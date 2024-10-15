@@ -1,0 +1,22 @@
+name: Code Format
+trigger:
+  change:
+    types:
+      - create
+      - push
+
+jobs:
+  yapf_format:
+    name: py code style check (yapf)
+    image: hub.byted.org/base/lab.pytorch2:2.1.0.post3
+    working-directory: seed/alpha-seed
+    steps:
+      - name: Add Data CI Environments
+        uses: actions/adapt-to-data-ci
+      - name: Install yapf
+        commands:
+          - pip3 install yapf --index-url=https://bytedpypi.byted.org/simple/
+      - name: Python codestyle
+        commands:
+          - yapf -r -vv -d --style=./.style.yapf alpha-seed tasks
+
