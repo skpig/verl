@@ -233,12 +233,12 @@ class ActorRolloutRefWorker(Worker):
         from alpha_seed.workers.hybrid_engine import FSDPXPerfGPTShardingManager
 
         rollout = XPerfGPTRollout(config=self.config.rollout,
-                                    tokenizer=self.tokenizer,
-                                    model_hf_config=self.actor_model_config)
+                                  tokenizer=self.tokenizer,
+                                  model_hf_config=self.actor_model_config)
         sharding_manager = FSDPXPerfGPTShardingManager(module=self.actor_module_fsdp,
-                                                        model_config=self.actor_model_config,
-                                                        inference_engine=rollout.inference_engine,
-                                                           device_mesh=rollout.device_mesh)
+                                                       model_config=self.actor_model_config,
+                                                       inference_engine=rollout.inference_engine,
+                                                       device_mesh=rollout.device_mesh)
         return rollout, sharding_manager
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)

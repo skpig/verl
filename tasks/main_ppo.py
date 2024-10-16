@@ -21,6 +21,7 @@ import torch
 # rule-based reward score
 from alpha_seed.utils.reward_score import gsm8k, math
 
+
 def _select_rm_score_fn(data_source):
     if data_source == 'openai/gsm8k':
         return gsm8k.compute_score
@@ -86,7 +87,6 @@ class RewardManager():
 
 import ray
 import hydra
-
 
 from alpha_seed.trainer.ppo import RayPPOTrainer
 
