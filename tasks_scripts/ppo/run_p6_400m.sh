@@ -1,3 +1,5 @@
+MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/lijiahao.plus/gpt/p6moe_400m/global_step_58
+
 python3 tasks/main_ppo.py \
     data.train_files=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/gsm8k/train.parquet \
     data.val_files=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/gsm8k/test.parquet \
@@ -6,7 +8,7 @@ python3 tasks/main_ppo.py \
     data.max_prompt_length=512 \
     data.max_response_length=512 \
     +data.chat_template=seed \
-    actor_rollout_ref.model.path=hdfs://haruna/home/byte_data_seed/ssd_lq/public/seed_models/Seed-3.3B-P6-MOE_1t5_sft_v25_dyn_bs40_lr1e-4 \
+    actor_rollout_ref.model.path=${MODEL_PATH} \
     +actor_rollout_ref.model.use_rmpad=True \
     actor_rollout_ref.model.external_lib=seed_models \
     +actor_rollout_ref.model.override_config.attention_dropout=0. \
@@ -20,7 +22,7 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
     actor_rollout_ref.rollout.micro_batch_size=1024 \
     actor_rollout_ref.rollout.log_prob_micro_batch_size=128 \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=4 \
+    actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=xperf_gpt \
     +actor_rollout_ref.rollout.use_vllm=True \
     +actor_rollout_ref.rollout.num_slots=256 \
@@ -29,7 +31,7 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     +actor_rollout_ref.ref.fsdp_config.mixed_precision.buffer_dtype=bf16 \
     critic.optim.lr=1e-5 \
-    critic.model.path=hdfs://haruna/home/byte_data_seed/ssd_lq/public/seed_models/Seed-3.3B-P6-MOE_1t5_sft_v25_dyn_bs40_lr1e-4 \
+    critic.model.path=${MODEL_PATH} \
     critic.model.enable_gradient_checkpointing=False \
     critic.ppo_micro_batch_size=64 \
     critic.model.fsdp_config.param_offload=False \
@@ -44,8 +46,8 @@ python3 tasks/main_ppo.py \
     trainer.critic_warmup=0 \
     trainer.logger=['console','tracking'] \
     trainer.project_name='verl_example_gsm8k' \
-    trainer.experiment_name='p6_3b3_function_rm' \
+    trainer.experiment_name='p6_400m_function_rm' \
     trainer.n_gpus_per_node=8 \
-    trainer.nnodes=4 \
+    trainer.nnodes=1 \
     trainer.save_freq=-1 \
     trainer.total_epochs=15

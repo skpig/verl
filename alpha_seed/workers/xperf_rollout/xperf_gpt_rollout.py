@@ -91,10 +91,16 @@ class XPerfGPTRollout(object):
                                top_k=config.top_k,
                                top_p=config.top_p,
                                temperature=config.temperature)
-        inference_sess = InferenceSession(num_slots=config.micro_batch_size,
+
+        use_vllm = self.config.get('use_vllm', False)
+        num_slots = self.config.get('num_slots', 256)
+        slot_block_size = self.config.get('slot_block_size', 1024)
+
+        inference_sess = InferenceSession(num_slots=num_slots,
                                           max_batch_size=config.micro_batch_size,
                                           max_length=config.prompt_length + config.response_length,
-                                          use_vllm=False,
+                                          slot_block_size=slot_block_size,
+                                          use_vllm=use_vllm,
                                           vocab_tp=False)  # vocab_tp will hang
         xperf_config = get_xperf_gpt_config(model_config=model_hf_config, tokenizer=tokenizer)
 
