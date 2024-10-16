@@ -1,3 +1,5 @@
+set -x
+
 python3 tasks/main_ppo.py \
     data.train_files=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/gsm8k/train.parquet \
     data.val_files=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/gsm8k/test.parquet \

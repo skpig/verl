@@ -1,3 +1,5 @@
+set -x
+
 MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/lijiahao.plus/gpt/p6moe_400m/global_step_58
 
 python3 tasks/main_ppo.py \
@@ -24,7 +26,7 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.rollout.log_prob_micro_batch_size=128 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=xperf_gpt \
-    +actor_rollout_ref.rollout.use_vllm=True \
+    +actor_rollout_ref.rollout.use_vllm=False \
     +actor_rollout_ref.rollout.num_slots=256 \
     +actor_rollout_ref.rollout.slot_block_size=1024 \
     actor_rollout_ref.ref.log_prob_micro_batch_size=128 \
