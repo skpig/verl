@@ -653,6 +653,9 @@ class CriticWorker(Worker):
             offload_fsdp_param_and_grad(module=self.critic_module, offload_grad=self._is_offload_grad)
 
 
+from flash_attn.bert_padding import pad_input, unpad_input
+
+
 @ray.remote
 class RewardModelWorker(Worker):
     """
@@ -670,7 +673,7 @@ class RewardModelWorker(Worker):
 
     def _build_model(self, config):
         # the following line is necessary
-        from transformers import AutoModelForSequenceClassification, AutoTokenizer, AutoConfig
+        from transformers import AutoModelForTokenClassification, AutoTokenizer, AutoConfig
         from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, ShardingStrategy, CPUOffload
 
         # download the checkpoint from hdfs
@@ -684,20 +687,30 @@ class RewardModelWorker(Worker):
             self.input_tokenizer = AutoTokenizer.from_pretrained(input_tokenizer_local_path,
                                                                  trust_remote_code=config.model.get(
                                                                      'trust_remote_code', False))
-            self.tokenizer = AutoTokenizer.from_pretrained(local_path,
-                                                           trust_remote_code=config.model.get(
-                                                               'trust_remote_code', False))
+        self.tokenizer = AutoTokenizer.from_pretrained(local_path,
+                                                       trust_remote_code=config.model.get('trust_remote_code', False))
+
+        print(f'Switch chat_template: {self._do_switch_chat_template}')
 
         trust_remote_code = config.model.get('trust_remote_code', False)
         model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code)
         # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect
         init_context = get_init_weight_context_manager(use_meta_tensor=not model_config.tie_word_embeddings)
 
+        use_rmpad = self.config.get('use_rmpad', False)
+        if use_rmpad:
+            # optimize the model via rmpad
+            from verl.models.transformers.monkey_patch import apply_monkey_patch
+            assert apply_monkey_patch(config=model_config), f'Cannot find rmpad version of {model_config.model_type}'
+
+        model_config.pad_token_id = self.tokenizer.pad_token_id
+
         with init_context():
-            reward_module = AutoModelForSequenceClassification.from_pretrained(pretrained_model_name_or_path=local_path,
-                                                                               torch_dtype=torch.bfloat16,
-                                                                               attn_implementation='flash_attention_2',
-                                                                               trust_remote_code=trust_remote_code)
+            reward_module = AutoModelForTokenClassification.from_pretrained(pretrained_model_name_or_path=local_path,
+                                                                            torch_dtype=torch.bfloat16,
+                                                                            attn_implementation='flash_attention_2',
+                                                                            config=model_config,
+                                                                            trust_remote_code=trust_remote_code)
             reward_module.to(torch.bfloat16)
         auto_wrap_policy = get_fsdp_wrap_policy(module=reward_module, config=self.config.model.fsdp_config)
 
@@ -722,11 +735,24 @@ class RewardModelWorker(Worker):
 
     def _forward_micro_batch(self, micro_batch):
         with torch.no_grad(), torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-            output = self.reward_module(input_ids=micro_batch['input_ids'],
-                                        attention_mask=micro_batch['attention_mask'],
-                                        position_ids=micro_batch['position_ids'])
-            rm_score = output.logits  # (batch_size,)
-            rm_score = rm_score.squeeze(-1)
+            if self.config.get('use_rmpad', False):
+                input_ids = micro_batch['input_ids']
+                batch, seqlen = input_ids.shape
+                attention_mask = micro_batch['attention_mask']
+                input_ids_rmpad, indices, cu_seqlens, _ = unpad_input(input_ids.unsqueeze(-1),
+                                                                      attention_mask=attention_mask)  # (totol_nnz, 1)
+                input_ids_rmpad = input_ids_rmpad.transpose(0, 1)  # (1, total_nnz)
+
+                output = self.reward_module(input_ids=input_ids_rmpad,
+                                            attention_mask=micro_batch['attention_mask'],
+                                            position_ids=None,
+                                            use_cache=False)
+                rm_score = output.logits.squeeze(0).squeeze(-1)  # (total_nnz,)
+                last_pos = cu_seqlens[1:] - 1
+                rm_score = rm_score[last_pos]  # (bsz,)
+                assert rm_score.shape == (batch,)
+            else:
+                raise NotImplementedError
             return rm_score
 
     def _expand_to_token_level(self, data: DataProto, scores: torch.Tensor):
@@ -806,6 +832,8 @@ class RewardModelWorker(Worker):
         data = data.to('cuda')
         if self._do_switch_chat_template:
             rm_data = self._switch_chat_template(data)
+        else:
+            rm_data = data
 
         rm_data.batch = rm_data.batch.cuda()
         micro_batches = rm_data.batch.split(self.config.micro_batch_size)
