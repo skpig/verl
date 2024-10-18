@@ -10,6 +10,7 @@ python3 tasks/main_ppo.py \
     data.val_batch_size=1312 \
     data.max_prompt_length=512 \
     data.max_response_length=512 \
+    data.use_ref_answer=True \
     +data.chat_template=seed \
     actor_rollout_ref.model.path=${SFT_MODEL_PATH} \
     +actor_rollout_ref.model.use_rmpad=True \

@@ -112,6 +112,8 @@ reward_model:
       param_offload: False
   micro_batch_size: 64
   max_length: null
+  max_prompt_length: ${data.max_prompt_length}
+  max_response_length: ${data.max_response_length}
 
 algorithm:
   gamma: 1.0

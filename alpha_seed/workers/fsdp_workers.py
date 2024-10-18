@@ -736,17 +736,18 @@ class RewardModelWorker(Worker):
     def _forward_micro_batch(self, micro_batch):
         with torch.no_grad(), torch.autocast(device_type='cuda', dtype=torch.bfloat16):
             if self.config.get('use_rmpad', False):
-                # input_ids = micro_batch['input_ids']
-                input_ids = micro_batch['answer_input_ids']
+                max_prompt_length = self.config["max_prompt_length"]
+                input_ids = micro_batch['input_ids'][:, max_prompt_length:]
+                input_ids = torch.cat([micro_batch['answer_input_ids'], input_ids], dim=-1)
+                attention_mask = micro_batch['attention_mask'][:, max_prompt_length:]
+                attention_mask = torch.cat([micro_batch['answer_attention_mask'], attention_mask], dim=-1)
                 batch, seqlen = input_ids.shape
-                # attention_mask = micro_batch['attention_mask']
-                attention_mask = micro_batch['answer_attention_mask']
                 input_ids_rmpad, indices, cu_seqlens, _ = unpad_input(input_ids.unsqueeze(-1),
                                                                       attention_mask=attention_mask)  # (totol_nnz, 1)
                 input_ids_rmpad = input_ids_rmpad.transpose(0, 1)  # (1, total_nnz)
 
                 output = self.reward_module(input_ids=input_ids_rmpad,
-                                            attention_mask=micro_batch['answer_attention_mask'],
+                                            attention_mask=attention_mask,
                                             position_ids=None,
                                             use_cache=False)
                 rm_score = output.logits.squeeze(0).squeeze(-1)  # (total_nnz,)
