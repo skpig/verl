@@ -30,7 +30,8 @@ from single_controller.base import Worker
 from single_controller.ray import RayResourcePool, RayWorkerGroup, RayClassWithInitArgs
 from single_controller.ray.base import create_colocated_worker_cls
 from verl import DataProto
-from verl.trainer.ppo import core_algos
+
+from alpha_seed import core_algos
 
 WorkerType = Type[Worker]
 
@@ -94,12 +95,13 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
 
     current_kl = masked_mean(kld, mask=response_mask, axis=-1)  # average over sequence
     current_kl = torch.mean(current_kl, dim=0).item()
+    current_kl_sum = torch.mean(torch.sum(kld * response_mask, dim=-1), dim=0).item()
 
     # according to https://github.com/huggingface/trl/blob/951ca1841f29114b969b57b26c7d3e80a39f75a0/trl/trainer/ppo_trainer.py#L837
     kl_ctrl.update(current_kl=current_kl, n_steps=batch_size)
     data.batch['token_level_rewards'] = token_level_rewards
 
-    metrics = {'critic/kl': current_kl, 'critic/kl_coeff': beta}
+    metrics = {'critic/kl': current_kl, 'critic/kl_coeff': beta, 'critic/kl_sum': current_kl_sum}
 
     return data, metrics
 
@@ -145,39 +147,82 @@ def compute_data_metrics(batch):
 
     prompt_length = prompt_mask.sum(-1).float()
     response_length = response_mask.sum(-1).float()  # (batch_size,)
+    max_prompt_length = float(prompt_mask.size(-1))
+    max_response_length = float(response_mask.size(-1))
 
     returns = batch.batch['returns']
     values = batch.batch['values']
 
     metrics = {
         # score
-        'critic/score/mean': torch.mean(sequence_score).detach().item(),
-        'critic/score/max': torch.max(sequence_score).detach().item(),
-        'critic/score/min': torch.min(sequence_score).detach().item(),
+        'critic/score/mean':
+            torch.mean(sequence_score).detach().item(),
+        'critic/score/max':
+            torch.max(sequence_score).detach().item(),
+        'critic/score/min':
+            torch.min(sequence_score).detach().item(),
+        'critic/score/std':
+            torch.std(sequence_score).detach().item(),
         # reward
-        'critic/rewards/mean': torch.mean(sequence_reward).detach().item(),
-        'critic/rewards/max': torch.max(sequence_reward).detach().item(),
-        'critic/rewards/min': torch.min(sequence_reward).detach().item(),
+        'critic/rewards/mean':
+            torch.mean(sequence_reward).detach().item(),
+        'critic/rewards/max':
+            torch.max(sequence_reward).detach().item(),
+        'critic/rewards/min':
+            torch.min(sequence_reward).detach().item(),
+        'critic/rewards/std':
+            torch.std(sequence_reward).detach().item(),
         # adv
-        'critic/advantages/mean': masked_mean(advantages, response_mask).detach().item(),
-        'critic/advantages/max': torch.max(advantages[response_mask]).detach().item(),
-        'critic/advantages/min': torch.min(advantages[response_mask]).detach().item(),
+        'critic/advantages/mean':
+            masked_mean(advantages, response_mask).detach().item(),
+        'critic/advantages/max':
+            torch.max(advantages[response_mask]).detach().item(),
+        'critic/advantages/min':
+            torch.min(advantages[response_mask]).detach().item(),
+        'critic/advantages/std':
+            torch.std(advantages[response_mask]).detach().item(),
         # returns
-        'critic/returns/mean': masked_mean(returns, response_mask).detach().item(),
-        'critic/returns/max': torch.max(returns[response_mask]).detach().item(),
-        'critic/returns/min': torch.min(returns[response_mask]).detach().item(),
+        'critic/returns/mean':
+            masked_mean(returns, response_mask).detach().item(),
+        'critic/returns/max':
+            torch.max(returns[response_mask]).detach().item(),
+        'critic/returns/min':
+            torch.min(returns[response_mask]).detach().item(),
+        'critic/returns/std':
+            torch.std(returns[response_mask]).detach().item(),
         # values
-        'critic/values/mean': masked_mean(values, response_mask).detach().item(),
-        'critic/values/max': torch.max(values[response_mask]).detach().item(),
-        'critic/values/min': torch.min(values[response_mask]).detach().item(),
+        'critic/values/mean':
+            masked_mean(values, response_mask).detach().item(),
+        'critic/values/max':
+            torch.max(values[response_mask]).detach().item(),
+        'critic/values/min':
+            torch.min(values[response_mask]).detach().item(),
+        'critic/values/std':
+            torch.std(values[response_mask]).detach().item(),
         # response length
-        'response_length/mean': torch.mean(response_length).detach().item(),
-        'response_length/max': torch.max(response_length).detach().item(),
-        'response_length/min': torch.min(response_length).detach().item(),
+        'response_length/mean':
+            torch.mean(response_length).detach().item(),
+        'response_length/max':
+            torch.max(response_length).detach().item(),
+        'response_length/min':
+            torch.min(response_length).detach().item(),
+        ## response clip ratio
+        'response_length/clip_ratio':
+            torch.mean(torch.eq(response_length, max_response_length).float()).detach().item(),
         # prompt length
-        'prompt_length/mean': torch.mean(prompt_length).detach().item(),
-        'prompt_length/max': torch.max(prompt_length).detach().item(),
-        'prompt_length/min': torch.min(prompt_length).detach().item(),
+        'prompt_length/mean':
+            torch.mean(prompt_length).detach().item(),
+        'prompt_length/max':
+            torch.max(prompt_length).detach().item(),
+        'prompt_length/min':
+            torch.min(prompt_length).detach().item(),
+        ## prompt clip ratio
+        'prompt_length/clip_ratio':
+            torch.mean(torch.eq(prompt_length, max_prompt_length).float()).detach().item(),
+        # vf explained var
+        'critic/vf/vf_explained_var':
+            (1.0 - torch.var(torch.masked_select(returns - values, response_mask.bool())) /
+             (torch.var(torch.masked_select(returns, response_mask.bool())) + 1e-5)).detach().item(),
     }
     return metrics
 
@@ -236,75 +281,36 @@ class RayPPOTrainer(object):
         from torch.utils.data import DataLoader
         version = self.config.data.get('version', 'v1')
         # TODO: we have to make sure the batch size is divisible by the dp size
-        if version == 'v1':
-            from verl.utils.dataset import RLHFDataset
-            self.train_dataset = RLHFDataset(
-                parquet_files=self.config.data.train_files,
-                tokenizer=self.tokenizer,
-                prompt_key=self.config.data.prompt_key,
-                max_prompt_length=self.config.data.max_prompt_length,
-                max_prompt_str_length=self.config.data.get('max_prompt_str_length', 0),
-                prompt_id_key=self.config.data.get('prompt_id_key', None),
-                first_n_char_as_key=self.config.data.get('first_n_char_as_key', None),
-                max_prompt_id_length=self.config.data.get('max_prompt_id_length', None),
-                return_raw_input_ids=self.config.data.get('return_raw_input_ids', False),
-                cache_dir=self.config.data.get('cache_dir', '~/.cache/verl/rlhf_datasets'),
-                chat_template_func=self.config.data.get('chat_template', 'default'),  # TODO: this is a hack
-                truncation=self.config.data.get('truncation', 'error'))
+        from alpha_seed.utils.dataset.rl_dataset import RLHFDataset, collate_fn
+        self.train_dataset = RLHFDataset(parquet_files=self.config.data.train_files,
+                                         tokenizer=self.tokenizer,
+                                         prompt_key=self.config.data.prompt_key,
+                                         answer_key=self.config.data.answer_key,
+                                         use_ref_answer=self.config.data.use_ref_answer,
+                                         max_prompt_length=self.config.data.max_prompt_length,
+                                         filter_prompts=True,
+                                         return_raw_chat=self.config.data.get('return_raw_chat', False),
+                                         truncation='error')
+        self.train_dataloader = DataLoader(dataset=self.train_dataset,
+                                           batch_size=self.config.data.train_batch_size,
+                                           shuffle=True,
+                                           drop_last=True,
+                                           collate_fn=collate_fn)
 
-            self.train_dataloader = DataLoader(dataset=self.train_dataset,
-                                               batch_size=self.config.data.train_batch_size,
-                                               shuffle=True,
-                                               drop_last=True)
-
-            self.val_dataset = RLHFDataset(
-                parquet_files=self.config.data.val_files,
-                tokenizer=self.tokenizer,
-                prompt_key=self.config.data.prompt_key,
-                max_prompt_length=self.config.data.max_prompt_length,
-                max_prompt_str_length=self.config.data.get('max_prompt_str_length', 0),
-                prompt_id_key=self.config.data.get('prompt_id_key', None),
-                first_n_char_as_key=self.config.data.get('first_n_char_as_key', None),
-                max_prompt_id_length=self.config.data.get('max_prompt_id_length', None),
-                return_raw_input_ids=self.config.data.get('return_raw_input_ids', False),
-                cache_dir=self.config.data.get('cache_dir', '~/.cache/verl/rlhf_datasets'),
-                chat_template_func=self.config.data.get('chat_template', 'default'),  # TODO: this is a hack
-                truncation=self.config.data.get('truncation', 'error'))
-
-            self.val_dataloader = DataLoader(dataset=self.val_dataset,
-                                             batch_size=self.config.data.val_batch_size,
-                                             shuffle=False,
-                                             drop_last=True)
-        elif version == 'v2':
-            from verl.utils.dataset.rl_dataset_v2 import RLHFDatasetV2, collate_fn
-            self.train_dataset = RLHFDatasetV2(parquet_files=self.config.data.train_files,
-                                               tokenizer=self.tokenizer,
-                                               prompt_key=self.config.data.prompt_key,
-                                               max_prompt_length=self.config.data.max_prompt_length,
-                                               filter_prompts=True,
-                                               return_raw_chat=self.config.data.get('return_raw_chat', False),
-                                               truncation='error')
-            self.train_dataloader = DataLoader(dataset=self.train_dataset,
-                                               batch_size=self.config.data.train_batch_size,
-                                               shuffle=True,
-                                               drop_last=True,
-                                               collate_fn=collate_fn)
-
-            self.val_dataset = RLHFDatasetV2(parquet_files=self.config.data.val_files,
-                                             tokenizer=self.tokenizer,
-                                             prompt_key=self.config.data.prompt_key,
-                                             max_prompt_length=self.config.data.max_prompt_length,
-                                             filter_prompts=True,
-                                             return_raw_chat=self.config.data.get('return_raw_chat', False),
-                                             truncation='error')
-            self.val_dataloader = DataLoader(dataset=self.val_dataset,
-                                             batch_size=self.config.data.val_batch_size,
-                                             shuffle=True,
-                                             drop_last=True,
-                                             collate_fn=collate_fn)
-
-        else:
-            raise NotImplementedError
+        self.val_dataset = RLHFDataset(parquet_files=self.config.data.val_files,
+                                       tokenizer=self.tokenizer,
+                                       prompt_key=self.config.data.prompt_key,
+                                       answer_key=self.config.data.answer_key,
+                                       use_ref_answer=self.config.data.use_ref_answer,
+                                       max_prompt_length=self.config.data.max_prompt_length,
+                                       filter_prompts=True,
+                                       return_raw_chat=self.config.data.get('return_raw_chat', False),
+                                       truncation='error')
+        self.val_dataloader = DataLoader(dataset=self.val_dataset,
+                                         batch_size=self.config.data.val_batch_size,
+                                         shuffle=True,
+                                         drop_last=True,
+                                         collate_fn=collate_fn)
 
         assert len(self.train_dataloader) >= 1
         assert len(self.val_dataloader) >= 1

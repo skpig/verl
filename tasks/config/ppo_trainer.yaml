@@ -3,6 +3,8 @@ data:
   train_files: hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/gsm8k/train.parquet
   val_files: hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/gsm8k/test.parquet
   prompt_key: prompt
+  answer_key: answer
+  use_ref_answer: False
   max_prompt_length: 512
   max_response_length: 512
   train_batch_size: 1024
@@ -24,6 +26,7 @@ actor_rollout_ref:
     ppo_micro_batch_size: 64
     grad_clip: 1.0
     clip_ratio: 0.2
+    clip_ratio2: 10.0
     entropy_coeff: 0.001
     ppo_epochs: 1
     shuffle: True

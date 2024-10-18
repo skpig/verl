@@ -22,11 +22,12 @@ from torch import nn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 from verl import DataProto
-from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.actor import BasePPOActor
 from verl.utils.py_functional import append_to_dict
 from verl.utils.torch_functional import logprobs_from_logits, log_probs_from_logits_response_rmpad, get_unpad_data
 from flash_attn.bert_padding import pad_input, unpad_input
+
+from alpha_seed import core_algos
 
 __all__ = ['DataParallelPPOActor']
 
@@ -141,15 +142,18 @@ class DataParallelPPOActor(BasePPOActor):
                 advantages = data['advantages']
 
                 clip_ratio = self.config.clip_ratio
+                clip_ratio2 = self.config.clip_ratio2
                 entropy_coeff = self.config.entropy_coeff
 
                 logits, log_prob = self._forward_micro_batch(micro_batch=data, temperature=temperature)
 
-                pg_loss, pg_clipfrac, ppo_kl = core_algos.compute_policy_loss(old_log_prob=old_log_prob,
-                                                                              log_prob=log_prob,
-                                                                              advantages=advantages,
-                                                                              eos_mask=response_mask,
-                                                                              cliprange=clip_ratio)
+                pg_loss, pg_clipfrac, pg_clipfrac2, ppo_kl, ppo_kl_sum = core_algos.compute_policy_loss(
+                    old_log_prob=old_log_prob,
+                    log_prob=log_prob,
+                    advantages=advantages,
+                    eos_mask=response_mask,
+                    cliprange=clip_ratio,
+                    cliprange2=clip_ratio2)
 
                 if self.use_rmpad:
                     full_response_mask = attention_mask.clone()
@@ -169,7 +173,9 @@ class DataParallelPPOActor(BasePPOActor):
                     'actor/entropy_loss': entropy_loss.detach().item(),
                     'actor/pg_loss': pg_loss.detach().item(),
                     'actor/pg_clipfrac': pg_clipfrac.detach().item(),
+                    'actor/pg_clipfrac2': pg_clipfrac2.detach().item(),
                     'actor/ppo_kl': ppo_kl.detach().item(),
+                    'actor/ppo_kl_sum': ppo_kl_sum.detach().item(),
                 }
                 append_to_dict(metrics, data)
 

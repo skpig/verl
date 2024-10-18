@@ -1,16 +1,17 @@
 set -x
 
-MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/lijiahao.plus/gpt/p6moe_400m/global_step_58
+SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/lijiahao.plus/gpt/p6moe_400m/global_step_58
+RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/rm_p6_moe_400m_0716_sftv27_stage2_hf
 
 python3 tasks/main_ppo.py \
-    data.train_files=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/gsm8k/train.parquet \
-    data.val_files=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/gsm8k/test.parquet \
+    data.train_files=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/gsm8k/train_with_ans.parquet \
+    data.val_files=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/gsm8k/test_with_ans.parquet \
     data.train_batch_size=1024 \
     data.val_batch_size=1312 \
     data.max_prompt_length=512 \
     data.max_response_length=512 \
     +data.chat_template=seed \
-    actor_rollout_ref.model.path=${MODEL_PATH} \
+    actor_rollout_ref.model.path=${SFT_MODEL_PATH} \
     +actor_rollout_ref.model.use_rmpad=True \
     actor_rollout_ref.model.external_lib=seed_models \
     +actor_rollout_ref.model.override_config.attention_dropout=0. \
@@ -33,7 +34,7 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     +actor_rollout_ref.ref.fsdp_config.mixed_precision.buffer_dtype=bf16 \
     critic.optim.lr=1e-5 \
-    critic.model.path=${MODEL_PATH} \
+    critic.model.path=${RM_MODEL_PATH} \
     critic.model.enable_gradient_checkpointing=False \
     critic.ppo_micro_batch_size=256 \
     critic.model.fsdp_config.param_offload=False \
@@ -46,7 +47,7 @@ python3 tasks/main_ppo.py \
     critic.model.external_lib=seed_models \
     reward_model.enable=True \
     reward_model.model.input_tokenizer=null \
-    reward_model.model.path=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/rm_p6_moe_400m_0716_sftv27_stage2_hf \
+    reward_model.model.path=${RM_MODEL_PATH} \
     reward_model.micro_batch_size=512 \
     +reward_model.use_rmpad=True \
     algorithm.kl_ctrl.kl_coef=0.001 \
@@ -56,5 +57,6 @@ python3 tasks/main_ppo.py \
     trainer.experiment_name='p6_400m_function_rm' \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
-    trainer.save_freq=-1 \
+    trainer.save_freq=10 \
+    trainer.default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/yueyu/model/rl/alpha_seed/test1 \
     trainer.total_epochs=15
