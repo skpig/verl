@@ -240,7 +240,8 @@ class RayPPOTrainer(object):
                  resource_pool_manager: ResourcePoolManager,
                  ray_worker_group_cls: RayWorkerGroup = RayWorkerGroup,
                  reward_fn=None,
-                 val_reward_fn=None):
+                 val_reward_fn=None,
+                 logger=None):
 
         # assert torch.cuda.is_available(), 'cuda must be available on driver'
 
@@ -248,6 +249,7 @@ class RayPPOTrainer(object):
         self.config = config
         self.reward_fn = reward_fn
         self.val_reward_fn = val_reward_fn
+        self.logger = logger
 
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert self.hybrid_engine, 'Currently, only support hybrid engine'
@@ -349,7 +351,7 @@ class RayPPOTrainer(object):
 
             # evaluate using reward_function
             # for certain reward function (e.g. sandbox), the generation can overlap with reward
-            reward_tensor = self.val_reward_fn(test_batch)
+            reward_tensor = self.val_reward_fn(test_batch, global_step=f"val_{self.global_step}")
 
             reward_tensor_lst.append(reward_tensor)
             data_source_lst.append(test_batch.non_tensor_batch.get('data_source', ['unknown'] * reward_tensor.shape[0]))
@@ -436,15 +438,7 @@ class RayPPOTrainer(object):
         self.actor_rollout_wg.init_model()
 
     def fit(self):
-        from verl.utils.tracking import Tracking
-        from omegaconf import OmegaConf
-
-        logger = Tracking(project_name=self.config.trainer.project_name,
-                          experiment_name=self.config.trainer.experiment_name,
-                          default_backend=self.config.trainer.logger,
-                          config=OmegaConf.to_container(self.config, resolve=True))
-
-        global_steps = 0
+        self.global_step = 0
 
         # perform validation before training
         if self.val_reward_fn is not None:
@@ -492,7 +486,7 @@ class RayPPOTrainer(object):
                         batch = batch.union(reward_tensor)
 
                     # we combine with rule-based rm
-                    reward_tensor = self.reward_fn(batch)
+                    reward_tensor = self.reward_fn(batch, global_step=self.global_step)
                     batch.batch['token_level_scores'] = reward_tensor
 
                     # compute rewards. apply_kl_penalty if available
@@ -517,7 +511,7 @@ class RayPPOTrainer(object):
                     metrics.update(critic_output_metrics)
 
                 # implement critic warmup
-                if self.config.trainer.critic_warmup <= global_steps:
+                if self.config.trainer.critic_warmup <= self.global_step:
                     # update actor
                     with Timer(name='update_actor', logger=None) as timer:
                         actor_output = self.actor_rollout_wg.update_actor(batch)
@@ -526,7 +520,7 @@ class RayPPOTrainer(object):
                     metrics.update(actor_output_metrics)
 
                 # validate
-                if self.val_reward_fn is not None and (global_steps + 1) % self.config.trainer.test_freq == 0:
+                if self.val_reward_fn is not None and (self.global_step + 1) % self.config.trainer.test_freq == 0:
                     with Timer(name='testing', logger=None) as timer:
                         val_metrics: dict = self._validate()
                         val_metrics = {f'val/{key}': val for key, val in val_metrics.items()}
@@ -538,21 +532,21 @@ class RayPPOTrainer(object):
                 metrics.update(data_metrics)
 
                 # TODO: make a canonical logger that supports various backend
-                logger.log(data=metrics, step=global_steps)
+                self.logger.log(data=metrics, step=self.global_step)
 
-                if self.config.trainer.save_freq > 0 and (global_steps + 1) % self.config.trainer.save_freq == 0:
+                if self.config.trainer.save_freq > 0 and (self.global_step + 1) % self.config.trainer.save_freq == 0:
                     actor_local_path = os.path.join(self.config.trainer.default_local_dir, 'actor',
-                                                    f'global_step_{global_steps}')
+                                                    f'global_step_{self.global_step}')
                     actor_remote_path = os.path.join(self.config.trainer.default_hdfs_dir, 'actor')
                     self.actor_rollout_wg.save_checkpoint(actor_local_path, actor_remote_path)
 
                     if self.use_critic:
                         critic_local_path = os.path.join(self.config.trainer.default_local_dir, 'critic',
-                                                         f'global_step_{global_steps}')
+                                                         f'global_step_{self.global_step}')
                         critic_remote_path = os.path.join(self.config.trainer.default_hdfs_dir, 'critic')
                         self.critic_wg.save_checkpoint(critic_local_path, critic_remote_path)
 
-                global_steps += 1
+                self.global_step += 1
 
         # perform validation after training
         if self.val_reward_fn is not None:

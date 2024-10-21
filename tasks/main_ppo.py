@@ -17,6 +17,8 @@ Note that we don't combine the main with ray_trainer as ray_trainer is used by o
 
 from verl import DataProto
 import torch
+from verl.utils.tracking import Tracking
+import wandb
 
 # rule-based reward score
 from alpha_seed.utils.reward_score import gsm8k, math
@@ -33,11 +35,14 @@ def _select_rm_score_fn(data_source):
 
 class RewardManager():
 
-    def __init__(self, tokenizer, num_examine) -> None:
+    def __init__(self, tokenizer, num_examine, logger: Tracking, rm_name="train") -> None:
         self.tokenizer = tokenizer
         self.num_examine = num_examine
+        self.logger = logger
+        self.log_table = []
+        self.rm_name = rm_name
 
-    def __call__(self, data: DataProto):
+    def __call__(self, data: DataProto, global_step=None):
         """We will expand this function gradually based on the available datasets"""
 
         # If there is rm score, we directly return rm score. Otherwise, we compute via rm_score_fn
@@ -80,8 +85,11 @@ class RewardManager():
 
             if already_print_data_sources[data_source] < self.num_examine:
                 already_print_data_sources[data_source] += 1
-                print(sequences_str)
-
+                self.log_table.append([str(global_step), sequences_str, score])
+        self.logger.log(
+            {f"gen&score_{self.rm_name}": wandb.Table(columns=["Step", "Gen Sequence", "Score"], data=self.log_table)},
+            step=None,
+            backend='tracking')
         return reward_tensor
 
 
@@ -110,6 +118,11 @@ def main_task(config):
     from omegaconf import OmegaConf
     pprint(OmegaConf.to_container(config, resolve=True))  # resolve=True will eval symbol values
     OmegaConf.resolve(config)
+
+    logger = Tracking(project_name=config.trainer.project_name,
+                      experiment_name=config.trainer.experiment_name,
+                      default_backend=config.trainer.logger,
+                      config=OmegaConf.to_container(config, resolve=True))
 
     # download the checkpoint from hdfs
     local_path = copy_local_path_from_hdfs(config.actor_rollout_ref.model.path)
@@ -158,10 +171,10 @@ def main_task(config):
         role_worker_mapping[Role.RewardModel] = RewardModelWorker
         mapping[Role.RewardModel] = global_pool_id
 
-    reward_fn = RewardManager(tokenizer=tokenizer, num_examine=0)
+    reward_fn = RewardManager(tokenizer=tokenizer, num_examine=2, logger=logger, rm_name="train")
 
     # Note that we always use function-based RM for validation
-    val_reward_fn = RewardManager(tokenizer=tokenizer, num_examine=1)
+    val_reward_fn = RewardManager(tokenizer=tokenizer, num_examine=2, logger=logger, rm_name="val")
 
     resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
@@ -171,7 +184,8 @@ def main_task(config):
                             resource_pool_manager=resource_pool_manager,
                             ray_worker_group_cls=ray_worker_group_cls,
                             reward_fn=reward_fn,
-                            val_reward_fn=val_reward_fn)
+                            val_reward_fn=val_reward_fn,
+                            logger=logger)
     trainer.init_workers()
     trainer.fit()
 
