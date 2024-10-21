@@ -85,10 +85,10 @@ class RewardManager():
 
             if already_print_data_sources[data_source] < self.num_examine:
                 already_print_data_sources[data_source] += 1
-                self.log_table.append([str(global_step), sequences_str, score])
+                self.log_table.append([global_step, sequences_str, score])
         self.logger.log(
             {f"gen&score_{self.rm_name}": wandb.Table(columns=["Step", "Gen Sequence", "Score"], data=self.log_table)},
-            step=None,
+            step=global_step,
             backend='tracking')
         return reward_tensor
 
