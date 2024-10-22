@@ -1,14 +1,18 @@
 set -x
 
+SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/ssd_lq/public/seed_models/Seed-3.3B-P6-MOE_1t5_sft_v25_dyn_bs40_lr1e-4
+RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/caizhao/3b3_release/rm_p6_moe_3b3_0812_sftv27_stage2_fix_order_aux_32k_v2/checkpoints/global_epoch_1/p6_to_models/rm_p6_moe_3.3m_0716_sftv27_stage2_hf
+
 python3 tasks/main_ppo.py \
-    data.train_files=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/gsm8k/train.parquet \
-    data.val_files=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/gsm8k/test.parquet \
+    data.train_files=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/gsm8k/train_with_ans.parquet \
+    data.val_files=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/gsm8k/test_with_ans.parquet \
     data.train_batch_size=1024 \
     data.val_batch_size=1312 \
     data.max_prompt_length=512 \
     data.max_response_length=512 \
+    data.use_ref_answer=True \
     +data.chat_template=seed \
-    actor_rollout_ref.model.path=hdfs://haruna/home/byte_data_seed/ssd_lq/public/seed_models/Seed-3.3B-P6-MOE_1t5_sft_v25_dyn_bs40_lr1e-4 \
+    actor_rollout_ref.model.path=${SFT_MODEL_PATH} \
     +actor_rollout_ref.model.use_rmpad=True \
     actor_rollout_ref.model.external_lib=seed_models \
     +actor_rollout_ref.model.override_config.attention_dropout=0. \
@@ -24,14 +28,14 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.rollout.log_prob_micro_batch_size=128 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=4 \
     actor_rollout_ref.rollout.name=xperf_gpt \
-    +actor_rollout_ref.rollout.use_vllm=True \
+    +actor_rollout_ref.rollout.use_vllm=False \
     +actor_rollout_ref.rollout.num_slots=256 \
     +actor_rollout_ref.rollout.slot_block_size=1024 \
     actor_rollout_ref.ref.log_prob_micro_batch_size=128 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     +actor_rollout_ref.ref.fsdp_config.mixed_precision.buffer_dtype=bf16 \
     critic.optim.lr=1e-5 \
-    critic.model.path=hdfs://haruna/home/byte_data_seed/ssd_lq/public/seed_models/Seed-3.3B-P6-MOE_1t5_sft_v25_dyn_bs40_lr1e-4 \
+    critic.model.path=${RM_MODEL_PATH} \
     critic.model.enable_gradient_checkpointing=False \
     critic.ppo_micro_batch_size=64 \
     critic.model.fsdp_config.param_offload=False \
@@ -42,6 +46,12 @@ python3 tasks/main_ppo.py \
     +critic.model.override_config.resid_pdrop=0. \
     +critic.use_rmpad=True \
     critic.model.external_lib=seed_models \
+    reward_model.enable=True \
+    reward_model.model.input_tokenizer=null \
+    reward_model.model.path=${RM_MODEL_PATH} \
+    reward_model.model.fsdp_config.param_offload=False \
+    reward_model.micro_batch_size=128 \
+    +reward_model.use_rmpad=True \
     algorithm.kl_ctrl.kl_coef=0.001 \
     trainer.critic_warmup=0 \
     trainer.logger=['console','tracking'] \
@@ -50,4 +60,5 @@ python3 tasks/main_ppo.py \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=4 \
     trainer.save_freq=-1 \
+    trainer.default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/yueyu/model/rl/alpha_seed/test1 \
     trainer.total_epochs=15
