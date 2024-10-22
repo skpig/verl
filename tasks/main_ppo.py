@@ -21,7 +21,7 @@ from verl.utils.tracking import Tracking
 import wandb
 
 # rule-based reward score
-from alpha_seed.utils.reward_score import gsm8k, math, model_score_fn
+from alpha_seed.utils.reward_score import gsm8k, math, model_score_fn, logic_puzzle
 
 
 def _select_rm_score_fn(reward_style):
@@ -29,6 +29,8 @@ def _select_rm_score_fn(reward_style):
         return model_score_fn.raw_score
     elif reward_style == "model-raw_score_reflection_penalty":
         return model_score_fn.raw_score_reflection_penalty
+    elif reward_style == "rule-logic_puzzle":
+        return logic_puzzle.compute_score
     elif reward_style == 'rule-openai/gsm8k':
         return gsm8k.compute_score
     elif reward_style == 'rule-lighteval/MATH':
