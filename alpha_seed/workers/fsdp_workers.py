@@ -736,11 +736,19 @@ class RewardModelWorker(Worker):
     def _forward_micro_batch(self, micro_batch):
         with torch.no_grad(), torch.autocast(device_type='cuda', dtype=torch.bfloat16):
             if self.config.get('use_rmpad', False):
-                max_prompt_length = self.config["max_prompt_length"]
-                input_ids = micro_batch['input_ids'][:, max_prompt_length:]
-                input_ids = torch.cat([micro_batch['answer_input_ids'], input_ids], dim=-1)
-                attention_mask = micro_batch['attention_mask'][:, max_prompt_length:]
-                attention_mask = torch.cat([micro_batch['answer_attention_mask'], attention_mask], dim=-1)
+                # 重新组合input_ids和attention_mask
+                max_prompt_length = self.config['max_prompt_length']
+                response_ids = micro_batch['input_ids'][:, max_prompt_length:]
+                response_mask = micro_batch['attention_mask'][:, max_prompt_length:]
+                reflection_nums = torch.zeros((response_mask.shape[0],))
+                if self.config.get('use_last_response', False):
+                    response_ids, response_mask, reflection_nums = self.get_last_response(response_ids, response_mask)
+
+                prompt_ids = micro_batch['answer_input_ids']
+                input_ids = torch.cat([prompt_ids, response_ids], dim=-1)
+                prompt_mask = micro_batch['answer_attention_mask']
+                attention_mask = torch.cat([prompt_mask, response_mask], dim=-1)
+
                 batch, seqlen = input_ids.shape
                 input_ids_rmpad, indices, cu_seqlens, _ = unpad_input(input_ids.unsqueeze(-1),
                                                                       attention_mask=attention_mask)  # (totol_nnz, 1)
@@ -756,7 +764,91 @@ class RewardModelWorker(Worker):
                 assert rm_score.shape == (batch,)
             else:
                 raise NotImplementedError
-            return rm_score
+            return rm_score, reflection_nums
+
+    def get_last_response(self, response_ids, response_mask):
+        bs = response_ids.shape[0]
+        pad_token_id = self.tokenizer.pad_token_id
+        new_response_ids = []
+        reflection_nums = []
+        for bi in range(bs):
+            raw_resp_len = len(response_ids[bi])
+            response_txt_i = self.tokenizer.decode(response_ids[bi])
+            new_response_txt_i, reflection_num = self._reflect_postprocess(response_txt_i)
+            new_response_ids_i = torch.tensor(self.tokenizer.encode(new_response_txt_i)).to(
+                device=response_ids[bi].device, dtype=response_ids[bi].dtype)
+            new_raw_resp_len = len(new_response_ids_i)
+            if new_raw_resp_len >= raw_resp_len:
+                if new_raw_resp_len > raw_resp_len:
+                    print('new_response_txt_i', new_response_txt_i.replace(self.tokenizer.pad_token, ''))
+                    print('response_txt_i', response_txt_i.replace(self.tokenizer.pad_token, ''))
+                new_response_txt_i = response_txt_i
+                new_response_ids_i = response_ids[bi]
+            else:
+                padding = torch.tensor([pad_token_id for _ in range(raw_resp_len - len(new_response_ids_i))
+                                       ]).to(device=response_ids[bi].device, dtype=response_ids[bi].dtype)
+                new_response_ids_i = torch.cat((new_response_ids_i, padding))
+            new_response_ids.append(new_response_ids_i)
+            reflection_nums.append(reflection_num)
+        new_response_ids = torch.stack(new_response_ids).to(device=response_ids.device, dtype=response_ids.dtype)
+        new_response_mask = new_response_ids.not_equal(pad_token_id).to(device=response_ids.device,
+                                                                        dtype=response_mask.dtype)
+        reflection_nums = torch.tensor(reflection_nums).to(device=response_ids.device, dtype=response_ids.dtype)
+        return new_response_ids, new_response_mask, reflection_nums
+
+    def _reflect_postprocess(self, input_text_i):
+
+        def sep_reflect(input_text_i, reflect_start='<reflection>', reflect_end='</reflection>'):
+            reflect_start_pos_list = []
+            reflect_end_pos_list = []
+            # Initialize variables to store the positions of the last reflect_start and reflect_end
+            last_reflect_start = -1
+            last_reflect_end = -1
+            second_last_reflect_end = -1
+
+            # Find all the positions of reflect_start and reflect_end
+            current_position = 0
+
+            while True:
+                # Find the next reflect_start position
+                reflect_start_pos = input_text_i.find(reflect_start, current_position)
+                if reflect_start_pos == -1:
+                    break  # No more reflect_start tokens
+                last_reflect_start = reflect_start_pos
+                reflect_start_pos_list += [last_reflect_start]
+                current_position = reflect_start_pos + len(reflect_start)
+
+            # Reset the current position for reflect_end search
+            current_position = 0
+
+            # Loop to find the last and second last reflect_end
+            while True:
+                reflect_end_pos = input_text_i.find(reflect_end, current_position)
+                if reflect_end_pos == -1:
+                    break  # No more reflect_end tokens
+                last_reflect_end = reflect_end_pos
+                reflect_end_pos_list += [last_reflect_end]
+                current_position = reflect_end_pos + len(reflect_end)
+
+            return reflect_start_pos_list, reflect_end_pos_list
+
+        reflect_start = '<reflection>'
+        reflect_end = '</reflection>'
+        reflect_start_pos_list, reflect_end_pos_list = sep_reflect(input_text_i, reflect_start, reflect_end)
+        if len(reflect_start_pos_list) == 0 or len(reflect_start_pos_list) != len(reflect_end_pos_list):
+            new_input_text_i = input_text_i
+        elif len(reflect_start_pos_list) == 1:
+            new_input_text_i = input_text_i[:reflect_start_pos_list[0]] + input_text_i[reflect_end_pos_list[0] +
+                                                                                       len(reflect_end):]
+        else:
+            last_reflect_end = reflect_end_pos_list[-1]
+            second_last_reflect_end = reflect_end_pos_list[-2]
+            last_reflect_start = reflect_start_pos_list[-1]
+            new_input_text_i = input_text_i[second_last_reflect_end +
+                                            len(reflect_end):last_reflect_start] + input_text_i[last_reflect_end +
+                                                                                                len(reflect_end):]
+        reflection_num = min(len(reflect_start_pos_list), len(reflect_end_pos_list))
+        return new_input_text_i, reflection_num
 
     def _expand_to_token_level(self, data: DataProto, scores: torch.Tensor):
         batch_size = data.batch.batch_size[0]
@@ -830,6 +922,10 @@ class RewardModelWorker(Worker):
 
         return DataProto.from_dict(rm_inputs)
 
+    def norm(self, rm_score):
+        rm_score = (rm_score - self.config["mean"]) / self.config["std"]
+        return rm_score
+
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_rm_score(self, data: DataProto):
         data = data.to('cuda')
@@ -841,13 +937,18 @@ class RewardModelWorker(Worker):
         rm_data.batch = rm_data.batch.cuda()
         micro_batches = rm_data.batch.split(self.config.micro_batch_size)
         output = []
+        total_reflection_nums = []
         for micro_batch in micro_batches:
-            rm_score = self._forward_micro_batch(micro_batch)
+            rm_score, reflection_nums = self._forward_micro_batch(micro_batch)
+            # 归一化
+            rm_score = self.norm(rm_score)
             output.append(rm_score)
+            total_reflection_nums.append(reflection_nums)
         scores = torch.cat(output, dim=0)  # (batch_size)
+        reflection_nums = torch.cat(total_reflection_nums, dim=0)
         token_level_scores = self._expand_to_token_level(data, scores)
         # Note that this is only the scores, may not be the final rewards used to train RL
-        output = DataProto.from_dict(tensors={'rm_scores': token_level_scores})
+        output = DataProto.from_dict(tensors={'rm_scores': token_level_scores, 'reflection_nums': reflection_nums})
         output = output.to('cpu')
         torch.cuda.empty_cache()
         return output

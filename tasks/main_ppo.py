@@ -21,13 +21,17 @@ from verl.utils.tracking import Tracking
 import wandb
 
 # rule-based reward score
-from alpha_seed.utils.reward_score import gsm8k, math
+from alpha_seed.utils.reward_score import gsm8k, math, model_score_fn
 
 
-def _select_rm_score_fn(data_source):
-    if data_source == 'openai/gsm8k':
+def _select_rm_score_fn(reward_style):
+    if reward_style == "model-raw_score":
+        return model_score_fn.raw_score
+    elif reward_style == "model-raw_score_reflection_penalty":
+        return model_score_fn.raw_score_reflection_penalty
+    elif reward_style == 'rule-openai/gsm8k':
         return gsm8k.compute_score
-    elif data_source == 'lighteval/MATH':
+    elif reward_style == 'rule-lighteval/MATH':
         return math.compute_score
     else:
         raise NotImplementedError
@@ -44,11 +48,6 @@ class RewardManager():
 
     def __call__(self, data: DataProto, global_step=None):
         """We will expand this function gradually based on the available datasets"""
-
-        # If there is rm score, we directly return rm score. Otherwise, we compute via rm_score_fn
-        if 'rm_scores' in data.batch.keys():
-            return data.batch['rm_scores']
-
         reward_tensor = torch.zeros_like(data.batch['responses'], dtype=torch.float32)
 
         already_print_data_sources = {}
@@ -69,23 +68,27 @@ class RewardManager():
 
             # decode
             sequences = torch.cat((valid_prompt_ids, valid_response_ids))
-            sequences_str = self.tokenizer.decode(sequences)
-
-            ground_truth = data_item.non_tensor_batch['reward_model']['ground_truth']
+            solution_str = self.tokenizer.decode(sequences)
 
             # select rm_score
-            data_source = data_item.non_tensor_batch['data_source']
-            compute_score_fn = _select_rm_score_fn(data_source)
-
-            score = compute_score_fn(solution_str=sequences_str, ground_truth=ground_truth)
+            reward_style = data_item.non_tensor_batch['reward_model']['style']
+            compute_score_fn = _select_rm_score_fn(reward_style)
+            ground_truth = data_item.non_tensor_batch['reward_model']['ground_truth']
+            score_fn_inputs = {
+                "batch_info": data_item.batch,
+                "tokenizer": self.tokenizer,
+                "solution_str": solution_str,
+                "ground_truth": ground_truth
+            }
+            score = compute_score_fn(**score_fn_inputs)
             reward_tensor[i, valid_response_length - 1] = score
 
-            if data_source not in already_print_data_sources:
-                already_print_data_sources[data_source] = 0
+            if reward_style not in already_print_data_sources:
+                already_print_data_sources[reward_style] = 0
 
-            if already_print_data_sources[data_source] < self.num_examine:
-                already_print_data_sources[data_source] += 1
-                self.log_table.append([global_step, sequences_str, score])
+            if already_print_data_sources[reward_style] < self.num_examine:
+                already_print_data_sources[reward_style] += 1
+                self.log_table.append([global_step, solution_str, score])
         self.logger.log(
             {f"gen&score_{self.rm_name}": wandb.Table(columns=["Step", "Gen Sequence", "Score"], data=self.log_table)},
             step=global_step,

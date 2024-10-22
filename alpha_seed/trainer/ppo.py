@@ -153,6 +153,8 @@ def compute_data_metrics(batch):
     returns = batch.batch['returns']
     values = batch.batch['values']
 
+    reflection_nums = batch.batch['reflection_nums']
+
     metrics = {
         # score
         'critic/score/mean':
@@ -206,6 +208,10 @@ def compute_data_metrics(batch):
             torch.max(response_length).detach().item(),
         'response_length/min':
             torch.min(response_length).detach().item(),
+        'response_length/mean_reflection_num':
+            torch.mean(reflection_nums.float()).detach().item(),
+        'response_length/reflection_ratio':
+            torch.mean(torch.gt(reflection_nums, 0.0).float()).detach().item(),
         ## response clip ratio
         'response_length/clip_ratio':
             torch.mean(torch.eq(response_length, max_response_length).float()).detach().item(),
@@ -292,7 +298,7 @@ class RayPPOTrainer(object):
                                          max_prompt_length=self.config.data.max_prompt_length,
                                          filter_prompts=True,
                                          return_raw_chat=self.config.data.get('return_raw_chat', False),
-                                         truncation='error')
+                                         truncation=self.config.data.get('truncation', 'error'))
         self.train_dataloader = DataLoader(dataset=self.train_dataset,
                                            batch_size=self.config.data.train_batch_size,
                                            shuffle=True,
@@ -307,7 +313,7 @@ class RayPPOTrainer(object):
                                        max_prompt_length=self.config.data.max_prompt_length,
                                        filter_prompts=True,
                                        return_raw_chat=self.config.data.get('return_raw_chat', False),
-                                       truncation='error')
+                                       truncation=self.config.data.get('truncation', 'error'))
         self.val_dataloader = DataLoader(dataset=self.val_dataset,
                                          batch_size=self.config.data.val_batch_size,
                                          shuffle=True,
@@ -348,6 +354,11 @@ class RayPPOTrainer(object):
             print('validation generation end')
 
             test_batch = test_batch.union(test_output_gen_batch)
+
+            if self.use_rm:
+                # we first compute reward model score
+                reward_tensor = self.rm_wg.compute_rm_score(test_batch)
+                test_batch = test_batch.union(reward_tensor)
 
             # evaluate using reward_function
             # for certain reward function (e.g. sandbox), the generation can overlap with reward

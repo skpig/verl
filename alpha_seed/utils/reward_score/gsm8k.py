@@ -41,7 +41,7 @@ def extract_solution(solution_str, method='strict'):
     return final_answer
 
 
-def compute_score(solution_str, ground_truth, method='strict', format_score=0., score=1.):
+def compute_score(solution_str, ground_truth, method='strict', format_score=0., score=1., **argv):
     answer = extract_solution(solution_str=solution_str, method=method)
     if answer is None:
         return 0

@@ -16,7 +16,7 @@ Copied from https://github.com/EleutherAI/lm-evaluation-harness/blob/main/lm_eva
 """
 
 
-def compute_score(solution_str, ground_truth) -> float:
+def compute_score(solution_str, ground_truth, **argv) -> float:
     retval = 0.
     try:
         string_in_last_boxed = last_boxed_only_string(solution_str)
