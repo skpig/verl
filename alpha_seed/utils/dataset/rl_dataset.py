@@ -157,7 +157,7 @@ class RLHFDataset(Dataset):
             sp = "请参考以下内容进行回答: \n\n" + answer
             if chat[0]["role"] == "system":
                 prompt_with_chat_template = prompt_with_chat_template.split(self.tokenizer.eos_token)[1]
-            prompt_with_chat_template = self.tokenizer.bos_token + "system:\n" + sp + self.tokenizer.eos_token + prompt_with_chat_template
+            prompt_with_chat_template = self.tokenizer.bos_token + "system\n" + sp + self.tokenizer.eos_token + prompt_with_chat_template
 
         input_ids, attention_mask = verl_F.tokenize_and_postprocess_data(prompt=prompt_with_chat_template,
                                                                          tokenizer=self.tokenizer,
@@ -183,12 +183,14 @@ if __name__ == '__main__':
 
     from torch.utils.data import DataLoader
 
-    local_path = "/opt/tiger/verl/verl/utils/dataset/global_step_58"
+    local_path = "/opt/tiger/alpha-seed/alpha_seed/utils/dataset/global_step_58"
     tokenizer = AutoTokenizer.from_pretrained(local_path)
+    from verl.utils.seed import CHAT_TEMPLATE
+    tokenizer.chat_template = CHAT_TEMPLATE
 
     dataset = RLHFDataset(
         parquet_files=
-        'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/gsm8k/train_with_ans.parquet',
+        '/opt/tiger/alpha-seed/train.parquet',
         tokenizer=tokenizer,
         prompt_key='prompt',
         answer_key='answer',
@@ -214,8 +216,8 @@ if __name__ == '__main__':
 
     data = dataset[0]['input_ids']
     output = tokenizer.batch_decode([data])[0]
-    print(f'\n\noutput: {output}')
+    print(f'\n\noutput: {output.replace(tokenizer.pad_token, "")}')
 
     data = dataset[0]['answer_input_ids']
     output = tokenizer.batch_decode([data])[0]
-    print(f'\n\noutput: {output}')
+    print(f'\n\noutput: {output.replace(tokenizer.pad_token, "")}')
