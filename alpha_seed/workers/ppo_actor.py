@@ -26,6 +26,8 @@ from verl.trainer.ppo.actor import BasePPOActor
 from verl.utils.py_functional import append_to_dict
 from verl.utils.torch_functional import logprobs_from_logits, log_probs_from_logits_response_rmpad, get_unpad_data
 from flash_attn.bert_padding import pad_input, unpad_input
+from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
+from dist_attn.ulysses.ops import slice_input_tensor, gather_outputs
 
 from alpha_seed import core_algos
 
@@ -57,11 +59,31 @@ class DataParallelPPOActor(BasePPOActor):
                 input_ids_rmpad = unpad_input(input_ids.unsqueeze(-1),
                                               attention_mask=attention_mask)[0]  # (totol_nnz, 1)
                 input_ids_rmpad = input_ids_rmpad.transpose(0, 1)  # (1, total_nnz)
+
+                # handle ulysses sequence parallelism
+                if (sp_size := get_ulysses_sequence_parallel_world_size()) > 1:
+                    _, total_s = input_ids_rmpad.shape
+                    pad_size = (sp_size - total_s % sp_size) % sp_size
+                    if pad_size > 0:
+                        # append a placeholder sequence
+                        input_ids_rmpad = torch.nn.functional.pad(input_ids_rmpad, (0, pad_size), value=0)
+                        attention_mask = torch.nn.functional.pad(attention_mask, (0, 0, 0, 1), value=0)
+                        attention_mask[-1, :pad_size] = 1
+                    input_ids_rmpad = slice_input_tensor(input_ids_rmpad, dim=1, padding=False)
+
                 # Note that in rmpad implementation, we don't need position_ids.
                 output = self.actor_module(input_ids=input_ids_rmpad,
                                            attention_mask=attention_mask,
                                            position_ids=None,
                                            use_cache=False)
+
+                # handle ulysses sequence parallelism
+                if get_ulysses_sequence_parallel_world_size() > 1:
+                    if pad_size > 0:
+                        # remove the trailing placeholder sequence
+                        attention_mask = attention_mask[:-1]
+                    output.logits = gather_outputs(output.logits, gather_dim=1, padding_dim=1, unpad_dim_size=total_s)
+
                 logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
 
                 logits_rmpad = logits_rmpad / temperature
