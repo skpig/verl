@@ -37,7 +37,7 @@ from contextlib import contextmanager
 import logging
 
 from .utils import get_xperf_gpt_config
-from .utils.weight_loader import offload_to_cpu
+from .utils.weight_loader import offload_to_cpu, init_meta
 
 
 @contextmanager
@@ -163,7 +163,7 @@ class XPerfGPTRollout(object):
         self.inference_engine = inference_sess
 
         # offload to CPU
-        offload_to_cpu(self.inference_engine.engine.module)
+        init_meta(self.inference_engine.engine.module)
         torch.cuda.empty_cache()
 
     @torch.no_grad()

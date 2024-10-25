@@ -39,6 +39,16 @@ def get_xperf_gpt_weight_bind_fn(model_config: PretrainedConfig):
         raise NotImplementedError(f'Unsupported model type {model_config.model_type}')
 
 
+def init_meta(tp_model):
+    param_list = [tp_model.layernorm_weight, tp_model.wte_weight, tp_model.lm_head_weight] + \
+                    [p for layer in tp_model.layers_weight for p in layer if isinstance(p, torch.Tensor)]
+    if hasattr(tp_model, 'wpe'):
+        param_list.append(tp_model.wpe.weight)
+    for param in param_list:
+        new_param = torch.empty_like(param, device='cpu')
+        torch.utils.swap_tensors(param, new_param)
+
+
 def offload_to_cpu(tp_model):
     param_list = [tp_model.layernorm_weight, tp_model.wte_weight, tp_model.lm_head_weight] + \
                     [p for layer in tp_model.layers_weight for p in layer if isinstance(p, torch.Tensor)]

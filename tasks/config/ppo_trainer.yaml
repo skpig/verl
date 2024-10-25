@@ -99,6 +99,7 @@ critic:
   ulysses_sequence_parallel_size: ${actor_rollout_ref.actor.ulysses_sequence_parallel_size}
   ppo_mini_batch_size: ${actor_rollout_ref.actor.ppo_mini_batch_size}
   ppo_micro_batch_size: 64
+  infer_micro_batch_size: 128
   ppo_epochs: ${actor_rollout_ref.actor.ppo_epochs}
   shuffle: ${actor_rollout_ref.actor.shuffle}
   grad_clip: 1.0
@@ -141,5 +142,6 @@ trainer:
   save_freq: -1
   test_freq: 2
   critic_warmup: 0
+  eval_before_training: False
   default_hdfs_dir: hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/experiments/gsm8k/ppo/${trainer.experiment_name}
   default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}

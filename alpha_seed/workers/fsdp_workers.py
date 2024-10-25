@@ -68,7 +68,9 @@ class ActorRolloutRefWorker(Worker):
         sp_size = config.actor.ulysses_sequence_parallel_size
         self.ulysses_sp_device_mesh = None
         if sp_size > 1:
-            self.ulysses_sp_device_mesh = init_device_mesh('cuda', mesh_shape=(sp_size, world_size // sp_size), mesh_dim_names=['sp', 'dp'])
+            self.ulysses_sp_device_mesh = init_device_mesh('cuda',
+                                                           mesh_shape=(sp_size, world_size // sp_size),
+                                                           mesh_dim_names=['sp', 'dp'])
             set_ulysses_sequence_parallel_group(self.ulysses_sp_device_mesh['sp'].get_group())
         self.role = role
         assert self.role in ['actor', 'rollout', 'ref', 'actor_rollout', 'actor_rollout_ref']
@@ -482,7 +484,9 @@ class CriticWorker(Worker):
         sp_size = config.ulysses_sequence_parallel_size
         self.ulysses_sp_device_mesh = None
         if sp_size > 1:
-            self.ulysses_sp_device_mesh = init_device_mesh('cuda', mesh_shape=(sp_size, world_size // sp_size), mesh_dim_names=['sp', 'dp'])
+            self.ulysses_sp_device_mesh = init_device_mesh('cuda',
+                                                           mesh_shape=(sp_size, world_size // sp_size),
+                                                           mesh_dim_names=['sp', 'dp'])
             set_ulysses_sequence_parallel_group(self.ulysses_sp_device_mesh['sp'].get_group())
         self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_sp_device_mesh)
 
@@ -624,7 +628,7 @@ class CriticWorker(Worker):
             load_fsdp_param_and_grad(module=self.critic_module,
                                      device_id=torch.cuda.current_device(),
                                      load_grad=self._is_offload_grad)
-        micro_batch_size = self.config.ppo_micro_batch_size
+        micro_batch_size = self.config.infer_micro_batch_size
         data.meta_info['micro_batch_size'] = micro_batch_size
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
@@ -646,7 +650,7 @@ class CriticWorker(Worker):
                                      load_grad=self._is_offload_grad)
         if self._is_offload_optimizer:
             load_fsdp_optimizer(optimizer=self.critic_optimizer, device_id=torch.cuda.current_device())
-        
+
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
             metrics = self.critic.update_critic(data=data)
@@ -717,7 +721,9 @@ class RewardModelWorker(Worker):
         sp_size = config.ulysses_sequence_parallel_size
         if sp_size > 1:
             # TODO: remove duplicate mesh
-            self.ulysses_sp_device_mesh = init_device_mesh('cuda', mesh_shape=(sp_size, world_size // sp_size), mesh_dim_names=['sp', 'dp'])
+            self.ulysses_sp_device_mesh = init_device_mesh('cuda',
+                                                           mesh_shape=(sp_size, world_size // sp_size),
+                                                           mesh_dim_names=['sp', 'dp'])
             set_ulysses_sequence_parallel_group(self.ulysses_sp_device_mesh['sp'].get_group())
             assert get_ulysses_sequence_parallel_world_size() == sp_size
         self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_sp_device_mesh)

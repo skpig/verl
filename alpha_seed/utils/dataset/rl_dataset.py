@@ -188,14 +188,12 @@ if __name__ == '__main__':
     from verl.utils.seed import CHAT_TEMPLATE
     tokenizer.chat_template = CHAT_TEMPLATE
 
-    dataset = RLHFDataset(
-        parquet_files=
-        '/opt/tiger/alpha-seed/train.parquet',
-        tokenizer=tokenizer,
-        prompt_key='prompt',
-        answer_key='answer',
-        use_ref_answer=True,
-        max_prompt_length=256)
+    dataset = RLHFDataset(parquet_files='/opt/tiger/alpha-seed/train.parquet',
+                          tokenizer=tokenizer,
+                          prompt_key='prompt',
+                          answer_key='answer',
+                          use_ref_answer=True,
+                          max_prompt_length=256)
 
     dataloader = DataLoader(dataset=dataset, batch_size=16, shuffle=True, drop_last=True, collate_fn=collate_fn)
 

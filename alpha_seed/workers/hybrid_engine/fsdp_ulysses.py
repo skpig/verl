@@ -69,7 +69,9 @@ class FSDPUlyssesShardingManager(BaseShardingManager):
             # all gather non_tensor_batch
             all_non_tensor_batch = [None for _ in range(sp_size)]
             torch.distributed.all_gather_object(all_non_tensor_batch, data.non_tensor_batch, group=group)
-            data.non_tensor_batch = {k: np.concatenate([d[k] for d in all_non_tensor_batch]) for k in data.non_tensor_batch}
+            data.non_tensor_batch = {
+                k: np.concatenate([d[k] for d in all_non_tensor_batch]) for k in data.non_tensor_batch
+            }
         return data
 
     def postprocess_data(self, data: DataProto) -> DataProto:

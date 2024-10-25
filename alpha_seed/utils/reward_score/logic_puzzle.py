@@ -32,6 +32,7 @@ except Exception as ex:
     def dummy_verify(solution_str, answer, meta):
         return 0
 
+
 def compute_score(solution_str, ground_truth, **argv) -> float:
     if isinstance(ground_truth, str):
         ground_truth = json.loads(ground_truth)

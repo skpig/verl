@@ -452,7 +452,7 @@ class RayPPOTrainer(object):
         self.global_step = 0
 
         # perform validation before training
-        if self.val_reward_fn is not None:
+        if self.val_reward_fn is not None and self.config.trainer.eval_before_training:
             val_metrics = self._validate()
             pprint(f'Initial validation metrics: {val_metrics}')
 
