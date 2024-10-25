@@ -257,7 +257,7 @@ class RayPPOTrainer(object):
         self.reward_fn = reward_fn
         self.val_reward_fn = val_reward_fn
         self.logger = logger
-
+        
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert self.hybrid_engine, 'Currently, only support hybrid engine'
 
@@ -269,6 +269,7 @@ class RayPPOTrainer(object):
         self.use_reference_policy = Role.RefPolicy in role_worker_mapping
         self.use_rm = Role.RewardModel in role_worker_mapping
         self.ray_worker_group_cls = ray_worker_group_cls
+        self.num_bon = self.config.actor_rollout_ref.rollout.get("num_bon", 1)
 
         # define KL control
         if self.use_reference_policy:
@@ -490,12 +491,12 @@ class RayPPOTrainer(object):
 
                 # pop those keys for generation
                 gen_batch = batch.pop(batch_keys=['input_ids', 'attention_mask', 'position_ids'])
-
+                gen_batch.meta_info["num_bon"] = self.num_bon
                 # generate a batch
                 with Timer(name='gen', logger=None) as timer:
                     gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
                 metrics['timing/gen'] = timer.last
-
+                batch = batch.repeat(self.num_bon)
                 batch = batch.union(gen_batch_output)
 
                 if self.use_reference_policy:

@@ -73,7 +73,8 @@ class FSDPXPerfGPTShardingManager(BaseShardingManager):
 
         # prepare the state_dict into a format for xperf_gpt
         self.bind_fn(self.inference_engine.engine.module, state_dict=state_dict, device_mesh=self.device_mesh)
-
+        if hasattr(self.inference_engine.pp_scheduler, "init_cuda_graph"):
+            self.inference_engine.pp_scheduler.init_cuda_graph()
         # important: need to manually set the random states of each tp to be identical. Otherwise, xperf_gpt will hang
         if self.device_mesh is not None:
             self.torch_random_states = torch.cuda.get_rng_state()

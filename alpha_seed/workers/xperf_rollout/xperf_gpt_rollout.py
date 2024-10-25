@@ -95,13 +95,19 @@ class XPerfGPTRollout(object):
         use_vllm = self.config.get('use_vllm', False)
         num_slots = self.config.get('num_slots', 256)
         slot_block_size = self.config.get('slot_block_size', 1024)
+        enable_cuda_graph = self.config.get('enable_cuda_graph', False)
+
+        print("initializing xperf gpt...")
+        print(f"use_vllm, num_slots, slot_block_size, enable_cuda_graph {use_vllm}, {num_slots}, {slot_block_size}, {enable_cuda_graph}")
+
 
         inference_sess = InferenceSession(num_slots=num_slots,
                                           max_batch_size=config.micro_batch_size,
                                           max_length=config.prompt_length + config.response_length,
                                           slot_block_size=slot_block_size,
                                           use_vllm=use_vllm,
-                                          vocab_tp=False)  # vocab_tp will hang
+                                          vocab_tp=False,
+                                          enable_cuda_graph=enable_cuda_graph)
         xperf_config = get_xperf_gpt_config(model_config=model_hf_config, tokenizer=tokenizer)
 
         with tempfile.NamedTemporaryFile(mode='w', suffix=".json") as f:
@@ -169,6 +175,8 @@ class XPerfGPTRollout(object):
     @torch.no_grad()
     def generate_sequences(self, prompts: DataProto) -> DataProto:
         meta_info = prompts.meta_info
+        num_bon = meta_info.get("num_bon", 1)
+        timeout_seconds = self.config.get('timeout_seconds', 60*30)
 
         prompt_ids = prompts.batch['input_ids']  # (bs, prompt_length)
         # left-padded attention_mask
@@ -179,11 +187,11 @@ class XPerfGPTRollout(object):
         tokenizer = self.inference_engine.tokenizer
         query_pool = tokenizer.batch_decode(prompt_ids.cpu())
         query_pool = [x.replace(tokenizer.pad_token, '') for x in query_pool]
-
+        print("infer... num queries.. {} num_bon.. {}".format(len(query_pool), num_bon))
         sampler = self.inference_engine.sampler
         generation_kwargs = dict(do_sample=meta_info.get('do_sample', sampler.do_sample))
         with logging_set_level(self.config.get('logging_level', 'WARN')), patch.multiple(sampler, **generation_kwargs):
-            self.inference_engine.execute(query_pool)
+            self.inference_engine.execute(query_pool, timeout=timeout_seconds, num_BoN=num_bon)
 
         response_outputs = dict(input_ids=[v.new_token_ids for v in self.inference_engine.get_inorder_responses()])
 
@@ -198,8 +206,11 @@ class XPerfGPTRollout(object):
         response_ids = response_outputs["input_ids"].cuda()
         response_attention_mask = response_outputs["attention_mask"].cuda()
 
+        prompt_ids = prompt_ids.repeat(num_bon, 1)
+        attention_mask = attention_mask.repeat(num_bon, 1)
+
         attention_mask = torch.hstack((attention_mask, response_attention_mask))
-        position_ids = (attention_mask.cumsum(dim=1) - 1).clamp(min=0)
+        position_ids = (attention_mask.cumsum(dim=-1) - 1).clamp(min=0)
 
         input_ids = torch.hstack((prompt_ids, response_ids))
 
