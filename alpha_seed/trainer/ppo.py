@@ -17,6 +17,7 @@ This trainer supports model-agonistic model initialization with huggingface
 """
 
 import os
+import json
 from dataclasses import dataclass, field
 from enum import Enum
 from pprint import pprint
@@ -334,38 +335,55 @@ class RayPPOTrainer(object):
             self.config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
             self.config.critic.optim.total_training_steps = total_training_steps
 
-    def _validate(self):
+    def _validate(self, val_epoch=1, need_log=False, log_file="/opt/tiger/alpha-seed/log.jsonl"):
         reward_tensor_lst = []
         data_source_lst = []
-        for test_data in self.val_dataloader:
-            test_batch = DataProto.from_single_dict(test_data)
-            # test_batch = test_batch.to('cuda')
+        if need_log:
+            f = open(log_file, "w")
+        for val_epoch_idx in range(val_epoch):
+            for val_idx, test_data in enumerate(self.val_dataloader):
+                test_batch = DataProto.from_single_dict(test_data)
+                # test_batch = test_batch.to('cuda')
 
-            test_gen_batch = test_batch.pop(['input_ids', 'attention_mask', 'position_ids'])
-            test_gen_batch.meta_info = {
-                'eos_token_id': self.tokenizer.eos_token_id,
-                'pad_token_id': self.tokenizer.pad_token_id,
-                'recompute_log_prob': False,
-                'do_sample': False,
-                'validate': True,
-            }
+                test_gen_batch = test_batch.pop(['input_ids', 'attention_mask', 'position_ids'])
+                test_gen_batch.meta_info = {
+                    'eos_token_id': self.tokenizer.eos_token_id,
+                    'pad_token_id': self.tokenizer.pad_token_id,
+                    'recompute_log_prob': False,
+                    'do_sample': False,
+                    'validate': True,
+                }
 
-            test_output_gen_batch = self.actor_rollout_wg.generate_sequences(test_gen_batch)
-            print('validation generation end')
+                test_output_gen_batch = self.actor_rollout_wg.generate_sequences(test_gen_batch)
+                print(
+                    f'{val_epoch_idx + 1}-th/{val_epoch} {val_idx + 1}-th/{len(self.val_dataloader)} validation generation end'
+                )
 
-            test_batch = test_batch.union(test_output_gen_batch)
+                test_batch = test_batch.union(test_output_gen_batch)
 
-            if self.use_rm:
-                # we first compute reward model score
-                reward_tensor = self.rm_wg.compute_rm_score(test_batch)
-                test_batch = test_batch.union(reward_tensor)
+                if self.use_rm:
+                    # we first compute reward model score
+                    reward_tensor = self.rm_wg.compute_rm_score(test_batch)
+                    test_batch = test_batch.union(reward_tensor)
 
-            # evaluate using reward_function
-            # for certain reward function (e.g. sandbox), the generation can overlap with reward
-            reward_tensor = self.val_reward_fn(test_batch, global_step=self.global_step)
+                # evaluate using reward_function
+                # for certain reward function (e.g. sandbox), the generation can overlap with reward
+                reward_tensor = self.val_reward_fn(test_batch, global_step=self.global_step)
 
-            reward_tensor_lst.append(reward_tensor)
-            data_source_lst.append(test_batch.non_tensor_batch.get('data_source', ['unknown'] * reward_tensor.shape[0]))
+                reward_tensor_lst.append(reward_tensor)
+                data_source_lst.append(
+                    test_batch.non_tensor_batch.get('data_source', ['unknown'] * reward_tensor.shape[0]))
+                if need_log:
+                    input_ids = test_output_gen_batch.batch['input_ids'].cpu().numpy()
+                    prompt_ids = input_ids[:, :self.config.data.max_prompt_length]
+                    response_ids = input_ids[:, self.config.data.max_prompt_length:]
+                    prompts = self.tokenizer.batch_decode(prompt_ids, skip_special_tokens=True)
+                    responses = self.tokenizer.batch_decode(response_ids, skip_special_tokens=True)
+                    reward_tensor=reward_tensor.sum(-1).cpu()
+                    for reward, prompt, response in zip(reward_tensor, prompts, responses):
+                        data = {"reward": reward.item(), "prompt": prompt, "response": response}
+                        f.write(json.dumps(data, ensure_ascii=False) + "\n")
+                        f.flush()
 
         reward_tensor = torch.cat(reward_tensor_lst, dim=0).sum(-1).cpu()  # (batch_size,)
         data_sources = np.concatenate(data_source_lst, axis=0)
@@ -381,6 +399,8 @@ class RayPPOTrainer(object):
         for data_source, rewards in data_source_reward.items():
             metric_dict[f'test_score/{data_source}'] = np.mean(rewards)
 
+        if need_log:
+            f.close()
         return metric_dict
 
     def init_workers(self):
@@ -453,8 +473,12 @@ class RayPPOTrainer(object):
 
         # perform validation before training
         if self.val_reward_fn is not None and self.config.trainer.eval_before_training:
-            val_metrics = self._validate()
+            val_metrics = self._validate(val_epoch=self.config.trainer.val_epoch,
+                                         need_log=self.config.trainer.need_log,
+                                         log_file=self.config.trainer.log_file)
             pprint(f'Initial validation metrics: {val_metrics}')
+        if self.config.trainer.val_only:
+            return
 
         # TODO: add staleness
         for epoch in range(self.config.trainer.total_epochs):
