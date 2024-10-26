@@ -45,8 +45,11 @@ from dist_attn.ulysses.ops import slice_input_tensor, gather_outputs
 from alpha_seed.workers.ppo_actor import DataParallelPPOActor
 from alpha_seed.workers.ppo_critic import DataParallelPPOCritic
 
+from seed_models.utils.count_flops import FlopsCounter
+
+from codetiming import Timer
+
 logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv('VERL_PPO_LOGGING_LEVEL', 'WARN'))
 
 
 @ray.remote
@@ -330,6 +333,9 @@ class ActorRolloutRefWorker(Worker):
         if self._is_actor or self._is_ref:
             self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_sp_device_mesh)
 
+        if self._is_actor:
+            self.flops_counter = FlopsCounter(self.actor_model_config)
+
         torch.cuda.empty_cache()
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
@@ -350,7 +356,15 @@ class ActorRolloutRefWorker(Worker):
 
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
-            metrics = self.actor.update_policy(data=data)
+
+            with Timer(name='update_critic', logger=None) as timer:
+                metrics = self.actor.update_policy(data=data)
+            delta_time = timer.last
+            global_num_tokens = data.meta_info['global_token_num']
+            estimated_flops, promised_flops = self.flops_counter.estimate_flops(
+                [global_num_tokens] * self.config.actor.ppo_epochs, delta_time)
+            metrics['mfu/actor'] = estimated_flops / promised_flops / self.world_size
+
             data = self.ulysses_sharding_manager.postprocess_data(data)
 
         self.actor_lr_scheduler.step()
@@ -615,14 +629,14 @@ class CriticWorker(Worker):
         critic_lr_scheduler = get_constant_schedule_with_warmup(optimizer=critic_optimizer,
                                                                 num_warmup_steps=num_warmup_steps)
 
-        return critic_module, critic_optimizer, critic_lr_scheduler
+        return critic_module, critic_optimizer, critic_lr_scheduler, critic_model_config
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get('external_lib', None))
 
-        self.critic_module, self.critic_optimizer, self.critic_lr_scheduler = self._build_critic_model_optimizer(
+        self.critic_module, self.critic_optimizer, self.critic_lr_scheduler, self.critic_model_config = self._build_critic_model_optimizer(
             self.config)
 
         if self._is_offload_param:
@@ -633,6 +647,9 @@ class CriticWorker(Worker):
         self.critic = DataParallelPPOCritic(config=self.config,
                                             critic_module=self.critic_module,
                                             critic_optimizer=self.critic_optimizer)
+
+        self.flops_counter = FlopsCounter(self.critic_model_config)
+
         torch.cuda.empty_cache()
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
@@ -666,11 +683,19 @@ class CriticWorker(Worker):
         if self._is_offload_optimizer:
             load_fsdp_optimizer(optimizer=self.critic_optimizer, device_id=torch.cuda.current_device())
 
-        log_gpu_memory_usage('After Critic update', logger=logger)
+        log_gpu_memory_usage('Before Critic update', logger=logger)
 
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
-            metrics = self.critic.update_critic(data=data)
+
+            with Timer(name='update_critic', logger=None) as timer:
+                metrics = self.critic.update_critic(data=data)
+            delta_time = timer.last
+
+            global_num_tokens = data.meta_info['global_token_num']
+            estimated_flops, promised_flops = self.flops_counter.estimate_flops([global_num_tokens] *
+                                                                                self.config.ppo_epochs, delta_time)
+            metrics['mfu/critic'] = estimated_flops / promised_flops / self.world_size
 
             self.critic_lr_scheduler.step()
             lr = self.critic_lr_scheduler.get_last_lr()[0]

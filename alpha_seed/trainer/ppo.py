@@ -499,6 +499,8 @@ class RayPPOTrainer(object):
                 batch = batch.repeat(self.num_bon)
                 batch = batch.union(gen_batch_output)
 
+                batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask']).item()
+
                 if self.use_reference_policy:
                     # compute reference log_prob
                     with Timer(name='ref', logger=None) as timer:

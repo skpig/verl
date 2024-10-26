@@ -31,7 +31,15 @@ from dist_attn.ulysses.ops import slice_input_tensor, gather_outputs
 
 from alpha_seed import core_algos
 
+from contextlib import nullcontext
+
 __all__ = ['DataParallelPPOActor']
+
+try:
+    from verl.utils.debug import get_profiler_context
+except:
+    print('Cannot find profile utilities. Please use latest verl master')
+    raise
 
 
 class DataParallelPPOActor(BasePPOActor):
@@ -49,6 +57,14 @@ class DataParallelPPOActor(BasePPOActor):
         self.use_rmpad = self.config.get('use_rmpad', False)
         if torch.distributed.get_rank() == 0:
             print(f'Actor use_rmpad={self.use_rmpad}')
+
+        if hasattr(self.config, 'profile'):
+            # refernce doesn't need debug
+            self.profiler_context = get_profiler_context(filename=self.config.profile.filename,
+                                                         profile_on_ranks=self.config.profile.profile_on_ranks,
+                                                         default_hdfs_dir=self.config.profile.default_hdfs_dir,
+                                                         upload_to_mlx=self.config.profile.upload_to_mlx,
+                                                         enable=self.config.profile.enable)
 
     def _forward_micro_batch(self, micro_batch, temperature):
         response_length = micro_batch['responses'].size(-1)
@@ -146,64 +162,74 @@ class DataParallelPPOActor(BasePPOActor):
         self.gradient_accumulation = self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size
         temperature = data.meta_info['temperature']  # temperature must be in the data.meta_info to avoid slient error
 
+        if self.gradient_accumulation > 2 and not isinstance(self.profiler_context, nullcontext):
+            raise ValueError(
+                f'Number of {self.gradient_accumulation=} is too large when turn on profile. Try to turn off profile or reduce ppo_mini_batch_size.'
+            )
+
         dataloader = self._make_minibatch_iterator(data=data)
 
         metrics = {}
         for batch_idx, data in enumerate(dataloader):
-            # split batch into micro_batches
-            micro_batches = data.batch.split(self.config.ppo_micro_batch_size)
+            with self.profiler_context as p:
 
-            self.actor_optimizer.zero_grad()
+                # split batch into micro_batches
+                micro_batches = data.batch.split(self.config.ppo_micro_batch_size)
 
-            for data in micro_batches:
-                data = data.cuda()  # actor device is cpu when using offload
-                responses = data['responses']
-                response_length = responses.size(1)
-                attention_mask = data['attention_mask']
-                response_mask = attention_mask[:, -response_length:]
-                old_log_prob = data['old_log_probs']
-                advantages = data['advantages']
+                self.actor_optimizer.zero_grad()
 
-                clip_ratio = self.config.clip_ratio
-                clip_ratio2 = self.config.clip_ratio2
-                entropy_coeff = self.config.entropy_coeff
+                for data in micro_batches:
+                    data = data.cuda()  # actor device is cpu when using offload
+                    responses = data['responses']
+                    response_length = responses.size(1)
+                    attention_mask = data['attention_mask']
+                    response_mask = attention_mask[:, -response_length:]
+                    old_log_prob = data['old_log_probs']
+                    advantages = data['advantages']
 
-                logits, log_prob = self._forward_micro_batch(micro_batch=data, temperature=temperature)
+                    clip_ratio = self.config.clip_ratio
+                    clip_ratio2 = self.config.clip_ratio2
+                    entropy_coeff = self.config.entropy_coeff
 
-                pg_loss, pg_clipfrac, pg_clipfrac2, ppo_kl, ppo_kl_sum = core_algos.compute_policy_loss(
-                    old_log_prob=old_log_prob,
-                    log_prob=log_prob,
-                    advantages=advantages,
-                    eos_mask=response_mask,
-                    cliprange=clip_ratio,
-                    cliprange2=clip_ratio2)
+                    logits, log_prob = self._forward_micro_batch(micro_batch=data, temperature=temperature)
 
-                if self.use_rmpad:
-                    full_response_mask = attention_mask.clone()
-                    full_response_mask[:, :-response_length] = 0  # set the prompt part to zero
-                    full_response_mask_rmpad, indices, cu_seqlens, max_seqlen_in_batch = unpad_input(
-                        full_response_mask.unsqueeze(-1), attention_mask=attention_mask)
-                    full_response_mask_rmpad = full_response_mask_rmpad.squeeze(-1)  # (total_nnz)
-                    entropy_loss = core_algos.compute_entropy_loss(logits, full_response_mask_rmpad)  # (total_nnz,)
-                else:
-                    entropy_loss = core_algos.compute_entropy_loss(logits, response_mask)
-                policy_loss = pg_loss - entropy_loss * entropy_coeff
+                    pg_loss, pg_clipfrac, pg_clipfrac2, ppo_kl, ppo_kl_sum = core_algos.compute_policy_loss(
+                        old_log_prob=old_log_prob,
+                        log_prob=log_prob,
+                        advantages=advantages,
+                        eos_mask=response_mask,
+                        cliprange=clip_ratio,
+                        cliprange2=clip_ratio2)
 
-                loss = policy_loss / self.gradient_accumulation
-                loss.backward()
+                    if self.use_rmpad:
+                        full_response_mask = attention_mask.clone()
+                        full_response_mask[:, :-response_length] = 0  # set the prompt part to zero
+                        full_response_mask_rmpad, indices, cu_seqlens, max_seqlen_in_batch = unpad_input(
+                            full_response_mask.unsqueeze(-1), attention_mask=attention_mask)
+                        full_response_mask_rmpad = full_response_mask_rmpad.squeeze(-1)  # (total_nnz)
+                        entropy_loss = core_algos.compute_entropy_loss(logits, full_response_mask_rmpad)  # (total_nnz,)
+                    else:
+                        entropy_loss = core_algos.compute_entropy_loss(logits, response_mask)
+                    policy_loss = pg_loss - entropy_loss * entropy_coeff
 
-                data = {
-                    'actor/entropy_loss': entropy_loss.detach().item(),
-                    'actor/pg_loss': pg_loss.detach().item(),
-                    'actor/pg_clipfrac': pg_clipfrac.detach().item(),
-                    'actor/pg_clipfrac2': pg_clipfrac2.detach().item(),
-                    'actor/ppo_kl': ppo_kl.detach().item(),
-                    'actor/ppo_kl_sum': ppo_kl_sum.detach().item(),
-                }
+                    loss = policy_loss / self.gradient_accumulation
+                    loss.backward()
+
+                    data = {
+                        'actor/entropy_loss': entropy_loss.detach().item(),
+                        'actor/pg_loss': pg_loss.detach().item(),
+                        'actor/pg_clipfrac': pg_clipfrac.detach().item(),
+                        'actor/pg_clipfrac2': pg_clipfrac2.detach().item(),
+                        'actor/ppo_kl': ppo_kl.detach().item(),
+                        'actor/ppo_kl_sum': ppo_kl_sum.detach().item(),
+                    }
+                    append_to_dict(metrics, data)
+
+                grad_norm = self._optimizer_step()
+                data = {'actor/grad_norm': grad_norm.detach().item()}
                 append_to_dict(metrics, data)
 
-            grad_norm = self._optimizer_step()
-            data = {'actor/grad_norm': grad_norm.detach().item()}
-            append_to_dict(metrics, data)
+                p.step()
+
         self.actor_optimizer.zero_grad()
         return metrics

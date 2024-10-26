@@ -45,6 +45,13 @@ actor_rollout_ref:
       param_offload: False
       grad_offload: False
       optimizer_offload: False
+    profile:
+      filename: p6_400m_ppo_actor
+      profile_on_ranks:
+        - 0
+      default_hdfs_dir: null
+      upload_to_mlx: False
+      enable: False
   ref:
     fsdp_config:
       param_offload: False
@@ -104,6 +111,13 @@ critic:
   shuffle: ${actor_rollout_ref.actor.shuffle}
   grad_clip: 1.0
   cliprange_value: 0.5
+  profile:
+    filename: p6_400m_ppo_critic
+    profile_on_ranks:
+      - 0
+    default_hdfs_dir: null
+    upload_to_mlx: False
+    enable: False
 
 reward_model:
   enable: False
