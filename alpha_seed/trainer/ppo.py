@@ -15,9 +15,9 @@
 FSDP PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
-
 import os
 import json
+import wandb
 from dataclasses import dataclass, field
 from enum import Enum
 from pprint import pprint
@@ -496,6 +496,12 @@ class RayPPOTrainer(object):
                 with Timer(name='gen', logger=None) as timer:
                     gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
                 metrics['timing/gen'] = timer.last
+
+                # only report metrics from one generation replica
+                if 'xperf_metrics' in gen_batch_output.meta_info:
+                    for name, x_metric in gen_batch_output.meta_info['xperf_metrics'].items():
+                        self.logger.log(data={"xperf/gen/{}".format(name): wandb.Histogram(x_metric)}, step=self.global_step)
+
                 batch = batch.repeat(self.num_bon)
                 batch = batch.union(gen_batch_output)
 

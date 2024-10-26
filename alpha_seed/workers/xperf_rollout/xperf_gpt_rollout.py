@@ -108,6 +108,7 @@ class XPerfGPTRollout(object):
                                           slot_block_size=slot_block_size,
                                           use_vllm=use_vllm,
                                           vocab_tp=False,
+                                          context_limit_bs=8,
                                           enable_cuda_graph=enable_cuda_graph)
         xperf_config = get_xperf_gpt_config(model_config=model_hf_config, tokenizer=tokenizer)
 
@@ -156,7 +157,9 @@ class XPerfGPTRollout(object):
                         inference_sess.init_inference_engine(f.name,
                                                              generate_kwargs,
                                                              rank0_split=False,
-                                                             mp_size=tp_size)
+                                                             mp_size=tp_size,
+                                                             enable_metrics=True
+                                                             )
                     if dist.is_initialized() and tp_size > 1:
                         dist.barrier()
                         if tp_rank == 0:
@@ -195,7 +198,9 @@ class XPerfGPTRollout(object):
             self.inference_engine.execute(query_pool, timeout=timeout_seconds, num_BoN=num_bon)
 
         response_outputs = dict(input_ids=[v.new_token_ids for v in self.inference_engine.get_inorder_responses()])
-
+        metrics = {}
+        if hasattr(self.inference_engine.pp_scheduler, "init_metrics") and self.inference_engine.pp_scheduler.enable_metrics:
+            metrics = self.inference_engine.pp_scheduler.metrics
         # empty kv cache
         self.inference_engine.empty_cache()
 
@@ -224,4 +229,6 @@ class XPerfGPTRollout(object):
             'position_ids': position_ids
         }
 
-        return DataProto.from_dict(batch)
+        out = DataProto.from_dict(batch)
+        out.meta_info["xperf_metrics"] = metrics
+        return out
