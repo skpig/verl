@@ -45,9 +45,10 @@ class DataParallelPPOCritic(BasePPOCritic):
         self.critic_optimizer = critic_optimizer
 
         self.use_rmpad = self.config.get('use_rmpad', False)
-        print(f'Critic use_rmpad={self.use_rmpad}')
+        if torch.distributed.get_rank() == 0:
+            print(f'Critic use_rmpad={self.use_rmpad}')
 
-        assert self.config.ppo_mini_batch_size % self.config.ppo_micro_batch_size == 0
+        assert self.config.ppo_mini_batch_size % self.config.ppo_micro_batch_size == 0, f'{self.config.ppo_mini_batch_size=}, {self.config.ppo_micro_batch_size=}'
         self.gradient_accumulation = self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size
 
     def _forward_micro_batch(self, micro_batch):

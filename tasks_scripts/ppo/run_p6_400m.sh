@@ -100,7 +100,7 @@ python3 tasks/main_ppo.py \
     trainer.save_freq=${save_freq} \
     trainer.test_freq=${test_freq} \
     trainer.total_epochs=${total_epochs} \
-    trainer.val_only=True \
+    trainer.val_only=False \
     trainer.val_epoch=100 \
     trainer.need_log=True \
     trainer.log_file=/opt/tiger/alpha-seed/log.jsonl

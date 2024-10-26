@@ -15,6 +15,7 @@
 The main entry point to run the PPO algorithm
 """
 
+import warnings
 import os
 import logging
 import hdfs_io
@@ -144,12 +145,14 @@ class ActorRolloutRefWorker(Worker):
             # optimize the model via rmpad
             from alpha_seed.models.transformers.monkey_patch import apply_monkey_patch
             assert apply_monkey_patch(
-                config=actor_model_config), f'Cannot find rmpad version of {actor_model_config.model_type}'
+                config=actor_model_config,
+                verbose=self.rank == 0), f'Cannot find rmpad version of {actor_model_config.model_type}'
 
         # Note(fix me): tie_word_embedding causes meta_tensor init to hang
         init_context = get_init_weight_context_manager(use_meta_tensor=not actor_model_config.tie_word_embeddings)
 
-        with init_context():
+        with init_context(), warnings.catch_warnings():
+            warnings.simplefilter("ignore")
             actor_module = AutoModelForCausalLM.from_pretrained(pretrained_model_name_or_path=local_path,
                                                                 torch_dtype=torch_dtype,
                                                                 config=actor_model_config,
@@ -189,7 +192,8 @@ class ActorRolloutRefWorker(Worker):
             # TODO(zhangchi.usc1992, shengguangming) fix me. Current, auto_wrap_policy causes HFRollout to hang in Gemma
             auto_wrap_policy = None
 
-        print(f'wrap_policy: {auto_wrap_policy}')
+        if self.rank == 0:
+            print(f'wrap_policy: {auto_wrap_policy}')
 
         if auto_wrap_policy is None:
             sharding_strategy = ShardingStrategy.SHARD_GRAD_OP
@@ -222,7 +226,8 @@ class ActorRolloutRefWorker(Worker):
             num_warmup_steps_ratio = optim_config.get('lr_warmup_steps_ratio', 0.)
             num_warmup_steps = int(num_warmup_steps_ratio * total_steps)
 
-            print(f'Total steps: {total_steps}, num_warmup_steps: {num_warmup_steps}')
+            if self.rank == 0:
+                print(f'Total steps: {total_steps}, num_warmup_steps: {num_warmup_steps}')
 
             actor_lr_scheduler = get_constant_schedule_with_warmup(optimizer=actor_optimizer,
                                                                    num_warmup_steps=num_warmup_steps)
@@ -243,13 +248,16 @@ class ActorRolloutRefWorker(Worker):
         from alpha_seed.workers.xperf_rollout import XPerfGPTRollout
         from alpha_seed.workers.hybrid_engine import FSDPXPerfGPTShardingManager
 
+        log_gpu_memory_usage('Before XPerfGPTRollout init', logger=logger)
         rollout = XPerfGPTRollout(config=self.config.rollout,
                                   tokenizer=self.tokenizer,
                                   model_hf_config=self.actor_model_config)
+        log_gpu_memory_usage('After XPerfGPTRollout init', logger=logger)
         sharding_manager = FSDPXPerfGPTShardingManager(module=self.actor_module_fsdp,
                                                        model_config=self.actor_model_config,
                                                        inference_engine=rollout.inference_engine,
                                                        device_mesh=rollout.device_mesh)
+        log_gpu_memory_usage('After FSDPXPerfGPTShardingManager init', logger=logger)
         return rollout, sharding_manager
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
@@ -422,6 +430,8 @@ class ActorRolloutRefWorker(Worker):
         data.meta_info['micro_batch_size'] = micro_batch_size
         data.meta_info['temperature'] = self.config.rollout.temperature
 
+        log_gpu_memory_usage('Bfore reference recompute log prob', logger=logger)
+
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
             output = self.ref_policy.compute_log_prob(data=data)
@@ -429,6 +439,8 @@ class ActorRolloutRefWorker(Worker):
             output = self.ulysses_sharding_manager.postprocess_data(output)
 
         output = output.to('cpu')
+
+        log_gpu_memory_usage('After reference recompute log prob', logger=logger)
 
         if self._is_offload_param:
             offload_fsdp_param_and_grad(module=self.ref_module_fsdp, offload_grad=self._is_offload_grad)
@@ -537,10 +549,12 @@ class CriticWorker(Worker):
             # optimize the model via rmpad
             from alpha_seed.models.transformers.monkey_patch import apply_monkey_patch
             assert apply_monkey_patch(
-                config=critic_model_config), f'Cannot find rmpad version of {critic_model_config.model_type}'
+                config=critic_model_config,
+                verbose=self.rank == 0), f'Cannot find rmpad version of {critic_model_config.model_type}'
 
         init_context = get_init_weight_context_manager()
-        with init_context():
+        with init_context(), warnings.catch_warnings():
+            warnings.simplefilter("ignore")
             critic_module = AutoModelForCausalLM.from_pretrained(pretrained_model_name_or_path=local_path,
                                                                  torch_dtype=torch_dtype,
                                                                  config=critic_model_config,
@@ -572,7 +586,7 @@ class CriticWorker(Worker):
 
         auto_wrap_policy = get_fsdp_wrap_policy(module=critic_module, config=self.config.model.fsdp_config.wrap_policy)
 
-        log_gpu_memory_usage('Before critic FSDP', logger=None)
+        log_gpu_memory_usage('Before critic FSDP', logger=logger)
 
         critic_module = FSDP(critic_module,
                              param_init_fn=init_fn,
@@ -583,7 +597,7 @@ class CriticWorker(Worker):
                              mixed_precision=mixed_precision,
                              sync_module_states=True)
 
-        log_gpu_memory_usage('After critic FSDP', logger=None)
+        log_gpu_memory_usage('After critic FSDP', logger=logger)
 
         critic_optimizer = optim.AdamW(critic_module.parameters(),
                                        lr=config.optim.lr,
@@ -594,7 +608,8 @@ class CriticWorker(Worker):
         num_warmup_steps_ratio = config.optim.get('lr_warmup_steps_ratio', 0.)
         num_warmup_steps = int(num_warmup_steps_ratio * total_steps)
 
-        print(f'Total steps: {total_steps}, num_warmup_steps: {num_warmup_steps}')
+        if self.rank == 0:
+            print(f'Total steps: {total_steps}, num_warmup_steps: {num_warmup_steps}')
 
         from verl.utils.torch_functional import get_constant_schedule_with_warmup
         critic_lr_scheduler = get_constant_schedule_with_warmup(optimizer=critic_optimizer,
@@ -651,6 +666,8 @@ class CriticWorker(Worker):
         if self._is_offload_optimizer:
             load_fsdp_optimizer(optimizer=self.critic_optimizer, device_id=torch.cuda.current_device())
 
+        log_gpu_memory_usage('After Critic update', logger=logger)
+
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
             metrics = self.critic.update_critic(data=data)
@@ -661,6 +678,8 @@ class CriticWorker(Worker):
 
             output = DataProto(batch=None, meta_info={'metrics': metrics})
             output = self.ulysses_sharding_manager.postprocess_data(output)
+
+        log_gpu_memory_usage('After Critic update', logger=logger)
 
         if self._is_offload_param:
             offload_fsdp_param_and_grad(module=self.critic_module, offload_grad=self._is_offload_grad)
@@ -748,7 +767,8 @@ class RewardModelWorker(Worker):
         self.tokenizer = AutoTokenizer.from_pretrained(local_path,
                                                        trust_remote_code=config.model.get('trust_remote_code', False))
 
-        print(f'Switch chat_template: {self._do_switch_chat_template}')
+        if self.rank == 0:
+            print(f'Switch chat_template: {self._do_switch_chat_template}')
 
         trust_remote_code = config.model.get('trust_remote_code', False)
         model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code)
@@ -759,11 +779,13 @@ class RewardModelWorker(Worker):
         if use_rmpad:
             # optimize the model via rmpad
             from verl.models.transformers.monkey_patch import apply_monkey_patch
-            assert apply_monkey_patch(config=model_config), f'Cannot find rmpad version of {model_config.model_type}'
+            assert apply_monkey_patch(config=model_config,
+                                      verbose=self.rank == 0), f'Cannot find rmpad version of {model_config.model_type}'
 
         model_config.pad_token_id = self.tokenizer.pad_token_id
 
-        with init_context():
+        with init_context(), warnings.catch_warnings():
+            warnings.simplefilter("ignore")
             reward_module = AutoModelForTokenClassification.from_pretrained(pretrained_model_name_or_path=local_path,
                                                                             torch_dtype=torch.bfloat16,
                                                                             attn_implementation='flash_attention_2',

@@ -47,7 +47,8 @@ class DataParallelPPOActor(BasePPOActor):
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
         self.use_rmpad = self.config.get('use_rmpad', False)
-        print(f'Actor use_rmpad={self.use_rmpad}')
+        if torch.distributed.get_rank() == 0:
+            print(f'Actor use_rmpad={self.use_rmpad}')
 
     def _forward_micro_batch(self, micro_batch, temperature):
         response_length = micro_batch['responses'].size(-1)

@@ -82,13 +82,13 @@ _PATCH_NAME_TO_FUNC = {
 from transformers import PretrainedConfig
 
 
-def apply_monkey_patch(config: PretrainedConfig):
+def apply_monkey_patch(config: PretrainedConfig, verbose=True):
     success_apply_monkey_patch = False
     if config.model_type in _PATCH_NAME_TO_FUNC:
         _PATCH_NAME_TO_FUNC[config.model_type]()
         success_apply_monkey_patch = True
 
-    if success_apply_monkey_patch:
+    if success_apply_monkey_patch and verbose:
         print(f'Applying monkey patch to model {config.model_type}')
 
     return success_apply_monkey_patch

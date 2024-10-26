@@ -257,7 +257,7 @@ class RayPPOTrainer(object):
         self.reward_fn = reward_fn
         self.val_reward_fn = val_reward_fn
         self.logger = logger
-        
+
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert self.hybrid_engine, 'Currently, only support hybrid engine'
 
@@ -380,7 +380,7 @@ class RayPPOTrainer(object):
                     response_ids = input_ids[:, self.config.data.max_prompt_length:]
                     prompts = self.tokenizer.batch_decode(prompt_ids, skip_special_tokens=True)
                     responses = self.tokenizer.batch_decode(response_ids, skip_special_tokens=True)
-                    reward_tensor=reward_tensor.sum(-1).cpu()
+                    reward_tensor = reward_tensor.sum(-1).cpu()
                     for reward, prompt, response in zip(reward_tensor, prompts, responses):
                         data = {"reward": reward.item(), "prompt": prompt, "response": response}
                         f.write(json.dumps(data, ensure_ascii=False) + "\n")

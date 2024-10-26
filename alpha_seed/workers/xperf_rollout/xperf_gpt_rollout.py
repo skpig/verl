@@ -98,8 +98,9 @@ class XPerfGPTRollout(object):
         enable_cuda_graph = self.config.get('enable_cuda_graph', False)
 
         print("initializing xperf gpt...")
-        print(f"use_vllm, num_slots, slot_block_size, enable_cuda_graph {use_vllm}, {num_slots}, {slot_block_size}, {enable_cuda_graph}")
-
+        print(
+            f"use_vllm, num_slots, slot_block_size, enable_cuda_graph {use_vllm}, {num_slots}, {slot_block_size}, {enable_cuda_graph}"
+        )
 
         inference_sess = InferenceSession(num_slots=num_slots,
                                           max_batch_size=config.micro_batch_size,
@@ -176,7 +177,7 @@ class XPerfGPTRollout(object):
     def generate_sequences(self, prompts: DataProto) -> DataProto:
         meta_info = prompts.meta_info
         num_bon = meta_info.get("num_bon", 1)
-        timeout_seconds = self.config.get('timeout_seconds', 60*30)
+        timeout_seconds = self.config.get('timeout_seconds', 60 * 30)
 
         prompt_ids = prompts.batch['input_ids']  # (bs, prompt_length)
         # left-padded attention_mask
