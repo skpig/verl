@@ -135,8 +135,11 @@ def reduce_metrics(metrics: dict):
     return metrics
 
 
-def compute_data_metrics(batch):
+def compute_data_metrics(batch: DataProto):
     # TODO: add response length
+    if torch.cuda.is_available():
+        print('Using GPU to compute_data_metrics')
+        batch = batch.to('cuda')
     sequence_score = batch.batch['token_level_scores'].sum(-1)
     sequence_reward = batch.batch['token_level_rewards'].sum(-1)
 
@@ -155,6 +158,11 @@ def compute_data_metrics(batch):
     values = batch.batch['values']
 
     reflection_nums = batch.batch['reflection_nums']
+
+    response_mask_bool = response_mask.bool()
+    valid_adv = torch.masked_select(advantages, response_mask_bool)
+    valid_returns = torch.masked_select(returns, response_mask_bool)
+    valid_values = torch.masked_select(values, response_mask_bool)
 
     metrics = {
         # score
@@ -179,29 +187,29 @@ def compute_data_metrics(batch):
         'critic/advantages/mean':
             masked_mean(advantages, response_mask).detach().item(),
         'critic/advantages/max':
-            torch.max(advantages[response_mask]).detach().item(),
+            torch.max(valid_adv).detach().item(),
         'critic/advantages/min':
-            torch.min(advantages[response_mask]).detach().item(),
+            torch.min(valid_adv).detach().item(),
         'critic/advantages/std':
-            torch.std(advantages[response_mask]).detach().item(),
+            torch.std(valid_adv).detach().item(),
         # returns
         'critic/returns/mean':
             masked_mean(returns, response_mask).detach().item(),
         'critic/returns/max':
-            torch.max(returns[response_mask]).detach().item(),
+            torch.max(valid_returns).detach().item(),
         'critic/returns/min':
-            torch.min(returns[response_mask]).detach().item(),
+            torch.min(valid_returns).detach().item(),
         'critic/returns/std':
-            torch.std(returns[response_mask]).detach().item(),
+            torch.std(valid_returns).detach().item(),
         # values
         'critic/values/mean':
             masked_mean(values, response_mask).detach().item(),
         'critic/values/max':
-            torch.max(values[response_mask]).detach().item(),
+            torch.max(valid_values).detach().item(),
         'critic/values/min':
-            torch.min(values[response_mask]).detach().item(),
+            torch.min(valid_values).detach().item(),
         'critic/values/std':
-            torch.std(values[response_mask]).detach().item(),
+            torch.std(valid_values).detach().item(),
         # response length
         'response_length/mean':
             torch.mean(response_length).detach().item(),
@@ -228,8 +236,8 @@ def compute_data_metrics(batch):
             torch.mean(torch.eq(prompt_length, max_prompt_length).float()).detach().item(),
         # vf explained var
         'critic/vf/vf_explained_var':
-            (1.0 - torch.var(torch.masked_select(returns - values, response_mask.bool())) /
-             (torch.var(torch.masked_select(returns, response_mask.bool())) + 1e-5)).detach().item(),
+            (1.0 - torch.var(torch.masked_select(returns - values, response_mask_bool)) /
+             (torch.var(torch.masked_select(returns, response_mask_bool)) + 1e-5)).detach().item(),
     }
     return metrics
 
@@ -500,7 +508,8 @@ class RayPPOTrainer(object):
                 # only report metrics from one generation replica
                 if 'xperf_metrics' in gen_batch_output.meta_info:
                     for name, x_metric in gen_batch_output.meta_info['xperf_metrics'].items():
-                        self.logger.log(data={"xperf/gen/{}".format(name): wandb.Histogram(x_metric)}, step=self.global_step)
+                        self.logger.log(data={"xperf/gen/{}".format(name): wandb.Histogram(x_metric)},
+                                        step=self.global_step)
 
                 batch = batch.repeat(self.num_bon)
                 batch = batch.union(gen_batch_output)
@@ -572,7 +581,10 @@ class RayPPOTrainer(object):
                     metrics.update(val_metrics)
 
                 # collect metrics
-                data_metrics = compute_data_metrics(batch=batch)
+                with Timer(name='compute_metrics', logger=None) as timer:
+                    # Note that we can use any worker groups here
+                    data_metrics = self.actor_rollout_wg.execute_func_rank_zero(compute_data_metrics, batch)
+                metrics['timing/compute_metrics'] = timer.last
                 metrics.update(data_metrics)
 
                 # TODO: make a canonical logger that supports various backend

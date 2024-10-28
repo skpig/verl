@@ -158,8 +158,7 @@ class XPerfGPTRollout(object):
                                                              generate_kwargs,
                                                              rank0_split=False,
                                                              mp_size=tp_size,
-                                                             enable_metrics=True
-                                                             )
+                                                             enable_metrics=True)
                     if dist.is_initialized() and tp_size > 1:
                         dist.barrier()
                         if tp_rank == 0:
@@ -191,7 +190,7 @@ class XPerfGPTRollout(object):
         tokenizer = self.inference_engine.tokenizer
         query_pool = tokenizer.batch_decode(prompt_ids.cpu())
         query_pool = [x.replace(tokenizer.pad_token, '') for x in query_pool]
-        print("infer... num queries.. {} num_bon.. {}".format(len(query_pool), num_bon))
+        # print("infer... num queries.. {} num_bon.. {}".format(len(query_pool), num_bon))
         sampler = self.inference_engine.sampler
         generation_kwargs = dict(do_sample=meta_info.get('do_sample', sampler.do_sample))
         with logging_set_level(self.config.get('logging_level', 'WARN')), patch.multiple(sampler, **generation_kwargs):
@@ -199,7 +198,8 @@ class XPerfGPTRollout(object):
 
         response_outputs = dict(input_ids=[v.new_token_ids for v in self.inference_engine.get_inorder_responses()])
         metrics = {}
-        if hasattr(self.inference_engine.pp_scheduler, "init_metrics") and self.inference_engine.pp_scheduler.enable_metrics:
+        if hasattr(self.inference_engine.pp_scheduler,
+                   "init_metrics") and self.inference_engine.pp_scheduler.enable_metrics:
             metrics = self.inference_engine.pp_scheduler.metrics
         # empty kv cache
         self.inference_engine.empty_cache()

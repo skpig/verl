@@ -2,5 +2,4 @@ working_dir: ./
 excludes: ["/.git/"]
 env_vars:
   TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
-  VLLM_ATTENTION_BACKEND: "XFORMERS"
-  PYTHONPATH: /opt/tiger/verl
+  PYTHONPATH: /opt/tiger/verl:/opt/tiger/seed_models:/opt/tiger/verifiable_tasks:/opt/tiger/bpex_triton

@@ -13,10 +13,11 @@ class Patcher:
 
     def prepare_python3_env(self):
         # os.system("git config pull.ff only")
-        # os.system("pip3 install transformers==4.41.1 byted-wandb==0.13.72 grpcio==1.51.1 grpcio-tools==1.48.2")
+        # os.system("pip3 install --no-cache-dir https://luban-source.byted.org/repository/scm/data.aml.xperf_gpt_th24_cu124_abi0_sdist_1.0.0.183.tar.gz")
         # os.system("cd /opt/tiger && rm -rf mariana && git clone https://yipzlf:vwZZ_JYy7mkx-1zUjyeR@code.byted.org/seed/mariana && cd mariana && git checkout zr/sc/xperf_infer")
         # os.system("cd /opt/tiger/mariana && git pull")
-        os.system("cd /opt/tiger && rm -rf verl && git clone https://yipzlf:vwZZ_JYy7mkx-1zUjyeR@code.byted.org/data/verl && cd verl && git checkout chi/feat/latest_p6_3b3")
+        # os.system("cd /opt/tiger && rm -rf seed_models && git clone https://yipzlf:vwZZ_JYy7mkx-1zUjyeR@code.byted.org/seed/seed_models && cd seed_models && git checkout chi/feat/p6_ggemm_ckpt")
+        os.system("cd /opt/tiger && rm -rf verl && git clone https://yipzlf:vwZZ_JYy7mkx-1zUjyeR@code.byted.org/data/verl && cd verl && git checkout chi/feat/execute_func_rank_zero")
         return 
         os.system("pip3 install bytedance.trainingmetrics -i https://bytedpypi.byted.org/simple/")
         os.system("cd /opt/tiger && rm -rf mariana && git clone https://yipzlf:vwZZ_JYy7mkx-1zUjyeR@code.byted.org/seed/mariana && cd mariana && git checkout fwq_sing")

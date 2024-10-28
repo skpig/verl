@@ -111,6 +111,9 @@ def _get_p6_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
         "has_k_layernorm": config.use_key_layernorm,
         "has_context_layernorm": config.use_context_groupnorm,
         "tokenizer_path": tokenizer.name_or_path,
-        "has_mlp_gate": True
+        "has_mlp_gate": True,
+        "rope_mode": config.rope_scaling['rope_type'],
+        "rope_base": config.rope_theta,
+        "rope_scale": config.rope_scaling['factor']
     }
     return xperf_config

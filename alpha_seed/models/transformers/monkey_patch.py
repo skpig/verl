@@ -67,8 +67,8 @@ def apply_monkey_patch_to_p6():
     from seed_models.models.p6.modeling_p6 import P6FlashAttention2, P6ExpertMLP
     from verl.models.transformers.seed_mlp import swiglu_mlp_forward
     from alpha_seed.models.transformers.seed_flash_attn_rmpad import flash_attn2_rmpad_forward
-    P6FlashAttention2.forward = flash_attn2_rmpad_forward
-    P6ExpertMLP.forward = swiglu_mlp_forward
+    # P6FlashAttention2.forward = flash_attn2_rmpad_forward
+    # P6ExpertMLP.forward = swiglu_mlp_forward
 
 
 _PATCH_NAME_TO_FUNC = {

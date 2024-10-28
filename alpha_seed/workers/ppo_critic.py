@@ -30,7 +30,6 @@ from verl.utils.torch_functional import masked_mean
 
 from alpha_seed import core_algos
 
-from flash_attn.bert_padding import pad_input, unpad_input
 from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
 from dist_attn.ulysses.ops import slice_input_tensor, gather_outputs
 
@@ -39,7 +38,7 @@ from contextlib import nullcontext
 __all__ = ['DataParallelPPOCritic']
 
 try:
-    from verl.utils.debug import get_profiler_context
+    from verl.utils.debug import get_profiler_context, MemoryProfiler
 except:
     print('Cannot find profile utilities. Please use latest verl master')
     raise
@@ -64,8 +63,16 @@ class DataParallelPPOCritic(BasePPOCritic):
                                                      default_hdfs_dir=self.config.profile.default_hdfs_dir,
                                                      upload_to_mlx=self.config.profile.upload_to_mlx,
                                                      enable=self.config.profile.enable)
+        self.memory_profiler = MemoryProfiler(filename=self.config.profile.filename + 'memory',
+                                              enable=torch.distributed.get_rank() == 0 and self.config.profile.enable,
+                                              upload_to_mlx=self.config.profile.upload_to_mlx,
+                                              active=3)
+
+        self.value_loss = torch.compile(core_algos.compute_value_loss)
 
     def _forward_micro_batch(self, micro_batch):
+        from flash_attn.bert_padding import pad_input, unpad_input, index_first_axis, rearrange
+
         response_length = micro_batch['responses'].size(-1)
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
             if self.use_rmpad:
@@ -76,6 +83,9 @@ class DataParallelPPOCritic(BasePPOCritic):
                 input_ids_rmpad, indices, _, _ = unpad_input(input_ids.unsqueeze(-1),
                                                              attention_mask=attention_mask)  # (totol_nnz, 1)
                 input_ids_rmpad = input_ids_rmpad.transpose(0, 1)  # (1, total_nnz)
+
+                position_ids_rmpad = index_first_axis(rearrange(position_ids.unsqueeze(-1), "b s ... -> (b s) ..."),
+                                                      indices).transpose(0, 1)
 
                 if (sp_size := get_ulysses_sequence_parallel_world_size()) > 1:
                     _, total_s = input_ids_rmpad.shape
@@ -88,8 +98,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                     input_ids_rmpad = slice_input_tensor(input_ids_rmpad, dim=1, padding=False)
 
                 values_rmpad = self.critic_module(input_ids=input_ids_rmpad,
-                                                  attention_mask=attention_mask,
-                                                  position_ids=None,
+                                                  position_ids=position_ids_rmpad,
                                                   use_cache=False).logits
 
                 # handle ulysses sequence parallelism
@@ -99,7 +108,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                         attention_mask = attention_mask[:-1]
                     values_rmpad = gather_outputs(values_rmpad, gather_dim=1, padding_dim=1, unpad_dim_size=total_s)
 
-                values_rmpad = values_rmpad.squeeze(0)  # (total_nnz)
+                values_rmpad = values_rmpad.squeeze(0).squeeze(-1)  # (total_nnz)
 
                 # pad it back
                 values = pad_input(values_rmpad.unsqueeze(-1), indices=indices, batch=batch, seqlen=seqlen).squeeze(-1)
@@ -174,11 +183,11 @@ class DataParallelPPOCritic(BasePPOCritic):
 
                     # assert not torch.any(torch.isnan(vpreds)).item()
 
-                    vf_loss, vf_clipfrac = core_algos.compute_value_loss(vpreds=vpreds,
-                                                                         values=values,
-                                                                         returns=returns,
-                                                                         eos_mask=eos_mask,
-                                                                         cliprange_value=self.config.cliprange_value)
+                    vf_loss, vf_clipfrac = self.value_loss(vpreds=vpreds,
+                                                           values=values,
+                                                           returns=returns,
+                                                           eos_mask=eos_mask,
+                                                           cliprange_value=self.config.cliprange_value)
                     loss = vf_loss / self.gradient_accumulation
                     loss.backward()
 
@@ -195,6 +204,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                 append_to_dict(metrics, data)
 
                 p.step()
+                self.memory_profiler.step()
 
         self.critic_optimizer.zero_grad()
         return metrics

@@ -577,50 +577,86 @@ def _reshard_fsdp_state_dict_to_xperf_p6(tp_model, state_dict, device_mesh: Devi
         assert gate_wg.shape == gate_w.shape
         gate_w.data = gate_wg.contiguous()
 
-        fc1_1_list = []
-        fc1_2_list = []
-        for expert_index in range(model_config.moe_num_expert):
-            fc1_1 = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts.{expert_index}.fc1_1.weight').to(
+        use_grouped_gemm_weight = getattr(model_config, 'moe_implementation', False)
+
+        if use_grouped_gemm_weight:
+            fc1_1_weight = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts.fc1_1_weight').to(
                 torch.bfloat16).full_tensor()
-            fc1_2 = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts.{expert_index}.fc1_2.weight').to(
+            if device_mesh is not None:
+                fc1_1_weight = DTensor.from_local(fc1_1_weight,
+                                                  device_mesh=device_mesh,
+                                                  placements=[Replicate(), Replicate()])
+                fc1_1_weight = fc1_1_weight.redistribute(device_mesh=device_mesh, placements=[Replicate(),
+                                                                                              Shard(1)])._local_tensor
+
+            fc1_2_weight = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts.fc1_2_weight').to(
                 torch.bfloat16).full_tensor()
 
             if device_mesh is not None:
-                fc1_1 = DTensor.from_local(fc1_1, device_mesh=device_mesh, placements=[Replicate(), Replicate()])
-                fc1_1 = fc1_1.redistribute(device_mesh=device_mesh, placements=[Replicate(), Shard(0)])._local_tensor
+                fc1_2_weight = DTensor.from_local(fc1_2_weight,
+                                                  device_mesh=device_mesh,
+                                                  placements=[Replicate(), Replicate()])
+                fc1_2_weight = fc1_2_weight.redistribute(device_mesh=device_mesh, placements=[Replicate(),
+                                                                                              Shard(1)])._local_tensor
+        else:
+            fc1_1_list = []
+            fc1_2_list = []
+            for expert_index in range(model_config.moe_num_expert):
+                fc1_1 = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts.{expert_index}.fc1_1.weight').to(
+                    torch.bfloat16).full_tensor()
+                fc1_2 = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts.{expert_index}.fc1_2.weight').to(
+                    torch.bfloat16).full_tensor()
 
-                fc1_2 = DTensor.from_local(fc1_2, device_mesh=device_mesh, placements=[Replicate(), Replicate()])
-                fc1_2 = fc1_2.redistribute(device_mesh=device_mesh, placements=[Replicate(), Shard(0)])._local_tensor
+                if device_mesh is not None:
+                    fc1_1 = DTensor.from_local(fc1_1, device_mesh=device_mesh, placements=[Replicate(), Replicate()])
+                    fc1_1 = fc1_1.redistribute(device_mesh=device_mesh, placements=[Replicate(),
+                                                                                    Shard(0)])._local_tensor
 
-            fc1_1_list.append(fc1_1)
-            fc1_2_list.append(fc1_2)
+                    fc1_2 = DTensor.from_local(fc1_2, device_mesh=device_mesh, placements=[Replicate(), Replicate()])
+                    fc1_2 = fc1_2.redistribute(device_mesh=device_mesh, placements=[Replicate(),
+                                                                                    Shard(0)])._local_tensor
 
-        # (num_experts, intermediate_size // tp, hidden_size)
-        fc1_1_weight = torch.stack(fc1_1_list, dim=0)
-        fc1_2_weight = torch.stack(fc1_2_list, dim=0)
+                fc1_1_list.append(fc1_1)
+                fc1_2_list.append(fc1_2)
+
+            # (num_experts, intermediate_size // tp, hidden_size)
+            fc1_1_weight = torch.stack(fc1_1_list, dim=0)
+            fc1_2_weight = torch.stack(fc1_2_list, dim=0)
+
+            del fc1_1_list, fc1_2_list
 
         fc1_weight = torch.cat((fc1_1_weight, fc1_2_weight), dim=1).contiguous().flatten()
 
         assert fc1_weight.shape == fc1_w.shape
         fc1_w.data = fc1_weight.contiguous()
 
-        del fc1_1_list, fc1_2_list
-
-        fc2_list = []
-        for expert_index in range(model_config.moe_num_expert):
-            fc2 = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts.{expert_index}.fc2.weight').to(
+        if use_grouped_gemm_weight:
+            fc2_weight = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts.fc2_weight').to(
                 torch.bfloat16).full_tensor()
             if device_mesh is not None:
-                fc2 = DTensor.from_local(fc2, device_mesh=device_mesh, placements=[Replicate(), Replicate()])
-                fc2 = fc2.redistribute(device_mesh=device_mesh, placements=[Replicate(), Shard(1)])._local_tensor
-            fc2_list.append(fc2)
+                fc2_weight = DTensor.from_local(fc2_weight,
+                                                device_mesh=device_mesh,
+                                                placements=[Replicate(), Replicate()])
+                fc2_weight = fc2_weight.redistribute(device_mesh=device_mesh, placements=[Replicate(),
+                                                                                          Shard(2)])._local_tensor
+            fc2_weight = fc2_weight.contiguous().flatten()
+        else:
+            fc2_list = []
+            for expert_index in range(model_config.moe_num_expert):
+                fc2 = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts.{expert_index}.fc2.weight').to(
+                    torch.bfloat16).full_tensor()
+                if device_mesh is not None:
+                    fc2 = DTensor.from_local(fc2, device_mesh=device_mesh, placements=[Replicate(), Replicate()])
+                    fc2 = fc2.redistribute(device_mesh=device_mesh, placements=[Replicate(), Shard(1)])._local_tensor
+                fc2_list.append(fc2)
+
+            fc2_weight = torch.stack(fc2_list, dim=0).contiguous().flatten()
+
+            del fc2_list
 
         # (num_experts, intermediate_size // tp, hidden_size)
-        fc2_weight = torch.stack(fc2_list, dim=0).contiguous().flatten()
-        assert fc2_weight.shape == fc2_w.shape
+        assert fc2_weight.shape == fc2_w.shape, f'{fc2_weight.shape=}, {fc2_w.shape=}'
         fc2_w.data = fc2_weight.contiguous()
-
-        del fc2_list
 
     load_to_cuda(tp_model=tp_model)
 

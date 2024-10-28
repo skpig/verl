@@ -21,11 +21,12 @@ from tensordict import TensorDict
 from torch import nn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
+from flash_attn.bert_padding import unpad_input
+
 from verl import DataProto
 from verl.trainer.ppo.actor import BasePPOActor
 from verl.utils.py_functional import append_to_dict
 from verl.utils.torch_functional import logprobs_from_logits, log_probs_from_logits_response_rmpad, get_unpad_data
-from flash_attn.bert_padding import pad_input, unpad_input
 from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
 from dist_attn.ulysses.ops import slice_input_tensor, gather_outputs
 
@@ -67,18 +68,24 @@ class DataParallelPPOActor(BasePPOActor):
                                                          enable=self.config.profile.enable)
 
     def _forward_micro_batch(self, micro_batch, temperature):
+        from flash_attn.bert_padding import index_first_axis, rearrange
+
         response_length = micro_batch['responses'].size(-1)
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
             if self.use_rmpad:
+                # TODO(zhangchi.usc1992): we can actually remove padding for the whole batch and perform balancing to reduce peak memory
                 input_ids = micro_batch['input_ids']
                 attention_mask = micro_batch['attention_mask']
                 position_ids = micro_batch['position_ids']
-                input_ids_rmpad = unpad_input(input_ids.unsqueeze(-1),
-                                              attention_mask=attention_mask)[0]  # (totol_nnz, 1)
+                input_ids_rmpad, indices, cu_seqlens, max_seqlen_in_batch = unpad_input(
+                    input_ids.unsqueeze(-1), attention_mask=attention_mask)  # (totol_nnz, 1)
                 input_ids_rmpad = input_ids_rmpad.transpose(0, 1)  # (1, total_nnz)
+                position_ids_rmpad = index_first_axis(rearrange(position_ids.unsqueeze(-1), "b s ... -> (b s) ..."),
+                                                      indices).transpose(0, 1)
 
                 # handle ulysses sequence parallelism
                 if (sp_size := get_ulysses_sequence_parallel_world_size()) > 1:
+                    assert NotImplementedError
                     _, total_s = input_ids_rmpad.shape
                     pad_size = (sp_size - total_s % sp_size) % sp_size
                     if pad_size > 0:
@@ -89,10 +96,7 @@ class DataParallelPPOActor(BasePPOActor):
                     input_ids_rmpad = slice_input_tensor(input_ids_rmpad, dim=1, padding=False)
 
                 # Note that in rmpad implementation, we don't need position_ids.
-                output = self.actor_module(input_ids=input_ids_rmpad,
-                                           attention_mask=attention_mask,
-                                           position_ids=None,
-                                           use_cache=False)
+                output = self.actor_module(input_ids=input_ids_rmpad, position_ids=position_ids_rmpad, use_cache=False)
 
                 # handle ulysses sequence parallelism
                 if get_ulysses_sequence_parallel_world_size() > 1:
@@ -202,6 +206,7 @@ class DataParallelPPOActor(BasePPOActor):
                         cliprange2=clip_ratio2)
 
                     if self.use_rmpad:
+                        # TODO(zhangchi.usc1992) optimize this!, remove unpad_input
                         full_response_mask = attention_mask.clone()
                         full_response_mask[:, :-response_length] = 0  # set the prompt part to zero
                         full_response_mask_rmpad, indices, cu_seqlens, max_seqlen_in_batch = unpad_input(

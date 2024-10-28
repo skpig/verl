@@ -34,13 +34,10 @@ from verl import DataProto
 
 from alpha_seed.workers.xperf_rollout.utils.weight_loader import offload_to_cpu, get_xperf_gpt_weight_bind_fn
 
-from seed_models import P5ForCausalLM, P5Config
-
 
 class FSDPXPerfGPTShardingManager(BaseShardingManager):
 
-    def __init__(self, module: FSDP, model_config: P5Config, inference_engine: InferenceSession,
-                 device_mesh: DeviceMesh):
+    def __init__(self, module: FSDP, model_config, inference_engine: InferenceSession, device_mesh: DeviceMesh):
         super().__init__()
         self.module = module
         self.inference_engine = inference_engine
