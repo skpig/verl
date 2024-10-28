@@ -21,7 +21,7 @@ from verl.utils.tracking import Tracking
 import wandb
 
 # rule-based reward score
-from alpha_seed.utils.reward_score import gsm8k, math, model_score_fn, logic_puzzle
+from alpha_seed.utils.reward_score import gsm8k, math, math_v2, model_score_fn, logic_puzzle
 
 
 def _select_rm_score_fn(reward_style):
@@ -35,6 +35,8 @@ def _select_rm_score_fn(reward_style):
         return gsm8k.compute_score
     elif reward_style == 'rule-lighteval/MATH':
         return math.compute_score
+    elif reward_style == 'rule-lighteval/MATH_v2':
+        return math_v2.compute_score
     else:
         raise NotImplementedError
 

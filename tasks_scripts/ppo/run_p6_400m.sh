@@ -1,25 +1,25 @@
 set -x
 
 # ckpt和路径
-SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/ssd_hldy/user/yufan/400m_moe_sft/p6_400m_moe_4T_sft_v27_bs128_lr4e-4_master_dyn_epoch4/checkpoints/global_epoch_4/p6_to_models/400m_sft27
-RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/rm_p6_moe_400m_0716_sftv27_stage2_hf
-TRAIN_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/train_with_ref_ans.parquet
-TEST_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/test_with_ref_ans.parquet
+SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/ssd_hldy/user/yufan/400m_moe_sft/p6_400m_moe_4T_sft_v27_bs128_lr4e-4_master_dyn_epoch4/checkpoints/global_epoch_4/p6_to_models/400m.sft27.baseline
+RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/caizhao/400m_release/rm_p6_moe_400m_0716_sftv27_stage2/checkpoints/global_epoch_1/p6_to_models/rm_p6_moe_400m_baseline
+TRAIN_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/hard60_format.parquet
+TEST_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/math_500.parquet
 default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/yueyu/model/rl/alpha_seed/test5
 # 训练长度
-max_prompt_length=1024
-max_response_length=1024
+max_prompt_length=1024 # 16384
+max_response_length=1024 # 16384
 # batch size && 训练epoch
 train_batch_size=1024
-val_batch_size=1000
-ppo_mini_batch_size=32
-ppo_micro_batch_size=32
+val_batch_size=480
+ppo_mini_batch_size=128
+ppo_micro_batch_size=128
 total_epochs=5000
-test_freq=5
+test_freq=2
 save_freq=50
 # 算法相关的参数
-actor_lr=1e-6
-critic_lr=1e-5
+actor_lr=2e-6
+critic_lr=2e-6
 lr_warmup_steps_ratio=0.0003 # 10 / (train_size * total_epochs / train_batch_size)
 kl_coef=0.001
 use_last_response=False
@@ -29,7 +29,7 @@ gae_lam=0.95
 # tracking实验名
 project_name='verl_example_math'
 experiment_name='p6_400m_verifier_1024_32'
-
+export PYTHONPATH=$PYTHONPATH:/opt/tiger/verl:/opt/tiger/seed_models:/opt/tiger/verifiable_tasks:/opt/tiger/bpex_triton
 python3 tasks/main_ppo.py \
     data.train_files=${TRAIN_FILE} \
     data.val_files=${TEST_FILE} \
@@ -100,7 +100,8 @@ python3 tasks/main_ppo.py \
     trainer.save_freq=${save_freq} \
     trainer.test_freq=${test_freq} \
     trainer.total_epochs=${total_epochs} \
+    trainer.eval_before_training=True \
     trainer.val_only=False \
-    trainer.val_epoch=100 \
-    trainer.need_log=True \
+    trainer.val_epoch=1 \
+    trainer.need_log=False \
     trainer.log_file=/opt/tiger/alpha-seed/log.jsonl
