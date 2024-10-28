@@ -87,10 +87,10 @@ class XPerfGPTRollout(object):
             self.device_mesh = None  # this is actually the whole world size. No need to have a device mesh for it.
 
         generate_kwargs = dict(max_new_tokens=config.response_length,
-                               do_sample=config.do_sample,
-                               top_k=config.top_k,
-                               top_p=config.top_p,
-                               temperature=config.temperature)
+                               do_sample=config.train_generate_kwargs.do_sample,
+                               top_k=config.train_generate_kwargs.top_k,
+                               top_p=config.train_generate_kwargs.top_p,
+                               temperature=config.train_generate_kwargs.temperature)
 
         use_vllm = self.config.get('use_vllm', False)
         num_slots = self.config.get('num_slots', 256)
@@ -192,8 +192,11 @@ class XPerfGPTRollout(object):
         query_pool = [x.replace(tokenizer.pad_token, '') for x in query_pool]
         # print("infer... num queries.. {} num_bon.. {}".format(len(query_pool), num_bon))
         sampler = self.inference_engine.sampler
-        generation_kwargs = dict(do_sample=meta_info.get('do_sample', sampler.do_sample))
-        with logging_set_level(self.config.get('logging_level', 'WARN')), patch.multiple(sampler, **generation_kwargs):
+
+        generation_kwargs = prompts.meta_info['generation_kwargs']
+        self.inference_engine.set_generator_strategy(**generation_kwargs)
+
+        with logging_set_level(self.config.get('logging_level', 'WARN')):
             self.inference_engine.execute(query_pool, timeout=timeout_seconds, num_BoN=num_bon)
 
         response_outputs = dict(input_ids=[v.new_token_ids for v in self.inference_engine.get_inorder_responses()])

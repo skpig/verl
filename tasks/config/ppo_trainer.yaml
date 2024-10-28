@@ -60,10 +60,7 @@ actor_rollout_ref:
         min_num_params: 0
     log_prob_micro_batch_size: 128
   rollout:
-    name: vllm
-    temperature: 1.0
-    top_k: -1 # 0 for hf rollout, -1 for vllm rollout
-    top_p: 1
+    name: xperf_gpt
     prompt_length: ${data.max_prompt_length}  # for xperf_gpt
     response_length: ${data.max_response_length}
     # for vllm rollout
@@ -77,10 +74,19 @@ actor_rollout_ref:
     max_num_batched_tokens: 8192
     max_num_seqs: 1024
     log_prob_micro_batch_size: 128
-    # for hf rollout
-    do_sample: True
     # for xperf_gpt
     micro_batch_size: 256
+    train_generate_kwargs:
+      top_k: -1 # 0 for hf rollout, -1 for vllm rollout
+      top_p: 1.0
+      temperature: 1.0
+      do_sample: True
+    val_generate_kwargs:
+      # for validation
+      top_k: -1 # 0 for hf rollout, -1 for vllm rollout
+      top_p: 0.7
+      temperature: 1.0
+      do_sample: False
 
 critic:
   strategy: fsdp

@@ -392,7 +392,7 @@ class ActorRolloutRefWorker(Worker):
         if self._is_actor and recompute_log_prob:
             # we should always recompute old_log_probs when it is HybridEngine
             output.meta_info['micro_batch_size'] = self.config.rollout.log_prob_micro_batch_size
-            output.meta_info['temperature'] = self.config.rollout.temperature
+            output.meta_info['temperature'] = prompts.meta_info['generation_kwargs']['temperature']
             with self.ulysses_sharding_manager:
                 output = self.ulysses_sharding_manager.preprocess_data(output)
                 old_log_probs = self.actor.compute_log_prob(data=output)
@@ -414,7 +414,7 @@ class ActorRolloutRefWorker(Worker):
 
         micro_batch_size = self.config.ref.log_prob_micro_batch_size
         data.meta_info['micro_batch_size'] = micro_batch_size
-        data.meta_info['temperature'] = self.config.rollout.temperature
+        data.meta_info['temperature'] = self.config.rollout.train_generate_kwargs.temperature
 
         log_gpu_memory_usage('Bfore reference recompute log prob', logger=logger)
 

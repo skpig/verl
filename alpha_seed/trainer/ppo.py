@@ -359,10 +359,11 @@ class RayPPOTrainer(object):
                     'eos_token_id': self.tokenizer.eos_token_id,
                     'pad_token_id': self.tokenizer.pad_token_id,
                     'recompute_log_prob': False,
-                    'do_sample': False,
                     'validate': True,
                 }
 
+                test_gen_batch.meta_info[
+                    'generation_kwargs'] = self.config.actor_rollout_ref.rollout.val_generate_kwargs
                 test_output_gen_batch = self.actor_rollout_wg.generate_sequences(test_gen_batch)
                 print(
                     f'{val_epoch_idx + 1}-th/{val_epoch} {val_idx + 1}-th/{len(self.val_dataloader)} validation generation end'
@@ -499,6 +500,7 @@ class RayPPOTrainer(object):
 
                 # pop those keys for generation
                 gen_batch = batch.pop(batch_keys=['input_ids', 'attention_mask', 'position_ids'])
+                gen_batch.meta_info['generation_kwargs'] = self.config.actor_rollout_ref.rollout.train_generate_kwargs
                 gen_batch.meta_info["num_bon"] = self.num_bon
                 # generate a batch
                 with Timer(name='gen', logger=None) as timer:
