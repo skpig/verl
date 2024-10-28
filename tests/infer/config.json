@@ -19,6 +19,6 @@
     "has_k_layernorm": true,
     "has_context_layernorm": true,
     "rope_mode": "default", 
-    "model_ckpt_path": "/opt/tiger/alpha-seed/models/megatron_merge_states.pt",
-    "tokenizer_path": "/opt/tiger/alpha-seed/models/bbpe155k-v6.4.3-ml.pret"
+    "model_ckpt_path": "/opt/tiger/models/megatron_merge_states.pt",
+    "tokenizer_path": "/opt/tiger/models/bbpe155k-v6.4.3-ml.pret"
 }

@@ -56,6 +56,8 @@ def offload_to_cpu(tp_model):
         param_list.append(tp_model.wpe.weight)
     for param in param_list:
         param.data = torch.empty_like(param.data, device='cpu')
+    if hasattr(tp_model, '_free_kv_cache'):
+        tp_model._free_kv_cache()
 
     torch.cuda.empty_cache()
 
