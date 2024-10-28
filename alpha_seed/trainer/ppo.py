@@ -518,6 +518,22 @@ class RayPPOTrainer(object):
 
                 batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask']).item()
 
+                with Timer(name='rm_score', logger=None) as timer:
+                    # compute scores. Support both model and function-based.
+                    # We first compute the scores using reward model. Then, we call reward_fn to combine
+                    # the results from reward model and rule-based results.
+                    if self.use_rm:
+                        # we first compute reward model score
+                        reward_tensor = self.rm_wg.compute_rm_score(batch)
+                        batch = batch.union(reward_tensor)
+                metrics['timing/rm_score'] = timer.last
+
+                with Timer(name='reward_fn', logger=None) as timer:
+                    # we combine with rule-based rm
+                    reward_tensor = self.reward_fn(batch, global_step=self.global_step)
+                    batch.batch['token_level_scores'] = reward_tensor
+                metrics['timing/reward_fn'] = timer.last
+
                 if self.use_reference_policy:
                     # compute reference log_prob
                     with Timer(name='ref', logger=None) as timer:
@@ -532,18 +548,6 @@ class RayPPOTrainer(object):
                 metrics['timing/values'] = timer.last
 
                 with Timer(name='adv', logger=None) as timer:
-                    # compute scores. Support both model and function-based.
-                    # We first compute the scores using reward model. Then, we call reward_fn to combine
-                    # the results from reward model and rule-based results.
-                    if self.use_rm:
-                        # we first compute reward model score
-                        reward_tensor = self.rm_wg.compute_rm_score(batch)
-                        batch = batch.union(reward_tensor)
-
-                    # we combine with rule-based rm
-                    reward_tensor = self.reward_fn(batch, global_step=self.global_step)
-                    batch.batch['token_level_scores'] = reward_tensor
-
                     # compute rewards. apply_kl_penalty if available
                     batch, kl_metrics = apply_kl_penalty(batch,
                                                          kl_ctrl=self.kl_ctrl,
