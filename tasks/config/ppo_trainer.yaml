@@ -142,6 +142,8 @@ reward_model:
   mean: 0.0
   std: 1.0
   use_last_response: False
+  reward_0_for_overlong_rsp: False
+  punish_no_answer: v0
 
 algorithm:
   gamma: 1.0

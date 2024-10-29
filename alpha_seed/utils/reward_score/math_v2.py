@@ -282,11 +282,13 @@ def verify(pred, answer, resp_len, max_resp_len, reward_0_for_overlong_rsp=False
             reward = 0.3
     return reward
 
-def compute_score(batch_info, solution_str, ground_truth, **argv) -> float:
+def compute_score(batch_info, solution_str, ground_truth, config, **argv) -> float:
     prompt_length = batch_info['prompts'].shape[-1]
     max_resp_len = batch_info['responses'].shape[-1]
     resp_len = sum(batch_info['attention_mask'][prompt_length:].tolist())
-    return verify(solution_str, ground_truth, resp_len, max_resp_len)
+    reward_0_for_overlong_rsp = config.reward_model.reward_0_for_overlong_rsp
+    punish_no_answer = config.reward_model.punish_no_answer
+    return verify(solution_str, ground_truth, resp_len, max_resp_len, reward_0_for_overlong_rsp, punish_no_answer)
 
 if __name__ == "__main__":
     print(is_correct_minerva(r"""Answer:22+12\sqrt{2}""",r"""22+12\sqrt{2}"""))

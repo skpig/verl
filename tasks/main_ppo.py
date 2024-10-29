@@ -43,12 +43,13 @@ def _select_rm_score_fn(reward_style):
 
 class RewardManager():
 
-    def __init__(self, tokenizer, num_examine, logger: Tracking, rm_name="train") -> None:
+    def __init__(self, tokenizer, num_examine, config, logger: Tracking, rm_name="train") -> None:
         self.tokenizer = tokenizer
         self.num_examine = num_examine
         self.logger = logger
         self.log_table = []
         self.rm_name = rm_name
+        self.config = config
 
     def __call__(self, data: DataProto, global_step=None):
         """We will expand this function gradually based on the available datasets"""
@@ -82,7 +83,8 @@ class RewardManager():
                 "batch_info": data_item.batch,
                 "tokenizer": self.tokenizer,
                 "solution_str": solution_str,
-                "ground_truth": ground_truth
+                "ground_truth": ground_truth,
+                "config": self.config
             }
             score = compute_score_fn(**score_fn_inputs)
             reward_tensor[i, valid_response_length - 1] = score
@@ -178,10 +180,10 @@ def main_task(config):
         role_worker_mapping[Role.RewardModel] = RewardModelWorker
         mapping[Role.RewardModel] = global_pool_id
 
-    reward_fn = RewardManager(tokenizer=tokenizer, num_examine=2, logger=logger, rm_name="train")
+    reward_fn = RewardManager(tokenizer=tokenizer, num_examine=2, config=config, logger=logger, rm_name="train")
 
     # Note that we always use function-based RM for validation
-    val_reward_fn = RewardManager(tokenizer=tokenizer, num_examine=2, logger=logger, rm_name="val")
+    val_reward_fn = RewardManager(tokenizer=tokenizer, num_examine=2, config=config, logger=logger, rm_name="val")
 
     resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 

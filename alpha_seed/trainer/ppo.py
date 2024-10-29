@@ -157,7 +157,7 @@ def compute_data_metrics(batch: DataProto):
     returns = batch.batch['returns']
     values = batch.batch['values']
 
-    reflection_nums = batch.batch['reflection_nums']
+    reflection_nums = batch.batch.get('reflection_nums', torch.Tensor([0.0]))
 
     response_mask_bool = response_mask.bool()
     valid_adv = torch.masked_select(advantages, response_mask_bool)
