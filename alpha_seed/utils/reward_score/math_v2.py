@@ -270,16 +270,16 @@ def verify(pred, answer, resp_len, max_resp_len, reward_0_for_overlong_rsp=False
     """
     # breakpoint()
     corr, pred = is_correct_minerva(pred, answer)
-    reward = 1 if corr else 0
-    if reward_0_for_overlong_rsp and reward == 0 and pred == "[INVALID]" and (max_resp_len - resp_len) < 100:
-        reward = 0.5
+    reward = 1 if corr else -1
+    if reward_0_for_overlong_rsp and reward == -1 and pred == "[INVALID]" and (max_resp_len - resp_len) < 100:
+        reward = 0.0
     # 不含答案的全部设为-0.2
     assert punish_no_answer in ['v0', 'v1', 'v2']
     if punish_no_answer != 'v0' and pred == "[INVALID]":
         if punish_no_answer == 'v1':
-            reward = 0.4
+            reward = -0.1
         elif punish_no_answer == 'v2':
-            reward = 0.3
+            reward = -0.2
     return reward
 
 def compute_score(batch_info, solution_str, ground_truth, config, **argv) -> float:

@@ -77,6 +77,7 @@ class ResourcePoolManager:
 
 
 import torch
+from tensordict import TensorDict
 from verl.utils.torch_functional import masked_mean
 
 
@@ -494,6 +495,63 @@ class RayPPOTrainer(object):
         self.actor_rollout_wg = all_wg['actor_rollout']
         self.actor_rollout_wg.init_model()
 
+    def select_training_samples(self, batch, strategy):
+        # strategy:
+        #   - all: use all responses to train policy and value
+        #   - best: use BoN to train policy and value
+        #   - best_mix_random: use BoN and random-choice-one to train policy and value
+        #   - best_worst: use BoN and WoN to train policy and value
+        num_bon = self.config.actor_rollout_ref.rollout.num_bon
+        bsz = self.config.data.train_batch_size
+        # calc select ids
+        scores = batch.batch['token_level_scores'].sum(-1).reshape(bsz, num_bon) # (num_bon * bsz, )
+        if strategy == "all":
+            final_idx = torch.range(0, num_bon - 1).unsqueeze(dim=0).tile([bsz, 1]).to(torch.int64).unsqueeze(dim=2)
+            response_num_per_prompt = num_bon
+        elif strategy == "best":
+            final_idx = torch.argmax(scores, dim=1).unsqueeze(dim=1).unsqueeze(dim=2)
+            response_num_per_prompt = 1
+        elif strategy == "best_mix_random":
+            random_idx = torch.randint(0, num_bon, (bsz, )).unsqueeze(dim=1).unsqueeze(dim=2)
+            best_idx = torch.argmax(scores, dim=1).unsqueeze(dim=1).unsqueeze(dim=2)
+            final_idx = torch.cat([random_idx, best_idx], dim=1)
+            response_num_per_prompt = 2
+        elif strategy == "best_worst":
+            worst_idx = torch.argmin(scores, dim=1).unsqueeze(dim=1).unsqueeze(dim=2)
+            best_idx = torch.argmax(scores, dim=1).unsqueeze(dim=1).unsqueeze(dim=2)
+            final_idx = torch.cat([worst_idx, best_idx], dim=1)
+            response_num_per_prompt = 2
+        else:
+            raise NotImplemented
+
+        # gather corresponding tensor
+        tensors = {}
+        for key, tensor in batch.batch.items():
+            seq_len = tensor.shape[-1]
+            cur_idx = final_idx.repeat(1, 1, seq_len)
+            tensor = tensor.reshape(bsz, num_bon, -1)
+            tensor = torch.gather(tensor, dim=1, index=cur_idx).reshape(-1, seq_len)
+            assert tensor.shape == (bsz * response_num_per_prompt, seq_len)
+            tensors[key] = tensor
+        final_batch = TensorDict(
+                source=tensors,
+                batch_size=(batch.batch.batch_size[0] // num_bon * response_num_per_prompt,),
+            )
+
+        final_non_tensor_batch = {}
+        for key, val in batch.non_tensor_batch.items():
+            val = val.reshape(bsz, num_bon)
+            cur_idx = final_idx.squeeze(dim=2).numpy()
+            val = np.take_along_axis(val, cur_idx, axis=1).reshape(-1)
+            assert len(val) == bsz * response_num_per_prompt
+            final_non_tensor_batch[key] = val
+
+        return DataProto(
+            batch=final_batch,
+            non_tensor_batch=final_non_tensor_batch,
+            meta_info=batch.meta_info,
+        )
+
     def fit(self):
         self.global_step = 0
 
@@ -549,6 +607,8 @@ class RayPPOTrainer(object):
                     reward_tensor = self.reward_fn(batch, global_step=self.global_step)
                     batch.batch['token_level_scores'] = reward_tensor
                 metrics['timing/reward_fn'] = timer.last
+
+                batch = self.select_training_samples(batch, self.config.actor_rollout_ref.rollout.bon_strategy)
 
                 if self.use_reference_policy:
                     # compute reference log_prob

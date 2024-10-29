@@ -76,6 +76,8 @@ actor_rollout_ref:
     log_prob_micro_batch_size: 128
     # for xperf_gpt
     micro_batch_size: 256
+    num_bon: 1
+    bon_strategy: "best"
     train_generate_kwargs:
       top_k: -1 # 0 for hf rollout, -1 for vllm rollout
       top_p: 1.0
