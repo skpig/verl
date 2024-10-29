@@ -32,6 +32,12 @@ from single_controller.ray import RayResourcePool, RayWorkerGroup, RayClassWithI
 from single_controller.ray.base import create_colocated_worker_cls
 from verl import DataProto
 
+try:
+    from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
+except ImportError:
+    print('Cannot find pad_dataproto_to_divisor. Please use latest verl master')
+    raise
+
 from alpha_seed import core_algos
 
 WorkerType = Type[Worker]
@@ -364,7 +370,13 @@ class RayPPOTrainer(object):
 
                 test_gen_batch.meta_info[
                     'generation_kwargs'] = self.config.actor_rollout_ref.rollout.val_generate_kwargs
-                test_output_gen_batch = self.actor_rollout_wg.generate_sequences(test_gen_batch)
+
+                # pad test_gen_batch to divisible by world_size. TODO(zhangchi.usc1992): shall we move this logic to dispatch?
+                test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch,
+                                                                           self.actor_rollout_wg.world_size)
+                test_output_gen_batch = self.actor_rollout_wg.generate_sequences(test_gen_batch_padded)
+                test_output_gen_batch = unpad_dataproto(test_output_gen_batch, pad_size=pad_size)
+
                 print(
                     f'{val_epoch_idx + 1}-th/{val_epoch} {val_idx + 1}-th/{len(self.val_dataloader)} validation generation end'
                 )
@@ -373,7 +385,11 @@ class RayPPOTrainer(object):
 
                 if self.use_rm:
                     # we first compute reward model score
-                    reward_tensor = self.rm_wg.compute_rm_score(test_batch)
+                    test_batch_padded, pad_size = pad_dataproto_to_divisor(test_batch,
+                                                                           size_divisor=self.rm_wg.world_size)
+                    reward_tensor = self.rm_wg.compute_rm_score(test_batch_padded)
+                    reward_tensor = unpad_dataproto(reward_tensor, pad_size=pad_size)
+
                     test_batch = test_batch.union(reward_tensor)
 
                 # evaluate using reward_function

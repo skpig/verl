@@ -11,7 +11,7 @@ max_prompt_length=1024 # 16384
 max_response_length=1024 # 16384
 # batch size && 训练epoch
 train_batch_size=1024
-val_batch_size=480
+val_batch_size=500
 ppo_mini_batch_size=128
 ppo_micro_batch_size=128
 total_epochs=5000
