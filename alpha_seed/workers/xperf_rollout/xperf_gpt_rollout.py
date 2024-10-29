@@ -215,8 +215,9 @@ class XPerfGPTRollout(object):
         response_ids = response_outputs["input_ids"].cuda()
         response_attention_mask = response_outputs["attention_mask"].cuda()
 
-        prompt_ids = prompt_ids.repeat(num_bon, 1)
-        attention_mask = attention_mask.repeat(num_bon, 1)
+        local_bs = prompt_ids.shape[0]
+        prompt_ids = prompt_ids.repeat(1, num_bon).reshape(local_bs * num_bon, -1)
+        attention_mask = attention_mask.repeat(1, num_bon).reshape(local_bs * num_bon, -1)
 
         attention_mask = torch.hstack((attention_mask, response_attention_mask))
         position_ids = (attention_mask.cumsum(dim=-1) - 1).clamp(min=0)
