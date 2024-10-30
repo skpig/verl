@@ -174,3 +174,8 @@ trainer:
   val_epoch: 1
   need_log: False
   log_file: /opt/tiger/alpha-seed/log.jsonl
+  league_training_config: 
+    enable: False
+    buffer_size: 1
+    strategy: hard
+

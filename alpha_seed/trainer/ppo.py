@@ -307,6 +307,9 @@ class RayPPOTrainer(object):
         version = self.config.data.get('version', 'v1')
         # TODO: we have to make sure the batch size is divisible by the dp size
         from alpha_seed.utils.dataset.rl_dataset import RLHFDataset, collate_fn
+        train_batch_size = self.config.data.train_batch_size
+        if self.config.trainer.league_training_config.enable:
+            train_batch_size = train_batch_size * self.config.trainer.league_training_config.buffer_size
         self.train_dataset = RLHFDataset(parquet_files=self.config.data.train_files,
                                          tokenizer=self.tokenizer,
                                          prompt_key=self.config.data.prompt_key,
@@ -317,7 +320,7 @@ class RayPPOTrainer(object):
                                          return_raw_chat=self.config.data.get('return_raw_chat', False),
                                          truncation=self.config.data.get('truncation', 'error'))
         self.train_dataloader = DataLoader(dataset=self.train_dataset,
-                                           batch_size=self.config.data.train_batch_size,
+                                           batch_size=train_batch_size,
                                            shuffle=self.config.data.shuffle,
                                            drop_last=True,
                                            collate_fn=collate_fn)
@@ -495,6 +498,46 @@ class RayPPOTrainer(object):
         self.actor_rollout_wg = all_wg['actor_rollout']
         self.actor_rollout_wg.init_model()
 
+    def league_training_filter_prompt(self, batch, strategy="hard"):
+        num_bon = self.config.actor_rollout_ref.rollout.num_bon
+        bsz = self.config.data.train_batch_size
+        buffer_size = self.config.trainer.league_training_config.buffer_size
+        # mean score per prompt
+        mean_scores = batch.batch['token_level_scores'].sum(-1).reshape(bsz * buffer_size, num_bon).mean(-1) # (num_bon * buffer_size, )
+        if strategy == "hard":
+            sort_idex = torch.argsort(mean_scores, dim=0)
+        else:
+            raise NotImplemented
+
+        # gather corresponding tensor
+        tensors = {}
+        for key, tensor in batch.batch.items():
+            seq_len = tensor.shape[-1]
+            cur_idx = sort_idex.unsqueeze(dim=1).unsqueeze(dim=2).repeat(1, num_bon, seq_len)[:bsz, :, :]
+            tensor = tensor.reshape(bsz * buffer_size, num_bon, -1)
+            tensor = torch.gather(tensor, dim=0, index=cur_idx).reshape(-1, seq_len)
+            assert tensor.shape == (bsz * num_bon, seq_len)
+            tensors[key] = tensor
+        final_batch = TensorDict(
+            source=tensors,
+            batch_size=(batch.batch.batch_size[0] // buffer_size),
+        )
+
+        final_non_tensor_batch = {}
+        for key, val in batch.non_tensor_batch.items():
+            val = val.reshape(bsz * buffer_size, num_bon)
+            cur_idx = sort_idex.unsqueeze(dim=1).repeat(1, num_bon)[:bsz, :].numpy()
+            val = np.take_along_axis(val, cur_idx, axis=0).reshape(-1)
+            assert len(val) == bsz * num_bon
+            final_non_tensor_batch[key] = val
+
+        return DataProto(
+            batch=final_batch,
+            non_tensor_batch=final_non_tensor_batch,
+            meta_info=batch.meta_info,
+        )
+
+
     def select_training_samples(self, batch, strategy):
         # strategy:
         #   - all: use all responses to train policy and value
@@ -504,7 +547,7 @@ class RayPPOTrainer(object):
         num_bon = self.config.actor_rollout_ref.rollout.num_bon
         bsz = self.config.data.train_batch_size
         # calc select ids
-        scores = batch.batch['token_level_scores'].sum(-1).reshape(bsz, num_bon) # (num_bon * bsz, )
+        scores = batch.batch['token_level_scores'].sum(-1).reshape(bsz, num_bon)
         if strategy == "all":
             final_idx = torch.range(0, num_bon - 1).unsqueeze(dim=0).tile([bsz, 1]).to(torch.int64).unsqueeze(dim=2)
             response_num_per_prompt = num_bon
@@ -534,9 +577,9 @@ class RayPPOTrainer(object):
             assert tensor.shape == (bsz * response_num_per_prompt, seq_len)
             tensors[key] = tensor
         final_batch = TensorDict(
-                source=tensors,
-                batch_size=(batch.batch.batch_size[0] // num_bon * response_num_per_prompt,),
-            )
+            source=tensors,
+            batch_size=(batch.batch.batch_size[0] // num_bon * response_num_per_prompt,),
+        )
 
         final_non_tensor_batch = {}
         for key, val in batch.non_tensor_batch.items():
@@ -608,6 +651,11 @@ class RayPPOTrainer(object):
                     batch.batch['token_level_scores'] = reward_tensor
                 metrics['timing/reward_fn'] = timer.last
 
+                # league training，筛选平均通过率低的prompt
+                if self.config.trainer.league_training_config.enable:
+                    batch = self.league_training_filter_prompt(batch, strategy=self.config.trainer.league_training_config.strategy)
+
+                # bon策略，筛选prompt内部的response，有不同策略，all、best、best_mix_random、best_worst
                 if self.num_bon > 1:
                     batch = self.select_training_samples(batch, self.config.actor_rollout_ref.rollout.bon_strategy)
 
