@@ -318,7 +318,7 @@ class RayPPOTrainer(object):
                                          truncation=self.config.data.get('truncation', 'error'))
         self.train_dataloader = DataLoader(dataset=self.train_dataset,
                                            batch_size=self.config.data.train_batch_size,
-                                           shuffle=True,
+                                           shuffle=self.config.data.shuffle,
                                            drop_last=True,
                                            collate_fn=collate_fn)
 
@@ -333,7 +333,7 @@ class RayPPOTrainer(object):
                                        truncation=self.config.data.get('truncation', 'error'))
         self.val_dataloader = DataLoader(dataset=self.val_dataset,
                                          batch_size=self.config.data.val_batch_size,
-                                         shuffle=True,
+                                         shuffle=self.config.data.shuffle,
                                          drop_last=True,
                                          collate_fn=collate_fn)
 
@@ -608,7 +608,8 @@ class RayPPOTrainer(object):
                     batch.batch['token_level_scores'] = reward_tensor
                 metrics['timing/reward_fn'] = timer.last
 
-                batch = self.select_training_samples(batch, self.config.actor_rollout_ref.rollout.bon_strategy)
+                if self.num_bon > 1:
+                    batch = self.select_training_samples(batch, self.config.actor_rollout_ref.rollout.bon_strategy)
 
                 if self.use_reference_policy:
                     # compute reference log_prob
