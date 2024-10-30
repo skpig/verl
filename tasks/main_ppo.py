@@ -19,6 +19,9 @@ from verl import DataProto
 import torch
 from verl.utils.tracking import Tracking
 import wandb
+import os
+import pandas as pd
+import hdfs_io
 
 # rule-based reward score
 from alpha_seed.utils.reward_score import gsm8k, math, math_v2, model_score_fn, logic_puzzle
@@ -43,19 +46,22 @@ def _select_rm_score_fn(reward_style):
 
 class RewardManager():
 
-    def __init__(self, tokenizer, num_examine, config, logger: Tracking, rm_name="train") -> None:
+    def __init__(self, tokenizer, config, logger: Tracking, rm_name="train") -> None:
         self.tokenizer = tokenizer
-        self.num_examine = num_examine
         self.logger = logger
         self.log_table = []
         self.rm_name = rm_name
         self.config = config
+        if self.config.trainer.save_cases_to_hdfs:
+            self.case_study_dir = config.trainer.default_hdfs_dir + "/cases/"
+            os.makedirs(self.case_study_dir, exist_ok=True)
 
     def __call__(self, data: DataProto, global_step=None):
         """We will expand this function gradually based on the available datasets"""
         reward_tensor = torch.zeros_like(data.batch['responses'], dtype=torch.float32)
 
         already_print_data_sources = {}
+        save_to_hdfs = []
 
         for i in range(len(data)):
             data_item = data[i]  # DataProtoItem
@@ -92,13 +98,24 @@ class RewardManager():
             if reward_style not in already_print_data_sources:
                 already_print_data_sources[reward_style] = 0
 
-            if already_print_data_sources[reward_style] < self.num_examine:
+            if already_print_data_sources[reward_style] < self.config.trainer.num_cases_to_wandb:
                 already_print_data_sources[reward_style] += 1
-                self.log_table.append([global_step, solution_str, score])
-        self.logger.log(
-            {f"gen&score_{self.rm_name}": wandb.Table(columns=["Step", "Gen Sequence", "Score"], data=self.log_table)},
-            step=global_step,
-            backend='tracking')
+                self.log_table.append([global_step, solution_str, ground_truth, score])
+            save_to_hdfs.append([global_step, solution_str, ground_truth, score])
+
+        if self.config.trainer.num_cases_to_wandb > 0:
+            self.logger.log(
+                {
+                    f"gen&score_{self.rm_name}":
+                        wandb.Table(columns=["Step", "Gen Sequence", "GroundTruth", "Score"], data=self.log_table)
+                },
+                step=global_step,
+                backend='tracking')
+
+        if self.config.trainer.save_cases_to_hdfs:
+            df = pd.DataFrame(columns=["Step", "Gen Sequence", "GroundTruth", "Score"], data=save_to_hdfs)
+            df.to_parquet(".tmp.case.parquet")
+            hdfs_io.hput(".tmp.case.parquet", self.case_study_dir + f"{self.rm_name}.{str(global_step)}.parquet")
         return reward_tensor
 
 
@@ -186,10 +203,10 @@ def main_task(config):
         role_worker_mapping[Role.RewardModel] = RewardModelWorker
         mapping[Role.RewardModel] = global_pool_id
 
-    reward_fn = RewardManager(tokenizer=tokenizer, num_examine=2, config=config, logger=logger, rm_name="train")
+    reward_fn = RewardManager(tokenizer=tokenizer, config=config, logger=logger, rm_name="train")
 
     # Note that we always use function-based RM for validation
-    val_reward_fn = RewardManager(tokenizer=tokenizer, num_examine=2, config=config, logger=logger, rm_name="val")
+    val_reward_fn = RewardManager(tokenizer=tokenizer, config=config, logger=logger, rm_name="val")
 
     resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 

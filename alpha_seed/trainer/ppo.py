@@ -555,7 +555,7 @@ class RayPPOTrainer(object):
             final_idx = torch.argmax(scores, dim=1).unsqueeze(dim=1).unsqueeze(dim=2)
             response_num_per_prompt = 1
         elif strategy == "best_mix_random":
-            random_idx = torch.randint(0, num_bon, (bsz, )).unsqueeze(dim=1).unsqueeze(dim=2)
+            random_idx = torch.randint(0, num_bon, (bsz,)).unsqueeze(dim=1).unsqueeze(dim=2)
             best_idx = torch.argmax(scores, dim=1).unsqueeze(dim=1).unsqueeze(dim=2)
             final_idx = torch.cat([random_idx, best_idx], dim=1)
             response_num_per_prompt = 2
