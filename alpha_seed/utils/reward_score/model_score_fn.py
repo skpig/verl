@@ -21,7 +21,7 @@ def extract_rm_score(batch_info, rm_scores):
 
 
 def raw_score(batch_info, **argv):
-    return extract_rm_score(batch_info, batch_info['rm_scores'])
+    return extract_rm_score(batch_info, batch_info['rm_scores']).item()
 
 
 def count_subsequences(sequence, subsequence):
@@ -63,4 +63,4 @@ def raw_score_reflection_penalty(batch_info, tokenizer, **argv):
     else:
         new_score = rm_score
     new_score = torch.tensor(new_score).to(dtype=rm_score.dtype, device=rm_score.device)
-    return new_score
+    return new_score.item()
