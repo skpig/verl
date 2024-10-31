@@ -106,8 +106,7 @@ class DataParallelPPOActor(BasePPOActor):
                     output.logits = gather_outputs(output.logits, gather_dim=1, padding_dim=1, unpad_dim_size=total_s)
 
                 logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
-
-                logits_rmpad = logits_rmpad / temperature
+                logits_rmpad.div_(temperature)
                 log_probs = log_probs_from_logits_response_rmpad(input_ids=input_ids,
                                                                  attention_mask=attention_mask,
                                                                  logits_rmpad=logits_rmpad,
@@ -118,7 +117,8 @@ class DataParallelPPOActor(BasePPOActor):
                                            attention_mask=micro_batch['attention_mask'],
                                            position_ids=micro_batch['position_ids'],
                                            use_cache=False)  # prevent model thinks we are generating
-                logits = output.logits / temperature
+                logits = output.logits
+                logits.div_(temperature)
                 logits = logits[:, -response_length - 1:-1]
                 log_probs = logprobs_from_logits(logits, micro_batch['responses'])
             return logits, log_probs
