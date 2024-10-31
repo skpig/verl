@@ -226,12 +226,15 @@ class ActorRolloutRefWorker(Worker):
             from verl.utils.torch_functional import get_constant_schedule_with_warmup
             actor_optimizer = optim.AdamW(actor_module_fsdp.parameters(),
                                           lr=optim_config.lr,
-                                          betas=optim_config.get('betas', (0.9, 0.999)),
-                                          weight_decay=optim_config.get('weight_decay', 1e-2))
+                                          betas=optim_config.get('betas', (0.9, 0.95)),
+                                          eps=optim_config.get('eps', 1e-08),
+                                          weight_decay=optim_config.get('weight_decay', 0.1))
 
             total_steps = optim_config.get('total_training_steps', 0)
-            num_warmup_steps_ratio = optim_config.get('lr_warmup_steps_ratio', 0.)
-            num_warmup_steps = int(num_warmup_steps_ratio * total_steps)
+            num_warmup_steps = int(optim_config.get('num_warmup_steps', -1))
+            if num_warmup_steps < 0:
+                num_warmup_steps_ratio = optim_config.get('lr_warmup_steps_ratio', 0.)
+                num_warmup_steps = int(num_warmup_steps_ratio * total_steps)
 
             if self.rank == 0:
                 print(f'Total steps: {total_steps}, num_warmup_steps: {num_warmup_steps}')
@@ -587,12 +590,15 @@ class CriticWorker(Worker):
 
         critic_optimizer = optim.AdamW(critic_module.parameters(),
                                        lr=config.optim.lr,
-                                       betas=config.optim.get('betas', (0.9, 0.999)),
-                                       weight_decay=config.optim.get('weight_decay', 1e-2))
+                                       betas=config.optim.get('betas', (0.9, 0.95)),
+                                       eps=config.optim.get('eps', 1e-08),
+                                       weight_decay=config.optim.get('weight_decay', 0.1))
 
         total_steps = config.optim.get('total_training_steps', 0)
-        num_warmup_steps_ratio = config.optim.get('lr_warmup_steps_ratio', 0.)
-        num_warmup_steps = int(num_warmup_steps_ratio * total_steps)
+        num_warmup_steps = int(config.optim.get('num_warmup_steps', -1))
+        if num_warmup_steps < 0:
+            num_warmup_steps_ratio = config.optim.get('lr_warmup_steps_ratio', 0.)
+            num_warmup_steps = int(num_warmup_steps_ratio * total_steps)
 
         if self.rank == 0:
             print(f'Total steps: {total_steps}, num_warmup_steps: {num_warmup_steps}')
