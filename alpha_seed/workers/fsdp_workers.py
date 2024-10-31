@@ -541,7 +541,7 @@ class CriticWorker(Worker):
                                                                             config=critic_model_config,
                                                                             trust_remote_code=trust_remote_code)
             # reset score head parameter
-            critic_module.score.reset_parameters()
+            # critic_module.score.reset_parameters()
             # some parameters may not in torch_dtype
             critic_module.to(torch_dtype)
 
@@ -549,6 +549,7 @@ class CriticWorker(Worker):
                 critic_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': False})
                 critic_module.train()
                 if self.rank == 0:
+                    print(critic_module)
                     print('Enable critic gradient checkpointing')
                     model = critic_module.transformer
                     print(f'{model.gradient_checkpointing=}, {model.training=}, {model._gradient_checkpointing_func=}')
