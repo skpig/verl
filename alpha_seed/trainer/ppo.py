@@ -507,6 +507,8 @@ class RayPPOTrainer(object):
                                                                         num_bon).mean(-1)  # (num_bon * buffer_size, )
         if strategy == "hard":
             sort_idex = torch.argsort(mean_scores, dim=0)
+        elif strategy == "easy":
+            sort_idex = torch.argsort(mean_scores, dim=0, descending=True)
         else:
             raise NotImplemented
 
