@@ -69,7 +69,7 @@ class RewardManager():
         rm_res_future_list = []
 
         def get_rm_score(idx):
-            data_item = data[i]  # DataProtoItem
+            data_item = data[idx]  # DataProtoItem
             prompt_ids = data_item.batch['prompts']
             prompt_length = prompt_ids.shape[-1]
             valid_prompt_length = data_item.batch['attention_mask'][:prompt_length].sum()
@@ -94,13 +94,13 @@ class RewardManager():
                 "config": self.config
             }
             score = compute_score_fn(**score_fn_inputs)
-            return prompt_str, solution_str, ground_truth, reward_style, valid_response_length, score
+            return prompt_str, solution_str, ground_truth, reward_style, valid_response_length, score, idx
 
         for i in range(len(data)):
             rm_res_future_list.append(self.rm_req_executor.submit(get_rm_score, i))
         for res in as_completed(rm_res_future_list):
-            prompt_str, solution_str, ground_truth, reward_style, valid_response_length, score = res.result()
-            reward_tensor[i, valid_response_length - 1] = score
+            prompt_str, solution_str, ground_truth, reward_style, valid_response_length, score, idx = res.result()
+            reward_tensor[idx, valid_response_length - 1] = score
 
             if reward_style not in already_print_data_sources:
                 already_print_data_sources[reward_style] = 0

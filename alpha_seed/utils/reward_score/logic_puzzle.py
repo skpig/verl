@@ -1,13 +1,16 @@
 import json
 from collections import defaultdict
 
+
 def dummy_verify(solution_str, answer, meta):
     return 0
+
 
 registried_tasks = {}
 
 import os
 import importlib
+
 folder_path = '/opt/tiger/verifiable_tasks/verifiable_tasks/tasks'
 for task in os.listdir(folder_path):
     try:

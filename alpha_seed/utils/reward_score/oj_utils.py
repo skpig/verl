@@ -2,6 +2,7 @@ import json
 import requests
 import time
 from sandbox_fusion import set_sandbox_endpoint, set_dataset_endpoint, submit, SubmitRequest, TestConfig
+
 set_sandbox_endpoint("https://faas-code-sandbox.bytedance.net/")
 set_dataset_endpoint("https://faas-code-sandbox.bytedance.net/online_judge/")
 # def compute_score(solution_str, ground_truth, **argv) -> float:
@@ -29,11 +30,14 @@ set_dataset_endpoint("https://faas-code-sandbox.bytedance.net/online_judge/")
 import json
 import requests
 import time
+
 OJ_RETRY_TIMES = 5
 oj_headers = {
     'accept': 'application/json',
     'Content-Type': 'application/json',
 }
+
+
 def compute_score(solution_str, ground_truth, **argv) -> float:
     if isinstance(ground_truth, str):
         ground_truth = json.loads(ground_truth)
@@ -41,12 +45,15 @@ def compute_score(solution_str, ground_truth, **argv) -> float:
     oj_features["completion"] = solution_str
     for i in range(OJ_RETRY_TIMES):
         try:
-            eval_response = requests.post('https://faas-code-sandbox.bytedance.net/online_judge/submit', headers=oj_headers, json=oj_features, timeout=30).json()
-            if eval_response['accepted'] and not('exit(' in solution_str):
+            eval_response = requests.post('https://faas-code-sandbox.bytedance.net/online_judge/submit',
+                                          headers=oj_headers,
+                                          json=oj_features,
+                                          timeout=30).json()
+            if eval_response['accepted'] and not ('exit(' in solution_str):
                 return 1
             else:
                 return 0
         except Exception as ex:
             time.sleep(0.5)
             continue
-    return -2 
+    return -2
