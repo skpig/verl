@@ -53,7 +53,7 @@ class RewardManager():
         self.rm_name = rm_name
         self.config = config
         if self.config.trainer.save_cases_to_hdfs:
-            self.case_study_dir = config.trainer.default_hdfs_dir + "/cases/"
+            self.case_study_dir = config.trainer.default_local_dir + "/cases/"
             os.makedirs(self.case_study_dir, exist_ok=True)
 
     def __call__(self, data: DataProto, global_step=None):

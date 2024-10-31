@@ -503,7 +503,8 @@ class RayPPOTrainer(object):
         bsz = self.config.data.train_batch_size
         buffer_size = self.config.trainer.league_training_config.buffer_size
         # mean score per prompt
-        mean_scores = batch.batch['token_level_scores'].sum(-1).reshape(bsz * buffer_size, num_bon).mean(-1) # (num_bon * buffer_size, )
+        mean_scores = batch.batch['token_level_scores'].sum(-1).reshape(bsz * buffer_size,
+                                                                        num_bon).mean(-1)  # (num_bon * buffer_size, )
         if strategy == "hard":
             sort_idex = torch.argsort(mean_scores, dim=0)
         else:
@@ -536,7 +537,6 @@ class RayPPOTrainer(object):
             non_tensor_batch=final_non_tensor_batch,
             meta_info=batch.meta_info,
         )
-
 
     def select_training_samples(self, batch, strategy):
         # strategy:
@@ -653,7 +653,8 @@ class RayPPOTrainer(object):
 
                 # league training，筛选平均通过率低的prompt
                 if self.config.trainer.league_training_config.enable:
-                    batch = self.league_training_filter_prompt(batch, strategy=self.config.trainer.league_training_config.strategy)
+                    batch = self.league_training_filter_prompt(
+                        batch, strategy=self.config.trainer.league_training_config.strategy)
 
                 # bon策略，筛选prompt内部的response，有不同策略，all、best、best_mix_random、best_worst
                 if self.num_bon > 1:
