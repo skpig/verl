@@ -183,6 +183,7 @@ trainer:
   need_log: False
   log_file: /opt/tiger/alpha-seed/log.jsonl
   num_cases_to_wandb: 2 # number of samples log to wandb each step
+  logger_step_interval: 10 # how many steps to log to wandb
   save_cases_to_hdfs: False # save all cases to hdfs each step
   league_training_config: 
     enable: False

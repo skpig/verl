@@ -63,10 +63,11 @@ class RewardManager():
     def __call__(self, data: DataProto, global_step=None):
         """We will expand this function gradually based on the available datasets"""
         reward_tensor = torch.zeros_like(data.batch['responses'], dtype=torch.float32)
-
         already_print_data_sources = {}
         save_to_hdfs = []
         rm_res_future_list = []
+        if global_step is not None and global_step % self.config.trainer.logger_step_interval == 0:
+            self.log_table = []  # 清空self.log_table
 
         def get_rm_score(idx):
             data_item = data[idx]  # DataProtoItem
@@ -79,8 +80,8 @@ class RewardManager():
             valid_response_ids = response_ids[:valid_response_length]
 
             # decode
-            prompt_str = self.tokenizer.decode(valid_prompt_ids)
-            solution_str = self.tokenizer.decode(valid_response_ids)
+            prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
+            solution_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
 
             # select rm_score
             reward_style = data_item.non_tensor_batch['reward_model']['style']
@@ -100,6 +101,7 @@ class RewardManager():
             rm_res_future_list.append(self.rm_req_executor.submit(get_rm_score, i))
         for res in as_completed(rm_res_future_list):
             prompt_str, solution_str, ground_truth, reward_style, valid_response_length, score, idx = res.result()
+
             reward_tensor[idx, valid_response_length - 1] = score
 
             if reward_style not in already_print_data_sources:
@@ -107,11 +109,13 @@ class RewardManager():
 
             if already_print_data_sources[reward_style] < self.config.trainer.num_cases_to_wandb:
                 already_print_data_sources[reward_style] += 1
+                if reward_style == "code-sandbox":
+                    ground_truth = {}  # 对于OJ问题，ground_truth会比较大，扛不住
                 self.log_table.append([global_step, prompt_str, solution_str, ground_truth, score])
             save_to_hdfs.append([global_step, prompt_str, solution_str, ground_truth, score])
 
         if self.config.trainer.num_cases_to_wandb > 0:
-            logger_step = global_step - global_step % 10
+            logger_step = global_step - global_step % self.config.trainer.logger_step_interval
             self.logger.log(
                 {
                     f"gen&score_{self.rm_name}_{logger_step}":
@@ -120,11 +124,11 @@ class RewardManager():
                 },
                 step=global_step,
                 backend='tracking')
-
         if self.config.trainer.save_cases_to_hdfs:
-            df = pd.DataFrame(columns=["Step", "Gen Sequence", "GroundTruth", "Score"], data=save_to_hdfs)
-            df.to_parquet(".tmp.case.parquet")
-            hdfs_io.hput(".tmp.case.parquet", self.case_study_dir + f"{self.rm_name}.{str(global_step)}.parquet")
+            df = pd.DataFrame(columns=["Step", "Prompt", "Gen Sequence", "GroundTruth", "Score"], data=save_to_hdfs)
+            df.to_parquet(f"{self.rm_name}.{str(global_step)}.parquet")
+            hdfs_io.hput(f"{self.rm_name}.{str(global_step)}.parquet", self.case_study_dir)
+            os.remove(f"{self.rm_name}.{str(global_step)}.parquet")
         return reward_tensor
 
 
