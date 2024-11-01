@@ -60,7 +60,7 @@ class RMScoreOutput:
     score: float
 
 
-@ray.remote(num_cpus=5)  # make sure to distribute the task to different machines
+@ray.remote(num_cpus=1)  # make sure to distribute the task to different machines
 class RMScorer():
 
     def __init__(self, tokenizer, config) -> None:
