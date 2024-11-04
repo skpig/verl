@@ -94,6 +94,13 @@ actor_rollout_ref:
       top_p: 0.7
       temperature: 1.0
       do_sample: True
+    profile:
+      filename: p6_400m_ppo_rollout
+      profile_on_ranks:
+        - 0
+      default_hdfs_dir: null
+      upload_to_mlx: False
+      enable: False
 
 critic:
   strategy: fsdp

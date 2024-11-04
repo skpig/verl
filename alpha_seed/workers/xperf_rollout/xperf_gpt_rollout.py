@@ -39,6 +39,12 @@ import logging
 from .utils import get_xperf_gpt_config
 from .utils.weight_loader import offload_to_cpu, init_meta
 
+try:
+    from verl.utils.debug import get_profiler_context
+except:
+    print('Cannot find profile utilities. Please use latest verl master')
+    raise
+
 
 @contextmanager
 def logging_set_level(level: int = logging.WARNING):
@@ -85,6 +91,12 @@ class XPerfGPTRollout(object):
                                                 mesh_dim_names=('dp', 'tp'))
         else:
             self.device_mesh = None  # this is actually the whole world size. No need to have a device mesh for it.
+
+        self.profiler_context = get_profiler_context(filename=config.profile.filename,
+                                                     profile_on_ranks=config.profile.profile_on_ranks,
+                                                     default_hdfs_dir=config.profile.default_hdfs_dir,
+                                                     upload_to_mlx=config.profile.upload_to_mlx,
+                                                     enable=config.profile.enable)
 
         generate_kwargs = dict(max_new_tokens=config.response_length,
                                do_sample=config.train_generate_kwargs.do_sample,
@@ -196,8 +208,9 @@ class XPerfGPTRollout(object):
         generation_kwargs = prompts.meta_info['generation_kwargs']
         self.inference_engine.set_generator_strategy(**generation_kwargs)
 
-        with logging_set_level(self.config.get('logging_level', 'WARN')):
+        with logging_set_level(self.config.get('logging_level', 'WARN')), self.profiler_context as p:
             self.inference_engine.execute(query_pool, timeout=timeout_seconds, num_BoN=num_bon)
+            p.step()
 
         response_outputs = dict(input_ids=[v.new_token_ids for v in self.inference_engine.get_inorder_responses()])
         metrics = {}
