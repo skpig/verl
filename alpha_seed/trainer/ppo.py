@@ -114,7 +114,7 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
     return data, metrics
 
 
-def compute_advantage(data: DataProto, gamma, lam, adv_estimator):
+def compute_advantage(data: DataProto, gamma, lam, adv_estimator, upgo_loss_version):
     values = data.batch['values']
     responses = data.batch['responses']
     response_length = responses.size(1)
@@ -131,6 +131,11 @@ def compute_advantage(data: DataProto, gamma, lam, adv_estimator):
                                                                       lam=lam)
         data.batch['advantages'] = advantages
         data.batch['returns'] = returns
+        upgo_advantages = core_algos.compute_upgo_advantage(token_level_rewards=token_level_rewards,
+                                                            values=values,
+                                                            eos_mask=response_mask,
+                                                            upgo_loss_version=upgo_loss_version)
+        data.batch['upgo_advantages'] = upgo_advantages
     else:
         raise NotImplementedError
     return data
@@ -634,6 +639,9 @@ class RayPPOTrainer(object):
 
                 batch = batch.repeat(self.num_bon)
                 batch = batch.union(gen_batch_output)
+                if self.config.algorithm.force_append_eos:
+                    batch.batch["input_ids"][:, -1] = self.tokenizer.eos_token_id
+                    batch.batch["responses"][:, -1] = self.tokenizer.eos_token_id
 
                 batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask'], dim=-1).tolist()
 
@@ -686,7 +694,8 @@ class RayPPOTrainer(object):
                     batch = compute_advantage(batch,
                                               self.config.algorithm.gamma,
                                               self.config.algorithm.lam,
-                                              adv_estimator=self.config.algorithm.adv_estimator)
+                                              adv_estimator=self.config.algorithm.adv_estimator,
+                                              upgo_loss_version=self.config.actor_rollout_ref.actor.upgo_loss_version)
                 metrics['timing/adv'] = timer.last
 
                 # update critic

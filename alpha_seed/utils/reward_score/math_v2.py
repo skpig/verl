@@ -271,7 +271,8 @@ def is_correct_minerva(og_pred, gt, gt_need_extract=False):
         gt = normalize_final_answer(remove_boxed(last_boxed_only_string(gt)))
     else:
         gt = normalize_final_answer(gt)
-    return (pred == gt or is_equiv(pred, gt)), pred
+    # return (pred == gt or is_equiv(pred, gt)), pred
+    return (pred == gt), pred
 
 
 def verify(pred, answer, resp_len, max_resp_len, reward_0_for_overlong_rsp=False, punish_no_answer="v0"):

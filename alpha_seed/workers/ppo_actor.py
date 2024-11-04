@@ -124,7 +124,7 @@ class DataParallelPPOActor(BasePPOActor):
             return logits, log_probs
 
     def _make_minibatch_iterator(self, data: DataProto) -> Iterable[DataProto]:
-        select_keys = ['responses', 'input_ids', 'attention_mask', 'position_ids', 'old_log_probs', 'advantages']
+        select_keys = ['responses', 'input_ids', 'attention_mask', 'position_ids', 'old_log_probs', 'ref_log_prob', 'advantages', 'upgo_advantages']
         data = data.select(batch_keys=select_keys)
         return data.make_iterator(mini_batch_size=self.config.ppo_mini_batch_size,
                                   epochs=self.config.ppo_epochs,
@@ -189,21 +189,29 @@ class DataParallelPPOActor(BasePPOActor):
                     attention_mask = data['attention_mask']
                     response_mask = attention_mask[:, -response_length:]
                     old_log_prob = data['old_log_probs']
+                    ref_log_prob = data['ref_log_prob']
                     advantages = data['advantages']
+                    upgo_advantages = data['upgo_advantages']
 
                     clip_ratio = self.config.clip_ratio
                     clip_ratio2 = self.config.clip_ratio2
+                    scale_pg_by_kl = self.config.scale_pg_by_kl
                     entropy_coeff = self.config.entropy_coeff
+                    upgo_loss_weight = self.config.upgo_loss_weight
 
                     logits, log_prob = self._forward_micro_batch(micro_batch=data, temperature=temperature)
 
-                    pg_loss, pg_clipfrac, pg_clipfrac2, ppo_kl, ppo_kl_sum = core_algos.compute_policy_loss(
+                    total_loss, pg_loss, upgo_loss, pg_clipfrac, pg_clipfrac2, ppo_kl, ppo_kl_sum = core_algos.compute_policy_loss(
                         old_log_prob=old_log_prob,
+                        ref_log_prob=ref_log_prob,
                         log_prob=log_prob,
                         advantages=advantages,
+                        upgo_advantages=upgo_advantages,
                         eos_mask=response_mask,
                         cliprange=clip_ratio,
-                        cliprange2=clip_ratio2)
+                        cliprange2=clip_ratio2,
+                        scale_pg_by_kl=scale_pg_by_kl,
+                        upgo_loss_weight=upgo_loss_weight)
 
                     if self.use_rmpad:
                         # TODO(zhangchi.usc1992) optimize this!, remove unpad_input
@@ -215,7 +223,7 @@ class DataParallelPPOActor(BasePPOActor):
                         entropy_loss = core_algos.compute_entropy_loss(logits, full_response_mask_rmpad)  # (total_nnz,)
                     else:
                         entropy_loss = core_algos.compute_entropy_loss(logits, response_mask)
-                    policy_loss = pg_loss - entropy_loss * entropy_coeff
+                    policy_loss = total_loss - entropy_loss * entropy_coeff
 
                     loss = policy_loss / self.gradient_accumulation
                     loss.backward()
@@ -223,6 +231,7 @@ class DataParallelPPOActor(BasePPOActor):
                     data = {
                         'actor/entropy': entropy_loss.detach().item(),
                         'actor/pg_loss': pg_loss.detach().item(),
+                        'actor/upgo_loss': upgo_loss.detach().item(),
                         'actor/pg_clipfrac': pg_clipfrac.detach().item(),
                         'actor/pg_clipfrac2': pg_clipfrac2.detach().item(),
                         'actor/ppo_kl': ppo_kl.detach().item(),

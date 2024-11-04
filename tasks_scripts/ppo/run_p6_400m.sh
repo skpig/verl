@@ -32,12 +32,16 @@ save_freq=50
 # 算法相关的参数
 actor_lr=1e-5
 critic_lr=2e-5
-lr_warmup_steps_ratio=0.0003 # 10 / (train_size * total_epochs / train_batch_size)
+lr_warmup_steps=1 # 10 / (train_size * total_epochs / train_batch_size)
 kl_coef=0.0001
 use_last_response=False
 use_ref_answer=True
 gae_gamma=1.0
 gae_lam=0.95
+force_append_eos=True
+upgo_loss_weight=0.2
+upgo_loss_version=1
+clip_ratio2=2.0
 # tracking实验名
 project_name='verl_example_math'
 experiment_name='p6_400m_verifier_1024_32'
@@ -61,13 +65,14 @@ python3 tasks/main_ppo.py \
     +actor_rollout_ref.model.override_config.embd_pdrop=0. \
     +actor_rollout_ref.model.override_config.resid_pdrop=0. \
     actor_rollout_ref.actor.optim.lr=${actor_lr} \
-    actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=${lr_warmup_steps_ratio} \
+    actor_rollout_ref.actor.optim.lr_warmup_steps=${lr_warmup_steps} \
     actor_rollout_ref.actor.ppo_mini_batch_size=${ppo_mini_batch_size} \
     actor_rollout_ref.actor.ppo_micro_batch_size=${ppo_micro_batch_size} \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.grad_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
-    actor_rollout_ref.actor.entropy_coeff=0.001 \
+    actor_rollout_ref.actor.entropy_coeff=0.000 \
+    actor_rollout_ref.actor.clip_ratio2=${clip_ratio2} \
     actor_rollout_ref.rollout.micro_batch_size=1024 \
     actor_rollout_ref.rollout.log_prob_micro_batch_size=512 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
@@ -77,8 +82,11 @@ python3 tasks/main_ppo.py \
     +actor_rollout_ref.rollout.slot_block_size=1024 \
     actor_rollout_ref.ref.log_prob_micro_batch_size=512 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
+    actor_rollout_ref.actor.scale_pg_by_kl=True \
+    actor_rollout_ref.actor.upgo_loss_weight=${upgo_loss_weight} \
+    actor_rollout_ref.actor.upgo_loss_version=${upgo_loss_version} \
     critic.optim.lr=${critic_lr} \
-    critic.optim.lr_warmup_steps_ratio=${lr_warmup_steps_ratio} \
+    critic.optim.lr_warmup_steps=${lr_warmup_steps} \
     critic.model.path=${RM_MODEL_PATH} \
     critic.model.enable_gradient_checkpointing=False \
     critic.ppo_micro_batch_size=${ppo_micro_batch_size} \
@@ -103,6 +111,7 @@ python3 tasks/main_ppo.py \
     algorithm.kl_ctrl.kl_coef=${kl_coef} \
     algorithm.gamma=${gae_gamma} \
     algorithm.lam=${gae_lam} \
+    algorithm.force_append_eos=${force_append_eos} \
     trainer.critic_warmup=0 \
     trainer.logger=['console','tracking'] \
     trainer.project_name=${project_name} \

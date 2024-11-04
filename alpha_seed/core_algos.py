@@ -88,6 +88,8 @@ def compute_gae_advantage_return(token_level_rewards: torch.Tensor, values: torc
             shape: (bs, response_length)
 
     """
+    token_level_rewards = token_level_rewards * eos_mask
+    values = values * eos_mask
     with torch.no_grad():
         lastgaelam = 0
         advantages_reversed = []
@@ -104,13 +106,47 @@ def compute_gae_advantage_return(token_level_rewards: torch.Tensor, values: torc
         advantages = verl_F.masked_whiten(advantages, eos_mask)
     return advantages, returns
 
+def compute_upgo_advantage(token_level_rewards: torch.Tensor, values: torch.Tensor, eos_mask: torch.Tensor,
+                           upgo_loss_version: int):
+    token_level_rewards = token_level_rewards * eos_mask
+    values = values * eos_mask
+    # upgo的return、adv计算
+    upgo_returns = torch.zeros_like(token_level_rewards)
+    upgo_returns[:, -1] = token_level_rewards[:, -1]
+    if upgo_loss_version == 0:
+        upgo_indicator = torch.ge(token_level_rewards[:, :-1] + values[:, 1:] - values[:, :-1], 0)
+    elif upgo_loss_version == 1:
+        upgo_indicator = torch.ge(token_level_rewards[:, 1:-1] + values[:, 2:] - values[:, 1:-1], 0)
+        last_upgo_indicator = torch.ge(token_level_rewards[:, -1:] - values[:, -1], 0)
+        upgo_indicator = torch.concat([upgo_indicator, last_upgo_indicator], dim=1)
+    else:
+        raise NotImplemented
+    gen_len = token_level_rewards.shape[-1]
+    for i in reversed(range(gen_len - 1)):
+        upgo_returns[:, i] = torch.where(upgo_indicator[:, i], token_level_rewards[:, i] + upgo_returns[:, i + 1],
+                                         token_level_rewards[:, i] + values[:, i + 1])
+    upgo_advantages = upgo_returns - values
+    return upgo_advantages
 
 def compute_rewards(token_level_scores, old_log_prob, ref_log_prob, kl_ratio):
     kl = old_log_prob - ref_log_prob
     return token_level_scores - kl * kl_ratio
 
+def get_kl_logprobs(logprobs: torch.Tensor, ref_logprobs: torch.Tensor, reward_low_variance_kl: int = 1):
+    kl = logprobs - ref_logprobs
+    if reward_low_variance_kl == 1:
+        kl = kl
+    elif reward_low_variance_kl == 2:
+        kl = 1 / 2 * (-kl)**2  # k2
+    elif reward_low_variance_kl == 3:
+        kl = -kl
+        kl = kl.exp() - 1 - kl  # k3
+    else:
+        raise ValueError(f"Need `reward_low_variance_kl` be in [1,2,3], got {reward_low_variance_kl}")
+    return kl
 
-def compute_policy_loss(old_log_prob, log_prob, advantages, eos_mask, cliprange, cliprange2):
+def compute_policy_loss(old_log_prob, ref_log_prob, log_prob, advantages, upgo_advantages, eos_mask, cliprange,
+                        cliprange2, scale_pg_by_kl, upgo_loss_weight):
     """Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py#L1122
 
     Args:
@@ -143,11 +179,26 @@ def compute_policy_loss(old_log_prob, log_prob, advantages, eos_mask, cliprange,
     pg_losses3 = torch.abs(-advantages * cliprange2)
     pg_losses_clip = torch.maximum(pg_losses, pg_losses2)
     pg_losses = torch.minimum(pg_losses_clip, pg_losses3)  # 这个应该对advantage为正的情况不影响
-    pg_loss = torch.mean(torch.sum(pg_losses * eos_mask, dim=1) / seq_len_per_sample)
+    pg_loss = torch.sum(pg_losses * eos_mask, dim=1) / seq_len_per_sample
+
+    if scale_pg_by_kl:
+        sqrt_kl = torch.sqrt(torch.clamp(torch.sum(get_kl_logprobs(old_log_prob, ref_log_prob, reward_low_variance_kl=3) * eos_mask, dim=1), min=1.0))
+        normed_sqrt_kl = (1 / sqrt_kl) / (torch.sum(1 / sqrt_kl)) * torch.clamp(torch.sum(eos_mask[:, 0]), min=1.0)
+        pg_loss = pg_loss * normed_sqrt_kl
+    pg_loss = torch.mean(pg_loss)
+
+    if upgo_loss_weight > 0.0:
+        rho = torch.minimum(ratio, torch.ones_like(ratio)).detach()
+        upgo_losses = -rho * upgo_advantages * log_prob
+        upgo_losses = torch.sum(upgo_losses * eos_mask, dim=1) / seq_len_per_sample
+        upgo_loss = torch.mean(upgo_losses)
+    else:
+        upgo_loss = torch.zeros(()).to(pg_loss.device)
+    total_loss = pg_loss + upgo_loss_weight * upgo_loss
 
     pg_clipfrac = verl_F.masked_mean(torch.gt(pg_losses2, pg_losses).float(), eos_mask)
     pg_clipfrac2 = verl_F.masked_mean(torch.gt(pg_losses, pg_losses3).float(), eos_mask)
-    return pg_loss, pg_clipfrac, pg_clipfrac2, ppo_kl, ppo_kl_sum
+    return total_loss, pg_loss, upgo_loss, pg_clipfrac, pg_clipfrac2, ppo_kl, ppo_kl_sum
 
 
 def compute_entropy_loss(logits, eos_mask):

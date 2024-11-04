@@ -30,6 +30,9 @@ actor_rollout_ref:
     grad_clip: 1.0
     clip_ratio: 0.2
     clip_ratio2: 10.0
+    scale_pg_by_kl: False
+    upgo_loss_weight: 0.0
+    upgo_loss_version: 1
     entropy_coeff: 0.001
     ppo_epochs: 1
     shuffle: True
@@ -166,6 +169,7 @@ reward_model:
   punish_no_answer: v0
 
 algorithm:
+  force_append_eos: False
   gamma: 1.0
   lam: 0.95
   adv_estimator: gae
