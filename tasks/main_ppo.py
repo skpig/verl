@@ -153,8 +153,34 @@ def main(config):
     ray.get(main_task.remote(config))
 
 
+def validate_config(config):
+    n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
+
+    ulysses = config.actor_rollout_ref.actor.ulysses_sequence_parallel_size
+    assert ulysses == 1, 'ulysses is currently broken.'
+
+    # data
+    real_train_batch_size = config.data.train_batch_size * config.actor_rollout_ref.rollout.num_bon
+    assert real_train_batch_size % n_gpus == 0
+
+    # rollout
+    assert real_train_batch_size % config.actor_rollout_ref.rollout.micro_batch_size == 0
+
+    # actor
+    assert real_train_batch_size % config.actor_rollout_ref.actor.ppo_mini_batch_size == 0
+    assert config.actor_rollout_ref.actor.ppo_mini_batch_size % config.actor_rollout_ref.actor.ppo_micro_batch_size == 0
+    assert config.actor_rollout_ref.actor.ppo_micro_batch_size * ulysses >= n_gpus
+
+    # critic
+    assert real_train_batch_size % config.critic.ppo_mini_batch_size == 0
+    assert config.critic.ppo_mini_batch_size % config.critic.ppo_micro_batch_size == 0
+    assert config.critic.ppo_micro_batch_size * ulysses >= n_gpus
+
+
 @ray.remote
 def main_task(config):
+    validate_config(config=config)
+
     from verl.utils.fs import copy_local_path_from_hdfs
     from transformers import AutoTokenizer
 

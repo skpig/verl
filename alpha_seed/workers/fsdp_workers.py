@@ -351,9 +351,8 @@ class ActorRolloutRefWorker(Worker):
                 metrics = self.actor.update_policy(data=data)
             delta_time = timer.last
             global_num_tokens = data.meta_info['global_token_num']
-            estimated_flops, promised_flops = self.flops_counter.estimate_flops(
-                [global_num_tokens] * self.config.actor.ppo_epochs, delta_time)
-            metrics['mfu/actor'] = estimated_flops / promised_flops / self.world_size
+            estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
+            metrics['mfu/actor'] = estimated_flops * self.config.actor.ppo_epochs / promised_flops / self.world_size
 
             data = self.ulysses_sharding_manager.postprocess_data(data)
 
@@ -441,8 +440,10 @@ class ActorRolloutRefWorker(Worker):
         import torch.distributed
         from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, StateDictType, FullStateDictConfig
         cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-        with FSDP.state_dict_type(self.actor.actor_module, StateDictType.FULL_STATE_DICT, cfg):
-            state_dict = self.actor.actor_module.state_dict()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with FSDP.state_dict_type(self.actor.actor_module, StateDictType.FULL_STATE_DICT, cfg):
+                state_dict = self.actor.actor_module.state_dict()
         if self.rank == 0:
             print(f'Saving actor checkpoint to {local_path}')
             os.makedirs(local_path, exist_ok=True)
@@ -657,9 +658,8 @@ class CriticWorker(Worker):
             delta_time = timer.last
 
             global_num_tokens = data.meta_info['global_token_num']
-            estimated_flops, promised_flops = self.flops_counter.estimate_flops([global_num_tokens] *
-                                                                                self.config.ppo_epochs, delta_time)
-            metrics['mfu/critic'] = estimated_flops / promised_flops / self.world_size
+            estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
+            metrics['mfu/critic'] = estimated_flops * self.config.ppo_epochs / promised_flops / self.world_size
 
             self.critic_lr_scheduler.step()
             lr = self.critic_lr_scheduler.get_last_lr()[0]

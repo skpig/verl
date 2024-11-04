@@ -635,7 +635,7 @@ class RayPPOTrainer(object):
                 batch = batch.repeat(self.num_bon)
                 batch = batch.union(gen_batch_output)
 
-                batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask']).item()
+                batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask'], dim=-1).tolist()
 
                 with Timer(name='rm_score', logger=None) as timer:
                     # compute scores. Support both model and function-based.

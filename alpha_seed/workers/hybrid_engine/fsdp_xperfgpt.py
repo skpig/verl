@@ -17,6 +17,8 @@ Contains a resharding manager that binds weights from FSDP zero3 to XPerfGPT
 
 from .base import BaseShardingManager
 
+import warnings
+
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.api import StateDictType, ShardedStateDictConfig
 from torch.distributed.device_mesh import DeviceMesh
@@ -65,8 +67,10 @@ class FSDPXPerfGPTShardingManager(BaseShardingManager):
         # TODO: optimize this. Since state_dict is a copy, there are actually two copies in the GPU memory
         # We need to switch to FSDP2 to handle this.
         cfg = ShardedStateDictConfig(offload_to_cpu=False)
-        with FSDP.state_dict_type(self.module, StateDictType.SHARDED_STATE_DICT, cfg):
-            state_dict = self.module.state_dict()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with FSDP.state_dict_type(self.module, StateDictType.SHARDED_STATE_DICT, cfg):
+                state_dict = self.module.state_dict()
 
         # prepare the state_dict into a format for xperf_gpt
         self.bind_fn(self.inference_engine.engine.module, state_dict=state_dict, device_mesh=self.device_mesh)
