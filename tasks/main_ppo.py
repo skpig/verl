@@ -15,7 +15,6 @@
 Note that we don't combine the main with ray_trainer as ray_trainer is used by other main.
 """
 
-import ray
 from verl import DataProto
 import torch
 from verl.utils.tracking import Tracking
@@ -27,8 +26,6 @@ import hdfs_io
 # rule-based reward score
 from alpha_seed.utils.reward_score import gsm8k, math, math_v2, model_score_fn, logic_puzzle, oj_utils
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
-from dataclasses import dataclass
 
 
 def _select_rm_score_fn(reward_style):
@@ -50,61 +47,9 @@ def _select_rm_score_fn(reward_style):
         raise NotImplementedError
 
 
-@dataclass(frozen=True)
-class RMScoreOutput:
-    prompt_str: str
-    solution_str: str
-    ground_truth: str
-    reward_style: str
-    valid_response_length: int
-    score: float
-
-
-@ray.remote(num_cpus=1)  # make sure to distribute the task to different machines
-class RMScorer():
-
-    def __init__(self, tokenizer, config) -> None:
-        self.tokenizer = tokenizer
-        self.config = config
-
-    def forward(self, data_item):
-        # breakpoint()
-        prompt_ids = data_item.batch['prompts']
-        prompt_length = prompt_ids.shape[-1]
-        valid_prompt_length = data_item.batch['attention_mask'][:prompt_length].sum()
-        valid_prompt_ids = prompt_ids[-valid_prompt_length:]
-        response_ids = data_item.batch['responses']
-        valid_response_length = data_item.batch['attention_mask'][prompt_length:].sum()
-        valid_response_ids = response_ids[:valid_response_length]
-
-        # decode # TODO(zhangchi.usc1992) optimize this. we can actually do batch_coding outside this function
-        prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
-        solution_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
-
-        # select rm_score
-        reward_style = data_item.non_tensor_batch['reward_model']['style']
-        compute_score_fn = _select_rm_score_fn(reward_style)
-        ground_truth = data_item.non_tensor_batch['reward_model']['ground_truth']
-        score_fn_inputs = {
-            "batch_info": data_item.batch,
-            "tokenizer": self.tokenizer,
-            "solution_str": solution_str,
-            "ground_truth": ground_truth,
-            "config": self.config
-        }
-        score = compute_score_fn(**score_fn_inputs)
-        return RMScoreOutput(prompt_str=prompt_str,
-                             solution_str=solution_str,
-                             ground_truth=ground_truth,
-                             reward_style=reward_style,
-                             valid_response_length=valid_response_length,
-                             score=score)
-
-
 class RewardManager():
 
-    def __init__(self, tokenizer, config, logger: Tracking, rm_name="train", n_nodes=1) -> None:
-        self.total_workers = n_nodes * 5
+    def __init__(self, tokenizer, config, logger: Tracking, rm_name="train") -> None:
         self.tokenizer = tokenizer
         self.logger = logger
         self.log_table = []
@@ -113,7 +58,7 @@ class RewardManager():
         if self.config.trainer.save_cases_to_hdfs:
             self.case_study_dir = config.trainer.default_local_dir + "/cases/"
             os.makedirs(self.case_study_dir, exist_ok=True)
-        self.rm_score_cls = [RMScorer.remote(tokenizer=tokenizer, config=config) for _ in range(self.total_workers)]
+        self.rm_req_executor = ThreadPoolExecutor(max_workers=128)
 
     def __call__(self, data: DataProto, global_step=None):
         """We will expand this function gradually based on the available datasets"""
@@ -124,23 +69,40 @@ class RewardManager():
         if global_step is not None and global_step % self.config.trainer.logger_step_interval == 0:
             self.log_table = []  # 清空self.log_table
 
-        for i in range(len(data)):
-            # launch all the tasks at once
-            # (TODO: zhangchi.usc1992) maybe we should not launch them all at once?
-            # TODO: we should only select key that is necessary and send them to remote
-            worker_id = i % self.total_workers
-            rm_res_future_list.append(self.rm_score_cls[worker_id].forward.remote(data[i]))
+        def get_rm_score(idx):
+            data_item = data[idx]  # DataProtoItem
+            prompt_ids = data_item.batch['prompts']
+            prompt_length = prompt_ids.shape[-1]
+            valid_prompt_length = data_item.batch['attention_mask'][:prompt_length].sum()
+            valid_prompt_ids = prompt_ids[-valid_prompt_length:]
+            response_ids = data_item.batch['responses']
+            valid_response_length = data_item.batch['attention_mask'][prompt_length:].sum()
+            valid_response_ids = response_ids[:valid_response_length]
+
+            # decode
+            prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
+            solution_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
+
+            # select rm_score
+            reward_style = data_item.non_tensor_batch['reward_model']['style']
+            compute_score_fn = _select_rm_score_fn(reward_style)
+            ground_truth = data_item.non_tensor_batch['reward_model']['ground_truth']
+            score_fn_inputs = {
+                "batch_info": data_item.batch,
+                "tokenizer": self.tokenizer,
+                "solution_str": solution_str,
+                "ground_truth": ground_truth,
+                "config": self.config
+            }
+            score = compute_score_fn(**score_fn_inputs)
+            return prompt_str, solution_str, ground_truth, reward_style, valid_response_length, score, idx
 
         for i in range(len(data)):
-            rm_score_output: RMScoreOutput = ray.get(rm_res_future_list[i])
-            prompt_str = rm_score_output.prompt_str
-            solution_str = rm_score_output.solution_str
-            ground_truth = rm_score_output.ground_truth
-            reward_style = rm_score_output.reward_style
-            valid_response_length = rm_score_output.valid_response_length
-            score = rm_score_output.score
+            rm_res_future_list.append(self.rm_req_executor.submit(get_rm_score, i))
+        for res in as_completed(rm_res_future_list):
+            prompt_str, solution_str, ground_truth, reward_style, valid_response_length, score, idx = res.result()
 
-            reward_tensor[i, valid_response_length - 1] = score
+            reward_tensor[idx, valid_response_length - 1] = score
 
             if reward_style not in already_print_data_sources:
                 already_print_data_sources[reward_style] = 0
@@ -254,18 +216,10 @@ def main_task(config):
         role_worker_mapping[Role.RewardModel] = RewardModelWorker
         mapping[Role.RewardModel] = global_pool_id
 
-    reward_fn = RewardManager(tokenizer=tokenizer,
-                              config=config,
-                              logger=logger,
-                              rm_name="train",
-                              n_nodes=config.trainer.nnodes)
+    reward_fn = RewardManager(tokenizer=tokenizer, config=config, logger=logger, rm_name="train")
 
     # Note that we always use function-based RM for validation
-    val_reward_fn = RewardManager(tokenizer=tokenizer,
-                                  config=config,
-                                  logger=logger,
-                                  rm_name="val",
-                                  n_nodes=config.trainer.nnodes)
+    val_reward_fn = RewardManager(tokenizer=tokenizer, config=config, logger=logger, rm_name="val")
 
     resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
