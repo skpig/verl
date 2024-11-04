@@ -44,6 +44,7 @@ actor_rollout_ref:
       warmup_style: constant  # select from constant/cosine
       total_training_steps: -1  # must be override by program
     fsdp_config:
+      sharding_strategy: FULL_SHARD # https://pytorch.org/docs/stable/fsdp.html#torch.distributed.fsdp.ShardingStrategy
       wrap_policy:
         # transformer_layer_cls_to_wrap: None
         min_num_params: 0
@@ -121,6 +122,7 @@ critic:
     external_lib: ${actor_rollout_ref.model.external_lib}
     enable_gradient_checkpointing: False
     fsdp_config:
+      sharding_strategy: FULL_SHARD # https://pytorch.org/docs/stable/fsdp.html#torch.distributed.fsdp.ShardingStrategy
       param_offload: False
       grad_offload: False
       optimizer_offload: False

@@ -170,6 +170,9 @@ class ActorRolloutRefWorker(Worker):
         log_gpu_memory_usage('After init from HF AutoModel', logger=logger)
 
         # We wrap FSDP for rollout as well
+        sharding_strategy_config = fsdp_config.get('sharding_strategy', 'FULL_SHARD')  # zero3
+        sharding_strategy = getattr(ShardingStrategy, sharding_strategy_config)
+
         mixed_precision_config = fsdp_config.get('mixed_precision', None)
         if mixed_precision_config is not None:
             param_dtype = PrecisionType.to_dtype(mixed_precision_config.get('param_dtype', 'bf16'))
@@ -193,11 +196,6 @@ class ActorRolloutRefWorker(Worker):
 
         if self.rank == 0:
             print(f'wrap_policy: {auto_wrap_policy}')
-
-        if auto_wrap_policy is None:
-            sharding_strategy = ShardingStrategy.SHARD_GRAD_OP
-        else:
-            sharding_strategy = ShardingStrategy.FULL_SHARD
 
         if self._is_ref:
             # TODO(zhangchi): this may cause bug when actor/rollout/ref colocate
@@ -560,6 +558,9 @@ class CriticWorker(Worker):
             print_model_size(critic_module)
 
         fsdp_config = self.config.model.fsdp_config
+        sharding_strategy_config = fsdp_config.get('sharding_strategy', 'FULL_SHARD')  # zero3
+        sharding_strategy = getattr(ShardingStrategy, sharding_strategy_config)
+
         mixed_precision_config = fsdp_config.get('mixed_precision', None)
         if mixed_precision_config is not None:
             param_dtype = PrecisionType.to_dtype(mixed_precision_config.get('param_dtype', 'bf16'))
@@ -581,7 +582,7 @@ class CriticWorker(Worker):
                              use_orig_params=False,
                              auto_wrap_policy=auto_wrap_policy,
                              device_id=torch.cuda.current_device(),
-                             sharding_strategy=ShardingStrategy.FULL_SHARD,
+                             sharding_strategy=sharding_strategy,
                              mixed_precision=mixed_precision,
                              forward_prefetch=True,
                              sync_module_states=True)
