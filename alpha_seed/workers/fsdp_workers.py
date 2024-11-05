@@ -50,6 +50,8 @@ from seed_models.utils.count_flops import FlopsCounter
 
 from codetiming import Timer
 
+from datetime import timedelta
+
 logger = logging.getLogger(__file__)
 
 
@@ -65,7 +67,8 @@ class ActorRolloutRefWorker(Worker):
         self.config = config
         import torch.distributed
         if not torch.distributed.is_initialized():
-            torch.distributed.init_process_group(backend="nccl")
+            timeout = timedelta(minutes=os.getenv('NCCL_TIMEOUT', 60))
+            torch.distributed.init_process_group(backend="nccl", timeout=timeout)
 
         # build device mesh
         world_size = torch.distributed.get_world_size()
@@ -464,7 +467,8 @@ class CriticWorker(Worker):
         super().__init__()
         import torch.distributed
         if not torch.distributed.is_initialized():
-            torch.distributed.init_process_group(backend="nccl")
+            timeout = timedelta(minutes=os.getenv('NCCL_TIMEOUT', 60))
+            torch.distributed.init_process_group(backend="nccl", timeout=timeout)
         self.config = config
         self._is_offload_param = self.config.model.fsdp_config.param_offload
         self._is_offload_grad = self.config.model.fsdp_config.grad_offload
@@ -708,7 +712,8 @@ class RewardModelWorker(Worker):
         super().__init__()
         import torch.distributed
         if not torch.distributed.is_initialized():
-            torch.distributed.init_process_group(backend="nccl")
+            timeout = timedelta(minutes=os.getenv('NCCL_TIMEOUT', 60))
+            torch.distributed.init_process_group(backend="nccl", timeout=timeout)
         self.config = config
 
         world_size = torch.distributed.get_world_size()
