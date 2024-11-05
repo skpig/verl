@@ -67,7 +67,7 @@ class ActorRolloutRefWorker(Worker):
         self.config = config
         import torch.distributed
         if not torch.distributed.is_initialized():
-            timeout = timedelta(minutes=os.getenv('NCCL_TIMEOUT', 60))
+            timeout = timedelta(minutes=int(os.getenv('NCCL_TIMEOUT', 60)))
             torch.distributed.init_process_group(backend="nccl", timeout=timeout)
 
         # build device mesh
@@ -467,7 +467,7 @@ class CriticWorker(Worker):
         super().__init__()
         import torch.distributed
         if not torch.distributed.is_initialized():
-            timeout = timedelta(minutes=os.getenv('NCCL_TIMEOUT', 60))
+            timeout = timedelta(minutes=int(os.getenv('NCCL_TIMEOUT', 60)))
             torch.distributed.init_process_group(backend="nccl", timeout=timeout)
         self.config = config
         self._is_offload_param = self.config.model.fsdp_config.param_offload
@@ -712,7 +712,7 @@ class RewardModelWorker(Worker):
         super().__init__()
         import torch.distributed
         if not torch.distributed.is_initialized():
-            timeout = timedelta(minutes=os.getenv('NCCL_TIMEOUT', 60))
+            timeout = timedelta(minutes=int(os.getenv('NCCL_TIMEOUT', 60)))
             torch.distributed.init_process_group(backend="nccl", timeout=timeout)
         self.config = config
 
