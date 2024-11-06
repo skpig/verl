@@ -120,7 +120,7 @@ class XPerfGPTRollout(object):
                                           slot_block_size=slot_block_size,
                                           use_vllm=use_vllm,
                                           vocab_tp=False,
-                                          context_limit_bs=8,
+                                          context_limit_bs=32, # activation memory limit 
                                           enable_cuda_graph=enable_cuda_graph)
         xperf_config = get_xperf_gpt_config(model_config=model_hf_config, tokenizer=tokenizer)
 
@@ -191,7 +191,9 @@ class XPerfGPTRollout(object):
     def generate_sequences(self, prompts: DataProto) -> DataProto:
         meta_info = prompts.meta_info
         num_bon = meta_info.get("num_bon", 1)
-        timeout_seconds = self.config.get('timeout_seconds', 60 * 30)
+
+        # note: deterministic control to avoid nccl dead lock, by default no timeout
+        timeout_steps = self.config.get('timeout_steps', -1)
 
         prompt_ids = prompts.batch['input_ids']  # (bs, prompt_length)
         # left-padded attention_mask
@@ -202,14 +204,12 @@ class XPerfGPTRollout(object):
         tokenizer = self.inference_engine.tokenizer
         query_pool = tokenizer.batch_decode(prompt_ids.cpu())
         query_pool = [x.replace(tokenizer.pad_token, '') for x in query_pool]
-        # print("infer... num queries.. {} num_bon.. {}".format(len(query_pool), num_bon))
-        sampler = self.inference_engine.sampler
 
         generation_kwargs = prompts.meta_info['generation_kwargs']
         self.inference_engine.set_generator_strategy(**generation_kwargs)
 
         with logging_set_level(self.config.get('logging_level', 'WARN')), self.profiler_context as p:
-            self.inference_engine.execute(query_pool, timeout=timeout_seconds, num_BoN=num_bon)
+            self.inference_engine.execute(query_pool, timeout_steps=timeout_steps, num_repeat=num_bon)
             p.step()
 
         response_outputs = dict(input_ids=[v.new_token_ids for v in self.inference_engine.get_inorder_responses()])
