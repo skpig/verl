@@ -94,6 +94,8 @@ class RewardManager():
                 "ground_truth": ground_truth,
                 "config": self.config
             }
+            if reward_style == "code-sandbox":
+                score_fn_inputs["code_sandbox_psm"] = self.config.trainer.code_sandbox_psm
             score = compute_score_fn(**score_fn_inputs)
             return prompt_str, solution_str, ground_truth, reward_style, valid_response_length, score, idx
 
