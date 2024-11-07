@@ -64,11 +64,18 @@ def apply_monkey_patch_to_p5():
 
 
 def apply_monkey_patch_to_p6():
-    from seed_models.models.p6.modeling_p6 import P6FlashAttention2, P6ExpertMLP
-    from verl.models.transformers.seed_mlp import swiglu_mlp_forward
-    from alpha_seed.models.transformers.seed_flash_attn_rmpad import flash_attn2_rmpad_forward
+    # from seed_models.models.p6.modeling_p6 import P6FlashAttention2, P6ExpertMLP
+    # from verl.models.transformers.seed_mlp import swiglu_mlp_forward
+    # from alpha_seed.models.transformers.seed_flash_attn_rmpad import flash_attn2_rmpad_forward
     # P6FlashAttention2.forward = flash_attn2_rmpad_forward
     # P6ExpertMLP.forward = swiglu_mlp_forward
+    from seed_models.integrations import apply_liger_kernel_to_p6
+    apply_liger_kernel_to_p6()
+
+
+def apply_monkey_patch_to_p6_dense():
+    from seed_models.integrations import apply_liger_kernel_to_p6d
+    apply_liger_kernel_to_p6d()
 
 
 _PATCH_NAME_TO_FUNC = {
@@ -76,7 +83,8 @@ _PATCH_NAME_TO_FUNC = {
     'qwen2': apply_monkey_patch_to_qwen2,
     'seed_p4': apply_monkey_patch_to_p4,
     'seed_p5': apply_monkey_patch_to_p5,
-    'seed_p6': apply_monkey_patch_to_p6
+    'seed_p6': apply_monkey_patch_to_p6,
+    'seed_p6dense': apply_monkey_patch_to_p6_dense
 }
 
 from transformers import PretrainedConfig

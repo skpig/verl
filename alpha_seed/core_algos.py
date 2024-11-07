@@ -106,6 +106,7 @@ def compute_gae_advantage_return(token_level_rewards: torch.Tensor, values: torc
         advantages = verl_F.masked_whiten(advantages, eos_mask)
     return advantages, returns
 
+
 def compute_upgo_advantage(token_level_rewards: torch.Tensor, values: torch.Tensor, eos_mask: torch.Tensor,
                            upgo_loss_version: int):
     token_level_rewards = token_level_rewards * eos_mask
@@ -128,8 +129,11 @@ def compute_upgo_advantage(token_level_rewards: torch.Tensor, values: torch.Tens
     upgo_advantages = upgo_returns - values
     return upgo_advantages
 
-def compute_grpo_advantage_return(token_level_scores: torch.Tensor, num_bon: torch.Tensor, eos_mask: torch.Tensor,
-                                  epsilon: float=1e-6):
+
+def compute_grpo_advantage_return(token_level_scores: torch.Tensor,
+                                  num_bon: torch.Tensor,
+                                  eos_mask: torch.Tensor,
+                                  epsilon: float = 1e-6):
     """Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py
 
     Args:
@@ -156,9 +160,11 @@ def compute_grpo_advantage_return(token_level_scores: torch.Tensor, num_bon: tor
         scores = scores.reshape(-1).unsqueeze(dim=1).tile([1, response_length]) * eos_mask
     return scores, scores
 
+
 def compute_rewards(token_level_scores, old_log_prob, ref_log_prob, kl_ratio):
     kl = old_log_prob - ref_log_prob
     return token_level_scores - kl * kl_ratio
+
 
 def get_kl_logprobs(logprobs: torch.Tensor, ref_logprobs: torch.Tensor, reward_low_variance_kl: int = 1):
     kl = logprobs - ref_logprobs
@@ -173,8 +179,9 @@ def get_kl_logprobs(logprobs: torch.Tensor, ref_logprobs: torch.Tensor, reward_l
         raise ValueError(f"Need `reward_low_variance_kl` be in [1,2,3], got {reward_low_variance_kl}")
     return kl
 
-def compute_policy_loss(old_log_prob, ref_log_prob, log_prob, advantages, upgo_advantages, 
-                        eos_mask, cliprange, cliprange2, scale_pg_by_kl, upgo_loss_weight):
+
+def compute_policy_loss(old_log_prob, ref_log_prob, log_prob, advantages, upgo_advantages, eos_mask, cliprange,
+                        cliprange2, scale_pg_by_kl, upgo_loss_weight):
     """Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py#L1122
 
     Args:
@@ -210,7 +217,10 @@ def compute_policy_loss(old_log_prob, ref_log_prob, log_prob, advantages, upgo_a
     pg_loss = torch.sum(pg_losses * eos_mask, dim=1) / seq_len_per_sample
 
     if scale_pg_by_kl:
-        sqrt_kl = torch.sqrt(torch.clamp(torch.sum(get_kl_logprobs(old_log_prob, ref_log_prob, reward_low_variance_kl=3) * eos_mask, dim=1), min=1.0))
+        sqrt_kl = torch.sqrt(
+            torch.clamp(torch.sum(get_kl_logprobs(old_log_prob, ref_log_prob, reward_low_variance_kl=3) * eos_mask,
+                                  dim=1),
+                        min=1.0))
         normed_sqrt_kl = (1 / sqrt_kl) / (torch.sum(1 / sqrt_kl)) * torch.clamp(torch.sum(eos_mask[:, 0]), min=1.0)
         pg_loss = pg_loss * normed_sqrt_kl
     pg_loss = torch.mean(pg_loss)
@@ -274,6 +284,7 @@ def compute_value_loss(vpreds, returns, values, eos_mask, cliprange_value):
     vf_clipfrac = verl_F.masked_mean(torch.gt(vf_losses2, vf_losses1).float(), eos_mask)
     return vf_loss, vf_clipfrac
 
+
 def compute_kl_loss(log_prob, ref_log_prob, eos_mask, kl_penalty_):
     if kl_penalty_ in ("abs", "mse"):
         kl = kl_penalty(log_prob, ref_log_prob, kl_penalty_)
@@ -284,6 +295,7 @@ def compute_kl_loss(log_prob, ref_log_prob, eos_mask, kl_penalty_):
     seq_len_per_sample = torch.clamp(torch.sum(eos_mask, dim=1), min=1.0)
     kl_loss = torch.mean(torch.sum(kl * eos_mask, dim=1) / seq_len_per_sample)
     return kl_loss
+
 
 def kl_penalty(logprob: torch.FloatTensor, ref_logprob: torch.FloatTensor, kl_penalty) -> torch.FloatTensor:
     """Compute KL divergence given logprob and ref_logprob.

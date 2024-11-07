@@ -33,7 +33,7 @@ import torch.distributed as dist
 import torch.distributed
 from torch.distributed.device_mesh import init_device_mesh
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import logging
 
 from .utils import get_xperf_gpt_config
@@ -41,6 +41,7 @@ from .utils.weight_loader import offload_to_cpu, init_meta
 
 try:
     from verl.utils.debug import get_profiler_context
+    from verl.utils.debug.performance import NullProfileEnter
 except:
     print('Cannot find profile utilities. Please use latest verl master')
     raise
@@ -61,7 +62,7 @@ def remove_nccl_files():
     print(f'cwd: {cwd}')
     for p in Path(cwd).glob("xperf_gpt_nccl_file*"):
         print(f'Removing file {p.name}')
-        p.unlink()
+        p.unlink(missing_ok=True)
 
 
 class XPerfGPTRollout(object):
@@ -92,11 +93,14 @@ class XPerfGPTRollout(object):
         else:
             self.device_mesh = None  # this is actually the whole world size. No need to have a device mesh for it.
 
-        self.profiler_context = get_profiler_context(filename=config.profile.filename,
-                                                     profile_on_ranks=config.profile.profile_on_ranks,
-                                                     default_hdfs_dir=config.profile.default_hdfs_dir,
-                                                     upload_to_mlx=config.profile.upload_to_mlx,
-                                                     enable=config.profile.enable)
+        if hasattr(config, 'profile'):
+            self.profiler_context = get_profiler_context(filename=config.profile.filename,
+                                                         profile_on_ranks=config.profile.profile_on_ranks,
+                                                         default_hdfs_dir=config.profile.default_hdfs_dir,
+                                                         upload_to_mlx=config.profile.upload_to_mlx,
+                                                         enable=config.profile.enable)
+        else:
+            self.profiler_context = nullcontext(enter_result=NullProfileEnter())
 
         generate_kwargs = dict(max_new_tokens=config.response_length,
                                do_sample=config.train_generate_kwargs.do_sample,
@@ -114,14 +118,15 @@ class XPerfGPTRollout(object):
             f"use_vllm, num_slots, slot_block_size, enable_cuda_graph {use_vllm}, {num_slots}, {slot_block_size}, {enable_cuda_graph}"
         )
 
-        inference_sess = InferenceSession(num_slots=num_slots,
-                                          max_batch_size=config.micro_batch_size,
-                                          max_length=config.prompt_length + config.response_length,
-                                          slot_block_size=slot_block_size,
-                                          use_vllm=use_vllm,
-                                          vocab_tp=False,
-                                          context_limit_bs=32, # activation memory limit 
-                                          enable_cuda_graph=enable_cuda_graph)
+        inference_sess = InferenceSession(
+            num_slots=num_slots,
+            max_batch_size=config.micro_batch_size,
+            max_length=config.prompt_length + config.response_length,
+            slot_block_size=slot_block_size,
+            use_vllm=use_vllm,
+            vocab_tp=False,
+            context_limit_bs=32,  # activation memory limit 
+            enable_cuda_graph=enable_cuda_graph)
         xperf_config = get_xperf_gpt_config(model_config=model_hf_config, tokenizer=tokenizer)
 
         with tempfile.NamedTemporaryFile(mode='w', suffix=".json") as f:

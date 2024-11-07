@@ -124,7 +124,10 @@ class DataParallelPPOActor(BasePPOActor):
             return logits, log_probs
 
     def _make_minibatch_iterator(self, data: DataProto) -> Iterable[DataProto]:
-        select_keys = ['responses', 'input_ids', 'attention_mask', 'position_ids', 'old_log_probs', 'ref_log_prob', 'advantages', 'upgo_advantages']
+        select_keys = [
+            'responses', 'input_ids', 'attention_mask', 'position_ids', 'old_log_probs', 'ref_log_prob', 'advantages',
+            'upgo_advantages'
+        ]
         data = data.select(batch_keys=select_keys)
         return data.make_iterator(mini_batch_size=self.config.ppo_mini_batch_size,
                                   epochs=self.config.ppo_epochs,

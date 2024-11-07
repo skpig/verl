@@ -270,7 +270,7 @@ def compute_data_metrics(batch, use_critic):
             # vf explained var
             'critic/vf/vf_explained_var':
                 (1.0 - torch.var(torch.masked_select(returns - values, response_mask_bool)) /
-                    (torch.var(torch.masked_select(returns, response_mask_bool)) + 1e-5)).detach().item(),
+                 (torch.var(torch.masked_select(returns, response_mask_bool)) + 1e-5)).detach().item(),
         }
         metrics.update(values_metrics)
     return metrics
@@ -761,7 +761,8 @@ class RayPPOTrainer(object):
                 # collect metrics
                 with Timer(name='compute_metrics', logger=None) as timer:
                     # Note that we can use any worker groups here
-                    data_metrics = self.actor_rollout_wg.execute_func_rank_zero(compute_data_metrics, batch, self.use_critic)
+                    data_metrics = self.actor_rollout_wg.execute_func_rank_zero(compute_data_metrics, batch,
+                                                                                self.use_critic)
                 metrics['timing/compute_metrics'] = timer.last
                 metrics.update(data_metrics)
 

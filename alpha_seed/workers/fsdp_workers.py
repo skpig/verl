@@ -134,6 +134,7 @@ class ActorRolloutRefWorker(Worker):
         }
         override_config_kwargs.update(override_model_config)
         update_model_config(actor_model_config, override_config_kwargs=override_config_kwargs)
+        setattr(actor_model_config, '_moe_implementation', 'fused')
         if self.rank == 0:
             print(f'Model config after override: {actor_model_config}')
 
@@ -149,7 +150,6 @@ class ActorRolloutRefWorker(Worker):
 
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            actor_model_config.moe_implementation = 'group_gemm'
             actor_module = AutoModelForCausalLM.from_pretrained(pretrained_model_name_or_path=local_path,
                                                                 torch_dtype=torch_dtype,
                                                                 config=actor_model_config,
@@ -162,9 +162,18 @@ class ActorRolloutRefWorker(Worker):
                 actor_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': False})
                 actor_module.train()
                 if self.rank == 0:
+                    print(actor_module)
                     print('Enable actor gradient checkpointing')
-                    model = actor_module.transformer
-                    print(f'{model.gradient_checkpointing=}, {model.training=}, {model._gradient_checkpointing_func=}')
+                    if hasattr(actor_module, 'transformer'):
+                        model = actor_module.transformer
+                    elif hasattr(actor_module, 'model'):
+                        model = actor_module.model
+                    else:
+                        model = None
+                    if model is not None:
+                        print(
+                            f'{model.gradient_checkpointing=}, {model.training=}, {model._gradient_checkpointing_func=}'
+                        )
         torch.distributed.barrier()
 
         if self.rank == 0:
@@ -516,8 +525,6 @@ class CriticWorker(Worker):
             'pad_token_id': self.tokenizer.pad_token_id,
         }
         override_config_kwargs.update(override_config)
-        if self.rank == 0:
-            print(f'Critic overriding config {override_config_kwargs}')
 
         torch_dtype = self.config.model.fsdp_config.get('model_dtype', 'fp32')
         torch_dtype = PrecisionType.to_dtype(torch_dtype)
@@ -539,8 +546,8 @@ class CriticWorker(Worker):
         init_context = get_init_weight_context_manager()
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            critic_model_config.moe_implementation = 'group_gemm'
             setattr(critic_model_config, 'classifier_dropout', 0.)
+            setattr(critic_model_config, '_moe_implementation', 'fused')
             critic_module = AutoModelForTokenClassification.from_pretrained(pretrained_model_name_or_path=local_path,
                                                                             torch_dtype=torch_dtype,
                                                                             attn_implementation='flash_attention_2',
@@ -556,9 +563,20 @@ class CriticWorker(Worker):
                 critic_module.train()
                 if self.rank == 0:
                     print(critic_module)
-                    print('Enable critic gradient checkpointing')
-                    model = critic_module.transformer
-                    print(f'{model.gradient_checkpointing=}, {model.training=}, {model._gradient_checkpointing_func=}')
+                    if hasattr(critic_module, 'transformer'):
+                        model = critic_module.transformer
+                    elif hasattr(critic_module, 'model'):
+                        model = critic_module.model
+                    else:
+                        model = None
+                    if model is not None:
+                        print(
+                            f'{model.gradient_checkpointing=}, {model.training=}, {model._gradient_checkpointing_func=}'
+                        )
+
+        if self.rank == 0:
+            print(f'Critic overriding config {override_config_kwargs}')
+
         if self.rank == 0:
             print_model_size(critic_module)
 
@@ -768,7 +786,9 @@ class RewardModelWorker(Worker):
 
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            model_config.moe_implementation = 'group_gemm'
+            # model_config.moe_implementation = 'group_gemm'  # Note that this is deprecated. Use seed-models stable
+            setattr(model_config, '_moe_implementation', 'fused')
+            setattr(model_config, 'classifier_dropout', 0.)
             reward_module = AutoModelForTokenClassification.from_pretrained(pretrained_model_name_or_path=local_path,
                                                                             torch_dtype=torch.bfloat16,
                                                                             attn_implementation='flash_attention_2',
@@ -779,6 +799,8 @@ class RewardModelWorker(Worker):
             #     if reward_module.score.bias is not None:
             #         reward_module.score.bias.zero_()
             reward_module.to(torch.bfloat16)
+            if self.rank == 0:
+                print(reward_module)
         auto_wrap_policy = get_fsdp_wrap_policy(module=reward_module, config=self.config.model.fsdp_config)
 
         reward_module = FSDP(

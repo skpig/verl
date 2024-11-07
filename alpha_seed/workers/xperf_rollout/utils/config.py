@@ -28,6 +28,8 @@ def get_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
         return _get_p5_xperf_gpt_config(model_config, tokenizer)
     elif model_config.model_type == 'seed_p6':
         return _get_p6_xperf_gpt_config(model_config, tokenizer)
+    elif model_config.model_type == 'seed_p6dense':
+        return _get_p6dense_xperf_gpt_config(model_config, tokenizer)
     else:
         raise NotImplementedError(f'Unsupported model {model_config.model_type}')
 
@@ -114,6 +116,31 @@ def _get_p6_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
         "has_mlp_gate": True,
         "rope_mode": config.rope_scaling['rope_type'],
         "rope_base": config.rope_theta,
+        "rope_scale": config.rope_scaling['factor']
+    }
+    return xperf_config
+
+
+def _get_p6dense_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
+    from seed_models import P6DenseConfig
+    assert isinstance(model_config, P6DenseConfig)
+    config = model_config
+    xperf_config = {
+        "model_name": "SeedLLaMAForCausalLM",
+        "vocab_size": config.vocab_size,
+        "max_position_embeddings": config.max_position_embeddings,
+        "hidden_size": config.hidden_size,
+        "ffn_internal_dim": config.intermediate_size,
+        "num_heads": config.num_attention_heads,
+        "num_kv_heads": config.num_key_value_heads,
+        "num_layers": config.num_hidden_layers,
+        "gqa_weights_layout": "AABB",
+        "quant_mode": "NO_QUANT",
+        "is_meta": True,
+        "dtype": "bfloat16",
+        "tokenizer_path": tokenizer.name_or_path,
+        "rope_mode": config.rope_scaling['rope_type'],
+        "rope_base": int(config.rope_theta),
         "rope_scale": config.rope_scaling['factor']
     }
     return xperf_config

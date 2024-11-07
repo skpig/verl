@@ -17,7 +17,8 @@ class Patcher:
         # os.system("cd /opt/tiger && rm -rf mariana && git clone https://yipzlf:vwZZ_JYy7mkx-1zUjyeR@code.byted.org/seed/mariana && cd mariana && git checkout zr/sc/xperf_infer")
         # os.system("cd /opt/tiger/mariana && git pull")
         # os.system("cd /opt/tiger && rm -rf seed_models && git clone https://yipzlf:vwZZ_JYy7mkx-1zUjyeR@code.byted.org/seed/seed_models && cd seed_models && git checkout chi/feat/p6_ggemm_ckpt")
-        os.system("cd /opt/tiger && rm -rf verl && git clone https://yipzlf:vwZZ_JYy7mkx-1zUjyeR@code.byted.org/data/verl && cd verl && git checkout chi/feat/execute_func_rank_zero")
+        os.system("pip3 install --no-cache-dir torchvision==0.19.1 timm")
+        # os.system("cd /opt/tiger && rm -rf verifiable_tasks && git clone https://yipzlf:vwZZ_JYy7mkx-1zUjyeR@code.byted.org/seed/verifiable_tasks")
         return 
         os.system("pip3 install bytedance.trainingmetrics -i https://bytedpypi.byted.org/simple/")
         os.system("cd /opt/tiger && rm -rf mariana && git clone https://yipzlf:vwZZ_JYy7mkx-1zUjyeR@code.byted.org/seed/mariana && cd mariana && git checkout fwq_sing")
