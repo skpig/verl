@@ -114,16 +114,15 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
     return data, metrics
 
 
-def compute_advantage(data: DataProto, gamma, lam, adv_estimator, upgo_loss_version):
-    values = data.batch['values']
+def compute_advantage(data: DataProto, gamma, lam, adv_estimator, upgo_loss_version, num_bon):
+    # TODO: add other ways to estimate advantages
+    token_level_rewards = data.batch['token_level_rewards']
     responses = data.batch['responses']
     response_length = responses.size(1)
     attention_mask = data.batch['attention_mask']
     response_mask = attention_mask[:, -response_length:]
-    token_level_rewards = data.batch['token_level_rewards']
-
-    # TODO: add other ways to estimate advantages
     if adv_estimator == 'gae':
+        values = data.batch['values']
         advantages, returns = core_algos.compute_gae_advantage_return(token_level_rewards=token_level_rewards,
                                                                       values=values,
                                                                       eos_mask=response_mask,
@@ -136,6 +135,14 @@ def compute_advantage(data: DataProto, gamma, lam, adv_estimator, upgo_loss_vers
                                                             eos_mask=response_mask,
                                                             upgo_loss_version=upgo_loss_version)
         data.batch['upgo_advantages'] = upgo_advantages
+    elif adv_estimator == 'grpo':
+        token_level_scores = data.batch['token_level_scores']
+        advantages, returns = core_algos.compute_grpo_advantage_return(token_level_scores=token_level_scores,
+                                                                       eos_mask=response_mask,
+                                                                       num_bon=num_bon)
+        data.batch['advantages'] = advantages
+        data.batch['returns'] = returns
+        data.batch['upgo_advantages'] = torch.zeros_like(advantages)
     else:
         raise NotImplementedError
     return data
@@ -147,7 +154,7 @@ def reduce_metrics(metrics: dict):
     return metrics
 
 
-def compute_data_metrics(batch: DataProto):
+def compute_data_metrics(batch, use_critic):
     # TODO: add response length
     if torch.cuda.is_available():
         print('Using GPU to compute_data_metrics')
@@ -167,14 +174,12 @@ def compute_data_metrics(batch: DataProto):
     max_response_length = float(response_mask.size(-1))
 
     returns = batch.batch['returns']
-    values = batch.batch['values']
 
     reflection_nums = batch.batch.get('reflection_nums', torch.Tensor([0.0]))
 
     response_mask_bool = response_mask.bool()
     valid_adv = torch.masked_select(advantages, response_mask_bool)
     valid_returns = torch.masked_select(returns, response_mask_bool)
-    valid_values = torch.masked_select(values, response_mask_bool)
 
     metrics = {
         # score
@@ -213,15 +218,6 @@ def compute_data_metrics(batch: DataProto):
             torch.min(valid_returns).detach().item(),
         'critic/returns/std':
             torch.std(valid_returns).detach().item(),
-        # values
-        'critic/values/mean':
-            masked_mean(values, response_mask).detach().item(),
-        'critic/values/max':
-            torch.max(valid_values).detach().item(),
-        'critic/values/min':
-            torch.min(valid_values).detach().item(),
-        'critic/values/std':
-            torch.std(valid_values).detach().item(),
         # response length
         'response_length/mean':
             torch.mean(response_length).detach().item(),
@@ -246,11 +242,37 @@ def compute_data_metrics(batch: DataProto):
         ## prompt clip ratio
         'prompt_length/clip_ratio':
             torch.mean(torch.eq(prompt_length, max_prompt_length).float()).detach().item(),
-        # vf explained var
-        'critic/vf/vf_explained_var':
-            (1.0 - torch.var(torch.masked_select(returns - values, response_mask_bool)) /
-             (torch.var(torch.masked_select(returns, response_mask_bool)) + 1e-5)).detach().item(),
     }
+    if use_critic:
+        values = batch.batch['values']
+        upgo_advantages = batch.batch['upgo_advantages']
+        valid_values = torch.masked_select(values, response_mask_bool)
+        valid_upgo_adv = torch.masked_select(upgo_advantages, response_mask_bool)
+        values_metrics = {
+            # values
+            'critic/values/mean':
+                masked_mean(values, response_mask).detach().item(),
+            'critic/values/max':
+                torch.max(valid_values).detach().item(),
+            'critic/values/min':
+                torch.min(valid_values).detach().item(),
+            'critic/values/std':
+                torch.std(valid_values).detach().item(),
+            # upgo adv
+            'critic/upgo_advantages/mean':
+                masked_mean(upgo_advantages, response_mask).detach().item(),
+            'critic/upgo_advantages/max':
+                torch.max(valid_upgo_adv).detach().item(),
+            'critic/upgo_advantages/min':
+                torch.min(valid_upgo_adv).detach().item(),
+            'critic/upgo_advantages/std':
+                torch.std(valid_upgo_adv).detach().item(),
+            # vf explained var
+            'critic/vf/vf_explained_var':
+                (1.0 - torch.var(torch.masked_select(returns - values, response_mask_bool)) /
+                    (torch.var(torch.masked_select(returns, response_mask_bool)) + 1e-5)).detach().item(),
+        }
+        metrics.update(values_metrics)
     return metrics
 
 
@@ -462,7 +484,14 @@ class RayPPOTrainer(object):
             self.use_critic = True
         else:
             # support GRPO and ReMax
-            raise NotImplementedError
+            if self.config.algorithm.adv_estimator == 'grpo':
+                # grpo需要用所有的bon来算adv
+                assert self.config.actor_rollout_ref.rollout.bon_strategy == "all"
+                # grpo下不算UPGO loss
+                assert self.config.actor_rollout_ref.actor.upgo_loss_weight <= 1e-10
+                # grpo时要使用kl loss
+                assert self.config.actor_rollout_ref.actor.kl_loss_weight >= 0.0
+            self.use_critic = False
 
         # create reference policy if needed
         if self.use_reference_policy:
@@ -502,6 +531,10 @@ class RayPPOTrainer(object):
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         self.actor_rollout_wg = all_wg['actor_rollout']
         self.actor_rollout_wg.init_model()
+
+        if self.config.actor_rollout_ref.actor.kl_loss_weight >= 1e-10:
+            # 两种情况下使用kl loss，一种是grpo，另一种是在rewards里不加kl惩罚
+            assert self.config.algorithm.adv_estimator == 'grpo' or self.config.algorithm.kl_ctrl.kl_coef <= 1e-10
 
     def league_training_filter_prompt(self, batch, strategy="hard"):
         num_bon = self.config.actor_rollout_ref.rollout.num_bon
@@ -678,10 +711,11 @@ class RayPPOTrainer(object):
                     metrics['timing/ref'] = timer.last
 
                 # compute values
-                with Timer(name='values', logger=None) as timer:
-                    values = self.critic_wg.compute_values(batch)
-                    batch = batch.union(values)
-                metrics['timing/values'] = timer.last
+                if self.use_critic:
+                    with Timer(name='values', logger=None) as timer:
+                        values = self.critic_wg.compute_values(batch)
+                        batch = batch.union(values)
+                    metrics['timing/values'] = timer.last
 
                 with Timer(name='adv', logger=None) as timer:
                     # compute rewards. apply_kl_penalty if available
@@ -695,7 +729,8 @@ class RayPPOTrainer(object):
                                               self.config.algorithm.gamma,
                                               self.config.algorithm.lam,
                                               adv_estimator=self.config.algorithm.adv_estimator,
-                                              upgo_loss_version=self.config.actor_rollout_ref.actor.upgo_loss_version)
+                                              upgo_loss_version=self.config.actor_rollout_ref.actor.upgo_loss_version,
+                                              num_bon=self.config.actor_rollout_ref.rollout.num_bon)
                 metrics['timing/adv'] = timer.last
 
                 # update critic
@@ -726,7 +761,7 @@ class RayPPOTrainer(object):
                 # collect metrics
                 with Timer(name='compute_metrics', logger=None) as timer:
                     # Note that we can use any worker groups here
-                    data_metrics = self.actor_rollout_wg.execute_func_rank_zero(compute_data_metrics, batch)
+                    data_metrics = self.actor_rollout_wg.execute_func_rank_zero(compute_data_metrics, batch, self.use_critic)
                 metrics['timing/compute_metrics'] = timer.last
                 metrics.update(data_metrics)
 

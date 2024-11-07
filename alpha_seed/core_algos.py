@@ -128,6 +128,34 @@ def compute_upgo_advantage(token_level_rewards: torch.Tensor, values: torch.Tens
     upgo_advantages = upgo_returns - values
     return upgo_advantages
 
+def compute_grpo_advantage_return(token_level_scores: torch.Tensor, num_bon: torch.Tensor, eos_mask: torch.Tensor,
+                                  epsilon: float=1e-6):
+    """Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py
+
+    Args:
+        token_level_scores: `(torch.Tensor)`
+            shape: (bs, response_length)
+        eos_mask: `(torch.Tensor)`
+            shape: (bs, response_length). [EOS] mask. The token after [EOS] have mask zero.
+        num_bon: `(float)`
+            response num per prompt
+
+    Returns:
+        advantages: `(torch.Tensor)`
+            shape: (bs, response_length)
+        Returns: `(torch.Tensor)`
+            shape: (bs, response_length)
+
+    """
+    response_length = token_level_scores.shape[-1]
+    scores = token_level_scores.sum(-1).reshape(-1, num_bon)
+    with torch.no_grad():
+        score_mean = torch.mean(scores, dim=1, keepdim=True)
+        score_std = torch.std(scores, dim=1, keepdim=True)
+        scores = (scores - score_mean) / (score_std + epsilon)
+        scores = scores.reshape(-1).unsqueeze(dim=1).tile([1, response_length]) * eos_mask
+    return scores, scores
+
 def compute_rewards(token_level_scores, old_log_prob, ref_log_prob, kl_ratio):
     kl = old_log_prob - ref_log_prob
     return token_level_scores - kl * kl_ratio
@@ -145,8 +173,8 @@ def get_kl_logprobs(logprobs: torch.Tensor, ref_logprobs: torch.Tensor, reward_l
         raise ValueError(f"Need `reward_low_variance_kl` be in [1,2,3], got {reward_low_variance_kl}")
     return kl
 
-def compute_policy_loss(old_log_prob, ref_log_prob, log_prob, advantages, upgo_advantages, eos_mask, cliprange,
-                        cliprange2, scale_pg_by_kl, upgo_loss_weight):
+def compute_policy_loss(old_log_prob, ref_log_prob, log_prob, advantages, upgo_advantages, 
+                        eos_mask, cliprange, cliprange2, scale_pg_by_kl, upgo_loss_weight):
     """Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py#L1122
 
     Args:
@@ -246,16 +274,27 @@ def compute_value_loss(vpreds, returns, values, eos_mask, cliprange_value):
     vf_clipfrac = verl_F.masked_mean(torch.gt(vf_losses2, vf_losses1).float(), eos_mask)
     return vf_loss, vf_clipfrac
 
+def compute_kl_loss(log_prob, ref_log_prob, eos_mask, kl_penalty_):
+    if kl_penalty_ in ("abs", "mse"):
+        kl = kl_penalty(log_prob, ref_log_prob, kl_penalty_)
+    elif kl_penalty_ in ("kl", "low_var_kl"):
+        kl = kl_penalty(log_prob, ref_log_prob, kl_penalty_).square()
+    else:
+        raise NotImplementedError
+    seq_len_per_sample = torch.clamp(torch.sum(eos_mask, dim=1), min=1.0)
+    kl_loss = torch.mean(torch.sum(kl * eos_mask, dim=1) / seq_len_per_sample)
+    return kl_loss
 
 def kl_penalty(logprob: torch.FloatTensor, ref_logprob: torch.FloatTensor, kl_penalty) -> torch.FloatTensor:
     """Compute KL divergence given logprob and ref_logprob.
     Copied from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py#L1104
 
     Args:
-        logprob:
-        ref_logprob:
+        logprob: (bs, response_len)
+        ref_logprob: (bs, response_len)
 
     Returns:
+        per_token_kl: (bs, response_len)
 
     """
     if kl_penalty == "kl":
@@ -267,8 +306,15 @@ def kl_penalty(logprob: torch.FloatTensor, ref_logprob: torch.FloatTensor, kl_pe
     if kl_penalty == "mse":
         return 0.5 * (logprob - ref_logprob).square()
 
+    if kl_penalty == "low_var_kl":
+        ratio = ref_logprob - logprob
+        return torch.clamp(torch.exp(ratio) - ratio - 1, max=10, min=-10)
+
     if kl_penalty == "full":
         # so, here logprob and ref_logprob should contain the logits for every token in vocabulary
         raise NotImplementedError
+        # total_logprob = torch.softmax(logits, dim=-1)
+        # total_ref_logprob = torch.softmax(ref_logits, dim=-1)
+        # return torch.sum(total_logprob * torch.log(total_logprob / (total_ref_logprob + 1e-10)), dim=-1)
 
     raise NotImplementedError

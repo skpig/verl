@@ -198,6 +198,8 @@ class DataParallelPPOActor(BasePPOActor):
                     scale_pg_by_kl = self.config.scale_pg_by_kl
                     entropy_coeff = self.config.entropy_coeff
                     upgo_loss_weight = self.config.upgo_loss_weight
+                    kl_loss_weight = self.config.kl_loss_weight
+                    kl_penalty = self.config.kl_penalty
 
                     logits, log_prob = self._forward_micro_batch(micro_batch=data, temperature=temperature)
 
@@ -223,7 +225,13 @@ class DataParallelPPOActor(BasePPOActor):
                         entropy_loss = core_algos.compute_entropy_loss(logits, full_response_mask_rmpad)  # (total_nnz,)
                     else:
                         entropy_loss = core_algos.compute_entropy_loss(logits, response_mask)
-                    policy_loss = total_loss - entropy_loss * entropy_coeff
+
+                    if kl_loss_weight > 0.0:
+                        kl_loss = core_algos.compute_kl_loss(log_prob, ref_log_prob, response_mask, kl_penalty)
+                    else:
+                        kl_loss = torch.zeros(()).to(pg_loss.device)
+
+                    policy_loss = total_loss - entropy_loss * entropy_coeff + kl_loss_weight * kl_loss
 
                     loss = policy_loss / self.gradient_accumulation
                     loss.backward()
@@ -232,6 +240,7 @@ class DataParallelPPOActor(BasePPOActor):
                         'actor/entropy': entropy_loss.detach().item(),
                         'actor/pg_loss': pg_loss.detach().item(),
                         'actor/upgo_loss': upgo_loss.detach().item(),
+                        'actor/kl_loss': kl_loss.detach().item(),
                         'actor/pg_clipfrac': pg_clipfrac.detach().item(),
                         'actor/pg_clipfrac2': pg_clipfrac2.detach().item(),
                         'actor/ppo_kl': ppo_kl.detach().item(),

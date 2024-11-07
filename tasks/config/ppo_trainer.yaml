@@ -33,6 +33,8 @@ actor_rollout_ref:
     scale_pg_by_kl: False
     upgo_loss_weight: 0.0
     upgo_loss_version: 1
+    kl_loss_weight: 0.0
+    kl_penalty: ${algorithm.kl_penalty}
     entropy_coeff: 0.001
     ppo_epochs: 1
     shuffle: True
