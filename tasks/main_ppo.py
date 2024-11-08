@@ -59,8 +59,10 @@ class RewardManager():
             self.case_study_dir = config.trainer.default_local_dir + "/cases/"
             os.makedirs(self.case_study_dir, exist_ok=True)
         self.rm_req_executor = ThreadPoolExecutor(max_workers=128)
+        self.mean = self.config.reward_model.mean
+        self.std = self.config.reward_model.std
 
-    def __call__(self, data: DataProto, global_step=None):
+    def __call__(self, data: DataProto, global_step=None, need_norm=True):
         """We will expand this function gradually based on the available datasets"""
         reward_tensor = torch.zeros_like(data.batch['responses'], dtype=torch.float32)
         already_print_data_sources = {}
@@ -103,7 +105,10 @@ class RewardManager():
             rm_res_future_list.append(self.rm_req_executor.submit(get_rm_score, i))
         for res in as_completed(rm_res_future_list):
             prompt_str, solution_str, ground_truth, reward_style, valid_response_length, score, idx = res.result()
-
+            # train的时候做这个norm，但是打点的时候恢复，打原始值
+            # eval的时候不做这个norm
+            if need_norm:
+                score = (score - self.mean) / self.std
             reward_tensor[idx, valid_response_length - 1] = score
 
             if reward_style not in already_print_data_sources:

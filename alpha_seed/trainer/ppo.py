@@ -114,7 +114,7 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
     return data, metrics
 
 
-def compute_advantage(data: DataProto, gamma, lam, adv_estimator, upgo_loss_version, num_bon):
+def compute_advantage(data: DataProto, gamma, lam, adv_estimator, upgo_loss_version, num_bon, adv_whiten):
     # TODO: add other ways to estimate advantages
     token_level_rewards = data.batch['token_level_rewards']
     responses = data.batch['responses']
@@ -123,12 +123,14 @@ def compute_advantage(data: DataProto, gamma, lam, adv_estimator, upgo_loss_vers
     response_mask = attention_mask[:, -response_length:]
     if adv_estimator == 'gae':
         values = data.batch['values']
-        advantages, returns = core_algos.compute_gae_advantage_return(token_level_rewards=token_level_rewards,
+        origin_advantages, advantages, returns = core_algos.compute_gae_advantage_return(token_level_rewards=token_level_rewards,
                                                                       values=values,
                                                                       eos_mask=response_mask,
                                                                       gamma=gamma,
-                                                                      lam=lam)
+                                                                      lam=lam,
+                                                                      adv_whiten=adv_whiten)
         data.batch['advantages'] = advantages
+        data.batch['origin_advantages'] = origin_advantages
         data.batch['returns'] = returns
         upgo_advantages = core_algos.compute_upgo_advantage(token_level_rewards=token_level_rewards,
                                                             values=values,
@@ -141,6 +143,7 @@ def compute_advantage(data: DataProto, gamma, lam, adv_estimator, upgo_loss_vers
                                                                        eos_mask=response_mask,
                                                                        num_bon=num_bon)
         data.batch['advantages'] = advantages
+        data.batch['origin_advantages'] = advantages
         data.batch['returns'] = returns
         data.batch['upgo_advantages'] = torch.zeros_like(advantages)
     else:
@@ -154,17 +157,19 @@ def reduce_metrics(metrics: dict):
     return metrics
 
 
-def compute_data_metrics(batch, use_critic):
+def compute_data_metrics(batch, use_critic, mean, std):
     # TODO: add response length
     if torch.cuda.is_available():
         print('Using GPU to compute_data_metrics')
         batch = batch.to('cuda')
     sequence_score = batch.batch['token_level_scores'].sum(-1)
+    origin_sequence_score = sequence_score * std + mean # 打原始的分数
     sequence_reward = batch.batch['token_level_rewards'].sum(-1)
 
     response_length = batch.batch['responses'].shape[-1]
 
     advantages = batch.batch['advantages']
+    origin_advantages = batch.batch['origin_advantages']
     prompt_mask = batch.batch['attention_mask'][:, :-response_length]
     response_mask = batch.batch['attention_mask'][:, -response_length:]
 
@@ -179,7 +184,13 @@ def compute_data_metrics(batch, use_critic):
 
     response_mask_bool = response_mask.bool()
     valid_adv = torch.masked_select(advantages, response_mask_bool)
+    valid_origin_adv = torch.masked_select(origin_advantages, response_mask_bool)
     valid_returns = torch.masked_select(returns, response_mask_bool)
+
+    eos_adv = torch.gather(advantages, dim=1,
+                           index=response_length.unsqueeze(dim=1).long() - 1).reshape(-1)
+    eos_original_adv = torch.gather(origin_advantages, dim=1,
+                                    index=response_length.unsqueeze(dim=1).long() - 1).reshape(-1)
 
     metrics = {
         # score
@@ -191,6 +202,15 @@ def compute_data_metrics(batch, use_critic):
             torch.min(sequence_score).detach().item(),
         'critic/score/std':
             torch.std(sequence_score).detach().item(),
+        # original score
+        'critic/original_score/mean':
+            torch.mean(origin_sequence_score).detach().item(),
+        'critic/original_score/max':
+            torch.max(origin_sequence_score).detach().item(),
+        'critic/original_score/min':
+            torch.min(origin_sequence_score).detach().item(),
+        'critic/original_score/std':
+            torch.std(origin_sequence_score).detach().item(),
         # reward
         'critic/rewards/mean':
             torch.mean(sequence_reward).detach().item(),
@@ -203,12 +223,25 @@ def compute_data_metrics(batch, use_critic):
         # adv
         'critic/advantages/mean':
             masked_mean(advantages, response_mask).detach().item(),
+        'critic/advantages/eos_adv_mean':
+            torch.mean(eos_adv).detach().item(),
         'critic/advantages/max':
             torch.max(valid_adv).detach().item(),
         'critic/advantages/min':
             torch.min(valid_adv).detach().item(),
         'critic/advantages/std':
             torch.std(valid_adv).detach().item(),
+        # original adv
+        'critic/original_advantages/mean':
+            masked_mean(origin_advantages, response_mask).detach().item(),
+        'critic/original_advantages/eos_adv_mean':
+            torch.mean(eos_original_adv).detach().item(),
+        'critic/original_advantages/max':
+            torch.max(valid_origin_adv).detach().item(),
+        'critic/original_advantages/min':
+            torch.min(valid_origin_adv).detach().item(),
+        'critic/original_advantages/std':
+            torch.std(valid_origin_adv).detach().item(),
         # returns
         'critic/returns/mean':
             masked_mean(returns, response_mask).detach().item(),
@@ -425,7 +458,7 @@ class RayPPOTrainer(object):
 
                 # evaluate using reward_function
                 # for certain reward function (e.g. sandbox), the generation can overlap with reward
-                reward_tensor = self.val_reward_fn(test_batch, global_step=self.global_step)
+                reward_tensor = self.val_reward_fn(test_batch, global_step=self.global_step, need_norm=False)
 
                 reward_tensor_lst.append(reward_tensor)
                 data_source_lst.append(
@@ -730,7 +763,8 @@ class RayPPOTrainer(object):
                                               self.config.algorithm.lam,
                                               adv_estimator=self.config.algorithm.adv_estimator,
                                               upgo_loss_version=self.config.actor_rollout_ref.actor.upgo_loss_version,
-                                              num_bon=self.config.actor_rollout_ref.rollout.num_bon)
+                                              num_bon=self.config.actor_rollout_ref.rollout.num_bon,
+                                              adv_whiten=self.config.algorithm.adv_whiten)
                 metrics['timing/adv'] = timer.last
 
                 # update critic
@@ -762,7 +796,9 @@ class RayPPOTrainer(object):
                 with Timer(name='compute_metrics', logger=None) as timer:
                     # Note that we can use any worker groups here
                     data_metrics = self.actor_rollout_wg.execute_func_rank_zero(compute_data_metrics, batch,
-                                                                                self.use_critic)
+                                                                                self.use_critic,
+                                                                                self.config.reward_model.mean,
+                                                                                self.config.reward_model.std)
                 metrics['timing/compute_metrics'] = timer.last
                 metrics.update(data_metrics)
 

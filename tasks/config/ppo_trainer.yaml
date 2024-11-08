@@ -113,6 +113,7 @@ actor_rollout_ref:
       enable: False
 
 critic:
+  load_score_head: True
   strategy: fsdp
   optim:
     lr: 1e-5
@@ -181,6 +182,7 @@ algorithm:
   gamma: 1.0
   lam: 0.95
   adv_estimator: gae
+  adv_whiten: True
   kl_penalty: kl  # how to estimate kl divergence
   kl_ctrl:
     type: fixed

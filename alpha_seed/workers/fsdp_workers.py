@@ -554,7 +554,8 @@ class CriticWorker(Worker):
                                                                             config=critic_model_config,
                                                                             trust_remote_code=trust_remote_code)
             # reset score head parameter
-            # critic_module.score.reset_parameters()
+            if not config.load_score_head:
+                critic_module.score.reset_parameters()
             # some parameters may not in torch_dtype
             critic_module.to(torch_dtype)
 
@@ -1039,10 +1040,6 @@ class RewardModelWorker(Worker):
 
         return DataProto.from_dict(rm_inputs)
 
-    def norm(self, rm_score):
-        rm_score = (rm_score - self.config["mean"]) / self.config["std"]
-        return rm_score
-
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_rm_score(self, data: DataProto):
         data = data.to('cuda')
@@ -1061,7 +1058,6 @@ class RewardModelWorker(Worker):
             for micro_batch in micro_batches:
                 rm_score, reflection_nums = self._forward_micro_batch(micro_batch)
                 # 归一化
-                rm_score = self.norm(rm_score)
                 output.append(rm_score)
                 total_reflection_nums.append(reflection_nums)
             scores = torch.cat(output, dim=0)  # (batch_size)
