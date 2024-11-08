@@ -1,8 +1,8 @@
 set -x
 
 # ckpt和路径
-SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/ssd_hldy/user/yufan/400m_moe_sft/p6_400m_moe_4T_sft_v27_bs128_lr4e-4_master_dyn_epoch4/checkpoints/global_epoch_4/p6_to_models/400m.sft27.baseline
-RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/caizhao/400m_release/rm_p6_moe_400m_0716_sftv27_stage2/checkpoints/global_epoch_1/p6_to_models/rm_p6_moe_400m_baseline
+SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/p6_400m_moe_4T_sft_v27_bs128_lr4e-4_master_dyn_epoch4_hf
+RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/rm_p6_moe_400m_0716_sftv27_stage2_hf
 TRAIN_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/train_with_ref_ans.parquet
 TEST_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/test_with_ref_ans.parquet
 default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/yueyu/model/rl/alpha_seed/test5

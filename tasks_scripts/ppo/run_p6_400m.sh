@@ -2,6 +2,7 @@ set -x
 
 if [[ "${ARNOLD_REGION}" == "US" ]]; then
     echo "Running in US Region"
+    # ckpt格式和master冲突，需要重新同步
     SFT_MODEL_PATH=hdfs://harunava/home/byte_data_seed_azure/seed_rlhf/user/zhangchi.usc1992/alpha-seed/models/400m.sft27.baseline
     RM_MODEL_PATH=hdfs://harunava/home/byte_data_seed_azure/seed_rlhf/user/zhangchi.usc1992/alpha-seed/models/rm_p6_moe_400m_baseline
     TRAIN_FILE=hdfs://harunava/home/byte_data_seed_azure/seed_rlhf/user/zhangchi.usc1992/alpha-seed/data/math/hard60_format.parquet
@@ -11,8 +12,8 @@ if [[ "${ARNOLD_REGION}" == "US" ]]; then
 else
     echo "Running in CN Region"
     # ckpt和路径
-    SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/ssd_hldy/user/yufan/400m_moe_sft/p6_400m_moe_4T_sft_v27_bs128_lr4e-4_master_dyn_epoch4/checkpoints/global_epoch_4/p6_to_models/400m.sft27.baseline
-    RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/caizhao/400m_release/rm_p6_moe_400m_0716_sftv27_stage2/checkpoints/global_epoch_1/p6_to_models/rm_p6_moe_400m_baseline
+    SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/p6_400m_moe_4T_sft_v27_bs128_lr4e-4_master_dyn_epoch4_hf
+    RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/rm_p6_moe_400m_0716_sftv27_stage2_hf
     TRAIN_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/hard60_format.parquet
     TEST_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/math_500.parquet
     default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/yueyu/model/rl/alpha_seed/test5
