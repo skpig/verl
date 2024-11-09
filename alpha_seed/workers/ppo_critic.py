@@ -140,14 +140,17 @@ class DataParallelPPOCritic(BasePPOCritic):
         return grad_norm
 
     def compute_values(self, data: DataProto) -> torch.Tensor:
-        micro_batch_size = data.meta_info['micro_batch_size']
+        use_dynamic_bsz = data.meta_info['use_dynamic_bsz']
+        if use_dynamic_bsz:
+            max_token_len = data.meta_info['max_token_len']
+        else:
+            micro_batch_size = data.meta_info['micro_batch_size']
         select_keys = ['responses', 'input_ids', 'attention_mask', 'position_ids']
         batch = data.select(batch_keys=select_keys).batch
-        micro_batches = batch.split(micro_batch_size)
-        if self.config.use_dynamic_bsz:
+        if use_dynamic_bsz:
             (micro_batches,
              num_micro_batches) = rearrange_micro_batches(batch=data.batch,
-                                                          ppo_max_token_len=self.config.ppo_max_token_len)
+                                                          max_token_len=max_token_len)
         else:
             # split batch into micro_batches
             micro_batches = batch.split(micro_batch_size)
@@ -177,7 +180,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                 if self.config.use_dynamic_bsz:
                     (micro_batches,
                      num_micro_batches) = rearrange_micro_batches(batch=data.batch,
-                                                                  ppo_max_token_len=self.config.ppo_max_token_len)
+                                                                  max_token_len=self.config.ppo_max_token_len)
                 else:
                     # split batch into micro_batches
                     micro_batches = data.batch.split(self.config.ppo_micro_batch_size)

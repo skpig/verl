@@ -52,6 +52,8 @@ from codetiming import Timer
 
 from datetime import timedelta
 
+from .utils import rearrange_micro_batches
+
 logger = logging.getLogger(__file__)
 
 
@@ -403,8 +405,12 @@ class ActorRolloutRefWorker(Worker):
 
         if self._is_actor and recompute_log_prob:
             # we should always recompute old_log_probs when it is HybridEngine
-            output.meta_info['micro_batch_size'] = self.config.rollout.log_prob_micro_batch_size
             output.meta_info['temperature'] = prompts.meta_info['generation_kwargs']['temperature']
+            output.meta_info['use_dynamic_bsz'] = self.config.rollout.use_dynamic_bsz
+            if self.config.rollout.use_dynamic_bsz:
+                output.meta_info['max_token_len'] = self.config.rollout.max_token_len
+            else:
+                output.meta_info['micro_batch_size'] = self.config.rollout.log_prob_micro_batch_size
             with self.ulysses_sharding_manager:
                 output = self.ulysses_sharding_manager.preprocess_data(output)
                 old_log_probs = self.actor.compute_log_prob(data=output)
@@ -425,7 +431,11 @@ class ActorRolloutRefWorker(Worker):
         data = data.to('cuda')
 
         micro_batch_size = self.config.ref.log_prob_micro_batch_size
-        data.meta_info['micro_batch_size'] = micro_batch_size
+        data.meta_info['use_dynamic_bsz'] = self.config.ref.use_dynamic_bsz
+        if self.config.ref.use_dynamic_bsz:
+            data.meta_info['max_token_len'] = self.config.ref.max_token_len
+        else:
+            data.meta_info['micro_batch_size'] = micro_batch_size
         data.meta_info['temperature'] = self.config.rollout.train_generate_kwargs.temperature
 
         log_gpu_memory_usage('Bfore reference recompute log prob', logger=logger)
@@ -657,7 +667,11 @@ class CriticWorker(Worker):
         data = data.to('cuda')
 
         micro_batch_size = self.config.infer_micro_batch_size
-        data.meta_info['micro_batch_size'] = micro_batch_size
+        data.meta_info['use_dynamic_bsz'] = self.config.use_dynamic_bsz
+        if self.config.use_dynamic_bsz:
+            data.meta_info['max_token_len'] = self.config.ppo_max_token_len
+        else:
+            data.meta_info['micro_batch_size'] = micro_batch_size
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
             values = self.critic.compute_values(data=data)
@@ -1052,14 +1066,23 @@ class RewardModelWorker(Worker):
         with self.ulysses_sharding_manager:
             rm_data = self.ulysses_sharding_manager.preprocess_data(rm_data)
 
-            micro_batches = rm_data.batch.split(self.config.micro_batch_size)
+            if self.config.use_dynamic_bsz:
+                (micro_batches,
+                num_micro_batches) = rearrange_micro_batches(batch=rm_data.batch,
+                                                            max_token_len=self.config.max_token_len)
+            else:
+                # split batch into micro_batches
+                micro_batches = rm_data.batch.split(self.config.micro_batch_size)
+                num_micro_batches = len(micro_batches)
+
             output = []
             total_reflection_nums = []
-            for micro_batch in micro_batches:
+            for i, micro_batch in enumerate(micro_batches):
                 rm_score, reflection_nums = self._forward_micro_batch(micro_batch)
                 # 归一化
-                output.append(rm_score)
-                total_reflection_nums.append(reflection_nums)
+                if i < num_micro_batches:
+                    output.append(rm_score)
+                    total_reflection_nums.append(reflection_nums)
             scores = torch.cat(output, dim=0)  # (batch_size)
             reflection_nums = torch.cat(total_reflection_nums, dim=0)
             token_level_scores = self._expand_to_token_level(data, scores)

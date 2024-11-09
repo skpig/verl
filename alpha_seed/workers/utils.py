@@ -1,10 +1,10 @@
 import torch
 
 
-def rearrange_micro_batches(batch, ppo_max_token_len):
+def rearrange_micro_batches(batch, max_token_len):
     ## bin packing problem: NP-Complete probelm
     seq_len_effective = batch['attention_mask'].cuda().sum(dim=1)
-    bucket_index = seq_len_effective.cumsum(dim=0) // ppo_max_token_len
+    bucket_index = seq_len_effective.cumsum(dim=0) // max_token_len
     ## bucket_index is continuous
     bucket_segment_point = (bucket_index[1:] - bucket_index[:-1]).nonzero() + 1
 

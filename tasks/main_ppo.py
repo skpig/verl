@@ -189,9 +189,14 @@ def validate_config(config):
                 config.data.max_response_length) <= config.actor_rollout_ref.actor.ppo_max_token_len
     if config.actor_rollout_ref.ref.use_dynamic_bsz:
         assert (config.data.max_prompt_length +
-                config.data.max_response_length) <= config.actor_rollout_ref.ref.ppo_max_token_len
+                config.data.max_response_length) <= config.actor_rollout_ref.ref.max_token_len
+    if config.actor_rollout_ref.rollout.use_dynamic_bsz:
+        assert (config.data.max_prompt_length +
+                config.data.max_response_length) <= config.actor_rollout_ref.rollout.max_token_len
     if config.critic.use_dynamic_bsz:
         assert (config.data.max_prompt_length + config.data.max_response_length) <= config.critic.ppo_max_token_len
+    if config.reward_model.use_dynamic_bsz:
+        assert (config.data.max_prompt_length + config.data.max_response_length) <= config.reward_model.max_token_len
 
 
 @ray.remote
