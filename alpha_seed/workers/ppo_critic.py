@@ -32,7 +32,7 @@ from alpha_seed import core_algos
 
 from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
 from dist_attn.ulysses.ops import slice_input_tensor, gather_outputs
-
+from .utils import rearrange_micro_batches
 from contextlib import nullcontext
 
 __all__ = ['DataParallelPPOCritic']
@@ -143,11 +143,20 @@ class DataParallelPPOCritic(BasePPOCritic):
         select_keys = ['responses', 'input_ids', 'attention_mask', 'position_ids']
         batch = data.select(batch_keys=select_keys).batch
         micro_batches = batch.split(micro_batch_size)
+        if self.config.use_dynamic_bsz:
+            (micro_batches,
+             num_micro_batches) = rearrange_micro_batches(batch=data.batch,
+                                                          ppo_max_token_len=self.config.ppo_max_token_len)
+        else:
+            # split batch into micro_batches
+            micro_batches = batch.split(micro_batch_size)
+            num_micro_batches = len(micro_batches)
         values_lst = []
-        for micro_batch in micro_batches:
+        for i, micro_batch in enumerate(micro_batches):
             with torch.no_grad():
                 values = self._forward_micro_batch(micro_batch)
-            values_lst.append(values)
+            if i < num_micro_batches:
+                values_lst.append(values)
         values = torch.concat(values_lst, dim=0)
         return values
 
@@ -163,23 +172,28 @@ class DataParallelPPOCritic(BasePPOCritic):
 
         for batch_idx, data in enumerate(dataloader):
             with self.profiler_context as p:
-                # split batch into micro_batches
-                micro_batches = data.batch.split(self.config.ppo_micro_batch_size)
+                if self.config.use_dynamic_bsz:
+                    (micro_batches,
+                     num_micro_batches) = rearrange_micro_batches(batch=data.batch,
+                                                                  ppo_max_token_len=self.config.ppo_max_token_len)
+                else:
+                    # split batch into micro_batches
+                    micro_batches = data.batch.split(self.config.ppo_micro_batch_size)
                 self.critic_optimizer.zero_grad()
 
-                for data in micro_batches:
-                    data = data.cuda()  # critic device is cpu when using offload
-                    input_ids = data['input_ids']
-                    responses = data['responses']
-                    attention_mask = data['attention_mask']
-                    position_ids = data['position_ids']
-                    values = data['values']
-                    returns = data['returns']
+                for i, micro_data in enumerate(micro_batches):
+                    micro_data = micro_data.cuda()  # critic device is cpu when using offload
+                    input_ids = micro_data['input_ids']
+                    responses = micro_data['responses']
+                    attention_mask = micro_data['attention_mask']
+                    position_ids = micro_data['position_ids']
+                    values = micro_data['values']
+                    returns = micro_data['returns']
                     response_length = responses.size(1)
 
                     eos_mask = attention_mask[:, -response_length - 1:-1]
 
-                    vpreds = self._forward_micro_batch(data)
+                    vpreds = self._forward_micro_batch(micro_data)
 
                     # assert not torch.any(torch.isnan(vpreds)).item()
 
@@ -188,20 +202,27 @@ class DataParallelPPOCritic(BasePPOCritic):
                                                            returns=returns,
                                                            eos_mask=eos_mask,
                                                            cliprange_value=self.config.cliprange_value)
-                    loss = vf_loss / self.gradient_accumulation
+                    if self.config.use_dynamic_bsz:
+                        if i >= num_micro_batches:
+                            # fake data
+                            loss = vf_loss * 0.0
+                        else:
+                            loss = vf_loss * (len(micro_data) / self.config.ppo_mini_batch_size)
+                    else:
+                        loss = vf_loss / self.gradient_accumulation
                     loss.backward()
 
-                    data = {
+                    micro_data_metric = {
                         'critic/vf_loss': vf_loss.detach().item(),
                         'critic/vf_clipfrac': vf_clipfrac.detach().item(),
                         'critic/vpred_mean': masked_mean(vpreds, eos_mask).detach().item(),
                     }
 
-                    append_to_dict(metrics, data)
+                    append_to_dict(metrics, micro_data_metric)
 
                 grad_norm = self._optimizer_step()
-                data = {'critic/grad_norm': grad_norm.detach().item()}
-                append_to_dict(metrics, data)
+                data_metric = {'critic/grad_norm': grad_norm.detach().item()}
+                append_to_dict(metrics, data_metric)
 
                 p.step()
                 self.memory_profiler.step()

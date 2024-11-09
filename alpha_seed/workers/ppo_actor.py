@@ -31,13 +31,14 @@ from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_worl
 from dist_attn.ulysses.ops import slice_input_tensor, gather_outputs
 
 from alpha_seed import core_algos
+from .utils import rearrange_micro_batches
 
 from contextlib import nullcontext
 
 __all__ = ['DataParallelPPOActor']
 
 try:
-    from verl.utils.debug import get_profiler_context
+    from verl.utils.debug import get_profiler_context, MemoryProfiler
 except:
     print('Cannot find profile utilities. Please use latest verl master')
     raise
@@ -66,6 +67,11 @@ class DataParallelPPOActor(BasePPOActor):
                                                          default_hdfs_dir=self.config.profile.default_hdfs_dir,
                                                          upload_to_mlx=self.config.profile.upload_to_mlx,
                                                          enable=self.config.profile.enable)
+            self.memory_profiler = MemoryProfiler(filename=self.config.profile.filename + 'memory',
+                                                  enable=torch.distributed.get_rank() == 0 and
+                                                  self.config.profile.enable,
+                                                  upload_to_mlx=self.config.profile.upload_to_mlx,
+                                                  active=1)
 
     def _forward_micro_batch(self, micro_batch, temperature):
         from flash_attn.bert_padding import index_first_axis, rearrange
@@ -153,11 +159,20 @@ class DataParallelPPOActor(BasePPOActor):
         select_keys = ['responses', 'input_ids', 'attention_mask', 'position_ids']
         batch = data.select(batch_keys=select_keys).batch
         micro_batches = batch.split(micro_batch_size)
+        if self.config.use_dynamic_bsz:
+            (micro_batches,
+             num_micro_batches) = rearrange_micro_batches(batch=data.batch,
+                                                          ppo_max_token_len=self.config.ppo_max_token_len)
+        else:
+            # split batch into micro_batches
+            micro_batches = batch.split(micro_batch_size)
+            num_micro_batches = len(micro_batches)
         log_probs_lst = []
-        for micro_batch in micro_batches:
+        for i, micro_batch in enumerate(micro_batches):
             with torch.inference_mode():
                 _, log_probs = self._forward_micro_batch(micro_batch, temperature=temperature)
-            log_probs_lst.append(log_probs)
+            if i < num_micro_batches:
+                log_probs_lst.append(log_probs)
         log_probs = torch.concat(log_probs_lst, dim=0)
         return log_probs
 
@@ -179,22 +194,25 @@ class DataParallelPPOActor(BasePPOActor):
         metrics = {}
         for batch_idx, data in enumerate(dataloader):
             with self.profiler_context as p:
-
-                # split batch into micro_batches
-                micro_batches = data.batch.split(self.config.ppo_micro_batch_size)
-
+                if self.config.use_dynamic_bsz:
+                    (micro_batches,
+                     num_micro_batches) = rearrange_micro_batches(batch=data.batch,
+                                                                  ppo_max_token_len=self.config.ppo_max_token_len)
+                else:
+                    # split batch into micro_batches
+                    micro_batches = data.batch.split(self.config.ppo_micro_batch_size)
                 self.actor_optimizer.zero_grad()
 
-                for data in micro_batches:
-                    data = data.cuda()  # actor device is cpu when using offload
-                    responses = data['responses']
+                for i, micro_data in enumerate(micro_batches):
+                    micro_data = micro_data.cuda()  # actor device is cpu when using offload
+                    responses = micro_data['responses']
                     response_length = responses.size(1)
-                    attention_mask = data['attention_mask']
+                    attention_mask = micro_data['attention_mask']
                     response_mask = attention_mask[:, -response_length:]
-                    old_log_prob = data['old_log_probs']
-                    ref_log_prob = data['ref_log_prob']
-                    advantages = data['advantages']
-                    upgo_advantages = data['upgo_advantages']
+                    old_log_prob = micro_data['old_log_probs']
+                    ref_log_prob = micro_data['ref_log_prob']
+                    advantages = micro_data['advantages']
+                    upgo_advantages = micro_data['upgo_advantages']
 
                     clip_ratio = self.config.clip_ratio
                     clip_ratio2 = self.config.clip_ratio2
@@ -204,7 +222,7 @@ class DataParallelPPOActor(BasePPOActor):
                     kl_loss_weight = self.config.kl_loss_weight
                     kl_penalty = self.config.kl_penalty
 
-                    logits, log_prob = self._forward_micro_batch(micro_batch=data, temperature=temperature)
+                    logits, log_prob = self._forward_micro_batch(micro_batch=micro_data, temperature=temperature)
 
                     total_loss, pg_loss, upgo_loss, pg_clipfrac, pg_clipfrac2, ppo_kl, ppo_kl_sum = core_algos.compute_policy_loss(
                         old_log_prob=old_log_prob,
@@ -233,13 +251,19 @@ class DataParallelPPOActor(BasePPOActor):
                         kl_loss = core_algos.compute_kl_loss(log_prob, ref_log_prob, response_mask, kl_penalty)
                     else:
                         kl_loss = torch.zeros(()).to(pg_loss.device)
-
                     policy_loss = total_loss - entropy_loss * entropy_coeff + kl_loss_weight * kl_loss
 
-                    loss = policy_loss / self.gradient_accumulation
+                    if self.config.use_dynamic_bsz:
+                        if i >= num_micro_batches:
+                            # fake data
+                            loss = policy_loss * 0.0
+                        else:
+                            loss = policy_loss * (len(micro_data) / self.config.ppo_mini_batch_size)
+                    else:
+                        loss = policy_loss / self.gradient_accumulation
                     loss.backward()
 
-                    data = {
+                    micro_data_metric = {
                         'actor/entropy': entropy_loss.detach().item(),
                         'actor/pg_loss': pg_loss.detach().item(),
                         'actor/upgo_loss': upgo_loss.detach().item(),
@@ -248,14 +272,19 @@ class DataParallelPPOActor(BasePPOActor):
                         'actor/pg_clipfrac2': pg_clipfrac2.detach().item(),
                         'actor/ppo_kl': ppo_kl.detach().item(),
                         'actor/ppo_kl_sum': ppo_kl_sum.detach().item(),
+                        'actor/token_num_in_update': attention_mask.sum().detach().item(),
                     }
-                    append_to_dict(metrics, data)
+                    append_to_dict(metrics, micro_data_metric)
 
                 grad_norm = self._optimizer_step()
-                data = {'actor/grad_norm': grad_norm.detach().item()}
-                append_to_dict(metrics, data)
+                data_metric = {
+                    'actor/grad_norm': grad_norm.detach().item(),
+                    'actor/num_micro_batch': len(micro_batches)
+                }
+                append_to_dict(metrics, data_metric)
 
                 p.step()
+                self.memory_profiler.step()
 
         self.actor_optimizer.zero_grad()
         return metrics

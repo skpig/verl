@@ -178,6 +178,15 @@ def validate_config(config):
     assert config.critic.ppo_mini_batch_size % config.critic.ppo_micro_batch_size == 0
     assert config.critic.ppo_micro_batch_size * ulysses >= n_gpus
 
+    if config.actor_rollout_ref.actor.use_dynamic_bsz:
+        assert (config.data.max_prompt_length +
+                config.data.max_response_length) <= config.actor_rollout_ref.actor.ppo_max_token_len
+    if config.actor_rollout_ref.ref.use_dynamic_bsz:
+        assert (config.data.max_prompt_length +
+                config.data.max_response_length) <= config.actor_rollout_ref.ref.ppo_max_token_len
+    if config.critic.use_dynamic_bsz:
+        assert (config.data.max_prompt_length + config.data.max_response_length) <= config.critic.ppo_max_token_len
+
 
 @ray.remote
 def main_task(config):
