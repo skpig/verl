@@ -123,12 +123,13 @@ def compute_advantage(data: DataProto, gamma, lam, adv_estimator, upgo_loss_vers
     response_mask = attention_mask[:, -response_length:]
     if adv_estimator == 'gae':
         values = data.batch['values']
-        origin_advantages, advantages, returns = core_algos.compute_gae_advantage_return(token_level_rewards=token_level_rewards,
-                                                                      values=values,
-                                                                      eos_mask=response_mask,
-                                                                      gamma=gamma,
-                                                                      lam=lam,
-                                                                      adv_whiten=adv_whiten)
+        origin_advantages, advantages, returns = core_algos.compute_gae_advantage_return(
+            token_level_rewards=token_level_rewards,
+            values=values,
+            eos_mask=response_mask,
+            gamma=gamma,
+            lam=lam,
+            adv_whiten=adv_whiten)
         data.batch['advantages'] = advantages
         data.batch['origin_advantages'] = origin_advantages
         data.batch['returns'] = returns
@@ -163,7 +164,7 @@ def compute_data_metrics(batch, use_critic, mean, std):
         print('Using GPU to compute_data_metrics')
         batch = batch.to('cuda')
     sequence_score = batch.batch['token_level_scores'].sum(-1)
-    origin_sequence_score = sequence_score * std + mean # 打原始的分数
+    origin_sequence_score = sequence_score * std + mean  # 打原始的分数
     sequence_reward = batch.batch['token_level_rewards'].sum(-1)
 
     response_length = batch.batch['responses'].shape[-1]
@@ -187,8 +188,7 @@ def compute_data_metrics(batch, use_critic, mean, std):
     valid_origin_adv = torch.masked_select(origin_advantages, response_mask_bool)
     valid_returns = torch.masked_select(returns, response_mask_bool)
 
-    eos_adv = torch.gather(advantages, dim=1,
-                           index=response_length.unsqueeze(dim=1).long() - 1).reshape(-1)
+    eos_adv = torch.gather(advantages, dim=1, index=response_length.unsqueeze(dim=1).long() - 1).reshape(-1)
     eos_original_adv = torch.gather(origin_advantages, dim=1,
                                     index=response_length.unsqueeze(dim=1).long() - 1).reshape(-1)
 
@@ -684,138 +684,144 @@ class RayPPOTrainer(object):
         for epoch in range(self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
                 metrics = {}
+                with Timer(name='step', logger=None) as step_timer:
+                    batch: DataProto = DataProto.from_single_dict(batch_dict)
+                    # batch = batch.to('cuda')
 
-                batch: DataProto = DataProto.from_single_dict(batch_dict)
-                # batch = batch.to('cuda')
+                    # pop those keys for generation
+                    gen_batch = batch.pop(batch_keys=['input_ids', 'attention_mask', 'position_ids'])
+                    gen_batch.meta_info[
+                        'generation_kwargs'] = self.config.actor_rollout_ref.rollout.train_generate_kwargs
+                    gen_batch.meta_info["num_bon"] = self.num_bon
+                    # generate a batch
+                    with Timer(name='gen', logger=None) as timer:
+                        gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+                    metrics['timing/gen'] = timer.last
 
-                # pop those keys for generation
-                gen_batch = batch.pop(batch_keys=['input_ids', 'attention_mask', 'position_ids'])
-                gen_batch.meta_info['generation_kwargs'] = self.config.actor_rollout_ref.rollout.train_generate_kwargs
-                gen_batch.meta_info["num_bon"] = self.num_bon
-                # generate a batch
-                with Timer(name='gen', logger=None) as timer:
-                    gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
-                metrics['timing/gen'] = timer.last
+                    # only report metrics from one generation replica
+                    if 'xperf_metrics' in gen_batch_output.meta_info:
+                        for name, x_metric in gen_batch_output.meta_info['xperf_metrics'].items():
+                            self.logger.log(data={"xperf/gen/{}".format(name): wandb.Histogram(x_metric)},
+                                            step=self.global_step)
 
-                # only report metrics from one generation replica
-                if 'xperf_metrics' in gen_batch_output.meta_info:
-                    for name, x_metric in gen_batch_output.meta_info['xperf_metrics'].items():
-                        self.logger.log(data={"xperf/gen/{}".format(name): wandb.Histogram(x_metric)},
-                                        step=self.global_step)
+                    batch = batch.repeat(self.num_bon)
+                    batch = batch.union(gen_batch_output)
+                    if self.config.algorithm.force_append_eos:
+                        batch.batch["input_ids"][:, -1] = self.tokenizer.eos_token_id
+                        batch.batch["responses"][:, -1] = self.tokenizer.eos_token_id
 
-                batch = batch.repeat(self.num_bon)
-                batch = batch.union(gen_batch_output)
-                if self.config.algorithm.force_append_eos:
-                    batch.batch["input_ids"][:, -1] = self.tokenizer.eos_token_id
-                    batch.batch["responses"][:, -1] = self.tokenizer.eos_token_id
+                    batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask'], dim=-1).tolist()
 
-                batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask'], dim=-1).tolist()
+                    with Timer(name='rm_score', logger=None) as timer:
+                        # compute scores. Support both model and function-based.
+                        # We first compute the scores using reward model. Then, we call reward_fn to combine
+                        # the results from reward model and rule-based results.
+                        if self.use_rm:
+                            # we first compute reward model score
+                            reward_tensor = self.rm_wg.compute_rm_score(batch)
+                            batch = batch.union(reward_tensor)
+                    metrics['timing/rm_score'] = timer.last
 
-                with Timer(name='rm_score', logger=None) as timer:
-                    # compute scores. Support both model and function-based.
-                    # We first compute the scores using reward model. Then, we call reward_fn to combine
-                    # the results from reward model and rule-based results.
-                    if self.use_rm:
-                        # we first compute reward model score
-                        reward_tensor = self.rm_wg.compute_rm_score(batch)
-                        batch = batch.union(reward_tensor)
-                metrics['timing/rm_score'] = timer.last
+                    with Timer(name='reward_fn', logger=None) as timer:
+                        # we combine with rule-based rm
+                        reward_tensor = self.reward_fn(batch, global_step=self.global_step)
+                        batch.batch['token_level_scores'] = reward_tensor
+                    metrics['timing/reward_fn'] = timer.last
 
-                with Timer(name='reward_fn', logger=None) as timer:
-                    # we combine with rule-based rm
-                    reward_tensor = self.reward_fn(batch, global_step=self.global_step)
-                    batch.batch['token_level_scores'] = reward_tensor
-                metrics['timing/reward_fn'] = timer.last
+                    # league training，筛选平均通过率低的prompt
+                    if self.config.trainer.league_training_config.enable:
+                        batch = self.league_training_filter_prompt(
+                            batch, strategy=self.config.trainer.league_training_config.strategy)
 
-                # league training，筛选平均通过率低的prompt
-                if self.config.trainer.league_training_config.enable:
-                    batch = self.league_training_filter_prompt(
-                        batch, strategy=self.config.trainer.league_training_config.strategy)
+                    # bon策略，筛选prompt内部的response，有不同策略，all、best、best_mix_random、best_worst
+                    if self.num_bon > 1:
+                        batch = self.select_training_samples(batch, self.config.actor_rollout_ref.rollout.bon_strategy)
 
-                # bon策略，筛选prompt内部的response，有不同策略，all、best、best_mix_random、best_worst
-                if self.num_bon > 1:
-                    batch = self.select_training_samples(batch, self.config.actor_rollout_ref.rollout.bon_strategy)
+                    if self.use_reference_policy:
+                        # compute reference log_prob
+                        with Timer(name='ref', logger=None) as timer:
+                            ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
+                            batch = batch.union(ref_log_prob)
+                        metrics['timing/ref'] = timer.last
 
-                if self.use_reference_policy:
-                    # compute reference log_prob
-                    with Timer(name='ref', logger=None) as timer:
-                        ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
-                        batch = batch.union(ref_log_prob)
-                    metrics['timing/ref'] = timer.last
+                    # compute values
+                    if self.use_critic:
+                        with Timer(name='values', logger=None) as timer:
+                            values = self.critic_wg.compute_values(batch)
+                            batch = batch.union(values)
+                        metrics['timing/values'] = timer.last
 
-                # compute values
-                if self.use_critic:
-                    with Timer(name='values', logger=None) as timer:
-                        values = self.critic_wg.compute_values(batch)
-                        batch = batch.union(values)
-                    metrics['timing/values'] = timer.last
+                    with Timer(name='adv', logger=None) as timer:
+                        # compute rewards. apply_kl_penalty if available
+                        batch, kl_metrics = apply_kl_penalty(batch,
+                                                             kl_ctrl=self.kl_ctrl,
+                                                             kl_penalty=self.config.algorithm.kl_penalty)
+                        metrics.update(kl_metrics)
 
-                with Timer(name='adv', logger=None) as timer:
-                    # compute rewards. apply_kl_penalty if available
-                    batch, kl_metrics = apply_kl_penalty(batch,
-                                                         kl_ctrl=self.kl_ctrl,
-                                                         kl_penalty=self.config.algorithm.kl_penalty)
-                    metrics.update(kl_metrics)
+                        # compute advantages
+                        batch = compute_advantage(
+                            batch,
+                            self.config.algorithm.gamma,
+                            self.config.algorithm.lam,
+                            adv_estimator=self.config.algorithm.adv_estimator,
+                            upgo_loss_version=self.config.actor_rollout_ref.actor.upgo_loss_version,
+                            num_bon=self.config.actor_rollout_ref.rollout.num_bon,
+                            adv_whiten=self.config.algorithm.adv_whiten)
+                    metrics['timing/adv'] = timer.last
 
-                    # compute advantages
-                    batch = compute_advantage(batch,
-                                              self.config.algorithm.gamma,
-                                              self.config.algorithm.lam,
-                                              adv_estimator=self.config.algorithm.adv_estimator,
-                                              upgo_loss_version=self.config.actor_rollout_ref.actor.upgo_loss_version,
-                                              num_bon=self.config.actor_rollout_ref.rollout.num_bon,
-                                              adv_whiten=self.config.algorithm.adv_whiten)
-                metrics['timing/adv'] = timer.last
+                    # update critic
+                    if self.use_critic:
+                        with Timer(name='update_critic', logger=None) as timer:
+                            critic_output = self.critic_wg.update_critic(batch)
+                        metrics['timing/update_critic'] = timer.last
+                        critic_output_metrics = reduce_metrics(critic_output.meta_info['metrics'])
+                        metrics.update(critic_output_metrics)
 
-                # update critic
-                if self.use_critic:
-                    with Timer(name='update_critic', logger=None) as timer:
-                        critic_output = self.critic_wg.update_critic(batch)
-                    metrics['timing/update_critic'] = timer.last
-                    critic_output_metrics = reduce_metrics(critic_output.meta_info['metrics'])
-                    metrics.update(critic_output_metrics)
+                    # implement critic warmup
+                    if self.config.trainer.critic_warmup <= self.global_step:
+                        # update actor
+                        with Timer(name='update_actor', logger=None) as timer:
+                            actor_output = self.actor_rollout_wg.update_actor(batch)
+                        metrics['timing/update_actor'] = timer.last
+                        actor_output_metrics = reduce_metrics(actor_output.meta_info['metrics'])
+                        metrics.update(actor_output_metrics)
 
-                # implement critic warmup
-                if self.config.trainer.critic_warmup <= self.global_step:
-                    # update actor
-                    with Timer(name='update_actor', logger=None) as timer:
-                        actor_output = self.actor_rollout_wg.update_actor(batch)
-                    metrics['timing/update_actor'] = timer.last
-                    actor_output_metrics = reduce_metrics(actor_output.meta_info['metrics'])
-                    metrics.update(actor_output_metrics)
+                    # validate
+                    if self.val_reward_fn is not None and (self.global_step + 1) % self.config.trainer.test_freq == 0:
+                        with Timer(name='testing', logger=None) as timer:
+                            val_metrics: dict = self._validate()
+                            val_metrics = {f'val/{key}': val for key, val in val_metrics.items()}
+                        metrics['timing/testing'] = timer.last
+                        metrics.update(val_metrics)
 
-                # validate
-                if self.val_reward_fn is not None and (self.global_step + 1) % self.config.trainer.test_freq == 0:
-                    with Timer(name='testing', logger=None) as timer:
-                        val_metrics: dict = self._validate()
-                        val_metrics = {f'val/{key}': val for key, val in val_metrics.items()}
-                    metrics['timing/testing'] = timer.last
-                    metrics.update(val_metrics)
+                    # collect metrics
+                    with Timer(name='compute_metrics', logger=None) as timer:
+                        # Note that we can use any worker groups here
+                        data_metrics = self.actor_rollout_wg.execute_func_rank_zero(compute_data_metrics, batch,
+                                                                                    self.use_critic,
+                                                                                    self.config.reward_model.mean,
+                                                                                    self.config.reward_model.std)
+                    metrics['timing/compute_metrics'] = timer.last
+                    metrics.update(data_metrics)
 
-                # collect metrics
-                with Timer(name='compute_metrics', logger=None) as timer:
-                    # Note that we can use any worker groups here
-                    data_metrics = self.actor_rollout_wg.execute_func_rank_zero(compute_data_metrics, batch,
-                                                                                self.use_critic,
-                                                                                self.config.reward_model.mean,
-                                                                                self.config.reward_model.std)
-                metrics['timing/compute_metrics'] = timer.last
-                metrics.update(data_metrics)
+                    with Timer(name='save_checkpoint', logger=None) as timer:
+                        if self.config.trainer.save_freq > 0 and (self.global_step +
+                                                                  1) % self.config.trainer.save_freq == 0:
+                            actor_local_path = os.path.join(self.config.trainer.default_local_dir, 'actor',
+                                                            f'global_step_{self.global_step}')
+                            actor_remote_path = os.path.join(self.config.trainer.default_hdfs_dir, 'actor')
+                            self.actor_rollout_wg.save_checkpoint(actor_local_path, actor_remote_path)
 
+                            if self.use_critic:
+                                critic_local_path = os.path.join(self.config.trainer.default_local_dir, 'critic',
+                                                                 f'global_step_{self.global_step}')
+                                critic_remote_path = os.path.join(self.config.trainer.default_hdfs_dir, 'critic')
+                                self.critic_wg.save_checkpoint(critic_local_path, critic_remote_path)
+                    metrics['timing/save_checkpoint'] = timer.last
+
+                metrics['timing/step'] = step_timer.last
                 # TODO: make a canonical logger that supports various backend
                 self.logger.log(data=metrics, step=self.global_step)
-
-                if self.config.trainer.save_freq > 0 and (self.global_step + 1) % self.config.trainer.save_freq == 0:
-                    actor_local_path = os.path.join(self.config.trainer.default_local_dir, 'actor',
-                                                    f'global_step_{self.global_step}')
-                    actor_remote_path = os.path.join(self.config.trainer.default_hdfs_dir, 'actor')
-                    self.actor_rollout_wg.save_checkpoint(actor_local_path, actor_remote_path)
-
-                    if self.use_critic:
-                        critic_local_path = os.path.join(self.config.trainer.default_local_dir, 'critic',
-                                                         f'global_step_{self.global_step}')
-                        critic_remote_path = os.path.join(self.config.trainer.default_hdfs_dir, 'critic')
-                        self.critic_wg.save_checkpoint(critic_local_path, critic_remote_path)
 
                 self.global_step += 1
 

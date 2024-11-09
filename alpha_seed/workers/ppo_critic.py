@@ -148,9 +148,7 @@ class DataParallelPPOCritic(BasePPOCritic):
         select_keys = ['responses', 'input_ids', 'attention_mask', 'position_ids']
         batch = data.select(batch_keys=select_keys).batch
         if use_dynamic_bsz:
-            (micro_batches,
-             num_micro_batches) = rearrange_micro_batches(batch=data.batch,
-                                                          max_token_len=max_token_len)
+            (micro_batches, num_micro_batches) = rearrange_micro_batches(batch=data.batch, max_token_len=max_token_len)
         else:
             # split batch into micro_batches
             micro_batches = batch.split(micro_batch_size)

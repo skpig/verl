@@ -1067,9 +1067,8 @@ class RewardModelWorker(Worker):
             rm_data = self.ulysses_sharding_manager.preprocess_data(rm_data)
 
             if self.config.use_dynamic_bsz:
-                (micro_batches,
-                num_micro_batches) = rearrange_micro_batches(batch=rm_data.batch,
-                                                            max_token_len=self.config.max_token_len)
+                (micro_batches, num_micro_batches) = rearrange_micro_batches(batch=rm_data.batch,
+                                                                             max_token_len=self.config.max_token_len)
             else:
                 # split batch into micro_batches
                 micro_batches = rm_data.batch.split(self.config.micro_batch_size)
