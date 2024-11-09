@@ -55,8 +55,9 @@ class DataParallelPPOCritic(BasePPOCritic):
         if torch.distributed.get_rank() == 0:
             print(f'Critic use_rmpad={self.use_rmpad}')
 
-        assert self.config.ppo_mini_batch_size % self.config.ppo_micro_batch_size == 0, f'{self.config.ppo_mini_batch_size=}, {self.config.ppo_micro_batch_size=}'
-        self.gradient_accumulation = self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size
+        if not self.config.use_dynamic_bsz:
+            assert self.config.ppo_mini_batch_size % self.config.ppo_micro_batch_size == 0, f'{self.config.ppo_mini_batch_size=}, {self.config.ppo_micro_batch_size=}'
+            self.gradient_accumulation = self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size
 
         self.profiler_context = get_profiler_context(filename=self.config.profile.filename,
                                                      profile_on_ranks=self.config.profile.profile_on_ranks,
@@ -165,10 +166,11 @@ class DataParallelPPOCritic(BasePPOCritic):
 
         dataloader = self._make_minibatch_iterator(data)
 
-        if self.gradient_accumulation > 2 and not isinstance(self.profiler_context, nullcontext):
-            raise ValueError(
-                f'Number of {self.gradient_accumulation=} is too large when turn on profile. Try to turn off profile or reduce ppo_mini_batch_size.'
-            )
+        if not self.config.use_dynamic_bsz:
+            if self.gradient_accumulation > 2 and not isinstance(self.profiler_context, nullcontext):
+                raise ValueError(
+                    f'Number of {self.gradient_accumulation=} is too large when turn on profile. Try to turn off profile or reduce ppo_mini_batch_size.'
+                )
 
         for batch_idx, data in enumerate(dataloader):
             with self.profiler_context as p:

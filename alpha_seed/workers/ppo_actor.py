@@ -180,15 +180,14 @@ class DataParallelPPOActor(BasePPOActor):
         # make sure we are in training mode
         self.actor_module.train()
 
-        assert self.config.ppo_mini_batch_size % self.config.ppo_micro_batch_size == 0
-        self.gradient_accumulation = self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size
+        if not self.config.use_dynamic_bsz:
+            assert self.config.ppo_mini_batch_size % self.config.ppo_micro_batch_size == 0
+            self.gradient_accumulation = self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size
+            if self.gradient_accumulation > 2 and not isinstance(self.profiler_context, nullcontext):
+                raise ValueError(
+                    f'Number of {self.gradient_accumulation=} is too large when turn on profile. Try to turn off profile or reduce ppo_mini_batch_size.'
+                )
         temperature = data.meta_info['temperature']  # temperature must be in the data.meta_info to avoid slient error
-
-        if self.gradient_accumulation > 2 and not isinstance(self.profiler_context, nullcontext):
-            raise ValueError(
-                f'Number of {self.gradient_accumulation=} is too large when turn on profile. Try to turn off profile or reduce ppo_mini_batch_size.'
-            )
-
         dataloader = self._make_minibatch_iterator(data=data)
 
         metrics = {}
