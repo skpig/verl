@@ -1,3 +1,6 @@
+jobs/
+trash/
+data_proc/
 **/xperf_gpt_nccl_file*
 **/*.pt
 **/checkpoints
