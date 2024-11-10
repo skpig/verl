@@ -778,7 +778,7 @@ class RayPPOTrainer(object):
                         metrics.update(critic_output_metrics)
 
                     # implement critic warmup
-                    if self.config.trainer.critic_warmup <= self.global_step:
+                    if self.config.trainer.critic_warmup <= self.global_step and self.global_step % self.config.trainer.actor_update_freq == 0:
                         # update actor
                         with Timer(name='update_actor', logger=None) as timer:
                             actor_output = self.actor_rollout_wg.update_actor(batch)
