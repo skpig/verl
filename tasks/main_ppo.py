@@ -185,19 +185,33 @@ def validate_config(config):
         assert config.critic.ppo_mini_batch_size % config.critic.ppo_micro_batch_size == 0
         assert config.critic.ppo_micro_batch_size * ulysses >= n_gpus
 
+    min_required_seq_len = config.data.max_prompt_length + config.data.max_response_length
     if config.actor_rollout_ref.actor.use_dynamic_bsz:
-        assert (config.data.max_prompt_length +
-                config.data.max_response_length) <= config.actor_rollout_ref.actor.ppo_max_token_len
+        if min_required_seq_len > config.actor_rollout_ref.actor.ppo_max_token_len:
+            config.actor_rollout_ref.actor.ppo_max_token_len = min_required_seq_len
+            print(
+                f"Warning: config.actor_rollout_ref.actor.ppo_max_token_len is set to {config.actor_rollout_ref.actor.ppo_max_token_len}"
+            )
     if config.actor_rollout_ref.ref.use_dynamic_bsz:
-        assert (config.data.max_prompt_length +
-                config.data.max_response_length) <= config.actor_rollout_ref.ref.max_token_len
+        if min_required_seq_len > config.actor_rollout_ref.ref.log_prob_max_token_len:
+            config.actor_rollout_ref.ref.log_prob_max_token_len = min_required_seq_len
+            print(
+                f"Warning: config.actor_rollout_ref.ref.log_prob_max_token_len is set to {config.actor_rollout_ref.ref.log_prob_max_token_len}"
+            )
     if config.actor_rollout_ref.rollout.use_dynamic_bsz:
-        assert (config.data.max_prompt_length +
-                config.data.max_response_length) <= config.actor_rollout_ref.rollout.max_token_len
+        if min_required_seq_len > config.actor_rollout_ref.rollout.log_prob_max_token_len:
+            config.actor_rollout_ref.rollout.log_prob_max_token_len = min_required_seq_len
+            print(
+                f"Warning: config.actor_rollout_ref.rollout.log_prob_max_token_len is set to {config.actor_rollout_ref.rollout.log_prob_max_token_len}"
+            )
     if config.critic.use_dynamic_bsz:
-        assert (config.data.max_prompt_length + config.data.max_response_length) <= config.critic.ppo_max_token_len
+        if min_required_seq_len > config.critic.ppo_max_token_len:
+            config.critic.ppo_max_token_len = min_required_seq_len
+            print(f"Warning: config.critic.ppo_max_token_len is set to {config.critic.ppo_max_token_len}")
     if config.reward_model.use_dynamic_bsz:
-        assert (config.data.max_prompt_length + config.data.max_response_length) <= config.reward_model.max_token_len
+        if min_required_seq_len > config.reward_model.max_token_len:
+            config.reward_model.max_token_len = min_required_seq_len
+            print(f"Warning: config.reward_model.max_token_len is set to {config.reward_model.max_token_len}")
 
 
 @ray.remote

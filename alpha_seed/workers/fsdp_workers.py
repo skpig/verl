@@ -408,7 +408,7 @@ class ActorRolloutRefWorker(Worker):
             output.meta_info['temperature'] = prompts.meta_info['generation_kwargs']['temperature']
             output.meta_info['use_dynamic_bsz'] = self.config.rollout.use_dynamic_bsz
             if self.config.rollout.use_dynamic_bsz:
-                output.meta_info['max_token_len'] = self.config.rollout.max_token_len
+                output.meta_info['max_token_len'] = self.config.rollout.log_prob_max_token_len
             else:
                 output.meta_info['micro_batch_size'] = self.config.rollout.log_prob_micro_batch_size
             with self.ulysses_sharding_manager:
@@ -433,7 +433,7 @@ class ActorRolloutRefWorker(Worker):
         micro_batch_size = self.config.ref.log_prob_micro_batch_size
         data.meta_info['use_dynamic_bsz'] = self.config.ref.use_dynamic_bsz
         if self.config.ref.use_dynamic_bsz:
-            data.meta_info['max_token_len'] = self.config.ref.max_token_len
+            data.meta_info['max_token_len'] = self.config.ref.log_prob_max_token_len
         else:
             data.meta_info['micro_batch_size'] = micro_batch_size
         data.meta_info['temperature'] = self.config.rollout.train_generate_kwargs.temperature
