@@ -73,7 +73,7 @@ actor_rollout_ref:
         min_num_params: 0
     log_prob_micro_batch_size: 128
     use_dynamic_bsz: True
-    log_prob_max_token_len: -1
+    max_token_len: -1
   rollout:
     name: xperf_gpt
     prompt_length: ${data.max_prompt_length}  # for xperf_gpt
@@ -89,7 +89,7 @@ actor_rollout_ref:
     max_num_batched_tokens: 8192
     max_num_seqs: 1024
     use_dynamic_bsz: True
-    log_prob_max_token_len: -1
+    max_token_len: -1
     log_prob_micro_batch_size: 128
     # for xperf_gpt
     micro_batch_size: 256

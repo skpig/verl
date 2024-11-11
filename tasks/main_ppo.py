@@ -193,16 +193,16 @@ def validate_config(config):
                 f"Warning: config.actor_rollout_ref.actor.ppo_max_token_len is set to {config.actor_rollout_ref.actor.ppo_max_token_len}"
             )
     if config.actor_rollout_ref.ref.use_dynamic_bsz:
-        if min_required_seq_len > config.actor_rollout_ref.ref.log_prob_max_token_len:
-            config.actor_rollout_ref.ref.log_prob_max_token_len = min_required_seq_len
+        if min_required_seq_len > config.actor_rollout_ref.ref.max_token_len:
+            config.actor_rollout_ref.ref.max_token_len = min_required_seq_len
             print(
-                f"Warning: config.actor_rollout_ref.ref.log_prob_max_token_len is set to {config.actor_rollout_ref.ref.log_prob_max_token_len}"
+                f"Warning: config.actor_rollout_ref.ref.max_token_len is set to {config.actor_rollout_ref.ref.max_token_len}"
             )
     if config.actor_rollout_ref.rollout.use_dynamic_bsz:
-        if min_required_seq_len > config.actor_rollout_ref.rollout.log_prob_max_token_len:
-            config.actor_rollout_ref.rollout.log_prob_max_token_len = min_required_seq_len
+        if min_required_seq_len > config.actor_rollout_ref.rollout.max_token_len:
+            config.actor_rollout_ref.rollout.max_token_len = min_required_seq_len
             print(
-                f"Warning: config.actor_rollout_ref.rollout.log_prob_max_token_len is set to {config.actor_rollout_ref.rollout.log_prob_max_token_len}"
+                f"Warning: config.actor_rollout_ref.rollout.max_token_len is set to {config.actor_rollout_ref.rollout.max_token_len}"
             )
     if config.critic.use_dynamic_bsz:
         if min_required_seq_len > config.critic.ppo_max_token_len:
