@@ -272,14 +272,14 @@ class DataParallelPPOActor(BasePPOActor):
                         'actor/pg_clipfrac2': pg_clipfrac2.detach().item(),
                         'actor/ppo_kl': ppo_kl.detach().item(),
                         'actor/ppo_kl_sum': ppo_kl_sum.detach().item(),
-                        'actor/token_num_in_update': attention_mask.sum().detach().item(),
+                        'actor/tokens_per_micro_batch_update': attention_mask.sum().detach().item(),
                     }
                     append_to_dict(metrics, micro_data_metric)
 
                 grad_norm = self._optimizer_step()
                 data_metric = {
                     'actor/grad_norm': grad_norm.detach().item(),
-                    'actor/num_micro_batch': len(micro_batches)
+                    'actor/#micro_batch_update': len(micro_batches)
                 }
                 append_to_dict(metrics, data_metric)
 

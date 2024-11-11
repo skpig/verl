@@ -219,12 +219,16 @@ class DataParallelPPOCritic(BasePPOCritic):
                         'critic/vf_loss': vf_loss.detach().item(),
                         'critic/vf_clipfrac': vf_clipfrac.detach().item(),
                         'critic/vpred_mean': masked_mean(vpreds, eos_mask).detach().item(),
+                        'critic/tokens_per_micro_batch_update': attention_mask.sum().detach().item(),
                     }
 
                     append_to_dict(metrics, micro_data_metric)
 
                 grad_norm = self._optimizer_step()
-                data_metric = {'critic/grad_norm': grad_norm.detach().item()}
+                data_metric = {
+                    'critic/grad_norm': grad_norm.detach().item(),
+                    'critic/#micro_batch_update': len(micro_batches)
+                }
                 append_to_dict(metrics, data_metric)
 
                 p.step()

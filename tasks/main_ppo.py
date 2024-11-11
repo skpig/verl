@@ -175,14 +175,15 @@ def validate_config(config):
 
     # actor
     assert real_train_batch_size % config.actor_rollout_ref.actor.ppo_mini_batch_size == 0
-    assert config.actor_rollout_ref.actor.ppo_mini_batch_size % config.actor_rollout_ref.actor.ppo_micro_batch_size == 0
     if not config.actor_rollout_ref.actor.use_dynamic_bsz:
+        assert config.actor_rollout_ref.actor.ppo_mini_batch_size % config.actor_rollout_ref.actor.ppo_micro_batch_size == 0
         assert config.actor_rollout_ref.actor.ppo_micro_batch_size * ulysses >= n_gpus
 
     # critic
     assert real_train_batch_size % config.critic.ppo_mini_batch_size == 0
-    assert config.critic.ppo_mini_batch_size % config.critic.ppo_micro_batch_size == 0
-    assert config.critic.ppo_micro_batch_size * ulysses >= n_gpus
+    if not config.critic.use_dynamic_bsz:
+        assert config.critic.ppo_mini_batch_size % config.critic.ppo_micro_batch_size == 0
+        assert config.critic.ppo_micro_batch_size * ulysses >= n_gpus
 
     if config.actor_rollout_ref.actor.use_dynamic_bsz:
         assert (config.data.max_prompt_length +

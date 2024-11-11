@@ -27,7 +27,7 @@ actor_rollout_ref:
     ppo_mini_batch_size: 512
     ulysses_sequence_parallel_size: 1
     ppo_micro_batch_size: 64
-    use_dynamic_bsz: False
+    use_dynamic_bsz: True
     ppo_max_token_len: 4096
     grad_clip: 1.0
     clip_ratio: 0.2
@@ -72,7 +72,7 @@ actor_rollout_ref:
         # transformer_layer_cls_to_wrap: None
         min_num_params: 0
     log_prob_micro_batch_size: 128
-    use_dynamic_bsz: False
+    use_dynamic_bsz: True
     max_token_len: 4096
   rollout:
     name: xperf_gpt
@@ -88,7 +88,7 @@ actor_rollout_ref:
     tensor_model_parallel_size: 2
     max_num_batched_tokens: 8192
     max_num_seqs: 1024
-    use_dynamic_bsz: False
+    use_dynamic_bsz: True
     max_token_len: 4096
     log_prob_micro_batch_size: 128
     # for xperf_gpt
@@ -144,7 +144,7 @@ critic:
   ulysses_sequence_parallel_size: ${actor_rollout_ref.actor.ulysses_sequence_parallel_size}
   ppo_mini_batch_size: ${actor_rollout_ref.actor.ppo_mini_batch_size}
   ppo_micro_batch_size: 64
-  use_dynamic_bsz: False
+  use_dynamic_bsz: True
   ppo_max_token_len: 4096
   infer_micro_batch_size: 128
   ppo_epochs: ${actor_rollout_ref.actor.ppo_epochs}
@@ -170,7 +170,7 @@ reward_model:
       param_offload: False
   ulysses_sequence_parallel_size: ${actor_rollout_ref.actor.ulysses_sequence_parallel_size}
   micro_batch_size: 64
-  use_dynamic_bsz: False
+  use_dynamic_bsz: True
   max_token_len: 4096
   max_length: null
   max_prompt_length: ${data.max_prompt_length}
