@@ -10,7 +10,8 @@ CLIENT_TIMEOUT = 30
 
 def compute_score(solution_str, ground_truth, code_sandbox_psm, **argv) -> float:
     if code_sandbox_psm != "":
-        sd_result = servicediscovery.get_one(code_sandbox_psm)
+        sd_result = servicediscovery.get_one(code_sandbox_psm, address_family="dual-stack")
+        sd_result['Host'] = f"[{sd_result['Host']}]" if ':' in sd_result['Host'] else sd_result['Host']
         endpoint = f"http://{sd_result['Host']}:{sd_result['Port']}"
     else:
         endpoint = "https://faas-code-sandbox.bytedance.net/"
@@ -46,7 +47,7 @@ def test_compute_score():
     return True''',
             ground_truth=
             '{"oj_features": {"dataset": "mining_11697_v1", "id": 8015, "config": {"dataset_type": "PythonAutoDataset", "language": "python", "is_fewshot": false, "extra": {"append_flag": true}, "provided_data": {"content": "\\n输入一个列表, 判断这个列表中的所有元素是否按照升序排列. 用 python 定义函数 is_sorted(items) 解决这个问题.\\n", "test": "\\n\\ndef check(): \\n    assert str(is_sorted([])) == \'True\'\\n    assert str(is_sorted([1])) == \'True\'\\n    assert str(is_sorted([1, 2])) == \'True\'\\n    assert str(is_sorted([2, 1])) == \'False\'\\n    assert str(is_sorted([1, 2, 3])) == \'True\'\\n\\ncheck()", "labels": "{\\"tags\\": [\\"mining_v1\\"], \\"programming_language\\": \\"python\\", \\"execution_language\\": \\"python\\"}", "id": 8015}}, "completion": ""}}',
-            code_sandbox_psm="data.seed.alphaseed.service.lf"))
+            code_sandbox_psm="seed.alpha.sandboxd1112.service.hl"))
 
 
 def test_compute_score_timeout():
@@ -62,7 +63,7 @@ def is_sorted(items):
     return True''',
             ground_truth=
             '{"oj_features": {"dataset": "mining_11697_v1", "id": 8015, "config": {"dataset_type": "PythonAutoDataset", "language": "python", "is_fewshot": false, "extra": {"append_flag": true}, "provided_data": {"content": "\\n输入一个列表, 判断这个列表中的所有元素是否按照升序排列. 用 python 定义函数 is_sorted(items) 解决这个问题.\\n", "test": "\\n\\ndef check(): \\n    assert str(is_sorted([])) == \'True\'\\n    assert str(is_sorted([1])) == \'True\'\\n    assert str(is_sorted([1, 2])) == \'True\'\\n    assert str(is_sorted([2, 1])) == \'False\'\\n    assert str(is_sorted([1, 2, 3])) == \'True\'\\n\\ncheck()", "labels": "{\\"tags\\": [\\"mining_v1\\"], \\"programming_language\\": \\"python\\", \\"execution_language\\": \\"python\\"}", "id": 8015}}, "completion": ""}}',
-            code_sandbox_psm="data.seed.alphaseed.service.lf"))
+            code_sandbox_psm="seed.alphaseed.sandbox.service.hl"))
 
 
 if __name__ == '__main__':
