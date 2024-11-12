@@ -20,8 +20,8 @@ else
 fi
 
 # 训练长度
-max_prompt_length=1024 # 16384
-max_response_length=1024 # 16384
+max_prompt_length=2048 # 16384
+max_response_length=8192 # 16384
 # batch size && 训练epoch
 train_batch_size=1024
 val_batch_size=500
@@ -72,7 +72,7 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.grad_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
-    actor_rollout_ref.actor.entropy_coeff=0.000 \
+    actor_rollout_ref.actor.entropy_coeff=0.001 \
     actor_rollout_ref.actor.clip_ratio2=${clip_ratio2} \
     actor_rollout_ref.rollout.micro_batch_size=1024 \
     actor_rollout_ref.rollout.log_prob_micro_batch_size=512 \

@@ -399,9 +399,13 @@ class ActorRolloutRefWorker(Worker):
 
             prompts = self.sharding_manager.preprocess_data(prompts)
             output = self.rollout.generate_sequences(prompts=prompts)
-            log_gpu_memory_usage('After rollout generation', logger=logger)
 
             output = self.sharding_manager.postprocess_data(output)
+
+        torch.distributed.barrier()
+        torch.cuda.empty_cache()
+
+        log_gpu_memory_usage('After rollout generation', logger=logger)
 
         if self._is_actor and recompute_log_prob:
             # we should always recompute old_log_probs when it is HybridEngine
