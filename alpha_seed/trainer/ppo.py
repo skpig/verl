@@ -174,6 +174,8 @@ def compute_data_metrics(batch, use_critic, mean, std):
     prompt_mask = batch.batch['attention_mask'][:, :-response_length]
     response_mask = batch.batch['attention_mask'][:, -response_length:]
 
+    old_log_probs = batch.batch['old_log_probs']
+
     prompt_length = prompt_mask.sum(-1).float()
     response_length = response_mask.sum(-1).float()  # (batch_size,)
     max_prompt_length = float(prompt_mask.size(-1))
@@ -187,6 +189,7 @@ def compute_data_metrics(batch, use_critic, mean, std):
     valid_adv = torch.masked_select(advantages, response_mask_bool)
     valid_origin_adv = torch.masked_select(origin_advantages, response_mask_bool)
     valid_returns = torch.masked_select(returns, response_mask_bool)
+    valid_old_logprob = torch.masked_select(old_log_probs, response_mask_bool)
 
     eos_adv = torch.gather(advantages, dim=1, index=response_length.unsqueeze(dim=1).long() - 1).reshape(-1)
     eos_original_adv = torch.gather(origin_advantages, dim=1,
@@ -275,6 +278,9 @@ def compute_data_metrics(batch, use_critic, mean, std):
         ## prompt clip ratio
         'prompt_length/clip_ratio':
             torch.mean(torch.eq(prompt_length, max_prompt_length).float()).detach().item(),
+        # prob
+        'prob/mean':
+            torch.mean(torch.exp(valid_old_logprob)).detach().item(),
     }
     if use_critic:
         values = batch.batch['values']
