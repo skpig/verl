@@ -180,6 +180,7 @@ class DataParallelPPOActor(BasePPOActor):
             max_token_len = data.meta_info['max_token_len']
         else:
             micro_batch_size = data.meta_info['micro_batch_size']
+            micro_batch_size = 1
         temperature = data.meta_info['temperature']  # temperature must be in the data.meta_info to avoid slient error
 
         select_keys = ['responses', 'input_ids', 'attention_mask', 'position_ids']

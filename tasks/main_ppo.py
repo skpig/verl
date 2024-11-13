@@ -25,6 +25,8 @@ import hdfs_io
 
 # rule-based reward score
 from alpha_seed.utils.reward_score import gsm8k, math, math_v2, model_score_fn, logic_puzzle, oj_utils
+from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRefWorker
+from alpha_seed.workers.actors.critic_worker import CriticWorker
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
@@ -244,7 +246,6 @@ def main_task(config):
     # define worker classes
     if config.actor_rollout_ref.actor.strategy == 'fsdp':
         assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
-        from alpha_seed.workers.fsdp_workers import ActorRolloutRefWorker, CriticWorker
         from single_controller.ray import RayWorkerGroup
         ray_worker_group_cls = RayWorkerGroup
     else:
@@ -253,19 +254,23 @@ def main_task(config):
     from alpha_seed.trainer.ppo import ResourcePoolManager, Role
 
     role_worker_mapping = {
-        Role.ActorRollout: ActorRolloutRefWorker,
+        Role.ActorRollout: AsyncActorRolloutRefWorker,
         Role.Critic: CriticWorker,
-        Role.RefPolicy: ActorRolloutRefWorker
+        Role.RefPolicy: AsyncActorRolloutRefWorker,
+        Role.Rollout: AsyncActorRolloutRefWorker,
     }
 
     global_pool_id = 'global_pool'
+    standalone_pool_id = 'standalone_pool'
     resource_pool_spec = {
         global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
+        standalone_pool_id: [config.streaming_rollout.n_gpus_per_node] * config.streaming_rollout.nnodes,
     }
     mapping = {
         Role.ActorRollout: global_pool_id,
         Role.Critic: global_pool_id,
         Role.RefPolicy: global_pool_id,
+        Role.Rollout: standalone_pool_id,
     }
 
     # we should adopt a multi-source reward function here
@@ -275,7 +280,7 @@ def main_task(config):
     # - finally, we combine all the rewards together
     # - The reward type depends on the tag of the data
     if config.reward_model.enable:
-        from alpha_seed.workers.fsdp_workers import RewardModelWorker
+        from alpha_seed.workers.actors.reward_worker import RewardModelWorker
         role_worker_mapping[Role.RewardModel] = RewardModelWorker
         mapping[Role.RewardModel] = global_pool_id
 

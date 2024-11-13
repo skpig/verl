@@ -1,43 +1,66 @@
 set -x
 
 # ckpt和路径
-SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/alphaseed/20241107/p6_400m_moe_4T_sft_v27_bs128_lr4e-4_master_dyn_epoch4_hf
-RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/alphaseed/20241107/400m_p60905_137k_revisedonly_scalingexp_5xsample_bsz400_lr5e6_tp4pp2_hf
+# ckpt和路径
+SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/alphaseed/20241107/ct128kv2_baseline_sft32k_v27_lr2e5_epoch4_rope1000_hf
+RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/alphaseed/20241107/3b3p60905_137k_revisedonly_scalingexp_5xsample_bsz1600_lr5e6_tp4pp5_hf
 TRAIN_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/hard60_format_repeat10.parquet
 TEST_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/math_500.parquet
-default_hdfs_dir=hdfs://haruna/home/byte_data_seed/ssd_hldy/evals_pipeline/user/liulingjun.godzilla/20241109
 
-# 训练长度
-max_prompt_length=2048 # 16384
-max_response_length=8192 # 16384
-# batch size && 训练epoch
+# 实验参数
+num_bon=1
+max_response_length=2048
+reward_overlong=True
 train_batch_size=1024
-val_batch_size=500
 ppo_mini_batch_size=128
+actor_lr=2e-6
+critic_lr=2e-6
+gae_gamma=1.0
+gae_lam=1.0
+lr_warmup_steps_ratio=0.00003 # 10 / (train_size * total_epochs / train_batch_size)
+kl_coef=0.0001
+actor_entropy_coeff=0.001
+
+# tracking log
+model_size="3b3"  # in 400m, 3b3, 12B
+project_name='alphaseed_bon'
+experiment_name=${model_size}'_bo1_speed_2k_streaming_2048'
+default_hdfs_dir=hdfs://haruna/home/byte_data_seed/ssd_hldy/evals_pipeline/user/liulingjun.godzilla/20241109bo1
+
+# 工程参数
+# 工程参数
+if [ "${model_size}" = "400m" ]; then
+    gen_micro_batch_size=1024
+    infer_micro_batch_size=256
+    train_micro_batch_size=64
+    ulysses_sequence_parallel_size=1
+    rollout_tensor_model_parallel_size=1 
+elif [ "${model_size}" = "3b3" ]; then
+    gen_micro_batch_size=128
+    infer_micro_batch_size=512
+    train_micro_batch_size=64
+    ulysses_sequence_parallel_size=1
+    rollout_tensor_model_parallel_size=4
+elif [ "${model_size}" = "12B" ]; then
+    gen_micro_batch_size=512
+    infer_micro_batch_size=512
+    train_micro_batch_size=64
+    ulysses_sequence_parallel_size=1
+    rollout_tensor_model_parallel_size=4
+else
+    echo "Model size is not recognized, taking default actions."
+    exit 1
+fi
+
+# 固定参数
+max_prompt_length=2048
+val_batch_size=448
 total_epochs=5000
 test_freq=5
-save_freq=10
-# 算法相关的参数
-actor_lr=1e-6
-critic_lr=2e-6
-lr_warmup_steps=1 # 10 / (train_size * total_epochs / train_batch_size)
-kl_coef=0.0001
+save_freq=50
 use_last_response=False
 use_ref_answer=True
-gae_gamma=1.0
-gae_lam=0.95
-force_append_eos=True
-upgo_loss_weight=0.2
-upgo_loss_version=1
-clip_ratio2=2.0
-# tracking实验名
-project_name='verl_example_math'
-experiment_name='p6_400m_math_baseline_v2_16k_1024_128_lam0.95_prm_actor_lr1e-6_streaming_1024'
-# 工程参数
-gen_micro_batch_size=512
-infer_micro_batch_size=512
-train_micro_batch_size=64
-ulysses_sequence_parallel_size=1
+
 
 python3 tasks/main_ppo.py \
     data.train_files=${TRAIN_FILE} \
@@ -60,28 +83,27 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=${ulysses_sequence_parallel_size} \
     actor_rollout_ref.actor.optim.lr=${actor_lr} \
-    actor_rollout_ref.actor.optim.lr_warmup_steps=${lr_warmup_steps} \
+    actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=${lr_warmup_steps_ratio} \
     actor_rollout_ref.actor.ppo_mini_batch_size=${ppo_mini_batch_size} \
     actor_rollout_ref.actor.ppo_micro_batch_size=${train_micro_batch_size} \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.grad_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
-    actor_rollout_ref.actor.entropy_coeff=0.001 \
-    actor_rollout_ref.actor.clip_ratio2=${clip_ratio2} \
+    actor_rollout_ref.actor.entropy_coeff=${actor_entropy_coeff} \
     actor_rollout_ref.rollout.micro_batch_size=${gen_micro_batch_size} \
     actor_rollout_ref.rollout.log_prob_micro_batch_size=${infer_micro_batch_size} \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
+    actor_rollout_ref.rollout.tensor_model_parallel_size=${rollout_tensor_model_parallel_size} \
     actor_rollout_ref.rollout.name=xperf_gpt \
     +actor_rollout_ref.rollout.use_vllm=False \
     +actor_rollout_ref.rollout.num_slots=256 \
+    actor_rollout_ref.rollout.num_bon=${num_bon} \
+    actor_rollout_ref.rollout.bon_strategy=best_worst \
     +actor_rollout_ref.rollout.slot_block_size=1024 \
     actor_rollout_ref.ref.log_prob_micro_batch_size=${infer_micro_batch_size} \
     actor_rollout_ref.ref.fsdp_config.param_offload=False \
-    actor_rollout_ref.actor.scale_pg_by_kl=True \
-    actor_rollout_ref.actor.upgo_loss_weight=${upgo_loss_weight} \
-    actor_rollout_ref.actor.upgo_loss_version=${upgo_loss_version} \
+    +actor_rollout_ref.ref.fsdp_config.mixed_precision.buffer_dtype=bf16 \
     critic.optim.lr=${critic_lr} \
-    critic.optim.lr_warmup_steps=${lr_warmup_steps} \
+    critic.optim.lr_warmup_steps_ratio=${lr_warmup_steps_ratio} \
     critic.model.path=${RM_MODEL_PATH} \
     critic.model.enable_gradient_checkpointing=True \
     critic.ppo_micro_batch_size=${train_micro_batch_size} \
@@ -102,12 +124,11 @@ python3 tasks/main_ppo.py \
     reward_model.std=1.0 \
     reward_model.use_last_response=${use_last_response} \
     +reward_model.use_rmpad=True \
-    reward_model.reward_0_for_overlong_rsp=False \
+    reward_model.reward_0_for_overlong_rsp=${reward_overlong} \
     reward_model.punish_no_answer=v0 \
     algorithm.kl_ctrl.kl_coef=${kl_coef} \
     algorithm.gamma=${gae_gamma} \
     algorithm.lam=${gae_lam} \
-    algorithm.force_append_eos=${force_append_eos} \
     trainer.critic_warmup=0 \
     trainer.logger=['console','tracking'] \
     trainer.project_name=${project_name} \
@@ -116,13 +137,14 @@ python3 tasks/main_ppo.py \
     trainer.save_freq=${save_freq} \
     trainer.test_freq=${test_freq} \
     trainer.total_epochs=${total_epochs} \
-    trainer.eval_before_training=True \
+    trainer.eval_before_training=False \
     trainer.val_only=False \
     trainer.val_epoch=1 \
     trainer.need_log=False \
     trainer.log_file=/opt/tiger/alpha-seed/log.jsonl \
-    +actor_rollout_ref.rollout.complete_ratio=0.8 \
+    trainer.save_cases_to_hdfs=False\
+    streaming_rollout.nnodes=2 \
+    streaming_rollout.n_gpus_per_node=8\
     trainer.nnodes=2 \
     trainer.n_gpus_per_node=8 \
-    streaming_rollout.nnodes=2 \
-    streaming_rollout.n_gpus_per_node=8
+    +actor_rollout_ref.rollout.complete_ratio=0.8 

@@ -1,15 +1,27 @@
 set -x
+ray stop --force
+if [[ "${ARNOLD_REGION}" == "US" ]]; then
+    echo "Running in US Region"
+    # ckpt格式和master冲突，需要重新同步
+    SFT_MODEL_PATH=hdfs://harunava/home/byte_data_seed_azure/seed_rlhf/user/zhangchi.usc1992/alpha-seed/models/400m.sft27.baseline
+    RM_MODEL_PATH=hdfs://harunava/home/byte_data_seed_azure/seed_rlhf/user/zhangchi.usc1992/alpha-seed/models/rm_p6_moe_400m_baseline
+    TRAIN_FILE=hdfs://harunava/home/byte_data_seed_azure/seed_rlhf/user/zhangchi.usc1992/alpha-seed/data/math/hard60_format.parquet
+    TEST_FILE=hdfs://harunava/home/byte_data_seed_azure/seed_rlhf/user/zhangchi.usc1992/alpha-seed/data/math/math_500.parquet
+    default_hdfs_dir=hdfs://harunava/home/byte_data_seed_azure/seed_rlhf/user/zhangchi.usc1992/alpha-seed/experiments/test
 
-# ckpt和路径
-SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/alphaseed/20241107/p6_400m_moe_4T_sft_v27_bs128_lr4e-4_master_dyn_epoch4_hf
-RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/alphaseed/20241107/400m_p60905_137k_revisedonly_scalingexp_5xsample_bsz400_lr5e6_tp4pp2_hf
-TRAIN_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/hard60_format_repeat10.parquet
-TEST_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/math_500.parquet
-default_hdfs_dir=hdfs://haruna/home/byte_data_seed/ssd_hldy/evals_pipeline/user/liulingjun.godzilla/20241109
+else
+    echo "Running in CN Region"
+    # ckpt和路径
+    SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/alphaseed/20241107/p6_400m_moe_4T_sft_v27_bs128_lr4e-4_master_dyn_epoch4_hf
+    RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/alphaseed/20241107/400m_p60905_137k_revisedonly_scalingexp_5xsample_bsz400_lr5e6_tp4pp2_hf
+    TRAIN_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/hard60_format_repeat10.parquet
+    TEST_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/math_500.parquet
+    default_hdfs_dir=hdfs://haruna/home/byte_data_seed/ssd_hldy/evals_pipeline/user/liulingjun.godzilla/streaming_rollout_test
+fi
 
 # 训练长度
-max_prompt_length=2048 # 16384
-max_response_length=8192 # 16384
+max_prompt_length=2048
+max_response_length=2048
 # batch size && 训练epoch
 train_batch_size=1024
 val_batch_size=500
@@ -18,7 +30,7 @@ total_epochs=5000
 test_freq=5
 save_freq=10
 # 算法相关的参数
-actor_lr=1e-6
+actor_lr=2e-6
 critic_lr=2e-6
 lr_warmup_steps=1 # 10 / (train_size * total_epochs / train_batch_size)
 kl_coef=0.0001
@@ -32,7 +44,7 @@ upgo_loss_version=1
 clip_ratio2=2.0
 # tracking实验名
 project_name='verl_example_math'
-experiment_name='p6_400m_math_baseline_v2_16k_1024_128_lam0.95_prm_actor_lr1e-6_streaming_1024'
+experiment_name='p6_400m_math_baseline_v2_16k_1024_128_lam0.95_prm_streaming_1024'
 # 工程参数
 gen_micro_batch_size=512
 infer_micro_batch_size=512
@@ -66,11 +78,12 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.grad_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
-    actor_rollout_ref.actor.entropy_coeff=0.001 \
+    actor_rollout_ref.actor.entropy_coeff=0.0 \
     actor_rollout_ref.actor.clip_ratio2=${clip_ratio2} \
     actor_rollout_ref.rollout.micro_batch_size=${gen_micro_batch_size} \
     actor_rollout_ref.rollout.log_prob_micro_batch_size=${infer_micro_batch_size} \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
+    +actor_rollout_ref.rollout.complete_ratio=0.8 \
     actor_rollout_ref.rollout.name=xperf_gpt \
     +actor_rollout_ref.rollout.use_vllm=False \
     +actor_rollout_ref.rollout.num_slots=256 \
@@ -116,13 +129,12 @@ python3 tasks/main_ppo.py \
     trainer.save_freq=${save_freq} \
     trainer.test_freq=${test_freq} \
     trainer.total_epochs=${total_epochs} \
-    trainer.eval_before_training=True \
+    trainer.eval_before_training=False \
     trainer.val_only=False \
     trainer.val_epoch=1 \
     trainer.need_log=False \
-    trainer.log_file=/opt/tiger/alpha-seed/log.jsonl \
-    +actor_rollout_ref.rollout.complete_ratio=0.8 \
-    trainer.nnodes=2 \
-    trainer.n_gpus_per_node=8 \
-    streaming_rollout.nnodes=2 \
-    streaming_rollout.n_gpus_per_node=8
+    trainer.log_file=/opt/tiger/alpha-seed/log.jsonl\
+    trainer.nnodes=1 \
+    trainer.n_gpus_per_node=4 \
+    streaming_rollout.nnodes=1 \
+    streaming_rollout.n_gpus_per_node=4

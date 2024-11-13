@@ -16,8 +16,10 @@ FSDP PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
 import os
+import copy
 import json
 import wandb
+import queue
 from dataclasses import dataclass, field
 from enum import Enum
 from pprint import pprint
@@ -68,7 +70,9 @@ class ResourcePoolManager:
 
     def create_resource_pool(self):
         for resource_pool_name, process_on_nodes in self.resource_pool_spec.items():
-            resource_pool = RayResourcePool(process_on_nodes=process_on_nodes, use_gpu=True)
+            resource_pool = RayResourcePool(process_on_nodes=process_on_nodes,
+                                            use_gpu=True,
+                                            name_prefix=resource_pool_name)
             self.resource_pool_dict[resource_pool_name] = resource_pool
 
     def get_resource_pool(self, role: Role) -> RayResourcePool:
@@ -428,7 +432,6 @@ class RayPPOTrainer(object):
         for val_epoch_idx in range(val_epoch):
             for val_idx, test_data in enumerate(self.val_dataloader):
                 test_batch = DataProto.from_single_dict(test_data)
-                # test_batch = test_batch.to('cuda')
 
                 test_gen_batch = test_batch.pop(['input_ids', 'attention_mask', 'position_ids'])
                 test_gen_batch.meta_info = {
@@ -436,8 +439,8 @@ class RayPPOTrainer(object):
                     'pad_token_id': self.tokenizer.pad_token_id,
                     'recompute_log_prob': False,
                     'validate': True,
+                    'complete_ratio': 1,  # validation does not need timeout
                 }
-
                 test_gen_batch.meta_info[
                     'generation_kwargs'] = self.config.actor_rollout_ref.rollout.val_generate_kwargs
 
@@ -512,6 +515,12 @@ class RayPPOTrainer(object):
                                                      config=self.config.actor_rollout_ref,
                                                      role='actor_rollout')
             self.resource_pool_to_cls[resource_pool]['actor_rollout'] = actor_rollout_cls
+
+            resource_pool = self.resource_pool_manager.get_resource_pool(Role.Rollout)
+            rollout_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Rollout],
+                                               config=self.config.actor_rollout_ref,
+                                               role='standalone_rollout')
+            self.resource_pool_to_cls[resource_pool]['standalone_rollout'] = rollout_cls
         else:
             raise NotImplementedError
 
@@ -566,10 +575,19 @@ class RayPPOTrainer(object):
         if self.use_rm:
             self.rm_wg = all_wg['rm']
             self.rm_wg.init_model()
+        # breakpoint()
+        if self.config.streaming_rollout.nnodes > 0:
+            # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
+            self.actor_rollout_wg = all_wg['actor_rollout']
+            self.standalone_rollout_wg = all_wg['standalone_rollout']
+            hybrid_master_address = self.actor_rollout_wg.get_master_addr()
+            standalone_master_address = self.standalone_rollout_wg.get_master_addr()
 
-        # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
-        self.actor_rollout_wg = all_wg['actor_rollout']
-        self.actor_rollout_wg.init_model()
+            self.actor_rollout_wg.init_model(hybrid_master_address, standalone_master_address)
+            self.standalone_rollout_wg.init_model(hybrid_master_address, standalone_master_address)
+        else:
+            self.actor_rollout_wg = all_wg['actor_rollout']
+            self.actor_rollout_wg.init_model()
 
         if self.config.actor_rollout_ref.actor.kl_loss_weight >= 1e-10:
             # 两种情况下使用kl loss，一种是grpo，另一种是在rewards里不加kl惩罚
@@ -687,36 +705,122 @@ class RayPPOTrainer(object):
             return
 
         # TODO: add staleness
+        standalone_batch = []
+        pending_batch_queue = queue.Queue()
+        ready_batch_queue = queue.Queue()
         for epoch in range(self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
                 metrics = {}
                 with Timer(name='step', logger=None) as step_timer:
+                    # hybrid generate (on policy)
                     batch: DataProto = DataProto.from_single_dict(batch_dict)
-                    # batch = batch.to('cuda')
-
-                    # pop those keys for generation
-                    gen_batch = batch.pop(batch_keys=['input_ids', 'attention_mask', 'position_ids'])
+                    batch = batch.repeat(self.num_bon)
+                    tmp_batch = copy.deepcopy(batch)
+                    gen_batch = tmp_batch.pop(batch_keys=['input_ids', 'attention_mask', 'position_ids'])
                     gen_batch.meta_info[
                         'generation_kwargs'] = self.config.actor_rollout_ref.rollout.train_generate_kwargs
-                    gen_batch.meta_info["num_bon"] = self.num_bon
-                    # generate a batch
+                    gen_batch.meta_info['complete_ratio'] = self.config.actor_rollout_ref.rollout.get(
+                        "complete_ratio", 1)
+                    pprint(f'start rollout, batches {len(gen_batch)}.')
                     with Timer(name='gen', logger=None) as timer:
                         gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
                     metrics['timing/gen'] = timer.last
-
+                    metrics['rollout/hybrid_input_batch'] = len(batch)
                     # only report metrics from one generation replica
                     if 'xperf_metrics' in gen_batch_output.meta_info:
                         for name, x_metric in gen_batch_output.meta_info['xperf_metrics'].items():
-                            self.logger.log(data={"xperf/gen/{}".format(name): wandb.Histogram(x_metric)},
+                            self.logger.log(data={"rollout/gen/hybrid_{}".format(name): wandb.Histogram(x_metric)},
                                             step=self.global_step)
 
-                    batch = batch.repeat(self.num_bon)
-                    batch = batch.union(gen_batch_output)
+                    # prepare for standalone generation
+                    gen_batch_output = tmp_batch.union(gen_batch_output)
+                    is_finished = gen_batch_output.pop(batch_keys=['is_finished']).batch['is_finished']
+                    for i in range(len(gen_batch_output)):
+                        item = gen_batch_output[i] if is_finished[i] else batch[i]
+                        item.batch = item.batch.unsqueeze(0)
+                        for key, value in item.non_tensor_batch.items():
+                            item.non_tensor_batch[key] = np.atleast_1d(np.array(value, dtype=object))
+                        if is_finished[i]:
+                            ready_batch_queue.put(item)
+                        else:
+                            pending_batch_queue.put(item)
+                    pprint(
+                        f'stop rollout, ready batches {ready_batch_queue.qsize()}, pending batches {pending_batch_queue.qsize()}.'
+                    )
+                    finished_num = is_finished.sum().int().item()
+                    metrics['rollout/hybrid_completed_batch'] = finished_num
+                    metrics['rollout/hybrid_incompleted_batch'] = len(batch) - finished_num
+
+                    # stop standalone rollout to update model
+                    finished_num = 0
+                    if len(standalone_batch) > 0:
+                        gen_batch_output = self.standalone_rollout_wg.generate_sequences_get(standalone_gen_batch)
+                        gen_batch_output = standalone_tmp_batch.union(gen_batch_output)
+                        is_finished = gen_batch_output.pop(batch_keys=['is_finished']).batch['is_finished']
+                        for i in range(len(gen_batch_output)):
+                            item = gen_batch_output[i] if is_finished[i] else standalone_batch[i]
+                            item.batch = item.batch.unsqueeze(0)
+                            for key, value in item.non_tensor_batch.items():
+                                item.non_tensor_batch[key] = np.atleast_1d(np.array(value, dtype=object))
+                            if is_finished[i]:
+                                ready_batch_queue.put(item)
+                            else:
+                                pending_batch_queue.put(item)
+                        pprint(
+                            f'stop standalone rollout, ready batches {ready_batch_queue.qsize()}, pending batches {pending_batch_queue.qsize()}.'
+                        )
+                        finished_num = is_finished.sum().int().item()
+                        # only report metrics from one generation replica
+                        if 'xperf_metrics' in gen_batch_output.meta_info:
+                            for name, x_metric in gen_batch_output.meta_info['xperf_metrics'].items():
+                                self.logger.log(
+                                    data={"rollout/gen/standalone_{}".format(name): wandb.Histogram(x_metric)},
+                                    step=self.global_step)
+                    metrics['rollout/standalone_completed_batch'] = finished_num
+                    metrics['rollout/standalone_incompleted_batch'] = len(standalone_batch) - finished_num
+
+                    # update standalone rollout weights
+                    with Timer(name='update_standalone', logger=None) as timer:
+                        if hasattr(self, "standalone_rollout_wg"):
+                            self.actor_rollout_wg.update_standalone_rollout()
+                            self.standalone_rollout_wg.update_standalone_rollout()
+                    metrics['timing/update_standalone'] = timer.last
+
+                    # standalone generate (off policy)
+                    standalone_batch = []
+                    while hasattr(self, "standalone_rollout_wg") and pending_batch_queue.qsize(
+                    ) >= self.standalone_rollout_wg.world_size:
+                        for _ in range(self.standalone_rollout_wg.world_size):
+                            standalone_batch.append(pending_batch_queue.get())
+                    if len(standalone_batch) > 0:
+                        standalone_batch = DataProto.concat(standalone_batch)
+                        standalone_tmp_batch = copy.deepcopy(standalone_batch)
+                        standalone_gen_batch = standalone_tmp_batch.pop(
+                            batch_keys=['input_ids', 'attention_mask', 'position_ids'])
+                        standalone_gen_batch.meta_info[
+                            'generation_kwargs'] = self.config.actor_rollout_ref.rollout.train_generate_kwargs
+                        standalone_gen_batch.meta_info['complete_ratio'] = 1
+                        self.standalone_rollout_wg.generate_sequences_put(standalone_gen_batch)
+                        pprint(f'start standalone rollout, batches {len(standalone_batch)}.')
+                    metrics['rollout/standalone_input_batch'] = len(standalone_batch)
+
+                    # get training batch from ready queue
+                    ready_batch = []
+                    while ready_batch_queue.qsize() >= self.config.actor_rollout_ref.actor.ppo_mini_batch_size:
+                        for _ in range(self.config.actor_rollout_ref.actor.ppo_mini_batch_size):
+                            ready_batch.append(ready_batch_queue.get())
+                    batch = DataProto.concat(ready_batch)
                     if self.config.algorithm.force_append_eos:
                         batch.batch["input_ids"][:, -1] = self.tokenizer.eos_token_id
                         batch.batch["responses"][:, -1] = self.tokenizer.eos_token_id
-
+                    batch.meta_info['generation_kwargs'] = self.config.actor_rollout_ref.rollout.train_generate_kwargs
                     batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask'], dim=-1).tolist()
+                    metrics['rollout/training_batch'] = len(batch)
+
+                    # training
+                    with Timer(name='old_log_probs', logger=None) as timer:
+                        batch = self.actor_rollout_wg.old_log_probs(batch)
+                    metrics['timing/old_log_probs'] = timer.last
 
                     with Timer(name='rm_score', logger=None) as timer:
                         # compute scores. Support both model and function-based.

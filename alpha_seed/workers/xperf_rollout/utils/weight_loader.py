@@ -609,6 +609,7 @@ def _reshard_fsdp_state_dict_to_xperf_p6(tp_model, state_dict, device_mesh: Devi
         else:
             fc1_1_list = []
             fc1_2_list = []
+            # breakpoint()
             for expert_index in range(model_config.moe_num_expert):
                 fc1_1 = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts.{expert_index}.fc1_1.weight').to(
                     torch.bfloat16).full_tensor()

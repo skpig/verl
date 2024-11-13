@@ -20,6 +20,8 @@ from verl import DataProto
 from torch import nn
 import tempfile
 import json
+import queue
+import threading
 
 from xperf_gpt.inference.session import InferenceSession
 
@@ -33,15 +35,14 @@ import torch.distributed as dist
 import torch.distributed
 from torch.distributed.device_mesh import init_device_mesh
 
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 import logging
 
-from .utils import get_xperf_gpt_config
-from .utils.weight_loader import offload_to_cpu, init_meta
+from alpha_seed.workers.xperf_rollout.utils import get_xperf_gpt_config
+from alpha_seed.workers.xperf_rollout.utils.weight_loader import offload_to_cpu, init_meta
 
 try:
     from verl.utils.debug import get_profiler_context
-    from verl.utils.debug.performance import NullProfileEnter
 except:
     print('Cannot find profile utilities. Please use latest verl master')
     raise
@@ -62,10 +63,10 @@ def remove_nccl_files():
     print(f'cwd: {cwd}')
     for p in Path(cwd).glob("xperf_gpt_nccl_file*"):
         print(f'Removing file {p.name}')
-        p.unlink(missing_ok=True)
+        p.unlink()
 
 
-class XPerfGPTRollout(object):
+class AsyncXPerfGPTRollout(object):
     """
     This class creates a training framework agnostic XPerfGPTRollout.
     For weight binding, it will be implemented in the resharding manager.
@@ -80,7 +81,7 @@ class XPerfGPTRollout(object):
 
         num_kv_heads = model_hf_config.num_key_value_heads
         assert tp_size <= num_kv_heads, f'tp_size {tp_size} must not be larger than num_kv_heads {num_kv_heads}'
-
+        torch.manual_seed(9898)
         # create a 2D device mesh
         if tp_size > 1:
             world_size = torch.distributed.get_world_size()
@@ -93,14 +94,11 @@ class XPerfGPTRollout(object):
         else:
             self.device_mesh = None  # this is actually the whole world size. No need to have a device mesh for it.
 
-        if hasattr(config, 'profile'):
-            self.profiler_context = get_profiler_context(filename=config.profile.filename,
-                                                         profile_on_ranks=config.profile.profile_on_ranks,
-                                                         default_hdfs_dir=config.profile.default_hdfs_dir,
-                                                         upload_to_mlx=config.profile.upload_to_mlx,
-                                                         enable=config.profile.enable)
-        else:
-            self.profiler_context = nullcontext(enter_result=NullProfileEnter())
+        self.profiler_context = get_profiler_context(filename=config.profile.filename,
+                                                     profile_on_ranks=config.profile.profile_on_ranks,
+                                                     default_hdfs_dir=config.profile.default_hdfs_dir,
+                                                     upload_to_mlx=config.profile.upload_to_mlx,
+                                                     enable=config.profile.enable)
 
         generate_kwargs = dict(max_new_tokens=config.response_length,
                                do_sample=config.train_generate_kwargs.do_sample,
@@ -115,18 +113,17 @@ class XPerfGPTRollout(object):
 
         print("initializing xperf gpt...")
         print(
-            f"use_vllm, num_slots, slot_block_size, enable_cuda_graph {use_vllm}, {num_slots}, {slot_block_size}, {enable_cuda_graph}"
+            f"use_vllm, num_slots, slot_block_size, enable_cuda_graph, device {use_vllm}, {num_slots}, {slot_block_size}, {enable_cuda_graph}, {os.getenv('CUDA_VISIBLE_DEVICES')}"
         )
-
-        inference_sess = InferenceSession(
-            num_slots=num_slots,
-            max_batch_size=config.micro_batch_size,
-            max_length=config.prompt_length + config.response_length,
-            slot_block_size=slot_block_size,
-            use_vllm=use_vllm,
-            vocab_tp=False,
-            context_limit_bs=32,  # activation memory limit 
-            enable_cuda_graph=enable_cuda_graph)
+        # torch.manual_seed(9898)
+        inference_sess = InferenceSession(num_slots=num_slots,
+                                          max_batch_size=config.micro_batch_size,
+                                          max_length=config.prompt_length + config.response_length,
+                                          slot_block_size=slot_block_size,
+                                          use_vllm=use_vllm,
+                                          vocab_tp=False,
+                                          context_limit_bs=8,
+                                          enable_cuda_graph=enable_cuda_graph)
         xperf_config = get_xperf_gpt_config(model_config=model_hf_config, tokenizer=tokenizer)
 
         with tempfile.NamedTemporaryFile(mode='w', suffix=".json") as f:
@@ -187,54 +184,76 @@ class XPerfGPTRollout(object):
             dist.barrier()
 
         self.inference_engine = inference_sess
+        self.__init_sub_process()
 
         # offload to CPU
         init_meta(self.inference_engine.engine.module)
         torch.cuda.empty_cache()
 
-    @torch.no_grad()
-    def generate_sequences(self, prompts: DataProto) -> DataProto:
+    def __init_sub_process(self):
+        os.environ["USE_SESSION_CACHE"] = "0"
+        self.input_queue = queue.Queue()
+        self.output_queue = queue.Queue()
+        self.stop_event = threading.Event()
+        self.process_thread = threading.Thread(target=self.generate, args=())
+        self.process_thread.start()
 
-        # note: deterministic control to avoid nccl dead lock, by default no timeout
-        complete_ratio = self.config.get('complete_ratio', 1)
+    def generate(self):
+        while True:
+            (query_pool, complete_ratio, generation_kwargs) = self.input_queue.get(block=True)
+            print("query_pool: ", len(query_pool))
+            self.inference_engine.set_generator_strategy(**generation_kwargs)
+            with logging_set_level(self.config.get('logging_level', 'WARN')):
+                self.inference_engine.execute(query_pool, complete_ratio=complete_ratio, stop_event=self.stop_event)
+
+            response_outputs = []
+            is_finished = []
+            for v in self.inference_engine.get_inorder_responses():
+                response_outputs.append(
+                    v.new_token_ids if v.is_finished else [self.inference_engine.tokenizer.eos_token_id])
+                is_finished.append(v.is_finished)
+            is_finished = torch.Tensor(is_finished)
+
+            metrics = {}
+            if hasattr(self.inference_engine.pp_scheduler,
+                       "init_metrics") and self.inference_engine.pp_scheduler.enable_metrics:
+                metrics = self.inference_engine.pp_scheduler.metrics
+            self.inference_engine.empty_cache()
+            self.output_queue.put((response_outputs, is_finished, metrics))
+
+    @torch.no_grad()
+    def generate_sequences(self, prompts: DataProto, is_async=False):
+        complete_ratio = prompts.meta_info.get('complete_ratio', 1)
 
         prompt_ids = prompts.batch['input_ids']  # (bs, prompt_length)
         # left-padded attention_mask
         attention_mask = prompts.batch['attention_mask']
         position_ids = prompts.batch['position_ids']
-
-        # prompts
-        tokenizer = self.inference_engine.tokenizer
         first_non_one_indices = (prompt_ids != 1).int().argmax(dim=1)
         rmv_padding_prompt_ids = [row[index:].tolist() for row, index in zip(prompt_ids, first_non_one_indices)]
+        self.input_queue.put((rmv_padding_prompt_ids, complete_ratio, prompts.meta_info['generation_kwargs']))
 
-        generation_kwargs = prompts.meta_info['generation_kwargs']
-        self.inference_engine.set_generator_strategy(**generation_kwargs)
+        if is_async:
+            yield
+            # stop event
+            self.stop_event.set()
+            (response_outputs, is_finished, metrics) = self.output_queue.get()
+            self.stop_event.clear()
+        else:
+            # complete_ratio or all prompts are finished
+            (response_outputs, is_finished, metrics) = self.output_queue.get()
 
-        with logging_set_level(self.config.get('logging_level', 'WARN')), self.profiler_context as p:
-            self.inference_engine.execute(rmv_padding_prompt_ids, complete_ratio=complete_ratio)
-            p.step()
-
-        response_outputs = dict(input_ids=[v.new_token_ids for v in self.inference_engine.get_inorder_responses()])
-        metrics = {}
-        if hasattr(self.inference_engine.pp_scheduler,
-                   "init_metrics") and self.inference_engine.pp_scheduler.enable_metrics:
-            metrics = self.inference_engine.pp_scheduler.metrics
-        # empty kv cache
-        self.inference_engine.empty_cache()
-
+        tokenizer = self.inference_engine.tokenizer
         with patch.object(tokenizer, "padding_side", "right"):
-            response_outputs = tokenizer.pad(response_outputs,
+            response_outputs = tokenizer.pad(dict(input_ids=response_outputs),
                                              padding="max_length",
                                              max_length=self.config.response_length,
                                              return_tensors="pt")
+
         response_ids = response_outputs["input_ids"].cuda()
         response_attention_mask = response_outputs["attention_mask"].cuda()
-
-        local_bs = prompt_ids.shape[0]
         attention_mask = torch.hstack((attention_mask, response_attention_mask))
         position_ids = (attention_mask.cumsum(dim=-1) - 1).clamp(min=0)
-
         input_ids = torch.hstack((prompt_ids, response_ids))
 
         # all the tp ranks should contain the same data here. data in all ranks are valid
@@ -243,9 +262,10 @@ class XPerfGPTRollout(object):
             'responses': response_ids,
             'input_ids': input_ids,  # here input_ids become the whole sentences
             'attention_mask': attention_mask,
-            'position_ids': position_ids
+            'position_ids': position_ids,
+            'is_finished': is_finished
         }
 
         out = DataProto.from_dict(batch)
         out.meta_info["xperf_metrics"] = metrics
-        return out
+        yield out
