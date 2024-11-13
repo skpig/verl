@@ -28,10 +28,11 @@ from verl.trainer.ppo.critic import BasePPOCritic
 from verl.utils.py_functional import append_to_dict
 from verl.utils.torch_functional import masked_mean
 
+from alpha_seed.workers.hybrid_engine.fsdp_ulysses import ulysses_pad_and_slice_inputs
 from alpha_seed import core_algos
 
 from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
-from dist_attn.ulysses.ops import slice_input_tensor, gather_outputs
+from dist_attn.ulysses.ops import gather_outputs
 from .utils import rearrange_micro_batches
 from contextlib import nullcontext
 
@@ -88,32 +89,25 @@ class DataParallelPPOCritic(BasePPOCritic):
                 position_ids_rmpad = index_first_axis(rearrange(position_ids.unsqueeze(-1), "b s ... -> (b s) ..."),
                                                       indices).transpose(0, 1)
 
-                if (sp_size := get_ulysses_sequence_parallel_world_size()) > 1:
-                    _, total_s = input_ids_rmpad.shape
-                    pad_size = (sp_size - total_s % sp_size) % sp_size
-                    if pad_size > 0:
-                        # append a placeholder sequence
-                        input_ids_rmpad = torch.nn.functional.pad(input_ids_rmpad, (0, pad_size), value=0)
-                        attention_mask = torch.nn.functional.pad(attention_mask, (0, 0, 0, 1), value=0)
-                        attention_mask[-1, :pad_size] = 1
-                    input_ids_rmpad = slice_input_tensor(input_ids_rmpad, dim=1, padding=False)
-
+                # handle ulysses sequence parallelism
+                sp_size = get_ulysses_sequence_parallel_world_size()
+                total_s = input_ids_rmpad.size(1)
+                input_ids_rmpad, position_ids_rmpad, pad_size = ulysses_pad_and_slice_inputs(
+                    input_ids_rmpad, position_ids_rmpad, sp_size)
+                # forward
                 values_rmpad = self.critic_module(input_ids=input_ids_rmpad,
                                                   position_ids=position_ids_rmpad,
-                                                  use_cache=False).logits
-
+                                                  use_cache=False).logits  # (1, total_nnz / sp_size, 1)
+                values_rmpad = values_rmpad.squeeze(0).squeeze(-1)  # (total_nnz / sp_size)
                 # handle ulysses sequence parallelism
-                if get_ulysses_sequence_parallel_world_size() > 1:
-                    if pad_size > 0:
-                        # remove the trailing placeholder sequence
-                        attention_mask = attention_mask[:-1]
-                    values_rmpad = gather_outputs(values_rmpad, gather_dim=1, padding_dim=1, unpad_dim_size=total_s)
-
-                values_rmpad = values_rmpad.squeeze(0).squeeze(-1)  # (total_nnz)
-
+                if sp_size > 1:
+                    values_rmpad = gather_outputs(values_rmpad, gather_dim=0, padding_dim=0, unpad_dim_size=total_s)
                 # pad it back
                 values = pad_input(values_rmpad.unsqueeze(-1), indices=indices, batch=batch, seqlen=seqlen).squeeze(-1)
             else:
+                sp_size = get_ulysses_sequence_parallel_world_size()
+                if sp_size > 1:
+                    raise NotImplementedError("ulysses sequence parallelism w/o use_rmpad is not supported yet")
                 output = self.critic_module(input_ids=micro_batch['input_ids'],
                                             attention_mask=micro_batch['attention_mask'],
                                             position_ids=micro_batch['position_ids'],

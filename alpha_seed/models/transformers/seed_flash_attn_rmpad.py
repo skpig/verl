@@ -16,19 +16,22 @@
 
 import inspect
 import torch
+import warnings
+from typing import Tuple
+import logging
 
 from transformers.models.qwen2.modeling_qwen2 import Cache
+import torch.distributed as dist
 
 from transformers.cache_utils import Cache
 from typing import Optional
 
-from flash_attn import flash_attn_varlen_func
-from flash_attn.bert_padding import index_first_axis, rearrange
-from flash_attn.layers.rotary import apply_rotary_emb
 from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
-from dist_attn.ulysses.ops import gather_seq_scatter_heads, gather_heads_scatter_seq
+from dist_attn.ulysses.ops import gather_seq_scatter_heads, gather_heads_scatter_seq, gather_outputs
 
 import torch.nn.functional as F
+
+logger = logging.getLogger(__file__)
 
 
 def _get_unpad_data(attention_mask):
@@ -43,143 +46,144 @@ def _get_unpad_data(attention_mask):
     )
 
 
-# use flash-attn rotary embeddings with rmpad
-# cos/sin shoudl be: (seq_length, rotary_dim / 2)
-def apply_rotary_pos_emb_rmpad_flash(q, k, cos, sin, cu_seqlens, max_seqlen):
-    q_embed = apply_rotary_emb(q,
-                               cos,
-                               sin,
-                               interleaved=False,
-                               inplace=False,
-                               cu_seqlens=cu_seqlens,
-                               max_seqlen=max_seqlen)
-    k_embed = apply_rotary_emb(k,
-                               cos,
-                               sin,
-                               interleaved=False,
-                               inplace=False,
-                               cu_seqlens=cu_seqlens,
-                               max_seqlen=max_seqlen)
-    return q_embed, k_embed
-
-
-# Copied from transformers.models.llama.modeling_llama.repeat_kv
-def repeat_kv(hidden_states: torch.Tensor, n_rep: int, interleaved_kv_shared: bool = True) -> torch.Tensor:
-    """
-    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
-    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
-    """
-    total_nnz, num_key_value_heads, head_dim = hidden_states.shape
-    if n_rep == 1:
-        return hidden_states
-
-    if interleaved_kv_shared:
-        hidden_states = hidden_states[:, None, :, :].expand(total_nnz, n_rep, num_key_value_heads, head_dim)
-    else:
-        hidden_states = hidden_states[:, :, None, :].expand(total_nnz, num_key_value_heads, n_rep, head_dim)
-    return hidden_states.reshape(total_nnz, num_key_value_heads * n_rep, head_dim)
-
-
 def flash_attn2_rmpad_forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Cache] = None,
-        output_attentions: bool = False,
-        use_cache: bool = False,
-        cache_position: Optional[torch.LongTensor] = None,
-        **kwargs  # for compatibility
+    self,
+    hidden_states: torch.Tensor,
+    attention_mask: Optional[torch.Tensor] = None,
+    position_ids: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.IntTensor] = None,
+    past_key_value: Optional[Cache] = None,
+    output_attentions: bool = False,
+    use_cache: bool = False,
+    position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.45
+    max_seqlen: int = None,
+    **kwargs,
 ):
-    assert past_key_value is None
-    assert not output_attentions
-    assert not use_cache
+    assert (past_key_value is None) and (not use_cache)
+    assert cu_seqlens is None
+    from seed_models.models.p6.modeling_p6 import (apply_rotary_pos_emb, _flash_attention_forward,
+                                                   _flash_supports_window_size, repeat_kv)
+    if "padding_mask" in kwargs:
+        warnings.warn(
+            "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"
+        )
+        # overwrite attention_mask with padding_mask
+        attention_mask = kwargs.pop("padding_mask")
+    sp_size = get_ulysses_sequence_parallel_world_size()
+    bsz, q_len, _ = hidden_states.size()  # q_len = seqlen/sp
 
-    bsz, total_nnz, _ = hidden_states.size()
-    assert bsz == 1
-
-    hidden_states = hidden_states.squeeze(0)  # (total_nnz, hidden_size)
-
-    # this matches with hidden_states
-    indices, cu_seqlens, max_seqlen_in_batch = _get_unpad_data(attention_mask)
-
-    query_states = self.q_proj(hidden_states)
+    query_states = self.q_proj(hidden_states)  # bsz, seqlen/sp, hidden
     key_states = self.k_proj(hidden_states)
     value_states = self.v_proj(hidden_states)
 
-    query_states = query_states.view(total_nnz, self.num_heads, self.head_dim)
-    key_states = key_states.view(total_nnz, self.num_key_value_heads, self.head_dim)
-    value_states = value_states.view(total_nnz, self.num_key_value_heads, self.head_dim)
+    # bsz, nhead, seqlen/sp, hdim
+    query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+    key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+    value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
-    # repeat k/v heads if n_kv_heads < n_heads
-    interleaved_kv_shared = getattr(self.config, 'interleaved_kv_shared', False)
-    dropout_rate = 0.0 if not self.training else self.attention_dropout
+    if cu_seqlens is None:
+        kv_seq_len = key_states.shape[-2]
+    else:
+        kv_seq_len = cu_seqlens.diff().max().item()
 
-    if get_ulysses_sequence_parallel_world_size() > 1:
-        key_states = repeat_kv(key_states, self.num_key_value_groups, interleaved_kv_shared)
-        value_states = repeat_kv(value_states, self.num_key_value_groups, interleaved_kv_shared)
-        # TODO: can we perform all2all before repeat_kv to reduce communication? need to handle interleave/non-interleave kv scenarios
-        qkv_states = torch.stack((query_states, key_states, value_states), dim=0)
-        qkv_states = gather_seq_scatter_heads(qkv_states, seq_dim=1, head_dim=2)
-        query_states, key_states, value_states = qkv_states[0], qkv_states[1], qkv_states[2]
+    if position_embeddings is None:
+        cos, sin = self.rotary_emb(value_states, position_ids)
+    else:
+        cos, sin = position_embeddings
 
-    # note: there are two ways to implement rotary_emb, one that returns [seqlen, rotary_dim].
-    # another directly returns [bsz, seqlen, rotary_dim] for each token
+    # bsz, nhead, seqlen/sp, hdim
+    query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
-    cos, sin = self.rotary_emb(value_states, seq_len=max_seqlen_in_batch)
-    cos, sin = cos[:, :cos.shape[1] // 2], sin[:, :sin.shape[1] // 2]  # flash attn only needs half
-    query_states, key_states = apply_rotary_pos_emb_rmpad_flash(query_states, key_states, cos, sin, cu_seqlens,
-                                                                max_seqlen_in_batch)
+    use_sliding_windows = (_flash_supports_window_size and getattr(self.config, "sliding_window", None) is not None and
+                           kv_seq_len > self.config.sliding_window[self.layer_idx])
 
-    if hasattr(self.config, 'use_key_layernorm') and self.config.use_key_layernorm:
+    if not _flash_supports_window_size:
+        logger.warning_once(
+            "The current flash attention version does not support sliding window attention, for a more memory"
+            " efficient implementation make sure to upgrade flash-attn library.")
+
+    if self.config.use_key_layernorm:
         key_states = self.key_layernorm(key_states)
         # in fsdp training mode, the norm will be autocasted to float32
         if key_states.dtype != query_states.dtype:
             key_states = key_states.to(query_states.dtype)
 
-    if get_ulysses_sequence_parallel_world_size() <= 1:
-        key_states = repeat_kv(key_states, self.num_key_value_groups, interleaved_kv_shared)
-        value_states = repeat_kv(value_states, self.num_key_value_groups, interleaved_kv_shared)
+    # repeat k/v heads if n_kv_heads < n_heads
+    key_states = repeat_kv(key_states, self.num_key_value_groups, self.interleaved_kv_shared)
+    value_states = repeat_kv(value_states, self.num_key_value_groups, self.interleaved_kv_shared)
+    dropout_rate = 0.0 if not self.training else self.attention_dropout
+
+    # ulysses region
+    # [bsz, nhead, seqlen/sp, hdim] -> [bsz, nhead/sp, seqlen, ,hdim]
+    if sp_size > 1:
+        query_states = gather_seq_scatter_heads(query_states, seq_dim=2, head_dim=1)
+        key_states = gather_seq_scatter_heads(key_states, seq_dim=2, head_dim=1)
+        value_states = gather_seq_scatter_heads(value_states, seq_dim=2, head_dim=1)
+        # the position_ids and max_seqlen is required to be global for flash attention
+        # TODO: optimize this, no need to allgather at each layer
+        position_ids = gather_outputs(position_ids, gather_dim=1)
+        max_seqlen = position_ids.max().item() + 1
+    full_qlen = query_states.size(2)
 
     # In PEFT, usually we cast the layer norms in float32 for training stability reasons
     # therefore the input hidden states gets silently casted in float32. Hence, we need
     # cast them back in float16 just to be sure everything works as expected.
     input_dtype = query_states.dtype
     if input_dtype == torch.float32:
-        assert torch.is_autocast_enabled()
-        target_dtype = torch.get_autocast_gpu_dtype()
+        if torch.is_autocast_enabled():
+            target_dtype = torch.get_autocast_gpu_dtype()
+        # Handle the case where the model is quantized
+        elif hasattr(self.config, "_pre_quantization_dtype"):
+            target_dtype = self.config._pre_quantization_dtype
+        else:
+            target_dtype = self.q_proj.weight.dtype
+
+        logger.warning_once(
+            f"The input hidden states seems to be silently casted in float32, this might be related to"
+            f" the fact you have upcasted embedding or layer norm layers in float32. We will cast back the input in"
+            f" {target_dtype}.")
+
         query_states = query_states.to(target_dtype)
         key_states = key_states.to(target_dtype)
         value_states = value_states.to(target_dtype)
 
-    use_sliding_windows = (getattr(self.config, "sliding_window", None) is not None and
-                           max_seqlen_in_batch > self.config.sliding_window[self.layer_idx])
-    if use_sliding_windows:
-        window_size = (self.config.sliding_window[self.layer_idx], self.config.sliding_window[self.layer_idx])
-    else:
-        window_size = (-1, -1)
+    # Reashape to the expected shape for Flash Attention
+    # [bsz, seqlen, nhead/sp, hdim]
+    query_states = query_states.transpose(1, 2)
+    key_states = key_states.transpose(1, 2)
+    value_states = value_states.transpose(1, 2)
 
-    attn_output = flash_attn_varlen_func(query_states,
-                                         key_states,
-                                         value_states,
-                                         cu_seqlens_q=cu_seqlens,
-                                         cu_seqlens_k=cu_seqlens,
-                                         max_seqlen_q=max_seqlen_in_batch,
-                                         max_seqlen_k=max_seqlen_in_batch,
-                                         dropout_p=dropout_rate,
-                                         softmax_scale=None,
-                                         causal=True,
-                                         window_size=window_size)
+    attn_output = _flash_attention_forward(
+        query_states,
+        key_states,
+        value_states,
+        attention_mask,
+        query_length=full_qlen,
+        position_ids=position_ids,
+        is_causal=self.is_causal,
+        dropout=dropout_rate,
+        cu_seqlens=cu_seqlens,
+        sliding_window=self.config.sliding_window[self.layer_idx] if use_sliding_windows else None,
+        use_top_left_mask=self._flash_attn_uses_top_left_mask,
+        training=self.training,
+        layer_number=self.layer_idx,
+        max_seqlen=max_seqlen,
+    )
 
-    if get_ulysses_sequence_parallel_world_size() > 1:
-        attn_output = gather_heads_scatter_seq(attn_output.unsqueeze(0), seq_dim=1, head_dim=2).squeeze(0)
+    # [bsz, seqlen, nhead/sp, hdim] -> [bsz, seqlen/sp, nhead, hdim]
+    attn_output = attn_output.reshape(bsz, full_qlen, -1, self.head_dim).contiguous()
 
-    if hasattr(self.config, 'use_context_groupnorm') and self.config.use_context_groupnorm:
+    if sp_size > 1:
+        attn_output = gather_heads_scatter_seq(attn_output, seq_dim=1, head_dim=2)
+
+    if self.config.use_context_groupnorm:
         attn_output = self.context_norm(attn_output)
 
-    # TODO: adapt for TP
-    attn_output = attn_output.reshape(total_nnz, self.hidden_size).contiguous()
+    attn_output = attn_output.reshape(bsz, q_len, self.hidden_size).contiguous()
     attn_output = self.o_proj(attn_output)
-    attn_output = attn_output.unsqueeze(0)
+    attn_output = self.resid_dropout(attn_output)
 
-    return attn_output, None, None
+    if not output_attentions:
+        attn_weights = None
+
+    return attn_output, attn_weights, past_key_value

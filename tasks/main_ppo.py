@@ -165,9 +165,6 @@ def main(config):
 def validate_config(config):
     n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
 
-    ulysses = config.actor_rollout_ref.actor.ulysses_sequence_parallel_size
-    assert ulysses == 1, 'ulysses is currently broken.'
-
     # data
     real_train_batch_size = config.data.train_batch_size * config.actor_rollout_ref.rollout.num_bon
     assert real_train_batch_size % n_gpus == 0
@@ -178,12 +175,14 @@ def validate_config(config):
     # actor
     assert real_train_batch_size % config.actor_rollout_ref.actor.ppo_mini_batch_size == 0
     if not config.actor_rollout_ref.actor.use_dynamic_bsz:
+        ulysses = config.actor_rollout_ref.actor.ulysses_sequence_parallel_size
         assert config.actor_rollout_ref.actor.ppo_mini_batch_size % config.actor_rollout_ref.actor.ppo_micro_batch_size == 0
         assert config.actor_rollout_ref.actor.ppo_micro_batch_size * ulysses >= n_gpus
 
     # critic
     assert real_train_batch_size % config.critic.ppo_mini_batch_size == 0
     if not config.critic.use_dynamic_bsz:
+        ulysses = config.critic.ulysses_sequence_parallel_size
         assert config.critic.ppo_mini_batch_size % config.critic.ppo_micro_batch_size == 0
         assert config.critic.ppo_micro_batch_size * ulysses >= n_gpus
 

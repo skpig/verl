@@ -22,8 +22,6 @@ import hdfs_io
 import ray
 import torch
 import torch.distributed
-from omegaconf import DictConfig, open_dict, OmegaConf
-from typing import List
 
 import verl.utils.torch_functional as verl_F
 from single_controller.base import Worker
@@ -32,19 +30,16 @@ from verl import DataProto
 from verl.utils.model import compute_position_id_with_mask
 from verl.utils.fs import copy_local_path_from_hdfs
 from verl.utils.fsdp_utils import get_fsdp_wrap_policy, load_fsdp_grad, offload_fsdp_grad, init_fn, get_init_weight_context_manager
-from verl.utils.fsdp_utils import offload_fsdp_optimizer, offload_fsdp_param_and_grad, load_fsdp_optimizer, load_fsdp_param_and_grad
 from verl.utils.import_utils import import_external_libs
 from verl.utils.debug import log_gpu_memory_usage
-from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
-from verl.utils.torch_functional import broadcast_dict_tensor, allgather_dict_tensors
+from torch.distributed.device_mesh import init_device_mesh
 from verl.utils.model import compute_position_id_with_mask
 import numpy as np
 
-from alpha_seed.workers.hybrid_engine.fsdp_ulysses import FSDPUlyssesShardingManager
-from dist_attn.ulysses.parallel_states import set_ulysses_sequence_parallel_group, get_ulysses_sequence_parallel_world_size
+from alpha_seed.workers.hybrid_engine.fsdp_ulysses import (FSDPUlyssesShardingManager, ulysses_pad_and_slice_inputs)
+from alpha_seed.workers.utils import rearrange_micro_batches
 from dist_attn.ulysses.ops import slice_input_tensor, gather_outputs
-from alpha_seed.workers.ppo_actor import DataParallelPPOActor
-from alpha_seed.workers.ppo_critic import DataParallelPPOCritic
+from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
 
 from seed_models.utils.count_flops import FlopsCounter
 
@@ -63,7 +58,6 @@ class RewardModelWorker(Worker):
 
     def __init__(self, config):
         super().__init__()
-        import torch.distributed
         if not torch.distributed.is_initialized():
             timeout = timedelta(minutes=int(os.getenv('NCCL_TIMEOUT', 60)))
             torch.distributed.init_process_group(backend="nccl", timeout=timeout)
@@ -74,12 +68,9 @@ class RewardModelWorker(Worker):
         self.ulysses_sp_device_mesh = None
         sp_size = config.ulysses_sequence_parallel_size
         if sp_size > 1:
-            # TODO: remove duplicate mesh
             self.ulysses_sp_device_mesh = init_device_mesh('cuda',
-                                                           mesh_shape=(sp_size, world_size // sp_size),
-                                                           mesh_dim_names=['sp', 'dp'])
-            set_ulysses_sequence_parallel_group(self.ulysses_sp_device_mesh['sp'].get_group())
-            assert get_ulysses_sequence_parallel_world_size() == sp_size
+                                                           mesh_shape=(world_size // sp_size, sp_size),
+                                                           mesh_dim_names=['dp', 'sp'])
         self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_sp_device_mesh)
         self.config.micro_batch_size //= world_size // sp_size
 
@@ -190,24 +181,15 @@ class RewardModelWorker(Worker):
                                                       indices).transpose(0, 1)
 
                 # handle ulysses sequence parallelism
-                if (sp_size := get_ulysses_sequence_parallel_world_size()) > 1:
-                    assert NotImplementedError
-                    _, total_s = input_ids_rmpad.shape
-                    pad_size = (sp_size - total_s % sp_size) % sp_size
-                    if pad_size > 0:
-                        # append a placeholder sequence
-                        input_ids_rmpad = torch.nn.functional.pad(input_ids_rmpad, (0, pad_size), value=0)
-                        attention_mask = torch.nn.functional.pad(attention_mask, (0, 0, 0, 1), value=0)
-                        attention_mask[-1, :pad_size] = 1
-                    input_ids_rmpad = slice_input_tensor(input_ids_rmpad, dim=1, padding=False)
+                sp_size = get_ulysses_sequence_parallel_world_size()
+                total_s = input_ids_rmpad.size(1)
+                input_ids_rmpad, position_ids_rmpad, pad_size = ulysses_pad_and_slice_inputs(
+                    input_ids_rmpad, position_ids_rmpad, sp_size)
 
                 output = self.reward_module(input_ids=input_ids_rmpad, position_ids=position_ids_rmpad, use_cache=False)
 
                 # handle ulysses sequence parallelism
-                if get_ulysses_sequence_parallel_world_size() > 1:
-                    if pad_size > 0:
-                        # remove the trailing placeholder sequence
-                        attention_mask = attention_mask[:-1]
+                if sp_size > 1:
                     output.logits = gather_outputs(output.logits, gather_dim=1, padding_dim=1, unpad_dim_size=total_s)
 
                 rm_score = output.logits.squeeze(0).squeeze(-1)  # (total_nnz,)

@@ -22,28 +22,18 @@ import hdfs_io
 import ray
 import torch
 import torch.distributed
-from omegaconf import DictConfig, open_dict, OmegaConf
-from typing import List
 
 import verl.utils.torch_functional as verl_F
 from single_controller.base import Worker
 from single_controller.base.decorator import register, Dispatch
 from verl import DataProto
-from verl.utils.model import compute_position_id_with_mask
 from verl.utils.fs import copy_local_path_from_hdfs
-from verl.utils.fsdp_utils import get_fsdp_wrap_policy, load_fsdp_grad, offload_fsdp_grad, init_fn, get_init_weight_context_manager
-from verl.utils.fsdp_utils import offload_fsdp_optimizer, offload_fsdp_param_and_grad, load_fsdp_optimizer, load_fsdp_param_and_grad
+from verl.utils.fsdp_utils import get_fsdp_wrap_policy, init_fn, get_init_weight_context_manager
 from verl.utils.import_utils import import_external_libs
 from verl.utils.debug import log_gpu_memory_usage
-from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
-from verl.utils.torch_functional import broadcast_dict_tensor, allgather_dict_tensors
-from verl.utils.model import compute_position_id_with_mask
-import numpy as np
+from torch.distributed.device_mesh import init_device_mesh
 
 from alpha_seed.workers.hybrid_engine.fsdp_ulysses import FSDPUlyssesShardingManager
-from dist_attn.ulysses.parallel_states import set_ulysses_sequence_parallel_group, get_ulysses_sequence_parallel_world_size
-from dist_attn.ulysses.ops import slice_input_tensor, gather_outputs
-from alpha_seed.workers.ppo_actor import DataParallelPPOActor
 from alpha_seed.workers.ppo_critic import DataParallelPPOCritic
 
 from seed_models.utils.count_flops import FlopsCounter
@@ -76,9 +66,8 @@ class CriticWorker(Worker):
         self.ulysses_sp_device_mesh = None
         if sp_size > 1:
             self.ulysses_sp_device_mesh = init_device_mesh('cuda',
-                                                           mesh_shape=(sp_size, world_size // sp_size),
-                                                           mesh_dim_names=['sp', 'dp'])
-            set_ulysses_sequence_parallel_group(self.ulysses_sp_device_mesh['sp'].get_group())
+                                                           mesh_shape=(world_size // sp_size, sp_size),
+                                                           mesh_dim_names=['dp', 'sp'])
         self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_sp_device_mesh)
 
         # normalize config

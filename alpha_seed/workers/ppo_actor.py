@@ -28,8 +28,11 @@ from verl import DataProto
 from verl.trainer.ppo.actor import BasePPOActor
 from verl.utils.py_functional import append_to_dict
 from verl.utils.torch_functional import logprobs_from_logits, log_probs_from_logits_response_rmpad, get_unpad_data
+import verl.utils.torch_functional as verl_F
+
 from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
-from dist_attn.ulysses.ops import slice_input_tensor, gather_outputs
+from dist_attn.ulysses.ops import gather_outputs
+from alpha_seed.workers.hybrid_engine.fsdp_ulysses import ulysses_pad_and_slice_inputs
 
 from alpha_seed import core_algos
 from .utils import rearrange_micro_batches
@@ -75,6 +78,7 @@ class DataParallelPPOActor(BasePPOActor):
                                                   active=1)
 
         self.compute_entropy_loss = torch.compile(core_algos.compute_entropy_loss, dynamic=True)
+        self.entropy_from_logits = torch.compile(verl_F.entropy_from_logits, dynamic=True)
 
     def _forward_micro_batch(self, micro_batch, temperature):
         from flash_attn.bert_padding import index_first_axis, rearrange
@@ -89,40 +93,33 @@ class DataParallelPPOActor(BasePPOActor):
                 input_ids_rmpad, indices, cu_seqlens, max_seqlen_in_batch = unpad_input(
                     input_ids.unsqueeze(-1), attention_mask=attention_mask)  # (totol_nnz, 1)
                 input_ids_rmpad = input_ids_rmpad.transpose(0, 1)  # (1, total_nnz)
+                input_ids_rmpad_rolled = torch.roll(input_ids_rmpad, shifts=-1, dims=1)
                 position_ids_rmpad = index_first_axis(rearrange(position_ids.unsqueeze(-1), "b s ... -> (b s) ..."),
                                                       indices).transpose(0, 1)
 
                 # handle ulysses sequence parallelism
-                if (sp_size := get_ulysses_sequence_parallel_world_size()) > 1:
-                    assert NotImplementedError
-                    _, total_s = input_ids_rmpad.shape
-                    pad_size = (sp_size - total_s % sp_size) % sp_size
-                    if pad_size > 0:
-                        # append a placeholder sequence
-                        input_ids_rmpad = torch.nn.functional.pad(input_ids_rmpad, (0, pad_size), value=0)
-                        attention_mask = torch.nn.functional.pad(attention_mask, (0, 0, 0, 1), value=0)
-                        attention_mask[-1, :pad_size] = 1
-                    input_ids_rmpad = slice_input_tensor(input_ids_rmpad, dim=1, padding=False)
-
-                # Note that in rmpad implementation, we don't need position_ids.
+                sp_size = get_ulysses_sequence_parallel_world_size()
+                total_nnz = input_ids_rmpad.size(1)
+                input_ids_rmpad, position_ids_rmpad, pad_size = ulysses_pad_and_slice_inputs(
+                    input_ids_rmpad, position_ids_rmpad, sp_size)
+                input_ids_rmpad_rolled, _, _ = ulysses_pad_and_slice_inputs(input_ids_rmpad_rolled, None, sp_size)
+                input_ids_rmpad_rolled = input_ids_rmpad_rolled.squeeze(0)
+                # forward
                 output = self.actor_module(input_ids=input_ids_rmpad, position_ids=position_ids_rmpad, use_cache=False)
-
-                # handle ulysses sequence parallelism
-                if get_ulysses_sequence_parallel_world_size() > 1:
-                    if pad_size > 0:
-                        # remove the trailing placeholder sequence
-                        attention_mask = attention_mask[:-1]
-                    output.logits = gather_outputs(output.logits, gather_dim=1, padding_dim=1, unpad_dim_size=total_s)
 
                 logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
                 logits_rmpad.div_(temperature)
 
                 batch_size, seqlen = input_ids.shape
 
-                input_ids_rmpad_rolled = torch.roll(input_ids_rmpad.squeeze(0), shifts=-1, dims=0)
                 # TODO: we should carefully determine whether to turn on inplace_backward
                 full_log_probs_rmpad = -cross_entropy_loss(logits_rmpad, input_ids_rmpad_rolled,
                                                            inplace_backward=False)[0]  # (total_nnz,)
+                if sp_size > 1:
+                    full_log_probs_rmpad = gather_outputs(full_log_probs_rmpad,
+                                                          gather_dim=0,
+                                                          padding_dim=0,
+                                                          unpad_dim_size=total_nnz)
                 full_output = pad_input(hidden_states=full_log_probs_rmpad.unsqueeze(-1),
                                         indices=indices,
                                         batch=batch_size,
@@ -135,10 +132,18 @@ class DataParallelPPOActor(BasePPOActor):
                 full_response_mask_rmpad = index_first_axis(
                     rearrange(full_response_mask.unsqueeze(-1), "b s ... -> (b s) ..."),
                     indices).squeeze(-1)  # (total_nnz,)
-                entropy_loss = self.compute_entropy_loss(logits_rmpad, full_response_mask_rmpad)  # (total_nnz,)
-                # TODO: we should apply ulysses allgather after computing entropy_loss and log_probs so that activation is chunked!!!
+
+                if sp_size > 1:
+                    entropy = self.entropy_from_logits(logits_rmpad)
+                    entropy = gather_outputs(entropy, gather_dim=0, padding_dim=0, unpad_dim_size=total_nnz)
+                    entropy_loss = verl_F.masked_mean(entropy, mask=full_response_mask_rmpad)
+                else:
+                    entropy_loss = self.compute_entropy_loss(logits_rmpad, full_response_mask_rmpad)  # (total_nnz,)
 
             else:
+                sp_size = get_ulysses_sequence_parallel_world_size()
+                if sp_size > 1:
+                    raise NotImplementedError("ulysses sequence parallelism w/o use_rmpad is not supported yet")
                 output = self.actor_module(input_ids=micro_batch['input_ids'],
                                            attention_mask=micro_batch['attention_mask'],
                                            position_ids=micro_batch['position_ids'],

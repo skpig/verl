@@ -78,13 +78,6 @@ class AsyncActorRolloutRefWorker(Worker):
         print(f'Master address: {self.master_address}, Master port: {self.master_port}')
         world_size = torch.distributed.get_world_size()
         self.device_mesh = init_device_mesh('cuda', mesh_shape=(world_size,), mesh_dim_names=['fsdp'])
-        sp_size = config.actor.ulysses_sequence_parallel_size
-        self.ulysses_sp_device_mesh = None
-        if sp_size > 1:
-            self.ulysses_sp_device_mesh = init_device_mesh('cuda',
-                                                           mesh_shape=(sp_size, world_size // sp_size),
-                                                           mesh_dim_names=['sp', 'dp'])
-            set_ulysses_sequence_parallel_group(self.ulysses_sp_device_mesh['sp'].get_group())
         self.role = role
         assert self.role in ['actor', 'rollout', 'ref', 'actor_rollout', 'actor_rollout_ref', 'standalone_rollout']
 
@@ -92,6 +85,20 @@ class AsyncActorRolloutRefWorker(Worker):
         self._is_rollout = self.role in ['rollout', 'actor_rollout', 'actor_rollout_ref']
         self._is_standalone_rollout = self.role in ['standalone_rollout']
         self._is_ref = self.role in ['ref', 'actor_rollout_ref']
+
+        # build device mesh for ulysses parallel
+        sp_size = 1
+        if self._is_actor:
+            sp_size = config.actor.ulysses_sequence_parallel_size
+        elif self._is_ref:
+            sp_size = config.ref.ulysses_sequence_parallel_size
+        self.ulysses_sp_device_mesh = None
+        if sp_size > 1:
+            self.ulysses_sp_device_mesh = init_device_mesh('cuda',
+                                                           mesh_shape=(world_size // sp_size, sp_size),
+                                                           mesh_dim_names=['dp', 'sp'])
+        if self._is_actor or self._is_ref:
+            self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_sp_device_mesh)
 
         # normalize config
         if self._is_actor:
@@ -354,9 +361,6 @@ class AsyncActorRolloutRefWorker(Worker):
             with open_dict(self.config.ref):
                 self.config.ref.use_rmpad = use_rmpad
             self.ref_policy = DataParallelPPOActor(config=self.config.ref, actor_module=self.ref_module_fsdp)
-
-        if self._is_actor or self._is_ref:
-            self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_sp_device_mesh)
 
         if self._is_actor:
             self.flops_counter = FlopsCounter(self.actor_model_config)
