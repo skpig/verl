@@ -15,6 +15,8 @@
 FSDP PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
+
+import ray
 import os
 import copy
 import json
@@ -33,6 +35,8 @@ from single_controller.base import Worker
 from single_controller.ray import RayResourcePool, RayWorkerGroup, RayClassWithInitArgs
 from single_controller.ray.base import create_colocated_worker_cls
 from verl import DataProto
+
+from hdfs_io import makedirs, hput, hcopy
 
 try:
     from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
@@ -372,6 +376,8 @@ class RayPPOTrainer(object):
 
         self._create_dataloader()
 
+        self.valid_hdfs_global_step = None
+
     def _create_dataloader(self):
         from torch.utils.data import DataLoader
         version = self.config.data.get('version', 'v1')
@@ -389,10 +395,15 @@ class RayPPOTrainer(object):
                                          filter_prompts=True,
                                          return_raw_chat=self.config.data.get('return_raw_chat', False),
                                          truncation=self.config.data.get('truncation', 'error'))
+
+        train_dataloader_generator = torch.Generator()
+        train_dataloader_generator.manual_seed(self.config.data.get('seed', 1))
+
         self.train_dataloader = DataLoader(dataset=self.train_dataset,
                                            batch_size=train_batch_size,
                                            shuffle=self.config.data.shuffle,
                                            drop_last=True,
+                                           generator=train_dataloader_generator,
                                            collate_fn=collate_fn)
 
         self.val_dataset = RLHFDataset(parquet_files=self.config.data.val_files,
@@ -418,6 +429,7 @@ class RayPPOTrainer(object):
 
         # inject total_training_steps to actor/critic optim_config. This is hacky.
         total_training_steps = len(self.train_dataloader) * self.config.trainer.total_epochs
+        self.total_training_steps = total_training_steps
 
         OmegaConf.set_struct(self.config, True)
         with open_dict(self.config):
@@ -692,8 +704,126 @@ class RayPPOTrainer(object):
             meta_info=batch.meta_info,
         )
 
+    def save_checkpoint(self):
+        """Save checkpoint to hdfs.
+        Checkpoint structure
+        default_local_dir:
+            - checkpoints
+                - latest_checkpointed_iteration.txt
+                - global_step_xxx
+                    - loader.pt
+                    - actor
+                        - model
+                        - optimizer
+                        - extra_state
+                    - critic
+                        - model
+                        - optimizer
+                        - extra_state
+            - config.yaml (TODO)
+            - step2token.json (TODO)
+            - training_trajectory.yaml (TODO)
+
+        """
+        # Attention!!! note that the latest_checkpointed_iteration.txt will be overriden if you resume from a previous checkpoint
+
+        local_checkpoint_folder = os.path.join(self.config.trainer.default_local_dir, 'checkpoints')
+        local_global_step_folder = os.path.join(local_checkpoint_folder, f'global_step_{self.global_step}')
+        os.makedirs(local_global_step_folder, exist_ok=True)
+
+        actor_local_path = os.path.join(local_global_step_folder, 'actor')
+        critic_local_path = os.path.join(local_global_step_folder, 'critic')
+
+        remote_checkpoint_folder = os.path.join(self.config.trainer.default_hdfs_dir, 'checkpoints')
+        remote_global_step_folder = os.path.join(remote_checkpoint_folder, f'global_step_{self.global_step}')
+
+        makedirs(remote_global_step_folder)
+
+        actor_remote_path = os.path.join(remote_global_step_folder, 'actor')
+        critic_remote_path = os.path.join(remote_global_step_folder, 'critic')
+
+        actor_upload_future = self.actor_rollout_wg.save_checkpoint(actor_local_path, actor_remote_path)
+
+        if self.use_critic:
+            critic_upload_future = self.critic_wg.save_checkpoint(critic_local_path, critic_remote_path)
+        else:
+            critic_upload_future = None
+
+        # save dataloader
+        dataloader_local_path = os.path.join(local_global_step_folder, 'data.pt')
+        torch.save(self.train_dataloader, dataloader_local_path)
+        # upload to hdfs
+        hput(dataloader_local_path, remote_global_step_folder)
+
+        # TODO(zhangchi.usc1992). Actually, we should postpone writing latest_checkpointed_iteration when all the hdfs upload finishes
+        # save latest_checkpointed_iteration.txt
+        if self.valid_hdfs_global_step is not None:
+            local_latest_checkpointed_iteration = os.path.join(local_checkpoint_folder,
+                                                               'latest_checkpointed_iteration.txt')
+            with open(local_latest_checkpointed_iteration, 'w') as f:
+                f.write(str(self.valid_hdfs_global_step))
+            hput(local_latest_checkpointed_iteration, remote_checkpoint_folder)
+
+        self.valid_hdfs_global_step = self.global_step
+
+        # mark a checkpoint version for future checkpoint format change and compatibility
+        local_ckpt_version = os.path.join(local_checkpoint_folder, 'checkpoint_version.txt')
+        with open(local_ckpt_version, 'w') as f:
+            f.write('v1')
+        hput(local_ckpt_version, remote_checkpoint_folder)
+
+        ray.get(actor_upload_future)
+
+        if critic_upload_future is not None:
+            ray.get(critic_upload_future)
+
+    def load_checkpoint(self):
+        if self.config.trainer.resume_steps == 'disable':
+            return
+
+        from verl.utils.fs import copy_local_path_from_hdfs
+        # find the latest global step
+        remote_checkpoint_folder = os.path.join(self.config.trainer.default_hdfs_dir, 'checkpoints')
+
+        if self.config.trainer.resume_steps == 'auto':
+            from omnistore.utilities.ckpt_format_tool import find_latest_ckpt_path
+            remote_global_step_folder = find_latest_ckpt_path(remote_checkpoint_folder)
+
+            if remote_global_step_folder is None:
+                print('Training from scratch')
+                return
+
+            # set global step
+            self.global_step = int(remote_global_step_folder.split('global_step_')[-1])
+
+        else:
+            remote_global_step_folder = os.path.join(remote_checkpoint_folder,
+                                                     f'global_step_{self.config.trainer.resume_steps}')
+            self.global_step = self.config.trainer.resume_steps
+
+        # note that we start from the next global_step
+        self.global_step += 1
+
+        print(f'Setting global step to {self.global_step}')
+        print(f'Resuming from {remote_global_step_folder}')
+
+        actor_remote_path = os.path.join(remote_global_step_folder, 'actor')
+        critic_remote_path = os.path.join(remote_global_step_folder, 'critic')
+        # load actor
+        self.actor_rollout_wg.load_checkpoint(actor_remote_path)
+        # load critic
+        if self.use_critic:
+            self.critic_wg.load_checkpoint(critic_remote_path)
+        # load dataloader
+        dataloader_remote_path = os.path.join(remote_global_step_folder, 'data.pt')
+        dataloader_local_path = copy_local_path_from_hdfs(dataloader_remote_path)
+        self.train_dataloader = torch.load(dataloader_local_path)
+
     def fit(self):
         self.global_step = 0
+
+        # load checkpoint before doing anything
+        self.load_checkpoint()
 
         # perform validation before training
         if self.val_reward_fn is not None and self.config.trainer.eval_before_training:
@@ -708,7 +838,7 @@ class RayPPOTrainer(object):
         standalone_batch = []
         pending_batch_queue = queue.Queue()
         ready_batch_queue = queue.Queue()
-        for epoch in range(self.config.trainer.total_epochs):
+        while True:
             for batch_dict in self.train_dataloader:
                 metrics = {}
                 with Timer(name='step', logger=None) as step_timer:
@@ -917,16 +1047,7 @@ class RayPPOTrainer(object):
                     with Timer(name='save_checkpoint', logger=None) as timer:
                         if self.config.trainer.save_freq > 0 and (self.global_step +
                                                                   1) % self.config.trainer.save_freq == 0:
-                            actor_local_path = os.path.join(self.config.trainer.default_local_dir, 'actor',
-                                                            f'global_step_{self.global_step}')
-                            actor_remote_path = os.path.join(self.config.trainer.default_hdfs_dir, 'actor')
-                            self.actor_rollout_wg.save_checkpoint(actor_local_path, actor_remote_path)
-
-                            if self.use_critic:
-                                critic_local_path = os.path.join(self.config.trainer.default_local_dir, 'critic',
-                                                                 f'global_step_{self.global_step}')
-                                critic_remote_path = os.path.join(self.config.trainer.default_hdfs_dir, 'critic')
-                                self.critic_wg.save_checkpoint(critic_local_path, critic_remote_path)
+                            self.save_checkpoint()
                     metrics['timing/save_checkpoint'] = timer.last
 
                 metrics['timing/step'] = step_timer.last
@@ -935,7 +1056,11 @@ class RayPPOTrainer(object):
 
                 self.global_step += 1
 
-        # perform validation after training
-        if self.val_reward_fn is not None:
-            val_metrics = self._validate()
-            pprint(f'Final validation metrics: {val_metrics}')
+                if self.global_step >= self.total_training_steps:
+
+                    # perform validation after training
+                    if self.val_reward_fn is not None:
+                        val_metrics = self._validate()
+                        pprint(f'Final validation metrics: {val_metrics}')
+
+                    return

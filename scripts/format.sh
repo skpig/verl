@@ -1,3 +1,3 @@
 #!/bin/bash
 pip3 install yapf
-yapf -ir -vv --style ./.style.yapf alpha_seed tasks
+yapf -ir -vv --style ./.style.yapf ./alpha_seed ./tasks ./scripts ./tests

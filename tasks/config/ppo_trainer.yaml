@@ -215,6 +215,8 @@ trainer:
   logger_step_interval: 10 # how many steps to log to wandb
   code_sandbox_psm: ""
   save_cases_to_hdfs: False # save all cases to hdfs each step
+  # auto: find the last ckpt to resume. If can't find, start from scratch
+  resume_steps: auto
   league_training_config: 
     enable: False
     buffer_size: 1

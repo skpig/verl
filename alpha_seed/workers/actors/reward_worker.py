@@ -47,6 +47,8 @@ from codetiming import Timer
 
 from datetime import timedelta
 
+from ..utils import rearrange_micro_batches
+
 logger = logging.getLogger(__file__)
 
 

@@ -5,7 +5,7 @@ SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/see
 RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/rm_p6_moe_400m_0716_sftv27_stage2_hf
 TRAIN_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/train_with_ref_ans.parquet
 TEST_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/test_with_ref_ans.parquet
-default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/yueyu/model/rl/alpha_seed/test5
+default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/test/p6_400m_omnistore_test_1
 
 # 训练长度
 max_prompt_length=1024 # 16384
@@ -16,8 +16,8 @@ val_batch_size=5000
 ppo_mini_batch_size=256
 ppo_micro_batch_size=64
 total_epochs=100
-test_freq=5
-save_freq=-1
+test_freq=10
+save_freq=1
 # 算法相关的参数
 actor_lr=1e-6
 critic_lr=1e-5
@@ -102,8 +102,9 @@ python3 tasks/main_ppo.py \
     trainer.save_freq=${save_freq} \
     trainer.test_freq=${test_freq} \
     trainer.total_epochs=${total_epochs} \
-    trainer.eval_before_training=True \
+    trainer.eval_before_training=False \
     trainer.val_only=False \
     trainer.val_epoch=1 \
     trainer.need_log=False \
-    trainer.log_file=/opt/tiger/alpha-seed/log.jsonl
+    trainer.log_file=/opt/tiger/alpha-seed/log.jsonl \
+    trainer.resume_steps=auto

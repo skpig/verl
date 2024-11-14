@@ -7,7 +7,7 @@ import os
 
 os.environ['NCCL_DEBUG'] = 'WARN'
 
-import seed_models # noqa
+import seed_models  # noqa
 
 from verl.utils.fs import copy_local_path_from_hdfs
 from verl.utils.distributed import initialize_global_process_group
@@ -56,7 +56,6 @@ actor_module_fsdp = FSDP(
     sync_module_states=False,
     device_id=torch.cuda.current_device(),
     device_mesh=device_mesh)
-
 
 from alpha_seed.workers.xperf_rollout.xperf_gpt_rollout import XPerfGPTRollout
 from alpha_seed.workers.hybrid_engine.fsdp_xperfgpt import FSDPXPerfGPTShardingManager

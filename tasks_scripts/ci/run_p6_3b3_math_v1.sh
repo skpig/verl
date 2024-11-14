@@ -5,7 +5,7 @@ SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/see
 RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/rm_p6_moe_3b3_0812_sftv27_stage2_fix_order_aux_32k_v2_hf
 TRAIN_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/train_with_ref_ans.parquet
 TEST_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/test_with_ref_ans.parquet
-default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/yueyu/model/rl/alpha_seed/test5
+default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/test/p6_3b3
 
 # 训练长度
 max_prompt_length=1024 # 16384

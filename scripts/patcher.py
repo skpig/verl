@@ -13,20 +13,24 @@ class Patcher:
 
     def prepare_python3_env(self):
         # os.system("git config pull.ff only")
-        # os.system("pip3 install --no-cache-dir https://luban-source.byted.org/repository/scm/data.aml.xperf_gpt_th24_cu124_abi0_sdist_1.0.0.183.tar.gz")
+        os.system(
+            "pip3 install --no-cache-dir https://luban-source.byted.org/repository/scm/data.aml.xperf_gpt_th24_cu124_abi0_sdist_1.0.0.272.tar.gz"
+        )
         # os.system("cd /opt/tiger && rm -rf mariana && git clone https://yipzlf:vwZZ_JYy7mkx-1zUjyeR@code.byted.org/seed/mariana && cd mariana && git checkout zr/sc/xperf_infer")
         # os.system("cd /opt/tiger/mariana && git pull")
         # os.system("cd /opt/tiger && rm -rf seed_models && git clone https://yipzlf:vwZZ_JYy7mkx-1zUjyeR@code.byted.org/seed/seed_models && cd seed_models && git checkout chi/feat/p6_ggemm_ckpt")
-        os.system("pip3 install --no-cache-dir torchvision==0.19.1 timm")
+        # os.system("pip3 install --no-cache-dir torchvision==0.19.1 timm")
         # os.system("cd /opt/tiger && rm -rf verifiable_tasks && git clone https://yipzlf:vwZZ_JYy7mkx-1zUjyeR@code.byted.org/seed/verifiable_tasks")
-        return 
+        return
         os.system("pip3 install bytedance.trainingmetrics -i https://bytedpypi.byted.org/simple/")
-        os.system("cd /opt/tiger && rm -rf mariana && git clone https://yipzlf:vwZZ_JYy7mkx-1zUjyeR@code.byted.org/seed/mariana && cd mariana && git checkout fwq_sing")
+        os.system(
+            "cd /opt/tiger && rm -rf mariana && git clone https://yipzlf:vwZZ_JYy7mkx-1zUjyeR@code.byted.org/seed/mariana && cd mariana && git checkout fwq_sing"
+        )
 
         # os.system("cd /opt/tiger/mariana && git checkout 38b36efdd00e4eee355e19cf15642339c1387224")
-        
+
         # os.system("mkdir -p /opt/tiger/debug_data")
-        
+
         # os.system("cd /opt/tiger/ && rm -rf cruise && bvc clone data/aml/cruise --version 1.0.0.2933")
 
         # os.system("pip3 install t
@@ -36,31 +40,42 @@ class Patcher:
         # os.system("cd /opt/tiger && rm -rf verl && git clone https://yipzlf:vwZZ_JYy7mkx-1zUjyeR@code.byted.org/data/verl && cd verl && git checkout zr/async_xperf")
         # os.system("cd /opt/tiger/ && rm -rf Megatron-LM && mkdir Megatron-LM && cd Megatron-LM && bvc clone aml/mlsys/megatron_pt2_cu121 --version 1.0.0.761 -f")
         # os.system("cd /opt/tiger && rm -rf cruise && git clone https://yipzlf:vwZZ_JYy7mkx-1zUjyeR@code.byted.org/data/cruise && cd cruise && git checkout zr/fix_stop")
-            
+
         return
-        os.system("pip3 install https://luban-source.byted.org/repository/scm/data.aml.xperf_gpt_th21_cu121_abi0_sdist_1.0.0.379.tar.gz")
+        os.system(
+            "pip3 install https://luban-source.byted.org/repository/scm/data.aml.xperf_gpt_th21_cu121_abi0_sdist_1.0.0.379.tar.gz"
+        )
         return
         os.system("pip3 install numpy==1.21.2")
         os.system("mkdir -p /opt/tiger/debug_data")
         os.system("pip3 install --upgrade byted-wandb")
         os.system("pip3 install hydra-core --upgrade")
-        os.system("cd /opt/tiger && rm -rf mariana && git clone https://yipzlf:vwZZ_JYy7mkx-1zUjyeR@code.byted.org/seed/mariana && cd mariana && git checkout zr/support_rl_dssp")
         os.system(
-            "cd /opt/tiger && rm -rf cruise && git clone https://yipzlf:vwZZ_JYy7mkx-1zUjyeR@code.byted.org/data/cruise && cd cruise && git checkout master")
-        os.system("cd /opt/tiger && rm -rf mariana_metadata && git clone https://yipzlf:vwZZ_JYy7mkx-1zUjyeR@code.byted.org/seed/mariana_metadata")
+            "cd /opt/tiger && rm -rf mariana && git clone https://yipzlf:vwZZ_JYy7mkx-1zUjyeR@code.byted.org/seed/mariana && cd mariana && git checkout zr/support_rl_dssp"
+        )
+        os.system(
+            "cd /opt/tiger && rm -rf cruise && git clone https://yipzlf:vwZZ_JYy7mkx-1zUjyeR@code.byted.org/data/cruise && cd cruise && git checkout master"
+        )
+        os.system(
+            "cd /opt/tiger && rm -rf mariana_metadata && git clone https://yipzlf:vwZZ_JYy7mkx-1zUjyeR@code.byted.org/seed/mariana_metadata"
+        )
         os.system(
             "cd /opt/tiger && rm -rf instruction_following_eval && git clone https://yipzlf:vwZZ_JYy7mkx-1zUjyeR@code.byted.org/seed/instruction_following_eval"
         )
-        os.system("cd /opt/tiger && pip3 install http://luban-source.byted.org/repository/scm/data.aml.verl_1.0.0.60.tar.gz")
-        os.system("cd /opt/tiger && pip3 uninstall byted-torch torch -y && pip3 install https://d.scm.byted.org/api/v2/download/lab.pytorch.pytorch2_cu121_1.0.0.73.tar.gz && pip3 install --no-cache-dir --pre torchvision==0.16.0 torchaudio==2.1.0")
-    
+        os.system(
+            "cd /opt/tiger && pip3 install http://luban-source.byted.org/repository/scm/data.aml.verl_1.0.0.60.tar.gz")
+        os.system(
+            "cd /opt/tiger && pip3 uninstall byted-torch torch -y && pip3 install https://d.scm.byted.org/api/v2/download/lab.pytorch.pytorch2_cu121_1.0.0.73.tar.gz && pip3 install --no-cache-dir --pre torchvision==0.16.0 torchaudio==2.1.0"
+        )
 
         if self.cuda_version == 11:
             os.system("pip3 install cupy-cuda11x")
             os.system(
                 "http_proxy=http://sys-proxy-rd-relay.byted.org:3128 https_proxy=http://sys-proxy-rd-relay.byted.org:3128 no_proxy= python3 -m cupyx.tools.install_library --library nccl --cuda 11.x"
             )
-            os.system("pip3 install https://luban-source.byted.org/repository/scm/data.aml.xperf_gpt_th113_cu117_abi0_sdist_1.0.0.409.tar.gz")
+            os.system(
+                "pip3 install https://luban-source.byted.org/repository/scm/data.aml.xperf_gpt_th113_cu117_abi0_sdist_1.0.0.409.tar.gz"
+            )
             os.system("cd /opt/tiger/ && rm -rf Megatron-LM")
             os.system("cd /opt/tiger/ && mkdir Megatron-LM && cd Megatron-LM && bvc clone aml/mlsys/megatron -f")
             os.system("cd /opt/tiger/Megatron-LM/megatron && pip3 install .")
@@ -70,10 +85,16 @@ class Patcher:
             os.system(
                 "http_proxy=http://sys-proxy-rd-relay.byted.org:3128 https_proxy=http://sys-proxy-rd-relay.byted.org:3128 no_proxy=  python3 -m cupyx.tools.install_library --library nccl --cuda 12.x"
             )
-            os.system("cd /opt/tiger && pip3 install https://luban-source.byted.org/repository/scm/data.aml.xperf_gpt_th21_cu121_abi0_sdist_1.0.0.179.tar.gz")
-            os.system("pip3 install https://luban-source.byted.org/repository/scm/data.aml.lego_ops_th21_cu121_cudnn890_abi0_sdist_1.0.0.184.tar.gz")
+            os.system(
+                "cd /opt/tiger && pip3 install https://luban-source.byted.org/repository/scm/data.aml.xperf_gpt_th21_cu121_abi0_sdist_1.0.0.179.tar.gz"
+            )
+            os.system(
+                "pip3 install https://luban-source.byted.org/repository/scm/data.aml.lego_ops_th21_cu121_cudnn890_abi0_sdist_1.0.0.184.tar.gz"
+            )
             os.system("cd /opt/tiger/ && rm -rf Megatron-LM")
-            os.system("cd /opt/tiger/ && mkdir Megatron-LM && cd Megatron-LM && bvc clone aml/mlsys/megatron_pt2_cu121 --version 1.0.0.339 -f")
+            os.system(
+                "cd /opt/tiger/ && mkdir Megatron-LM && cd Megatron-LM && bvc clone aml/mlsys/megatron_pt2_cu121 --version 1.0.0.339 -f"
+            )
             os.system("cd /opt/tiger/Megatron-LM/megatron && pip3 install .")
             os.system("pip3 install /opt/tiger/mariana_metadata/tools/th121/rotary_emb-0.1-cp39-cp39-linux_x86_64.whl")
 
@@ -198,33 +219,46 @@ class HeadPatcher:
     def run(self, cuda_version):
         # os.system("cd /opt/tiger && rm -rf verl && git clone https://yipzlf:vwZZ_JYy7mkx-1zUjyeR@code.byted.org/data/verl verl && cd verl && git checkout nozomi/unblocking_xp && git pull")
         # os.system("cd /opt/tiger && rm -rf mariana && git clone https://yipzlf:vwZZ_JYy7mkx-1zUjyeR@code.byted.org/seed/mariana && cd mariana && git checkout zr/verl/xperf_infer")
-        os.system("cd /opt/tiger && rm -rf mariana && git clone https://yipzlf:vwZZ_JYy7mkx-1zUjyeR@code.byted.org/seed/mariana && cd mariana && git checkout fwq_sing")
+        os.system(
+            "cd /opt/tiger && rm -rf mariana && git clone https://yipzlf:vwZZ_JYy7mkx-1zUjyeR@code.byted.org/seed/mariana && cd mariana && git checkout fwq_sing"
+        )
         return
-        os.system("cd /opt/tiger && rm -rf mariana && git clone https://yipzlf:vwZZ_JYy7mkx-1zUjyeR@code.byted.org/seed/mariana && cd mariana && git checkout zr/verl/xperf_infer")
+        os.system(
+            "cd /opt/tiger && rm -rf mariana && git clone https://yipzlf:vwZZ_JYy7mkx-1zUjyeR@code.byted.org/seed/mariana && cd mariana && git checkout zr/verl/xperf_infer"
+        )
         os.system("pip3 install tensordict")
         os.system("pip3 uninstall -y torch byted_torch")
-        os.system("python3 -m pip install --no-cache-dir http://luban-source.byted.org/repository/scm/lab.pytorch.pytorch2_cu121_1.0.0.182.tar.gz && python3 -m pip --timeout 3600 install --no-cache-dir --pre torchvision==0.16.0 torchaudio==2.1.0 --index-url https://download.pytorch.org/whl/cu121")
+        os.system(
+            "python3 -m pip install --no-cache-dir http://luban-source.byted.org/repository/scm/lab.pytorch.pytorch2_cu121_1.0.0.182.tar.gz && python3 -m pip --timeout 3600 install --no-cache-dir --pre torchvision==0.16.0 torchaudio==2.1.0 --index-url https://download.pytorch.org/whl/cu121"
+        )
         return
         os.system(
             "cd /opt/tiger && rm -rf instruction_following_eval && git clone https://yipzlf:vwZZ_JYy7mkx-1zUjyeR@code.byted.org/seed/instruction_following_eval"
         )
-        os.system("cd /opt/tiger && rm -rf mariana && git clone https://yipzlf:mUuXbsNc9VzHNsLAKy7_@code.byted.org/seed/mariana")
+        os.system(
+            "cd /opt/tiger && rm -rf mariana && git clone https://yipzlf:mUuXbsNc9VzHNsLAKy7_@code.byted.org/seed/mariana"
+        )
         os.system(
             "cd /opt/tiger && rm -rf mariana && git clone https://yipzlf:vwZZ_JYy7mkx-1zUjyeR@code.byted.org/seed/mariana && cd mariana && git checkout zr/support_rl_dssp"
         )
         os.system(
             "cd /opt/tiger && rm -rf cruise && git clone https://yipzlf:vwZZ_JYy7mkx-1zUjyeR@code.byted.org/data/cruise && cd cruise && git checkout ror_fix"
         )
-        os.system("cd /opt/tiger && pip3 install http://luban-source.byted.org/repository/scm/data.aml.verl_1.0.0.60.tar.gz")
-        os.system("cd /opt/tiger && pip3 uninstall byted-torch torch -y && pip3 install https://d.scm.byted.org/api/v2/download/lab.pytorch.pytorch2_cu121_1.0.0.73.tar.gz && pip3 install --no-cache-dir --pre torchvision==0.16.0 torchaudio==2.1.0")
-    
+        os.system(
+            "cd /opt/tiger && pip3 install http://luban-source.byted.org/repository/scm/data.aml.verl_1.0.0.60.tar.gz")
+        os.system(
+            "cd /opt/tiger && pip3 uninstall byted-torch torch -y && pip3 install https://d.scm.byted.org/api/v2/download/lab.pytorch.pytorch2_cu121_1.0.0.73.tar.gz && pip3 install --no-cache-dir --pre torchvision==0.16.0 torchaudio==2.1.0"
+        )
+
         os.system("pip3 install hydra-core --upgrade")
         if cuda_version == 11:
             os.system("cd /opt/tiger/ && rm -rf Megatron-LM")
             os.system("cd /opt/tiger/ && mkdir Megatron-LM && cd Megatron-LM && bvc clone aml/mlsys/megatron -f")
         else:
             os.system("cd /opt/tiger/ && rm -rf Megatron-LM")
-            os.system("cd /opt/tiger/ && mkdir Megatron-LM && cd Megatron-LM && bvc clone aml/mlsys/megatron_pt2_cu121 --version 1.0.0.339 -f")
+            os.system(
+                "cd /opt/tiger/ && mkdir Megatron-LM && cd Megatron-LM && bvc clone aml/mlsys/megatron_pt2_cu121 --version 1.0.0.339 -f"
+            )
 
         return True
 
@@ -234,12 +268,10 @@ if __name__ == '__main__':
     node_id_list = [n['NodeID'] for n in ray.nodes() if n['Alive']]
     nodes = []
     for node_id in node_id_list:
-        specific_node = Patcher.options(
-            scheduling_strategy=NodeAffinitySchedulingStrategy(
-                node_id=node_id,
-                soft=False,
-            )
-        ).remote()
+        specific_node = Patcher.options(scheduling_strategy=NodeAffinitySchedulingStrategy(
+            node_id=node_id,
+            soft=False,
+        )).remote()
         nodes.append(specific_node)
 
     print(ray.get([node.prepare_python3_env.remote() for node in nodes]))

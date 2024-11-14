@@ -20,12 +20,10 @@ def offload_to_cpu(tp_model):
     torch.cuda.empty_cache()
 
 
-
-
 if __name__ == "__main__":
     xperf_gpt.load_xperf_gpt()
 
-    max_length = 16*1024
+    max_length = 16 * 1024
     max_new_tokens = 16
     max_batch_size = 128
     num_slots = max_batch_size  # orca
@@ -37,20 +35,18 @@ if __name__ == "__main__":
         slot_block_size=256,
         use_vllm=False,
         context_split_len=1024,
-        enable_cuda_graph=True, # enable cuda graph
+        enable_cuda_graph=True,  # enable cuda graph
     )
-    generate_kwargs = dict(
-        max_new_tokens=max_new_tokens,
-        do_sample=True,
-        top_k=1,
-        top_p=0.7,
-        temperature=1.0,
-        rank0_split_backend="nccl"
-    )
-    inference_sess.init_inference_engine(
-        "/opt/tiger/alpha-seed/tests/infer/config.json", generate_kwargs, enable_metrics=True
-    )
-    query_pool = ["我"*1024]*64
+    generate_kwargs = dict(max_new_tokens=max_new_tokens,
+                           do_sample=True,
+                           top_k=1,
+                           top_p=0.7,
+                           temperature=1.0,
+                           rank0_split_backend="nccl")
+    inference_sess.init_inference_engine("/opt/tiger/alpha-seed/tests/infer/config.json",
+                                         generate_kwargs,
+                                         enable_metrics=True)
+    query_pool = ["我" * 1024] * 64
     complete_ratio = 1
     num_bon = 128
     import time
@@ -65,7 +61,7 @@ if __name__ == "__main__":
     torch.cuda.synchronize()
     print(f"Time spent: {time.time()-start}")
 
-    print("torch.cuda.memory_allocated: {} MB".format(torch.cuda.memory_allocated()/1024/1024))
+    print("torch.cuda.memory_allocated: {} MB".format(torch.cuda.memory_allocated() / 1024 / 1024))
 
     offload_to_cpu(inference_sess.engine.module)
-    print("offloaded, torch.cuda.memory_allocated: {} MB".format(torch.cuda.memory_allocated()/1024/1024))
+    print("offloaded, torch.cuda.memory_allocated: {} MB".format(torch.cuda.memory_allocated() / 1024 / 1024))
