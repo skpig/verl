@@ -83,7 +83,7 @@ def _get_p5_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
         "has_k_layernorm": config.use_key_layernorm,
         "tokenizer_path": tokenizer.name_or_path,
         "rope_mode": "default",
-        "rope_base": config.rope_theta
+        "rope_base": int(config.rope_theta)
     }
     return xperf_config
 
@@ -115,7 +115,7 @@ def _get_p6_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
         "tokenizer_path": tokenizer.name_or_path,
         "has_mlp_gate": True,
         "rope_mode": config.rope_scaling['rope_type'],
-        "rope_base": config.rope_theta,
+        "rope_base": int(config.rope_theta),
         "rope_scale": config.rope_scaling['factor']
     }
     return xperf_config
