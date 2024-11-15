@@ -34,7 +34,7 @@ def compute_score(solution_str, ground_truth, code_sandbox_psm, **argv) -> float
         return -2
     except Exception as ex:
         print(f'sandbox fail with error: {ex}')
-        return -2
+        return -3
 
 
 def test_compute_score():

@@ -106,6 +106,7 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
     else:
         beta = 0
         kld = torch.zeros_like(response_mask, dtype=torch.float32)
+    kld = torch.clamp(kld, max=10.0, min=-10.0)
 
     token_level_rewards = token_level_scores - beta * kld
 
@@ -290,6 +291,14 @@ def compute_data_metrics(batch, use_critic, mean, std):
         'prob/mean':
             torch.mean(torch.exp(valid_old_logprob)).detach().item(),
     }
+    for threshold in [1e-6, 1e-5, 1e-4, 1e-3]:
+        small_prob_mask = torch.logical_and(response_mask_bool, old_log_probs.exp() < threshold)
+        small_prob_ratio = small_prob_mask.float().sum() / response_mask_bool.float().sum()
+        small_prob_adv = torch.masked_select(advantages, small_prob_mask)
+        metrics.update({
+            f'prob/prob_lt_{threshold}_ratio': small_prob_ratio.detach().item(),
+            f'prob/prob_lt_{threshold}_adv': torch.mean(small_prob_adv).detach().item()
+        })
     if use_critic:
         values = batch.batch['values']
         upgo_advantages = batch.batch['upgo_advantages']
@@ -338,7 +347,6 @@ class RayPPOTrainer(object):
                  reward_fn=None,
                  val_reward_fn=None,
                  logger=None):
-
         # assert torch.cuda.is_available(), 'cuda must be available on driver'
 
         self.tokenizer = tokenizer
@@ -783,10 +791,9 @@ class RayPPOTrainer(object):
 
         from verl.utils.fs import copy_local_path_from_hdfs
         # find the latest global step
-        remote_checkpoint_folder = os.path.join(self.config.trainer.default_hdfs_dir, 'checkpoints')
-
         if self.config.trainer.resume_steps == 'auto':
             from omnistore.utilities.ckpt_format_tool import find_latest_ckpt_path
+            remote_checkpoint_folder = os.path.join(self.config.trainer.default_hdfs_dir, 'checkpoints')
             remote_global_step_folder = find_latest_ckpt_path(remote_checkpoint_folder)
 
             if remote_global_step_folder is None:
@@ -797,9 +804,10 @@ class RayPPOTrainer(object):
             self.global_step = int(remote_global_step_folder.split('global_step_')[-1])
 
         else:
-            remote_global_step_folder = os.path.join(remote_checkpoint_folder,
-                                                     f'global_step_{self.config.trainer.resume_steps}')
-            self.global_step = self.config.trainer.resume_steps
+            assert isinstance(self.config.trainer.resume_steps, str), "resume ckpt must be str type"
+            assert 'global_step_' in self.config.trainer.resume_steps, "resume ckpt must specify the global_step"
+            remote_global_step_folder = self.config.trainer.resume_steps
+            self.global_step = int(remote_global_step_folder.split('global_step_')[-1])
 
         # note that we start from the next global_step
         self.global_step += 1
@@ -970,12 +978,17 @@ class RayPPOTrainer(object):
 
                     # league training，筛选平均通过率低的prompt
                     if self.config.trainer.league_training_config.enable:
-                        batch = self.league_training_filter_prompt(
-                            batch, strategy=self.config.trainer.league_training_config.strategy)
+                        with Timer(name='select_league_training_prompts', logger=None) as timer:
+                            batch = self.league_training_filter_prompt(
+                                batch, strategy=self.config.trainer.league_training_config.strategy)
+                        metrics['timing/select_league_training_prompts'] = timer.last
 
                     # bon策略，筛选prompt内部的response，有不同策略，all、best、best_mix_random、best_worst
                     if self.num_bon > 1:
-                        batch = self.select_training_samples(batch, self.config.actor_rollout_ref.rollout.bon_strategy)
+                        with Timer(name='select_bon_samples', logger=None) as timer:
+                            batch = self.select_training_samples(batch,
+                                                                 self.config.actor_rollout_ref.rollout.bon_strategy)
+                        metrics['timing/select_bon_samples'] = timer.last
 
                     if self.use_reference_policy:
                         # compute reference log_prob

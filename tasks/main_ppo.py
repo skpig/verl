@@ -27,7 +27,11 @@ import hdfs_io
 from alpha_seed.utils.reward_score import gsm8k, math, math_v2, model_score_fn, logic_puzzle, oj_utils
 from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRefWorker
 from alpha_seed.workers.actors.critic_worker import CriticWorker
+from alpha_seed.utils.alarm.lark_util import send_message_to_employee
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+user_email = os.getenv('ARNOLD_LARK_RECEIVER', '')
+task_url = os.getenv('ARNOLD_ORIGIN_PLATFORM_URL', '')
 
 
 def _select_rm_score_fn(reward_style):
@@ -105,8 +109,15 @@ class RewardManager():
 
         for i in range(len(data)):
             rm_res_future_list.append(self.rm_req_executor.submit(get_rm_score, i))
+        fail_cnt = 0
+        total_cnt = 0
         for res in as_completed(rm_res_future_list):
             prompt_str, solution_str, ground_truth, reward_style, valid_response_length, score, idx = res.result()
+            if reward_style == "code-sandbox":
+                total_cnt += 1
+                # 访问失败的score现在设置成-3，用来计数，但是训练的时候还是当做没做对来处理
+                fail_cnt += int(score < -2)
+                score = max(score, -2)
             # train的时候做这个norm，但是打点的时候恢复，打原始值
             # eval的时候不做这个norm
             if need_norm:
@@ -122,7 +133,9 @@ class RewardManager():
                     ground_truth = {}  # 对于OJ问题，ground_truth会比较大，扛不住
                 self.log_table.append([global_step, prompt_str, solution_str, ground_truth, score])
             save_to_hdfs.append([global_step, prompt_str, solution_str, ground_truth, score])
-
+        if fail_cnt >= 1:
+            send_message_to_employee("alpha seed任务oj失败率过高", f"任务链接: {task_url}, 失败率: {round(fail_cnt/total_cnt, 2)}",
+                                     user_email)
         if self.config.trainer.num_cases_to_wandb > 0:
             logger_step = global_step - global_step % self.config.trainer.logger_step_interval
             self.logger.log(
@@ -299,6 +312,7 @@ def main_task(config):
                             val_reward_fn=val_reward_fn,
                             logger=logger)
     trainer.init_workers()
+    send_message_to_employee("alpha seed任务开始训练", f"任务链接: {task_url}", user_email)
     trainer.fit()
 
 
