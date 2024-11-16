@@ -24,7 +24,7 @@ import pandas as pd
 import hdfs_io
 
 # rule-based reward score
-from alpha_seed.utils.reward_score import gsm8k, math, math_v2, model_score_fn, logic_puzzle, oj_utils
+from alpha_seed.utils.reward_score import gsm8k, math, math_v2, model_score_fn, logic_puzzle, oj_utils, math_verifier
 from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRefWorker
 from alpha_seed.workers.actors.critic_worker import CriticWorker
 from alpha_seed.utils.alarm.lark_util import send_message_to_employee
@@ -47,6 +47,8 @@ def _select_rm_score_fn(reward_style):
         return math.compute_score
     elif reward_style == 'rule-lighteval/MATH_v2':
         return math_v2.compute_score
+    elif reward_style == "rule-math_verifier":
+        return math_verifier.compute_score
     else:
         if reward_style.startswith("rule-logic_puzzle"):
             return logic_puzzle.compute_score

@@ -153,7 +153,7 @@ class RLHFDataset(Dataset):
             answer = row_dict.get(self.answer_key, "")
         else:
             answer = ""
-        if answer:
+        if answer and not pd.isna(answer):
             sp = "请参考以下内容进行回答: \n\n" + answer
             if chat[0]["role"] == "system":
                 prompt_with_chat_template = prompt_with_chat_template.split(self.tokenizer.eos_token)[1]
