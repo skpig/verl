@@ -14,7 +14,7 @@ data:
   version: v2
   truncation: error
   shuffle: True
-  multi_prompts: all
+  multi_prompts: none
   num_prompts_per_data: 1
 
 
