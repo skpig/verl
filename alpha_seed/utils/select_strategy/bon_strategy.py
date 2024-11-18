@@ -6,14 +6,13 @@ from collections import defaultdict
 from verl import DataProto
 
 
-def select_training_samples(batch, strategy, config):
+def select_training_samples(batch, strategy, num_bon):
     # strategy:
     #   - all: use all responses to train policy and value
     #   - best: use BoN to train policy and value
     #   - best_mix_random: use BoN and random-choice-one to train policy and value
     #   - best_worst: use BoN and WoN to train policy and value
-    num_bon = config.actor_rollout_ref.rollout.num_bon
-    bsz = config.data.train_batch_size
+    bsz = batch.batch['token_level_scores'].shape[0] // num_bon  # self.config.data.train_batch_size
     # calc select ids
     scores = batch.batch['token_level_scores'].sum(-1).reshape(bsz, num_bon)
     if strategy == "all":
@@ -64,7 +63,7 @@ def select_training_samples(batch, strategy, config):
     )
 
 
-def select_training_samples_v2(batch, strategy, config):
+def select_training_samples_v2(batch, strategy, num_bon):
     # strategy:
     #   - all: use all responses to train policy and value
     #   - best: use BoN to train policy and value
@@ -75,7 +74,6 @@ def select_training_samples_v2(batch, strategy, config):
     id2feat = defaultdict(list)
     total_samples = []
     cur_bsz = batch.batch.batch_size[0]
-    num_bon = config.actor_rollout_ref.rollout.num_bon
     tensor_keys = set()
     non_tensor_keys = set()
     for i in range(cur_bsz):

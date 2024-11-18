@@ -404,7 +404,9 @@ class RayPPOTrainer(object):
                                          max_prompt_length=self.config.data.max_prompt_length,
                                          filter_prompts=True,
                                          return_raw_chat=self.config.data.get('return_raw_chat', False),
-                                         truncation=self.config.data.get('truncation', 'error'))
+                                         truncation=self.config.data.get('truncation', 'error'),
+                                         multi_prompts=self.config.data.get("multi_prompts", "none"),
+                                         num_prompts_per_data=self.config.data.get("num_prompts_per_data", 1))
 
         train_dataloader_generator = torch.Generator()
         train_dataloader_generator.manual_seed(self.config.data.get('seed', 1))
@@ -447,6 +449,7 @@ class RayPPOTrainer(object):
             self.config.critic.optim.total_training_steps = total_training_steps
 
     def _validate(self, val_epoch=1, need_log=False, log_file="/opt/tiger/alpha-seed/log.jsonl"):
+        metric_dict = {}
         reward_tensor_lst = []
         data_source_lst = []
         if need_log:
@@ -459,7 +462,6 @@ class RayPPOTrainer(object):
                 test_gen_batch.meta_info = {
                     'eos_token_id': self.tokenizer.eos_token_id,
                     'pad_token_id': self.tokenizer.pad_token_id,
-                    'recompute_log_prob': False,
                     'validate': True,
                     'complete_ratio': 1,  # validation does not need timeout
                 }
@@ -469,12 +471,18 @@ class RayPPOTrainer(object):
                 # pad test_gen_batch to divisible by world_size. TODO(zhangchi.usc1992): shall we move this logic to dispatch?
                 test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch,
                                                                            self.actor_rollout_wg.world_size)
+
+                eval_bon = self.config.actor_rollout_ref.rollout.get("eval_bon", 1)
+                test_gen_batch_padded.meta_info["num_bon"] = eval_bon
+
                 test_output_gen_batch = self.actor_rollout_wg.generate_sequences(test_gen_batch_padded)
-                test_output_gen_batch = unpad_dataproto(test_output_gen_batch, pad_size=pad_size)
+                test_output_gen_batch = unpad_dataproto(test_output_gen_batch, pad_size=pad_size * eval_bon)
 
                 print(
                     f'{val_epoch_idx + 1}-th/{val_epoch} {val_idx + 1}-th/{len(self.val_dataloader)} validation generation end'
                 )
+                if eval_bon > 1:
+                    test_batch = test_batch.repeat(eval_bon)
 
                 test_batch = test_batch.union(test_output_gen_batch)
 
@@ -491,6 +499,20 @@ class RayPPOTrainer(object):
                 # for certain reward function (e.g. sandbox), the generation can overlap with reward
                 reward_tensor = self.val_reward_fn(test_batch, global_step=self.global_step, need_norm=False)
 
+                reward_tensor_before_select = reward_tensor.clone()  # (B x bon, seqlen)
+                if eval_bon > 1 and self.global_step % self.config.actor_rollout_ref.rollout.get("eval_bon_every",
+                                                                                                 20) == 0:
+                    from alpha_seed.utils.reward_score.boostrap_bon import bootstrap_bon_metric
+                    nxm_mat = reward_tensor_before_select.sum(-1).reshape(-1, eval_bon)
+                    bon_matrix, bon_metric = bootstrap_bon_metric(nxm_mat)  #  nxm
+                    print("Bon matrix: {}".format(bon_matrix.mean(0).tolist()))
+                    metric_dict.update({f"diversity/eval_bo{k}": v for k, v in bon_metric.items()})
+                    metric_dict['diversity/eval_bon_hist'] = wandb.Histogram(np_histogram=np.histogram(
+                        np.arange(0, eval_bon) + 0.5, bins=eval_bon, weights=bon_matrix.mean(0)))
+                    reward_tensor = bon_matrix[:, 0]  # bo1 as reward
+                else:
+                    reward_tensor = reward_tensor.sum(-1)  # sum over seqlen
+
                 reward_tensor_lst.append(reward_tensor)
                 data_source_lst.append(
                     test_batch.non_tensor_batch.get('data_source', ['unknown'] * reward_tensor.shape[0]))
@@ -500,13 +522,13 @@ class RayPPOTrainer(object):
                     response_ids = input_ids[:, self.config.data.max_prompt_length:]
                     prompts = self.tokenizer.batch_decode(prompt_ids, skip_special_tokens=True)
                     responses = self.tokenizer.batch_decode(response_ids, skip_special_tokens=True)
-                    reward_tensor = reward_tensor.sum(-1).cpu()
-                    for reward, prompt, response in zip(reward_tensor, prompts, responses):
+                    reward_tensor_before_select = reward_tensor_before_select.sum(-1).cpu()
+                    for reward, prompt, response in zip(reward_tensor_before_select, prompts, responses):
                         data = {"reward": reward.item(), "prompt": prompt, "response": response}
                         f.write(json.dumps(data, ensure_ascii=False) + "\n")
                         f.flush()
 
-        reward_tensor = torch.cat(reward_tensor_lst, dim=0).sum(-1).cpu()  # (batch_size,)
+        reward_tensor = torch.cat(reward_tensor_lst, dim=0).cpu()  # (batch_size,)
         data_sources = np.concatenate(data_source_lst, axis=0)
         # evaluate test_score based on data source
         data_source_reward = {}
@@ -516,7 +538,6 @@ class RayPPOTrainer(object):
                 data_source_reward[data_source] = []
             data_source_reward[data_source].append(reward_tensor[i].item())
 
-        metric_dict = {}
         for data_source, rewards in data_source_reward.items():
             metric_dict[f'test_score/{data_source}'] = np.mean(rewards)
 
@@ -662,7 +683,8 @@ class RayPPOTrainer(object):
 
         # save dataloader
         dataloader_local_path = os.path.join(local_global_step_folder, 'data.pt')
-        torch.save(self.train_dataloader, dataloader_local_path)
+        import dill
+        torch.save(self.train_dataloader, dataloader_local_path, pickle_module=dill)
         # upload to hdfs
         hput(dataloader_local_path, remote_global_step_folder)
 
@@ -744,8 +766,11 @@ class RayPPOTrainer(object):
                                          need_log=self.config.trainer.need_log,
                                          log_file=self.config.trainer.log_file)
             pprint(f'Initial validation metrics: {val_metrics}')
+            self.logger.log(data=val_metrics, step=self.global_step)
         if self.config.trainer.val_only:
             return
+
+        self.global_step = 1
 
         # TODO: add staleness
         standalone_batch = []
@@ -757,6 +782,11 @@ class RayPPOTrainer(object):
                 with Timer(name='step', logger=None) as step_timer:
                     # hybrid generate (on policy)
                     batch: DataProto = DataProto.from_single_dict(batch_dict)
+
+                    if self.config.data.num_prompts_per_data > 1:
+                        batch = batch.unfold_column_chunks(self.config.data.num_prompts_per_data,
+                                                           split_keys=['input_ids', 'attention_mask', 'position_ids'])
+
                     batch = batch.repeat(self.num_bon)
                     tmp_batch = copy.deepcopy(batch)
                     gen_batch = tmp_batch.pop(batch_keys=['input_ids', 'attention_mask', 'position_ids'])
@@ -908,13 +938,13 @@ class RayPPOTrainer(object):
                                 batch, bon_metrics = select_training_samples_v2(
                                     batch=batch,
                                     strategy=self.config.actor_rollout_ref.rollout.bon_strategy,
-                                    config=self.config)
+                                    num_bon=self.num_bon)
                                 metrics.update(bon_metrics)
                             else:
                                 batch = select_training_samples(
                                     batch=batch,
                                     strategy=self.config.actor_rollout_ref.rollout.bon_strategy,
-                                    config=self.config)
+                                    num_bon=self.num_bon)
                         metrics['timing/select_bon_samples'] = timer.last
 
                     if self.use_reference_policy:
@@ -967,7 +997,7 @@ class RayPPOTrainer(object):
                         metrics.update(actor_output_metrics)
 
                     # validate
-                    if self.val_reward_fn is not None and (self.global_step + 1) % self.config.trainer.test_freq == 0:
+                    if self.val_reward_fn is not None and self.global_step % self.config.trainer.test_freq == 0:
                         with Timer(name='testing', logger=None) as timer:
                             val_metrics: dict = self._validate()
                             val_metrics = {f'val/{key}': val for key, val in val_metrics.items()}
@@ -985,8 +1015,7 @@ class RayPPOTrainer(object):
                     metrics.update(data_metrics)
 
                     with Timer(name='save_checkpoint', logger=None) as timer:
-                        if self.config.trainer.save_freq > 0 and (self.global_step +
-                                                                  1) % self.config.trainer.save_freq == 0:
+                        if self.config.trainer.save_freq > 0 and self.global_step % self.config.trainer.save_freq == 0:
                             self.save_checkpoint()
                     metrics['timing/save_checkpoint'] = timer.last
 

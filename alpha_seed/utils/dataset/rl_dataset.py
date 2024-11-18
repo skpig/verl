@@ -33,6 +33,8 @@ from verl.utils.fs import copy_local_path_from_hdfs
 from verl.utils.model import compute_position_id_with_mask
 import verl.utils.torch_functional as verl_F
 
+from alpha_seed.prompts.load import random_transform, load_prompts
+
 
 def collate_fn(data_list: list[dict]) -> dict:
     tensors = {}
@@ -77,7 +79,10 @@ class RLHFDataset(Dataset):
                  cache_dir='~/.cache/verl/rlhf',
                  chat_template_func=None,
                  return_raw_chat=False,
-                 truncation='error'):
+                 truncation='error',
+                 multi_prompts="none",
+                 num_prompts_per_data=1):
+
         if not isinstance(parquet_files, (List, ListConfig)):
             parquet_files = [parquet_files]
 
@@ -95,8 +100,17 @@ class RLHFDataset(Dataset):
         self.chat_template_func = chat_template_func
         self.truncation = truncation
 
+        self.multi_prompts = multi_prompts
+        self.num_prompts_per_data = num_prompts_per_data
+
         self._download()
         self._read_files_and_tokenize()
+        self._initialize_prompts()
+
+    def _initialize_prompts(
+        self,
+    ):
+        self.prompts = load_prompts(self.multi_prompts)
 
     def _download(self):
         from verl.utils.fs import copy_local_path_from_hdfs
@@ -133,20 +147,46 @@ class RLHFDataset(Dataset):
 
         chat = row_dict.pop(self.prompt_key)
 
-        prompt_with_chat_template = self.tokenizer.apply_chat_template(chat, add_generation_prompt=True, tokenize=False)
+        if self.multi_prompts == "none":
+            # chat[0] is dict({'content': '', 'role': ''})
+            prompt_with_chat_template = self.tokenizer.apply_chat_template(chat,
+                                                                           add_generation_prompt=True,
+                                                                           tokenize=False)
+            input_ids, attention_mask = verl_F.tokenize_and_postprocess_data(prompt=prompt_with_chat_template,
+                                                                             tokenizer=self.tokenizer,
+                                                                             max_length=self.max_prompt_length,
+                                                                             pad_token_id=self.tokenizer.pad_token_id,
+                                                                             left_pad=True,
+                                                                             truncation=self.truncation)
 
-        input_ids, attention_mask = verl_F.tokenize_and_postprocess_data(prompt=prompt_with_chat_template,
-                                                                         tokenizer=self.tokenizer,
-                                                                         max_length=self.max_prompt_length,
-                                                                         pad_token_id=self.tokenizer.pad_token_id,
-                                                                         left_pad=True,
-                                                                         truncation=self.truncation)
+            position_ids = compute_position_id_with_mask(attention_mask)
+            row_dict['input_ids'] = input_ids[0]
+            row_dict['attention_mask'] = attention_mask[0]
+            row_dict['position_ids'] = position_ids[0]
+        else:
+            all_input_ids = []
+            all_attention_mask = []
+            all_position_ids = []
+            for i in range(self.num_prompts_per_data):
+                data = random_transform(self.prompts, chat[0]['content'])  # -> str
+                prompt_with_chat_template = self.tokenizer.apply_chat_template(data,
+                                                                               add_generation_prompt=True,
+                                                                               tokenize=False)
+                input_ids, attention_mask = verl_F.tokenize_and_postprocess_data(
+                    prompt=prompt_with_chat_template,
+                    tokenizer=self.tokenizer,
+                    max_length=self.max_prompt_length,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                    left_pad=True,
+                    truncation=self.truncation)
+                position_ids = compute_position_id_with_mask(attention_mask)
+                all_input_ids.append(input_ids[0])
+                all_attention_mask.append(attention_mask[0])
+                all_position_ids.append(position_ids[0])
 
-        position_ids = compute_position_id_with_mask(attention_mask)
-
-        row_dict['input_ids'] = input_ids[0]
-        row_dict['attention_mask'] = attention_mask[0]
-        row_dict['position_ids'] = position_ids[0]
+            row_dict['input_ids'] = torch.cat(all_input_ids)
+            row_dict['attention_mask'] = torch.cat(all_attention_mask)
+            row_dict['position_ids'] = torch.cat(all_position_ids)
 
         # 添加answer
         if self.use_ref_answer:
@@ -196,7 +236,9 @@ if __name__ == '__main__':
                           prompt_key='prompt',
                           answer_key='answer',
                           use_ref_answer=True,
-                          max_prompt_length=256)
+                          max_prompt_length=256,
+                          multi_prompts="all",
+                          num_prompts_per_data=1)
 
     dataloader = DataLoader(dataset=dataset, batch_size=16, shuffle=True, drop_last=True, collate_fn=collate_fn)
 

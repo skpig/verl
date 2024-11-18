@@ -63,9 +63,7 @@ class RewardManager():
         self.log_table = []
         self.rm_name = rm_name
         self.config = config
-        if self.config.trainer.save_cases_to_hdfs:
-            self.case_study_dir = config.trainer.default_local_dir + "/cases/"
-            os.makedirs(self.case_study_dir, exist_ok=True)
+        self.case_study_dir = config.trainer.default_hdfs_dir + "/cases/"
         self.rm_req_executor = ThreadPoolExecutor(max_workers=128)
         self.mean = self.config.reward_model.mean
         self.std = self.config.reward_model.std
