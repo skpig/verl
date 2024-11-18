@@ -175,6 +175,9 @@ class RLHFDataset(Dataset):
         if self.return_raw_chat:
             row_dict['raw_prompt'] = chat.tolist()
 
+        index = row_dict.get("extra_info", {}).get("index", 0)
+        row_dict["index"] = index
+
         return row_dict
 
 

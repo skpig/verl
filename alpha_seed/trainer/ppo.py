@@ -31,6 +31,8 @@ from omegaconf import OmegaConf, open_dict
 import numpy as np
 from codetiming import Timer
 
+from alpha_seed.utils.select_strategy.bon_strategy import *
+from alpha_seed.utils.select_strategy.league_training_strategy import *
 from single_controller.base import Worker
 from single_controller.ray import RayResourcePool, RayWorkerGroup, RayClassWithInitArgs
 from single_controller.ray.base import create_colocated_worker_cls
@@ -613,105 +615,6 @@ class RayPPOTrainer(object):
             # 两种情况下使用kl loss，一种是grpo，另一种是在rewards里不加kl惩罚
             assert self.config.algorithm.adv_estimator == 'grpo' or self.config.algorithm.kl_ctrl.kl_coef <= 1e-10
 
-    def league_training_filter_prompt(self, batch, strategy="hard"):
-        num_bon = self.config.actor_rollout_ref.rollout.num_bon
-        bsz = self.config.data.train_batch_size
-        buffer_size = self.config.trainer.league_training_config.buffer_size
-        # mean score per prompt
-        mean_scores = batch.batch['token_level_scores'].sum(-1).reshape(bsz * buffer_size,
-                                                                        num_bon).mean(-1)  # (num_bon * buffer_size, )
-        if strategy == "hard":
-            sort_idex = torch.argsort(mean_scores, dim=0)
-        elif strategy == "easy":
-            sort_idex = torch.argsort(mean_scores, dim=0, descending=True)
-        else:
-            raise NotImplemented
-
-        # gather corresponding tensor
-        tensors = {}
-        for key, tensor in batch.batch.items():
-            seq_len = tensor.shape[-1]
-            cur_idx = sort_idex.unsqueeze(dim=1).unsqueeze(dim=2).repeat(1, num_bon, seq_len)[:bsz, :, :]
-            tensor = tensor.reshape(bsz * buffer_size, num_bon, -1)
-            tensor = torch.gather(tensor, dim=0, index=cur_idx).reshape(-1, seq_len)
-            assert tensor.shape == (bsz * num_bon, seq_len)
-            tensors[key] = tensor
-        final_batch = TensorDict(
-            source=tensors,
-            batch_size=(batch.batch.batch_size[0] // buffer_size),
-        )
-
-        final_non_tensor_batch = {}
-        for key, val in batch.non_tensor_batch.items():
-            val = val.reshape(bsz * buffer_size, num_bon)
-            cur_idx = sort_idex.unsqueeze(dim=1).repeat(1, num_bon)[:bsz, :].numpy()
-            val = np.take_along_axis(val, cur_idx, axis=0).reshape(-1)
-            assert len(val) == bsz * num_bon
-            final_non_tensor_batch[key] = val
-
-        return DataProto(
-            batch=final_batch,
-            non_tensor_batch=final_non_tensor_batch,
-            meta_info=batch.meta_info,
-        )
-
-    def select_training_samples(self, batch, strategy):
-        # strategy:
-        #   - all: use all responses to train policy and value
-        #   - best: use BoN to train policy and value
-        #   - best_mix_random: use BoN and random-choice-one to train policy and value
-        #   - best_worst: use BoN and WoN to train policy and value
-        num_bon = self.config.actor_rollout_ref.rollout.num_bon
-        bsz = self.config.data.train_batch_size
-        # calc select ids
-        scores = batch.batch['token_level_scores'].sum(-1).reshape(bsz, num_bon)
-        if strategy == "all":
-            final_idx = torch.range(0, num_bon - 1).unsqueeze(dim=0).tile([bsz, 1]).to(torch.int64).unsqueeze(dim=2)
-            response_num_per_prompt = num_bon
-        elif strategy == "best":
-            final_idx = torch.argmax(scores, dim=1).unsqueeze(dim=1).unsqueeze(dim=2)
-            response_num_per_prompt = 1
-        elif strategy == "best_mix_random":
-            random_idx = torch.randint(0, num_bon, (bsz,)).unsqueeze(dim=1).unsqueeze(dim=2)
-            best_idx = torch.argmax(scores, dim=1).unsqueeze(dim=1).unsqueeze(dim=2)
-            final_idx = torch.cat([random_idx, best_idx], dim=1)
-            response_num_per_prompt = 2
-        elif strategy == "best_worst":
-            worst_idx = torch.argmin(scores, dim=1).unsqueeze(dim=1).unsqueeze(dim=2)
-            best_idx = torch.argmax(scores, dim=1).unsqueeze(dim=1).unsqueeze(dim=2)
-            final_idx = torch.cat([worst_idx, best_idx], dim=1)
-            response_num_per_prompt = 2
-        else:
-            raise NotImplemented
-
-        # gather corresponding tensor
-        tensors = {}
-        for key, tensor in batch.batch.items():
-            seq_len = tensor.shape[-1]
-            cur_idx = final_idx.repeat(1, 1, seq_len)
-            tensor = tensor.reshape(bsz, num_bon, -1)
-            tensor = torch.gather(tensor, dim=1, index=cur_idx).reshape(-1, seq_len)
-            assert tensor.shape == (bsz * response_num_per_prompt, seq_len)
-            tensors[key] = tensor
-        final_batch = TensorDict(
-            source=tensors,
-            batch_size=(batch.batch.batch_size[0] // num_bon * response_num_per_prompt,),
-        )
-
-        final_non_tensor_batch = {}
-        for key, val in batch.non_tensor_batch.items():
-            val = val.reshape(bsz, num_bon)
-            cur_idx = final_idx.squeeze(dim=2).numpy()
-            val = np.take_along_axis(val, cur_idx, axis=1).reshape(-1)
-            assert len(val) == bsz * response_num_per_prompt
-            final_non_tensor_batch[key] = val
-
-        return DataProto(
-            batch=final_batch,
-            non_tensor_batch=final_non_tensor_batch,
-            meta_info=batch.meta_info,
-        )
-
     def save_checkpoint(self):
         """Save checkpoint to hdfs.
         Checkpoint structure
@@ -787,18 +690,19 @@ class RayPPOTrainer(object):
 
     def load_checkpoint(self):
         if self.config.trainer.resume_steps == 'disable':
-            return
+            return 0
 
         from verl.utils.fs import copy_local_path_from_hdfs
         # find the latest global step
         if self.config.trainer.resume_steps == 'auto':
             from omnistore.utilities.ckpt_format_tool import find_latest_ckpt_path
             remote_checkpoint_folder = os.path.join(self.config.trainer.default_hdfs_dir, 'checkpoints')
+            remote_checkpoint_folder = os.path.join(self.config.trainer.default_hdfs_dir, 'checkpoints')
             remote_global_step_folder = find_latest_ckpt_path(remote_checkpoint_folder)
 
             if remote_global_step_folder is None:
                 print('Training from scratch')
-                return
+                return 0
 
             # set global step
             self.global_step = int(remote_global_step_folder.split('global_step_')[-1])
@@ -826,12 +730,13 @@ class RayPPOTrainer(object):
         dataloader_remote_path = os.path.join(remote_global_step_folder, 'data.pt')
         dataloader_local_path = copy_local_path_from_hdfs(dataloader_remote_path)
         self.train_dataloader = torch.load(dataloader_local_path)
+        return self.global_step
 
     def fit(self):
         self.global_step = 0
 
         # load checkpoint before doing anything
-        self.load_checkpoint()
+        resume_step = self.load_checkpoint()
 
         # perform validation before training
         if self.val_reward_fn is not None and self.config.trainer.eval_before_training:
@@ -857,8 +762,11 @@ class RayPPOTrainer(object):
                     gen_batch = tmp_batch.pop(batch_keys=['input_ids', 'attention_mask', 'position_ids'])
                     gen_batch.meta_info[
                         'generation_kwargs'] = self.config.actor_rollout_ref.rollout.train_generate_kwargs
-                    gen_batch.meta_info['complete_ratio'] = self.config.actor_rollout_ref.rollout.get(
-                        "complete_ratio", 1)
+                    if self.global_step < resume_step + self.config.streaming_rollout.warmup_step:
+                        complete_ratio = 1.0
+                    else:
+                        complete_ratio = self.config.actor_rollout_ref.rollout.get("complete_ratio", 1)
+                    gen_batch.meta_info['complete_ratio'] = complete_ratio
                     pprint(f'start rollout, batches {len(gen_batch)}.')
                     with Timer(name='gen', logger=None) as timer:
                         gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
@@ -977,17 +885,36 @@ class RayPPOTrainer(object):
                     metrics['timing/reward_fn'] = timer.last
 
                     # league training，筛选平均通过率低的prompt
+                    use_async_gen = self.config.streaming_rollout.nnodes > 0
                     if self.config.trainer.league_training_config.enable:
                         with Timer(name='select_league_training_prompts', logger=None) as timer:
-                            batch = self.league_training_filter_prompt(
-                                batch, strategy=self.config.trainer.league_training_config.strategy)
+                            if use_async_gen:
+                                batch, league_training_metrics = league_training_filter_prompt_v2(
+                                    batch=batch,
+                                    strategy=self.config.trainer.league_training_config.strategy,
+                                    config=self.config)
+                                metrics.update(league_training_metrics)
+                            else:
+                                batch = league_training_filter_prompt(
+                                    batch=batch,
+                                    strategy=self.config.trainer.league_training_config.strategy,
+                                    config=self.config)
                         metrics['timing/select_league_training_prompts'] = timer.last
 
                     # bon策略，筛选prompt内部的response，有不同策略，all、best、best_mix_random、best_worst
                     if self.num_bon > 1:
                         with Timer(name='select_bon_samples', logger=None) as timer:
-                            batch = self.select_training_samples(batch,
-                                                                 self.config.actor_rollout_ref.rollout.bon_strategy)
+                            if use_async_gen:
+                                batch, bon_metrics = select_training_samples_v2(
+                                    batch=batch,
+                                    strategy=self.config.actor_rollout_ref.rollout.bon_strategy,
+                                    config=self.config)
+                                metrics.update(bon_metrics)
+                            else:
+                                batch = select_training_samples(
+                                    batch=batch,
+                                    strategy=self.config.actor_rollout_ref.rollout.bon_strategy,
+                                    config=self.config)
                         metrics['timing/select_bon_samples'] = timer.last
 
                     if self.use_reference_policy:
