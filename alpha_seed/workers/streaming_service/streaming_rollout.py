@@ -40,6 +40,7 @@ import logging
 
 from alpha_seed.workers.xperf_rollout.utils import get_xperf_gpt_config
 from alpha_seed.workers.xperf_rollout.utils.weight_loader import offload_to_cpu, init_meta
+from alpha_seed.workers.streaming_service.xperf_model_prophet import XperfModelProphet
 
 try:
     from verl.utils.debug import get_profiler_context
@@ -77,9 +78,37 @@ class AsyncXPerfGPTRollout(object):
 
     def __init__(self, config, tokenizer, model_hf_config):
         self.config = config
+        self.profiler_context = get_profiler_context(filename=config.profile.filename,
+                                                     profile_on_ranks=config.profile.profile_on_ranks,
+                                                     default_hdfs_dir=config.profile.default_hdfs_dir,
+                                                     upload_to_mlx=config.profile.upload_to_mlx,
+                                                     enable=config.profile.enable)
+
+        # auto infer rollout running config
+        use_vllm = self.config.get('use_vllm', False)
+        enable_cuda_graph = self.config.get('enable_cuda_graph', False)
+        slot_block_size = self.config.get('slot_block_size', 1024)
+
+        model_cfg = get_xperf_gpt_config(model_config=model_hf_config, tokenizer=tokenizer)
+        sched_cfg = {
+            "max_sequence_length": config.prompt_length + config.response_length,
+            "max_context_len": config.prompt_length,
+            "vllm_block_size": slot_block_size,
+        }
         tp_size = self.config.get('tensor_model_parallel_size', 1)
 
-        torch.manual_seed(9898)
+        xperf_prophet = XperfModelProphet(model_cfg, sched_cfg, tp_size)
+        if use_vllm:
+            prophet_cfg = xperf_prophet.profile_available_vllm_cfg(gpu_memory_utilization=0.8)
+            max_batch_size = prophet_cfg["orca_max_batch_size"]
+            max_ctx_batch_size = 8
+            num_slots = prophet_cfg["vllm_num_slots"]
+        else:
+            prophet_cfg = xperf_prophet.profile_available_orca_cfg(gpu_memory_utilization=0.8)
+            max_batch_size = prophet_cfg["orca_max_batch_size"]
+            max_ctx_batch_size = 8
+            num_slots = max_batch_size
+
         # create a 2D device mesh
         if tp_size > 1:
             world_size = torch.distributed.get_world_size()
@@ -92,40 +121,28 @@ class AsyncXPerfGPTRollout(object):
         else:
             self.device_mesh = None  # this is actually the whole world size. No need to have a device mesh for it.
 
-        self.profiler_context = get_profiler_context(filename=config.profile.filename,
-                                                     profile_on_ranks=config.profile.profile_on_ranks,
-                                                     default_hdfs_dir=config.profile.default_hdfs_dir,
-                                                     upload_to_mlx=config.profile.upload_to_mlx,
-                                                     enable=config.profile.enable)
-
+        print("initializing xperf gpt...")
+        print(
+            f"use_vllm, enable_cuda_graph, sched_cfg, prophet_cfg, device {use_vllm}, {enable_cuda_graph}, {sched_cfg}, {prophet_cfg}, {enable_cuda_graph}, {os.getenv('CUDA_VISIBLE_DEVICES')}"
+        )
+        torch.manual_seed(9898)
         generate_kwargs = dict(max_new_tokens=config.response_length,
                                do_sample=config.train_generate_kwargs.do_sample,
                                top_k=config.train_generate_kwargs.top_k,
                                top_p=config.train_generate_kwargs.top_p,
                                temperature=config.train_generate_kwargs.temperature)
 
-        use_vllm = self.config.get('use_vllm', False)
-        num_slots = self.config.get('num_slots', 256)
-        slot_block_size = self.config.get('slot_block_size', 1024)
-        enable_cuda_graph = self.config.get('enable_cuda_graph', False)
-
-        print("initializing xperf gpt...")
-        print(
-            f"use_vllm, num_slots, slot_block_size, enable_cuda_graph, device {use_vllm}, {num_slots}, {slot_block_size}, {enable_cuda_graph}, {os.getenv('CUDA_VISIBLE_DEVICES')}"
-        )
-        # torch.manual_seed(9898)
         inference_sess = InferenceSession(num_slots=num_slots,
-                                          max_batch_size=config.micro_batch_size,
+                                          max_batch_size=max_batch_size,
                                           max_length=config.prompt_length + config.response_length,
                                           slot_block_size=slot_block_size,
                                           use_vllm=use_vllm,
                                           vocab_tp=False,
-                                          context_limit_bs=8,
+                                          context_limit_bs=max_ctx_batch_size,
                                           enable_cuda_graph=enable_cuda_graph)
-        xperf_config = get_xperf_gpt_config(model_config=model_hf_config, tokenizer=tokenizer)
 
         with tempfile.NamedTemporaryFile(mode='w', suffix=".json") as f:
-            json.dump(xperf_config, f)
+            json.dump(model_cfg, f)
             f.flush()
             global_rank = 0 if not dist.is_initialized() else dist.get_rank()
             tp_rank = 0 if self.device_mesh is None else self.device_mesh['tp'].get_local_rank()
