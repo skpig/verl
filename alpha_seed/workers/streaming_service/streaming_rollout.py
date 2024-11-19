@@ -79,8 +79,6 @@ class AsyncXPerfGPTRollout(object):
         self.config = config
         tp_size = self.config.get('tensor_model_parallel_size', 1)
 
-        num_kv_heads = model_hf_config.num_key_value_heads
-        assert tp_size <= num_kv_heads, f'tp_size {tp_size} must not be larger than num_kv_heads {num_kv_heads}'
         torch.manual_seed(9898)
         # create a 2D device mesh
         if tp_size > 1:

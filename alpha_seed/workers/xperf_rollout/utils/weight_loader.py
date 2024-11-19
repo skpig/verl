@@ -75,22 +75,65 @@ def load_to_cuda(tp_model):
         param.data = param.data.cuda()
 
 
-def _fix_qkv_weight_ordering(param, hidden_size, tp_size, head_dim):
-    param = param.contiguous().view((-1, tp_size, head_dim, hidden_size)).transpose(0, 1).contiguous().view(
-        (tp_size, -1, head_dim, hidden_size)).contiguous().view(tp_size, -1, hidden_size)
-    return param
+def _fix_qkv_ordering(param, tp_size, num_heads, mqa_kv_heads, interleaved_kv_shared, dim=0):
+    q_heads_list = None
+    kv_heads_list = None
+
+    assert tp_size % mqa_kv_heads == 0 or mqa_kv_heads % tp_size == 0, \
+        "can't split mqa kv head {} to {} GPUs".format(mqa_kv_heads, tp_size)
+    if mqa_kv_heads % tp_size == 0:
+        heads_per_rank = mqa_kv_heads // tp_size
+        kv_heads_list = [[idx for idx in range(mp * heads_per_rank, (mp + 1) * heads_per_rank)] for mp in range(tp_size)
+                        ]
+
+        q_heads_list = list()
+        repeat_size = num_heads // mqa_kv_heads
+        for kv_heads in kv_heads_list:
+            if interleaved_kv_shared:
+                q_heads_list.append(
+                    [idx + mqa_kv_heads * repeat_idx for repeat_idx in range(repeat_size) for idx in kv_heads])
+            else:
+                q_heads_list.append(
+                    [kv_idx * repeat_size + repeat_idx for repeat_idx in range(repeat_size) for kv_idx in kv_heads])
+    elif tp_size % mqa_kv_heads == 0:
+        rank_per_head = tp_size // mqa_kv_heads
+        kv_heads_list = [[mp // rank_per_head] for mp in range(tp_size)]
+
+        q_heads_list = list()
+        repeat_size = num_heads // mqa_kv_heads // rank_per_head
+        for mp, kv_heads in enumerate(kv_heads_list):
+            if interleaved_kv_shared:
+                q_heads_list.append([
+                    kv_heads[0] + mqa_kv_heads * (repeat_idx + (mp % rank_per_head) * repeat_size)
+                    for repeat_idx in range(repeat_size)
+                ])
+            else:
+                q_heads_list.append([
+                    kv_idx * rank_per_head * repeat_size + (mp % rank_per_head) * repeat_size + repeat_idx
+                    for repeat_idx in range(repeat_size)
+                    for kv_idx in kv_heads
+                ])
+
+    head_dim = param.shape[dim] // (num_heads + mqa_kv_heads * 2)
+    src_split = torch.split(param.data, [num_heads * head_dim, mqa_kv_heads * head_dim, mqa_kv_heads * head_dim],
+                            dim=dim)
+    qkv_split = [torch.split(src_s, head_dim, dim=dim) for src_s in src_split]
+
+    q_split = [torch.cat([qkv_split[0][i] for i in q_heads], axis=dim) for q_heads in q_heads_list]
+    k_split = [torch.cat([qkv_split[1][i] for i in k_heads], axis=dim) for k_heads in kv_heads_list]
+    v_split = [torch.cat([qkv_split[2][i] for i in v_heads], axis=dim) for v_heads in kv_heads_list]
+
+    qkv_cat = [torch.cat([q, k, v], axis=dim) for q, k, v in zip(q_split, k_split, v_split)]
+    return qkv_cat, q_heads_list
 
 
-def _fix_qkv_bias_ordering(param, tp_size, head_dim):
-    param = param.contiguous().view((-1, tp_size, head_dim)).transpose(0, 1).contiguous().view(
-        (tp_size, -1, head_dim)).contiguous().view(tp_size, -1)
-    return param
+def _fix_o_ordering(param, num_heads, q_heads_list, dim=1):
+    assert q_heads_list is not None, "q_heads_list should not be None"
 
-
-def _fix_o_ordering(param, hidden_size, tp_size, head_dim):
-    param = param.view((hidden_size, -1, tp_size, head_dim)).transpose(1, 2).contiguous().view(
-        (hidden_size, tp_size, -1, head_dim)).contiguous().view(hidden_size, tp_size, -1)
-    return param
+    head_dim = param.shape[dim] // num_heads
+    src_split = torch.split(param, head_dim, dim=dim)
+    src_split = [torch.cat([src_split[i] for i in q_heads], axis=dim) for q_heads in q_heads_list]
+    return src_split
 
 
 def _reshard_fsdp_state_dict_to_xperf_p4(tp_model, state_dict, device_mesh: DeviceMesh, model_config: P4Config):
@@ -159,26 +202,17 @@ def _reshard_fsdp_state_dict_to_xperf_p4(tp_model, state_dict, device_mesh: Devi
         v_proj_weight = state_dict.pop(f'transformer.h.{layer_index}.attn.v_proj.weight').full_tensor().to(
             torch.bfloat16)  # (num_kv_head, head_dim, hidden_size)
 
-        if device_mesh is not None:
-            # from IPython import embed
-            # if torch.distributed.get_rank() == 0:
-            #     embed()
-            # torch.distributed.barrier()
-
-            q_proj_weight = _fix_qkv_weight_ordering(q_proj_weight,
-                                                     hidden_size=model_config.hidden_size,
-                                                     tp_size=tp_size,
-                                                     head_dim=head_dim)[tp_rank]
-            k_proj_weight = _fix_qkv_weight_ordering(k_proj_weight,
-                                                     hidden_size=model_config.hidden_size,
-                                                     tp_size=tp_size,
-                                                     head_dim=head_dim)[tp_rank]
-            v_proj_weight = _fix_qkv_weight_ordering(v_proj_weight,
-                                                     hidden_size=model_config.hidden_size,
-                                                     tp_size=tp_size,
-                                                     head_dim=head_dim)[tp_rank]
+        num_heads = q_proj_weight.shape[0] // head_dim
+        mqa_kv_heads = k_proj_weight.shape[0] // head_dim
 
         qkv_weight = torch.cat((q_proj_weight, k_proj_weight, v_proj_weight), dim=0)
+        if device_mesh is not None:
+            qkv_weight, q_heads_list = _fix_qkv_ordering(qkv_weight,
+                                                         tp_size=tp_size,
+                                                         num_heads=num_heads,
+                                                         mqa_kv_heads=mqa_kv_heads,
+                                                         interleaved_kv_shared=model_config.interleaved_kv_shared)
+            qkv_weight = qkv_weight[tp_rank]
 
         assert qkv_weight.shape == qkv_w.shape
         qkv_w.data = qkv_weight.contiguous()
@@ -187,24 +221,22 @@ def _reshard_fsdp_state_dict_to_xperf_p4(tp_model, state_dict, device_mesh: Devi
         k_proj_bias = state_dict.pop(f'transformer.h.{layer_index}.attn.k_proj.bias').full_tensor().to(torch.bfloat16)
         v_proj_bias = state_dict.pop(f'transformer.h.{layer_index}.attn.v_proj.bias').full_tensor().to(torch.bfloat16)
 
-        if device_mesh is not None:
-            q_proj_bias = _fix_qkv_bias_ordering(q_proj_bias, tp_size=tp_size, head_dim=head_dim)[tp_rank]
-            k_proj_bias = _fix_qkv_bias_ordering(k_proj_bias, tp_size=tp_size, head_dim=head_dim)[tp_rank]
-            v_proj_bias = _fix_qkv_bias_ordering(v_proj_bias, tp_size=tp_size, head_dim=head_dim)[tp_rank]
-
         qkv_bias = torch.cat((q_proj_bias, k_proj_bias, v_proj_bias), dim=0)
+        if device_mesh is not None:
+            qkv_bias, q_heads_list = _fix_qkv_ordering(qkv_bias,
+                                                       tp_size=tp_size,
+                                                       num_heads=num_heads,
+                                                       mqa_kv_heads=mqa_kv_heads,
+                                                       interleaved_kv_shared=model_config.interleaved_kv_shared)
+            qkv_bias = qkv_bias[tp_rank]
 
         assert qkv_bias.shape == qkv_b.shape
         qkv_b.data = qkv_bias.contiguous()
 
         o_proj_weight = state_dict.pop(f'transformer.h.{layer_index}.attn.o_proj.weight').full_tensor().to(
             torch.bfloat16)
-
         if device_mesh is not None:
-            o_proj_weight = _fix_o_ordering(o_proj_weight,
-                                            hidden_size=model_config.hidden_size,
-                                            tp_size=tp_size,
-                                            head_dim=head_dim)[:, tp_rank, :]
+            o_proj_weight = _fix_o_ordering(o_proj_weight, num_heads=num_heads, q_heads_list=q_heads_list)[tp_rank]
 
         assert o_proj_weight.shape == dense_w.shape
         dense_w.data = o_proj_weight.contiguous()
@@ -328,21 +360,17 @@ def _reshard_fsdp_state_dict_to_xperf_p5(tp_model, state_dict, device_mesh: Devi
         v_proj_weight = state_dict.pop(f'transformer.h.{layer_index}.attn.v_proj.weight').full_tensor().to(
             torch.bfloat16)  # (num_kv_head, head_dim, hidden_size)
 
-        if device_mesh is not None:
-            q_proj_weight = _fix_qkv_weight_ordering(q_proj_weight,
-                                                     hidden_size=model_config.hidden_size,
-                                                     tp_size=tp_size,
-                                                     head_dim=head_dim)[tp_rank]
-            k_proj_weight = _fix_qkv_weight_ordering(k_proj_weight,
-                                                     hidden_size=model_config.hidden_size,
-                                                     tp_size=tp_size,
-                                                     head_dim=head_dim)[tp_rank]
-            v_proj_weight = _fix_qkv_weight_ordering(v_proj_weight,
-                                                     hidden_size=model_config.hidden_size,
-                                                     tp_size=tp_size,
-                                                     head_dim=head_dim)[tp_rank]
+        num_heads = q_proj_weight.shape[0] // head_dim
+        mqa_kv_heads = k_proj_weight.shape[0] // head_dim
 
         qkv_weight = torch.cat((q_proj_weight, k_proj_weight, v_proj_weight), dim=0)
+        if device_mesh is not None:
+            qkv_weight, q_heads_list = _fix_qkv_ordering(qkv_weight,
+                                                         tp_size=tp_size,
+                                                         num_heads=num_heads,
+                                                         mqa_kv_heads=mqa_kv_heads,
+                                                         interleaved_kv_shared=model_config.interleaved_kv_shared)
+            qkv_weight = qkv_weight[tp_rank]
 
         assert qkv_weight.shape == qkv_w.shape
         qkv_w.data = qkv_weight.contiguous()
@@ -351,24 +379,22 @@ def _reshard_fsdp_state_dict_to_xperf_p5(tp_model, state_dict, device_mesh: Devi
         k_proj_bias = state_dict.pop(f'transformer.h.{layer_index}.attn.k_proj.bias').full_tensor().to(torch.bfloat16)
         v_proj_bias = state_dict.pop(f'transformer.h.{layer_index}.attn.v_proj.bias').full_tensor().to(torch.bfloat16)
 
-        if device_mesh is not None:
-            q_proj_bias = _fix_qkv_bias_ordering(q_proj_bias, tp_size=tp_size, head_dim=head_dim)[tp_rank]
-            k_proj_bias = _fix_qkv_bias_ordering(k_proj_bias, tp_size=tp_size, head_dim=head_dim)[tp_rank]
-            v_proj_bias = _fix_qkv_bias_ordering(v_proj_bias, tp_size=tp_size, head_dim=head_dim)[tp_rank]
-
         qkv_bias = torch.cat((q_proj_bias, k_proj_bias, v_proj_bias), dim=0)
+        if device_mesh is not None:
+            qkv_bias, q_heads_list = _fix_qkv_ordering(qkv_bias,
+                                                       tp_size=tp_size,
+                                                       num_heads=num_heads,
+                                                       mqa_kv_heads=mqa_kv_heads,
+                                                       interleaved_kv_shared=model_config.interleaved_kv_shared)
+            qkv_bias = qkv_bias[tp_rank]
 
         assert qkv_bias.shape == qkv_b.shape
         qkv_b.data = qkv_bias.contiguous()
 
         o_proj_weight = state_dict.pop(f'transformer.h.{layer_index}.attn.o_proj.weight').full_tensor().to(
             torch.bfloat16)
-
         if device_mesh is not None:
-            o_proj_weight = _fix_o_ordering(o_proj_weight,
-                                            hidden_size=model_config.hidden_size,
-                                            tp_size=tp_size,
-                                            head_dim=head_dim)[:, tp_rank, :]
+            o_proj_weight = _fix_o_ordering(o_proj_weight, num_heads=num_heads, q_heads_list=q_heads_list)[tp_rank]
 
         assert o_proj_weight.shape == dense_w.shape
         dense_w.data = o_proj_weight.contiguous()
@@ -441,13 +467,9 @@ def _reshard_fsdp_state_dict_to_xperf_p6(tp_model, state_dict, device_mesh: Devi
     if device_mesh is not None:
         tp_size = device_mesh['tp'].size()
         tp_rank = device_mesh['tp'].get_local_rank()
-        assert tp_size <= model_config.num_key_value_heads
-        assert model_config.num_key_value_heads % tp_size == 0
     else:
         tp_size = 1
         tp_rank = 0
-
-    assert tp_size == model_config.num_key_value_heads or tp_size == 1
 
     head_dim = model_config.hidden_size // model_config.num_attention_heads
 
@@ -516,21 +538,17 @@ def _reshard_fsdp_state_dict_to_xperf_p6(tp_model, state_dict, device_mesh: Devi
         v_proj_weight = state_dict.pop(f'transformer.h.{layer_index}.attn.v_proj.weight').full_tensor().to(
             torch.bfloat16)  # (num_kv_head, head_dim, hidden_size)
 
-        if device_mesh is not None:
-            q_proj_weight = _fix_qkv_weight_ordering(q_proj_weight,
-                                                     hidden_size=model_config.hidden_size,
-                                                     tp_size=tp_size,
-                                                     head_dim=head_dim)[tp_rank]
-            k_proj_weight = _fix_qkv_weight_ordering(k_proj_weight,
-                                                     hidden_size=model_config.hidden_size,
-                                                     tp_size=tp_size,
-                                                     head_dim=head_dim)[tp_rank]
-            v_proj_weight = _fix_qkv_weight_ordering(v_proj_weight,
-                                                     hidden_size=model_config.hidden_size,
-                                                     tp_size=tp_size,
-                                                     head_dim=head_dim)[tp_rank]
+        num_heads = q_proj_weight.shape[0] // head_dim
+        mqa_kv_heads = k_proj_weight.shape[0] // head_dim
 
         qkv_weight = torch.cat((q_proj_weight, k_proj_weight, v_proj_weight), dim=0)
+        if device_mesh is not None:
+            qkv_weight, q_heads_list = _fix_qkv_ordering(qkv_weight,
+                                                         tp_size=tp_size,
+                                                         num_heads=num_heads,
+                                                         mqa_kv_heads=mqa_kv_heads,
+                                                         interleaved_kv_shared=model_config.interleaved_kv_shared)
+            qkv_weight = qkv_weight[tp_rank]
 
         assert qkv_weight.shape == qkv_w.shape
         qkv_w.data = qkv_weight.contiguous()
@@ -539,24 +557,22 @@ def _reshard_fsdp_state_dict_to_xperf_p6(tp_model, state_dict, device_mesh: Devi
         k_proj_bias = state_dict.pop(f'transformer.h.{layer_index}.attn.k_proj.bias').full_tensor().to(torch.bfloat16)
         v_proj_bias = state_dict.pop(f'transformer.h.{layer_index}.attn.v_proj.bias').full_tensor().to(torch.bfloat16)
 
-        if device_mesh is not None:
-            q_proj_bias = _fix_qkv_bias_ordering(q_proj_bias, tp_size=tp_size, head_dim=head_dim)[tp_rank]
-            k_proj_bias = _fix_qkv_bias_ordering(k_proj_bias, tp_size=tp_size, head_dim=head_dim)[tp_rank]
-            v_proj_bias = _fix_qkv_bias_ordering(v_proj_bias, tp_size=tp_size, head_dim=head_dim)[tp_rank]
-
         qkv_bias = torch.cat((q_proj_bias, k_proj_bias, v_proj_bias), dim=0)
+        if device_mesh is not None:
+            qkv_bias, q_heads_list = _fix_qkv_ordering(qkv_bias,
+                                                       tp_size=tp_size,
+                                                       num_heads=num_heads,
+                                                       mqa_kv_heads=mqa_kv_heads,
+                                                       interleaved_kv_shared=model_config.interleaved_kv_shared)
+            qkv_bias = qkv_bias[tp_rank]
 
         assert qkv_bias.shape == qkv_b.shape
         qkv_b.data = qkv_bias.contiguous()
 
         o_proj_weight = state_dict.pop(f'transformer.h.{layer_index}.attn.o_proj.weight').full_tensor().to(
             torch.bfloat16)
-
         if device_mesh is not None:
-            o_proj_weight = _fix_o_ordering(o_proj_weight,
-                                            hidden_size=model_config.hidden_size,
-                                            tp_size=tp_size,
-                                            head_dim=head_dim)[:, tp_rank, :]
+            o_proj_weight = _fix_o_ordering(o_proj_weight, num_heads=num_heads, q_heads_list=q_heads_list)[tp_rank]
 
         assert o_proj_weight.shape == dense_w.shape
         dense_w.data = o_proj_weight.contiguous()
