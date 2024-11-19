@@ -95,6 +95,11 @@ class FSDPXPerfGPTShardingManager(BaseShardingManager):
             self.nccl_layer = torch.classes.XGPT.NCCLPrimitive()
             self.nccl_layer.init("standalone", self.world_size, self.rank, "tcp", 0)
 
+    def release_param_and_cache(self):
+        """Release the GPU memory occupied by xperf parameter and cache"""
+        offload_to_cpu(tp_model=self.inference_engine.engine.module)
+        torch.cuda.empty_cache()
+
     def __enter__(self):
         # gather full state_dict in CPU
         from torch.distributed.fsdp import ShardedStateDictConfig, StateDictType

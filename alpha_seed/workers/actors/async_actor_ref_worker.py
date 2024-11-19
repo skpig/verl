@@ -303,6 +303,10 @@ class AsyncActorRolloutRefWorker(Worker):
                                                        standalone=self._is_standalone_rollout)
         if hybrid_master_address is not None and standalone_master_address is not None:
             sharding_manager.setup_standalone_rollout_comm(hybrid_master_address, standalone_master_address)
+        else:
+            # not support for the case that contains standalone rollout
+            sharding_manager.release_param_and_cache()
+            log_gpu_memory_usage('After AsyncXPerfGPTRollout release parameter and kv cache', logger=logger)
         log_gpu_memory_usage('After FSDPXPerfGPTShardingManager init', logger=logger)
         return rollout, sharding_manager
 
