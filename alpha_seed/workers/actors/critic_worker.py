@@ -44,6 +44,8 @@ from codetiming import Timer
 
 from datetime import timedelta
 
+from .checkpoint import CheckpointManagerV1
+
 logger = logging.getLogger(__file__)
 
 
@@ -80,10 +82,6 @@ class CriticWorker(Worker):
         # normalize config
         self.config.ppo_mini_batch_size //= world_size // sp_size
         self.config.ppo_micro_batch_size //= world_size // sp_size
-
-        self.upload_sharded_future = None
-        self.upload_merged_future = None
-        self.previous_save_local_path = None
 
     def _build_critic_model_optimizer(self, config):
         # the following line is necessary
@@ -240,6 +238,11 @@ class CriticWorker(Worker):
         if self.rank == 0:
             print(self.critic_model_config)
 
+        self.checkpoint_manager = CheckpointManagerV1(model=self.critic_module,
+                                                      optimizer=self.critic_optimizer,
+                                                      lr_scheduler=self.critic_lr_scheduler,
+                                                      tokenizer=self.tokenizer)
+
         torch.cuda.empty_cache()
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
@@ -292,102 +295,8 @@ class CriticWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, hdfs_path=None):
-        if hdfs_path is None:
-            return
-
-        import torch
-        import torch.distributed
-        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, StateDictType, FullStateDictConfig
-        from torch.distributed.fsdp import ShardedStateDictConfig, ShardedOptimStateDictConfig
-
-        # every rank download its own checkpoint
-        remote_path = os.path.join(hdfs_path, f'model_optim_rank_{self.rank}.pt')
-        print(f'Loading from {remote_path}')
-        local_path = copy_local_path_from_hdfs(remote_path)
-
-        state_dict = torch.load(local_path)
-
-        model_state_dict = state_dict['model']
-        optimizer_state_dict = state_dict['optimizer']
-        lr_scheduler_state_dict = state_dict['lr_scheduler']
-
-        state_dict_cfg = ShardedStateDictConfig(offload_to_cpu=True)
-        optim_cfg = ShardedOptimStateDictConfig(offload_to_cpu=True)
-        with FSDP.state_dict_type(self.critic_module, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg):
-            self.critic_module.load_state_dict(model_state_dict)
-            self.critic_optimizer.load_state_dict(optimizer_state_dict)
-
-        self.critic_lr_scheduler.load_state_dict(lr_scheduler_state_dict)
+        self.checkpoint_manager.load_checkpoint(hdfs_path=hdfs_path)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    def save_checkpoint(self, local_path, hdfs_path=None, save_merge=False):
-        import torch
-        import torch.distributed
-        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, StateDictType, FullStateDictConfig
-        from torch.distributed.fsdp import ShardedStateDictConfig, ShardedOptimStateDictConfig
-
-        # wait for previous upload to hdfs
-        if self.upload_sharded_future is not None:
-            ray.get(self.upload_sharded_future)
-        if self.upload_merged_future is not None:
-            ray.get(self.upload_merged_future)
-
-        with FileLock(os.path.join('/tmp', local_path + '.lock')):
-            # remote previous local_path
-            if self.previous_save_local_path is not None:
-                shutil.rmtree(self.previous_save_local_path, ignore_errors=True)
-            # make a new dir
-            os.makedirs(local_path, exist_ok=True)
-
-        torch.distributed.barrier()
-
-        state_dict_cfg = ShardedStateDictConfig(offload_to_cpu=True)
-        optim_cfg = ShardedOptimStateDictConfig(offload_to_cpu=True)
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            with FSDP.state_dict_type(self.critic_module, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg):
-                model_state = self.critic_module.state_dict()
-                optimizer_state_dict = self.critic_optimizer.state_dict()
-                state_dict = {
-                    'model': model_state,
-                    'optimizer': optimizer_state_dict,
-                    'lr_scheduler': self.critic_lr_scheduler.state_dict()
-                }
-                path = os.path.join(local_path, f'model_optim_rank_{self.rank}.pt')
-                torch.save(state_dict, path)
-
-        if self.rank == 0:
-            hdfs_io.makedirs(hdfs_path, exist_ok=True)
-
-        # wait for everyone to dump to local
-        torch.distributed.barrier()
-
-        # upload to hdfs
-        if hdfs_path is not None:
-            self.upload_sharded_future = upload_ckpt.remote(path, hdfs_path)
-
-        if self.rank == 0:
-            local_path = os.path.join(local_path, 'huggingface')
-            os.makedirs(local_path, exist_ok=True)
-            self.critic_module._fsdp_wrapped_module.config.save_pretrained(local_path)
-            self.tokenizer.save_pretrained(local_path)
-            if hdfs_path is not None:
-                self.upload_merged_future = upload_ckpt.remote(local_path, hdfs_path)
-
-        # if save_merge:
-        #     cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-        #     with warnings.catch_warnings():
-        #         warnings.simplefilter("ignore")
-        #         with FSDP.state_dict_type(self.critic_module, StateDictType.FULL_STATE_DICT, cfg):
-        #             state_dict = self.critic_module.state_dict()
-        #     if self.rank == 0:
-        #         local_path = os.path.join(local_path, 'huggingface')
-        #         os.makedirs(local_path, exist_ok=True)
-        #         self.critic_module._fsdp_wrapped_module.save_pretrained(local_path, state_dict=state_dict)
-        #         self.tokenizer.save_pretrained(local_path)
-        #         if hdfs_path is not None:
-        #             self.upload_merged_future = upload_ckpt.remote(local_path, hdfs_path)
-
-        torch.distributed.barrier()
-
-        self.previous_save_local_path = local_path
+    def save_checkpoint(self, local_path, hdfs_path=None):
+        self.checkpoint_manager.save_checkpoint(local_path=local_path, hdfs_path=hdfs_path)
