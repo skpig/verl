@@ -938,13 +938,13 @@ class RayPPOTrainer(object):
                                 batch, bon_metrics = select_training_samples_v2(
                                     batch=batch,
                                     strategy=self.config.actor_rollout_ref.rollout.bon_strategy,
-                                    num_bon=self.num_bon)
+                                    config=self.config)
                                 metrics.update(bon_metrics)
                             else:
                                 batch = select_training_samples(
                                     batch=batch,
                                     strategy=self.config.actor_rollout_ref.rollout.bon_strategy,
-                                    num_bon=self.num_bon)
+                                    config=self.config)
                         metrics['timing/select_bon_samples'] = timer.last
 
                     if self.use_reference_policy:
