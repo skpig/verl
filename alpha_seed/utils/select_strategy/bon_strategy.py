@@ -6,13 +6,14 @@ from collections import defaultdict
 from verl import DataProto
 
 
-def select_training_samples(batch, strategy, num_bon):
+def select_training_samples(batch, strategy, config):
     # strategy:
     #   - all: use all responses to train policy and value
     #   - best: use BoN to train policy and value
     #   - best_mix_random: use BoN and random-choice-one to train policy and value
     #   - best_worst: use BoN and WoN to train policy and value
-    bsz = batch.batch['token_level_scores'].shape[0] // num_bon  # self.config.data.train_batch_size
+    num_bon = config.actor_rollout_ref.rollout.num_bon
+    bsz = config.data.train_batch_size
     # calc select ids
     scores = batch.batch['token_level_scores'].sum(-1).reshape(bsz, num_bon)
     if strategy == "all":
@@ -63,7 +64,7 @@ def select_training_samples(batch, strategy, num_bon):
     )
 
 
-def select_training_samples_v2(batch, strategy, num_bon):
+def select_training_samples_v2(batch, strategy, config):
     # strategy:
     #   - all: use all responses to train policy and value
     #   - best: use BoN to train policy and value
@@ -74,6 +75,8 @@ def select_training_samples_v2(batch, strategy, num_bon):
     id2feat = defaultdict(list)
     total_samples = []
     cur_bsz = batch.batch.batch_size[0]
+    mini_bsz = config.actor_rollout_ref.actor.ppo_mini_batch_size
+    num_bon = config.actor_rollout_ref.rollout.num_bon
     tensor_keys = set()
     non_tensor_keys = set()
     for i in range(cur_bsz):
@@ -112,7 +115,7 @@ def select_training_samples_v2(batch, strategy, num_bon):
             final_samples.append(val[index])
 
     # step3, 不够的补，多的随机挑
-    final_bsz = cur_bsz // num_bon * response_num_per_prompt
+    final_bsz = cur_bsz // num_bon * response_num_per_prompt // mini_bsz * mini_bsz
     if len(final_samples) < final_bsz:
         random.shuffle(total_samples)
         remain_len = final_bsz - len(final_samples)
@@ -156,6 +159,7 @@ def select_training_samples_v2(batch, strategy, num_bon):
         "bon/response_num_max": max(response_num_per_prompt),
         "bon/response_num_min": min(response_num_per_prompt),
         "bon/response_num_std": np.std(response_num_per_prompt),
+        "bon/final_bsz": final_bsz,
     }
 
     return DataProto(

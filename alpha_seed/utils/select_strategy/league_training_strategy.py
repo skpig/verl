@@ -54,7 +54,8 @@ def league_training_filter_prompt_v2(batch, strategy, config):
     id2feat = defaultdict(list)
     cur_bsz = batch.batch.batch_size[0]
     buffer_size = config.trainer.league_training_config.buffer_size
-    final_bsz = cur_bsz // buffer_size
+    mini_bsz = config.actor_rollout_ref.actor.ppo_mini_batch_size
+    final_bsz = cur_bsz // buffer_size // mini_bsz * mini_bsz
     tensor_keys = set()
     non_tensor_keys = set()
     for i in range(cur_bsz):
@@ -124,6 +125,7 @@ def league_training_filter_prompt_v2(batch, strategy, config):
         "league_training/response_num_max": max(response_num_per_prompt),
         "league_training/response_num_min": min(response_num_per_prompt),
         "league_training/response_num_std": np.std(response_num_per_prompt),
+        "league_training/final_bsz": final_bsz,
     }
 
     return DataProto(
