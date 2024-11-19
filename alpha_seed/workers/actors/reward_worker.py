@@ -131,6 +131,10 @@ class RewardModelWorker(Worker):
                 print(reward_module)
         auto_wrap_policy = get_fsdp_wrap_policy(module=reward_module, config=self.config.model.fsdp_config)
 
+        cpu_offload = None
+        if self.config.model.fsdp_config.param_offload:
+            cpu_offload = CPUOffload(offload_params=True)
+
         reward_module = FSDP(
             reward_module,
             param_init_fn=init_fn,
@@ -140,7 +144,7 @@ class RewardModelWorker(Worker):
             sharding_strategy=ShardingStrategy.FULL_SHARD,  # zero3
             sync_module_states=True,
             forward_prefetch=True,
-            cpu_offload=CPUOffload(offload_params=True))  # we always offload reward
+            cpu_offload=cpu_offload)  # we always offload reward
 
         if self.rank == 0:
             print(model_config)

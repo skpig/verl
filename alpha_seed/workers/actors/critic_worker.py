@@ -65,9 +65,6 @@ class CriticWorker(Worker):
             timeout = timedelta(minutes=int(os.getenv('NCCL_TIMEOUT', 60)))
             torch.distributed.init_process_group(backend="nccl", timeout=timeout)
         self.config = config
-        self._is_offload_param = self.config.model.fsdp_config.param_offload
-        self._is_offload_grad = self.config.model.fsdp_config.grad_offload
-        self._is_offload_optimizer = self.config.model.fsdp_config.optimizer_offload
 
         world_size = torch.distributed.get_world_size()
 
@@ -189,6 +186,10 @@ class CriticWorker(Worker):
 
         log_gpu_memory_usage('Before critic FSDP', logger=logger)
 
+        cpu_offload = None
+        if self.config.model.fsdp_config.param_offload:
+            cpu_offload = CPUOffload(offload_params=True)
+
         critic_module = FSDP(critic_module,
                              param_init_fn=init_fn,
                              use_orig_params=False,
@@ -197,7 +198,8 @@ class CriticWorker(Worker):
                              sharding_strategy=sharding_strategy,
                              mixed_precision=mixed_precision,
                              forward_prefetch=True,
-                             sync_module_states=True)
+                             sync_module_states=True,
+                             cpu_offload=cpu_offload)
 
         log_gpu_memory_usage('After critic FSDP', logger=logger)
 

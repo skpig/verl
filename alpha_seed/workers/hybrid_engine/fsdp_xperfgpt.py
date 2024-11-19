@@ -53,6 +53,8 @@ class FSDPXPerfGPTShardingManager(BaseShardingManager):
         self.world_size = torch.distributed.get_world_size()
 
         self.bind_fn = get_xperf_gpt_weight_bind_fn(model_config)
+        # will be set when calling to `setup_standalone_rollout_comm`
+        self.has_standalone_workers = False
 
         # Note that torch_random_states may be different on each dp rank
         self.torch_random_states = torch.cuda.get_rng_state()
@@ -69,6 +71,7 @@ class FSDPXPerfGPTShardingManager(BaseShardingManager):
     def setup_standalone_rollout_comm(self, hybrid_master_address, standalone_master_address):
         assert (hybrid_master_address is not None)
         assert (standalone_master_address is not None)
+        self.has_standalone_workers = True
         self.world_size_offset = len(hybrid_master_address)
         master_address = hybrid_master_address[0].meta_info["hybrid_master_addr"]
         # breakpoint()
@@ -119,6 +122,10 @@ class FSDPXPerfGPTShardingManager(BaseShardingManager):
         if self.device_mesh is not None:
             self.gen_random_states = torch.cuda.get_rng_state()
             torch.cuda.set_rng_state(self.torch_random_states)
+        # only support to release xperf weight and kv cache
+        # right after generation when there is no standalone workers
+        if (not self.standalone) and (not self.has_standalone_workers):
+            offload_to_cpu(tp_model=self.inference_engine.engine.module)
 
     def preprocess_data(self, data: DataProto) -> DataProto:
         """

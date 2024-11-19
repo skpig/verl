@@ -241,11 +241,11 @@ class AsyncActorRolloutRefWorker(Worker):
         if self.rank == 0:
             print(f'wrap_policy: {auto_wrap_policy}')
 
-        if self._is_ref:
-            # TODO(zhangchi): this may cause bug when actor/rollout/ref colocate
+        cpu_offload = None
+        if self._is_actor and self.config.actor.fsdp_config.param_offload:
             cpu_offload = CPUOffload(offload_params=True)
-        else:
-            cpu_offload = None
+        if self._is_ref and self.config.ref.fsdp_config.param_offload:
+            cpu_offload = CPUOffload(offload_params=True)
 
         # TODO: add transformer policy
         actor_module_fsdp = FSDP(

@@ -50,6 +50,8 @@ gen_micro_batch_size=512
 infer_micro_batch_size=512
 train_micro_batch_size=64
 ulysses_sequence_parallel_size=1
+param_offload=False
+
 
 python3 tasks/main_ppo.py \
     data.train_files=${TRAIN_FILE} \
@@ -75,9 +77,7 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.actor.optim.lr_warmup_steps=${lr_warmup_steps} \
     actor_rollout_ref.actor.ppo_mini_batch_size=${ppo_mini_batch_size} \
     actor_rollout_ref.actor.ppo_micro_batch_size=${train_micro_batch_size} \
-    actor_rollout_ref.actor.fsdp_config.param_offload=False \
-    actor_rollout_ref.actor.fsdp_config.grad_offload=False \
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
+    actor_rollout_ref.actor.fsdp_config.param_offload=${param_offload} \
     actor_rollout_ref.actor.entropy_coeff=0.0 \
     actor_rollout_ref.actor.clip_ratio2=${clip_ratio2} \
     actor_rollout_ref.rollout.micro_batch_size=${gen_micro_batch_size} \
@@ -89,7 +89,7 @@ python3 tasks/main_ppo.py \
     +actor_rollout_ref.rollout.num_slots=256 \
     +actor_rollout_ref.rollout.slot_block_size=1024 \
     actor_rollout_ref.ref.log_prob_micro_batch_size=${infer_micro_batch_size} \
-    actor_rollout_ref.ref.fsdp_config.param_offload=False \
+    actor_rollout_ref.ref.fsdp_config.param_offload=${param_offload} \
     actor_rollout_ref.actor.scale_pg_by_kl=True \
     actor_rollout_ref.actor.upgo_loss_weight=${upgo_loss_weight} \
     actor_rollout_ref.actor.upgo_loss_version=${upgo_loss_version} \
@@ -99,9 +99,7 @@ python3 tasks/main_ppo.py \
     critic.model.enable_gradient_checkpointing=True \
     critic.ppo_micro_batch_size=${train_micro_batch_size} \
     critic.infer_micro_batch_size=${infer_micro_batch_size} \
-    critic.model.fsdp_config.param_offload=False \
-    critic.model.fsdp_config.grad_offload=False \
-    critic.model.fsdp_config.optimizer_offload=False \
+    critic.model.fsdp_config.param_offload=${param_offload} \
     +critic.model.override_config.attention_dropout=0. \
     +critic.model.override_config.embd_pdrop=0. \
     +critic.model.override_config.resid_pdrop=0. \
@@ -110,6 +108,7 @@ python3 tasks/main_ppo.py \
     reward_model.enable=False \
     reward_model.model.input_tokenizer=null \
     reward_model.model.path=${RM_MODEL_PATH} \
+    reward_model.model.fsdp_config.param_offload=${param_offload} \
     reward_model.micro_batch_size=${infer_micro_batch_size} \
     reward_model.mean=0.0 \
     reward_model.std=1.0 \
