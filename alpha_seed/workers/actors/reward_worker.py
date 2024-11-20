@@ -403,5 +403,8 @@ class RewardModelWorker(Worker):
             output = self.ulysses_sharding_manager.postprocess_data(output)
 
         output = output.to('cpu')
+
+        # reset FSDP buffer after forward
+        self.reward_module._handle.reshard(True)
         torch.cuda.empty_cache()
         return output

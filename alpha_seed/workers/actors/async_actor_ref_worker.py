@@ -526,6 +526,8 @@ class AsyncActorRolloutRefWorker(Worker):
 
         output = output.to('cpu')
 
+        # reset FSDP buffer after forward
+        self.ref_policy.actor_module._handle.reshard(True)
         log_gpu_memory_usage('After reference recompute log prob', logger=logger)
 
         torch.cuda.empty_cache()
