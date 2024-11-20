@@ -540,6 +540,7 @@ class RayPPOTrainer(object):
 
         for data_source, rewards in data_source_reward.items():
             metric_dict[f'test_score/{data_source}'] = np.mean(rewards)
+            metric_dict[f'test_cnt/{data_source}'] = len(rewards)
 
         if need_log:
             f.close()
@@ -895,10 +896,6 @@ class RayPPOTrainer(object):
                     metrics['rollout/training_batch'] = len(batch)
 
                     # training
-                    with Timer(name='old_log_probs', logger=None) as timer:
-                        batch = self.actor_rollout_wg.old_log_probs(batch)
-                    metrics['timing/old_log_probs'] = timer.last
-
                     with Timer(name='rm_score', logger=None) as timer:
                         # compute scores. Support both model and function-based.
                         # We first compute the scores using reward model. Then, we call reward_fn to combine
@@ -947,6 +944,10 @@ class RayPPOTrainer(object):
                                     strategy=self.config.actor_rollout_ref.rollout.bon_strategy,
                                     config=self.config)
                         metrics['timing/select_bon_samples'] = timer.last
+
+                    with Timer(name='old_log_probs', logger=None) as timer:
+                        batch = self.actor_rollout_wg.old_log_probs(batch)
+                    metrics['timing/old_log_probs'] = timer.last
 
                     if self.use_reference_policy:
                         # compute reference log_prob
