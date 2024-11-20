@@ -47,6 +47,7 @@ from codetiming import Timer
 
 from datetime import timedelta
 
+from .initialize import get_device_init_context, create_init_fn
 from ..utils import rearrange_micro_batches
 
 logger = logging.getLogger(__file__)
@@ -101,7 +102,7 @@ class RewardModelWorker(Worker):
         trust_remote_code = config.model.get('trust_remote_code', False)
         model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code)
         # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect
-        init_context = get_init_weight_context_manager(use_meta_tensor=not model_config.tie_word_embeddings)
+        init_context = get_device_init_context(use_meta_tensor=True)
 
         use_rmpad = self.config.get('use_rmpad', False)
         if use_rmpad:
@@ -137,7 +138,7 @@ class RewardModelWorker(Worker):
 
         reward_module = FSDP(
             reward_module,
-            param_init_fn=init_fn,
+            param_init_fn=create_init_fn(reward_module),
             use_orig_params=False,
             auto_wrap_policy=auto_wrap_policy,
             device_id=torch.cuda.current_device(),

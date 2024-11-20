@@ -43,6 +43,7 @@ from verl.utils.model import compute_position_id_with_mask
 import numpy as np
 
 from alpha_seed.workers.hybrid_engine.fsdp_ulysses import FSDPUlyssesShardingManager
+from .initialize import get_device_init_context, create_init_fn
 from alpha_seed.workers.utils import rearrange_micro_batches
 from dist_attn.ulysses.parallel_states import set_ulysses_sequence_parallel_group, get_ulysses_sequence_parallel_world_size
 from dist_attn.ulysses.ops import slice_input_tensor, gather_outputs
@@ -168,8 +169,7 @@ class AsyncActorRolloutRefWorker(Worker):
                 config=actor_model_config,
                 verbose=self.rank == 0), f'Cannot find rmpad version of {actor_model_config.model_type}'
 
-        # Note(fix me): tie_word_embedding causes meta_tensor init to hang
-        init_context = get_init_weight_context_manager(use_meta_tensor=not actor_model_config.tie_word_embeddings)
+        init_context = get_device_init_context(use_meta_tensor=True)
 
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -241,7 +241,7 @@ class AsyncActorRolloutRefWorker(Worker):
         # TODO: add transformer policy
         actor_module_fsdp = FSDP(
             actor_module,
-            param_init_fn=init_fn,
+            param_init_fn=create_init_fn(actor_module),
             use_orig_params=False,
             auto_wrap_policy=auto_wrap_policy,
             device_id=torch.cuda.current_device(),
