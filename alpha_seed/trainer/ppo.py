@@ -737,7 +737,7 @@ class RayPPOTrainer(object):
             self.global_step = int(remote_global_step_folder.split('global_step_')[-1])
 
         # note that we start from the next global_step
-        self.global_step += 1
+        # self.global_step += 1
 
         print(f'Setting global step to {self.global_step}')
         print(f'Resuming from {remote_global_step_folder}')
@@ -772,7 +772,8 @@ class RayPPOTrainer(object):
         if self.config.trainer.val_only:
             return
 
-        self.global_step = 1
+        # Note that we start from step 1. After resume, we increment step by 1 to start next step
+        self.global_step += 1
 
         # TODO: add staleness
         standalone_batch = []
