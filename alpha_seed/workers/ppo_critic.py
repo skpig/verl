@@ -70,7 +70,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                                               upload_to_mlx=self.config.profile.upload_to_mlx,
                                               active=3)
 
-        self.value_loss = torch.compile(core_algos.compute_value_loss)
+        self.value_loss = torch.compile(core_algos.compute_value_loss, disable=True)
 
     def _forward_micro_batch(self, micro_batch):
         from flash_attn.bert_padding import pad_input, unpad_input, index_first_axis, rearrange
