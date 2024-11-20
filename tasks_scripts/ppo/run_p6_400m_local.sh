@@ -137,5 +137,5 @@ python3 tasks/main_ppo.py \
     trainer.n_gpus_per_node=4 \
     streaming_rollout.nnodes=1 \
     streaming_rollout.n_gpus_per_node=4 \
-    actor_rollout_ref.rollout.quant_mode=WFP8
-    
+    actor_rollout_ref.rollout.quant_mode=WFP8 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.8

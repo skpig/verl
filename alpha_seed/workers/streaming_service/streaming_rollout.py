@@ -99,13 +99,14 @@ class AsyncXPerfGPTRollout(object):
         tp_size = self.config.get('tensor_model_parallel_size', 1)
 
         xperf_prophet = XperfModelProphet(model_cfg, sched_cfg, tp_size)
+        gpu_memory_utilization = self.config.get('gpu_memory_utilization', 0.7)
         if use_vllm:
-            prophet_cfg = xperf_prophet.profile_available_vllm_cfg(gpu_memory_utilization=0.7)
+            prophet_cfg = xperf_prophet.profile_available_vllm_cfg(gpu_memory_utilization=gpu_memory_utilization)
             max_batch_size = prophet_cfg["orca_max_batch_size"]
             max_ctx_batch_size = 8
             num_slots = prophet_cfg["vllm_num_slots"]
         else:
-            prophet_cfg = xperf_prophet.profile_available_orca_cfg(gpu_memory_utilization=0.7)
+            prophet_cfg = xperf_prophet.profile_available_orca_cfg(gpu_memory_utilization=gpu_memory_utilization)
             max_batch_size = prophet_cfg["orca_max_batch_size"]
             max_ctx_batch_size = 8
             num_slots = max_batch_size

@@ -84,7 +84,6 @@ actor_rollout_ref:
     response_length: ${data.max_response_length}
     # for vllm rollout
     dtype: bfloat16 # should align with FSDP
-    gpu_memory_utilization: 0.5
     ignore_eos: False
     enforce_eager: True
     free_cache_engine: True
@@ -102,6 +101,7 @@ actor_rollout_ref:
     eval_bon_every: 20
     bon_strategy: "best"
     quant_mode: "NO_QUANT"
+    gpu_memory_utilization: 0.7
     train_generate_kwargs:
       top_k: -1 # 0 for hf rollout, -1 for vllm rollout
       top_p: 1.0
