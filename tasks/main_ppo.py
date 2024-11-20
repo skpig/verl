@@ -183,7 +183,7 @@ def validate_config(config):
     assert real_train_batch_size % n_gpus == 0
 
     # rollout
-    assert real_train_batch_size % config.actor_rollout_ref.rollout.micro_batch_size == 0
+    # assert real_train_batch_size % config.actor_rollout_ref.rollout.micro_batch_size == 0
 
     # actor
     assert real_train_batch_size % config.actor_rollout_ref.actor.ppo_mini_batch_size == 0

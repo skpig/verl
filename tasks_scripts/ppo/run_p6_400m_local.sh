@@ -83,7 +83,7 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.rollout.micro_batch_size=${gen_micro_batch_size} \
     actor_rollout_ref.rollout.log_prob_micro_batch_size=${infer_micro_batch_size} \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
-    +actor_rollout_ref.rollout.complete_ratio=0.8 \
+    +actor_rollout_ref.rollout.complete_ratio=0.5 \
     actor_rollout_ref.rollout.name=xperf_gpt \
     +actor_rollout_ref.rollout.use_vllm=False \
     +actor_rollout_ref.rollout.num_slots=256 \
@@ -136,4 +136,6 @@ python3 tasks/main_ppo.py \
     trainer.nnodes=1 \
     trainer.n_gpus_per_node=4 \
     streaming_rollout.nnodes=1 \
-    streaming_rollout.n_gpus_per_node=4
+    streaming_rollout.n_gpus_per_node=4 \
+    actor_rollout_ref.rollout.quant_mode=WFP8
+    

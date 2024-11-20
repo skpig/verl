@@ -39,7 +39,7 @@ from contextlib import contextmanager
 import logging
 
 from alpha_seed.workers.xperf_rollout.utils import get_xperf_gpt_config
-from alpha_seed.workers.xperf_rollout.utils.weight_loader import offload_to_cpu, init_meta
+from alpha_seed.workers.xperf_rollout.utils.layout_convert_helper import init_meta
 from alpha_seed.workers.streaming_service.xperf_model_prophet import XperfModelProphet
 
 try:
@@ -90,6 +90,7 @@ class AsyncXPerfGPTRollout(object):
         slot_block_size = self.config.get('slot_block_size', 1024)
 
         model_cfg = get_xperf_gpt_config(model_config=model_hf_config, tokenizer=tokenizer)
+        model_cfg["quant_mode"] = self.config.get("quant_mode", "NO_QUANT")
         sched_cfg = {
             "max_sequence_length": config.prompt_length + config.response_length,
             "max_context_len": config.prompt_length,
@@ -207,6 +208,7 @@ class AsyncXPerfGPTRollout(object):
 
     def __init_sub_process(self):
         os.environ["USE_SESSION_CACHE"] = "0"
+        os.environ["XGPT_TUNER_ENABLE"] = "1"
         self.input_queue = queue.Queue()
         self.output_queue = queue.Queue()
         self.stop_event = threading.Event()
@@ -216,7 +218,8 @@ class AsyncXPerfGPTRollout(object):
     def generate(self):
         while True:
             (query_pool, complete_ratio, generation_kwargs) = self.input_queue.get(block=True)
-            print("query_pool: ", len(query_pool))
+            if os.getenv("LOCAL_RANK", "0") == "0":
+                print("query_pool length: ", len(query_pool))
             self.inference_engine.set_generator_strategy(**generation_kwargs)
             with logging_set_level(self.config.get('logging_level', 'WARN')):
                 self.inference_engine.execute(query_pool, complete_ratio=complete_ratio, stop_event=self.stop_event)

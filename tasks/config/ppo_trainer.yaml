@@ -96,11 +96,12 @@ actor_rollout_ref:
     max_token_len: -1
     log_prob_micro_batch_size: 128
     # for xperf_gpt
-    micro_batch_size: 256
+    micro_batch_size: 2048
     num_bon: 1
     eval_bon: 1
     eval_bon_every: 20
     bon_strategy: "best"
+    quant_mode: "NO_QUANT"
     train_generate_kwargs:
       top_k: -1 # 0 for hf rollout, -1 for vllm rollout
       top_p: 1.0

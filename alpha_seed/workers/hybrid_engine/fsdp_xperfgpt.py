@@ -36,7 +36,8 @@ from torch.distributed._tensor import DTensor
 
 from verl import DataProto
 
-from alpha_seed.workers.xperf_rollout.utils.weight_loader import offload_to_cpu, get_xperf_gpt_weight_bind_fn
+from alpha_seed.workers.xperf_rollout.utils.layout_convert_helper import offload_to_cpu
+from alpha_seed.workers.xperf_rollout.utils.weight_loader import get_xperf_gpt_weight_bind_fn
 
 
 class FSDPXPerfGPTShardingManager(BaseShardingManager):
@@ -52,7 +53,7 @@ class FSDPXPerfGPTShardingManager(BaseShardingManager):
         self.world_size_offset = 0
         self.world_size = torch.distributed.get_world_size()
 
-        self.bind_fn = get_xperf_gpt_weight_bind_fn(model_config)
+        self.bind_fn = get_xperf_gpt_weight_bind_fn(model_config, self.inference_engine.engine.module.quant_mode)
         # will be set when calling to `setup_standalone_rollout_comm`
         self.has_standalone_workers = False
 
@@ -174,14 +175,19 @@ class FSDPXPerfGPTShardingManager(BaseShardingManager):
             self.inference_engine.engine.module.layernorm_weight = layernorm_weight
             self.inference_engine.engine.module.lm_head_weight = lm_head_weight
             self.inference_engine.engine.module.wte_weight = wte_weight
-
             layers_weight = self.inference_engine.engine.module.layers_weight
             for layer, layer_weight in enumerate(layers_weight):
                 for i, weight in enumerate(layer_weight):
                     if isinstance(weight, torch.Tensor):
+                        origin_dtype = weight.dtype
+                        if origin_dtype == torch.float8_e4m3fn or origin_dtype == torch.uint8:
+                            # use int8 to communicate
+                            weight = weight.to(torch.int8)
+                            if (self.inference_engine.engine.module.quant_mode == "WFP8"):
+                                origin_dtype = torch.float8_e4m3fn
                         weight = weight.cuda()
                         comm_fn(weight, comm_rank)
-                        self.inference_engine.engine.module.layers_weight[layer][i] = weight
+                        self.inference_engine.engine.module.layers_weight[layer][i] = weight.to(origin_dtype)
             self.inference_engine.current_steps = 0
 
         if self.standalone:

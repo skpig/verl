@@ -24,7 +24,7 @@ actor_entropy_coeff=0.001
 # tracking log
 model_size="3b3"  # in 400m, 3b3, 12B
 project_name='alphaseed_bon'
-experiment_name=${model_size}'_bo1_speed_2k_streaming_2048'
+experiment_name=${model_size}'_bo1_speed_2k_streaming_2048_fp8'
 default_hdfs_dir=hdfs://haruna/home/byte_data_seed/ssd_hldy/evals_pipeline/user/liulingjun.godzilla/20241109bo1
 
 # 工程参数
@@ -36,10 +36,10 @@ if [ "${model_size}" = "400m" ]; then
     ulysses_sequence_parallel_size=1
     rollout_tensor_model_parallel_size=1 
 elif [ "${model_size}" = "3b3" ]; then
-    gen_micro_batch_size=128
+    gen_micro_batch_size=2048
     infer_micro_batch_size=512
     train_micro_batch_size=64
-    ulysses_sequence_parallel_size=1
+    ulysses_sequence_parallel_size=4
     rollout_tensor_model_parallel_size=4
 elif [ "${model_size}" = "12B" ]; then
     gen_micro_batch_size=512
@@ -143,8 +143,8 @@ python3 tasks/main_ppo.py \
     trainer.need_log=False \
     trainer.log_file=/opt/tiger/alpha-seed/log.jsonl \
     trainer.save_cases_to_hdfs=False\
-    streaming_rollout.nnodes=2 \
+    streaming_rollout.nnodes=1 \
     streaming_rollout.n_gpus_per_node=8\
-    trainer.nnodes=2 \
+    trainer.nnodes=4 \
     trainer.n_gpus_per_node=8 \
-    +actor_rollout_ref.rollout.complete_ratio=0.8 
+    +actor_rollout_ref.rollout.complete_ratio=0.5

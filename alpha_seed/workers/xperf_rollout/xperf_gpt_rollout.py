@@ -37,7 +37,7 @@ from contextlib import contextmanager, nullcontext
 import logging
 
 from .utils import get_xperf_gpt_config
-from .utils.weight_loader import offload_to_cpu, init_meta
+from .utils.layout_convert_helper import init_meta
 
 try:
     from verl.utils.debug import get_profiler_context
