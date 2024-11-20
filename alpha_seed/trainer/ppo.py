@@ -766,6 +766,7 @@ class RayPPOTrainer(object):
                                          need_log=self.config.trainer.need_log,
                                          log_file=self.config.trainer.log_file)
             pprint(f'Initial validation metrics: {val_metrics}')
+            val_metrics = {f'val/{key}': val for key, val in val_metrics.items()}
             self.logger.log(data=val_metrics, step=self.global_step)
         if self.config.trainer.val_only:
             return
