@@ -30,6 +30,8 @@ from verl.utils.py_functional import append_to_dict
 from verl.utils.torch_functional import logprobs_from_logits, log_probs_from_logits_response_rmpad, get_unpad_data
 import verl.utils.torch_functional as verl_F
 
+from verl.utils.model import compute_position_id_with_mask
+
 from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
 from dist_attn.ulysses.ops import gather_outputs
 from alpha_seed.workers.hybrid_engine.fsdp_ulysses import ulysses_pad_and_slice_inputs
@@ -87,9 +89,9 @@ class DataParallelPPOActor(BasePPOActor):
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
             if self.use_rmpad:
                 # TODO(zhangchi.usc1992): we can actually remove padding for the whole batch and perform balancing to reduce peak memory
-                input_ids = micro_batch['input_ids']
-                attention_mask = micro_batch['attention_mask']
-                position_ids = micro_batch['position_ids']
+                input_ids = micro_batch['input_ids'].to(torch.int64)
+                attention_mask = micro_batch['attention_mask'].to(torch.int64)
+                position_ids = compute_position_id_with_mask(attention_mask)
                 input_ids_rmpad, indices, cu_seqlens, max_seqlen_in_batch = unpad_input(
                     input_ids.unsqueeze(-1), attention_mask=attention_mask)  # (totol_nnz, 1)
                 input_ids_rmpad = input_ids_rmpad.transpose(0, 1)  # (1, total_nnz)
@@ -141,6 +143,8 @@ class DataParallelPPOActor(BasePPOActor):
                     entropy_loss = self.compute_entropy_loss(logits_rmpad, full_response_mask_rmpad)  # (total_nnz,)
 
             else:
+                assert NotImplementedError('Only support rmpad mode')
+
                 sp_size = get_ulysses_sequence_parallel_world_size()
                 if sp_size > 1:
                     raise NotImplementedError("ulysses sequence parallelism w/o use_rmpad is not supported yet")
@@ -158,8 +162,7 @@ class DataParallelPPOActor(BasePPOActor):
 
     def _make_minibatch_iterator(self, data: DataProto) -> Iterable[DataProto]:
         select_keys = [
-            'responses', 'input_ids', 'attention_mask', 'position_ids', 'old_log_probs', 'ref_log_prob', 'advantages',
-            'upgo_advantages'
+            'responses', 'input_ids', 'attention_mask', 'old_log_probs', 'ref_log_prob', 'advantages', 'upgo_advantages'
         ]
         data = data.select(batch_keys=select_keys)
         return data.make_iterator(mini_batch_size=self.config.ppo_mini_batch_size,
@@ -188,7 +191,7 @@ class DataParallelPPOActor(BasePPOActor):
             micro_batch_size = 1
         temperature = data.meta_info['temperature']  # temperature must be in the data.meta_info to avoid slient error
 
-        select_keys = ['responses', 'input_ids', 'attention_mask', 'position_ids']
+        select_keys = ['responses', 'input_ids', 'attention_mask']
         batch = data.select(batch_keys=select_keys).batch
         if use_dynamic_bsz:
             (micro_batches, num_micro_batches) = rearrange_micro_batches(batch=data.batch, max_token_len=max_token_len)

@@ -107,4 +107,4 @@ python3 tasks/main_ppo.py \
     trainer.val_epoch=1 \
     trainer.need_log=False \
     trainer.log_file=/opt/tiger/alpha-seed/log.jsonl \
-    trainer.resume_steps=auto
+    trainer.resume_steps=disable

@@ -201,7 +201,6 @@ class XPerfGPTRollout(object):
         prompt_ids = prompts.batch['input_ids']  # (bs, prompt_length)
         # left-padded attention_mask
         attention_mask = prompts.batch['attention_mask']
-        position_ids = prompts.batch['position_ids']
 
         # prompts
         tokenizer = self.inference_engine.tokenizer
@@ -233,7 +232,6 @@ class XPerfGPTRollout(object):
 
         local_bs = prompt_ids.shape[0]
         attention_mask = torch.hstack((attention_mask, response_attention_mask))
-        position_ids = (attention_mask.cumsum(dim=-1) - 1).clamp(min=0)
 
         input_ids = torch.hstack((prompt_ids, response_ids))
 
@@ -243,7 +241,6 @@ class XPerfGPTRollout(object):
             'responses': response_ids,
             'input_ids': input_ids,  # here input_ids become the whole sentences
             'attention_mask': attention_mask,
-            'position_ids': position_ids
         }
 
         out = DataProto.from_dict(batch)

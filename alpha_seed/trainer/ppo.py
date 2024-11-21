@@ -334,6 +334,19 @@ def compute_data_metrics(batch, use_critic, mean, std):
     return metrics
 
 
+def print_dataproto_size(data: DataProto):
+    size_of_tensordict = 0
+    for key, tensor in data.batch.items():
+        size_of_tensordict += tensor.element_size() * tensor.numel()
+    size_of_numpy_array = 0
+    for key, numpy_array in data.non_tensor_batch.items():
+        size_of_numpy_array += numpy_array.nbytes
+
+    size_of_numpy_array /= 1024**3
+    size_of_tensordict /= 1024**3
+    print(f'Size of tensordict: {size_of_tensordict} GB, size of non_tensor_batch: {size_of_numpy_array} GB')
+
+
 class RayPPOTrainer(object):
     """
     Note that this trainer runs on the driver on a single GPU
@@ -458,7 +471,7 @@ class RayPPOTrainer(object):
             for val_idx, test_data in enumerate(self.val_dataloader):
                 test_batch = DataProto.from_single_dict(test_data)
 
-                test_gen_batch = test_batch.pop(['input_ids', 'attention_mask', 'position_ids'])
+                test_gen_batch = test_batch.pop(['input_ids', 'attention_mask'])
                 test_gen_batch.meta_info = {
                     'eos_token_id': self.tokenizer.eos_token_id,
                     'pad_token_id': self.tokenizer.pad_token_id,
@@ -786,13 +799,16 @@ class RayPPOTrainer(object):
                     # hybrid generate (on policy)
                     batch: DataProto = DataProto.from_single_dict(batch_dict)
 
+                    # print the size of each data proto before training
+                    print_dataproto_size(batch)
+
                     if self.config.data.num_prompts_per_data > 1:
                         batch = batch.unfold_column_chunks(self.config.data.num_prompts_per_data,
-                                                           split_keys=['input_ids', 'attention_mask', 'position_ids'])
+                                                           split_keys=['input_ids', 'attention_mask'])
 
                     batch = batch.repeat(self.num_bon)
                     tmp_batch = copy.deepcopy(batch)
-                    gen_batch = tmp_batch.pop(batch_keys=['input_ids', 'attention_mask', 'position_ids'])
+                    gen_batch = tmp_batch.pop(batch_keys=['input_ids', 'attention_mask'])
                     gen_batch.meta_info[
                         'generation_kwargs'] = self.config.actor_rollout_ref.rollout.train_generate_kwargs
                     if self.global_step < resume_step + self.config.streaming_rollout.warmup_step:

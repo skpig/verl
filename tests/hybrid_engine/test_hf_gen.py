@@ -40,7 +40,6 @@ input_data = tokenizer(sentences, return_tensors='pt').to('cuda')
 
 input_ids = input_data['input_ids']
 attention_mask = input_data['attention_mask']
-position_ids = compute_position_id_with_mask(attention_mask)
 
 data = {'input_ids': input_ids}
 

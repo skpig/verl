@@ -158,15 +158,11 @@ class RLHFDataset(Dataset):
                                                                              pad_token_id=self.tokenizer.pad_token_id,
                                                                              left_pad=True,
                                                                              truncation=self.truncation)
-
-            position_ids = compute_position_id_with_mask(attention_mask)
             row_dict['input_ids'] = input_ids[0]
             row_dict['attention_mask'] = attention_mask[0]
-            row_dict['position_ids'] = position_ids[0]
         else:
             all_input_ids = []
             all_attention_mask = []
-            all_position_ids = []
             for i in range(self.num_prompts_per_data):
                 data = random_transform(self.prompts, chat[0]['content'])  # -> str
                 prompt_with_chat_template = self.tokenizer.apply_chat_template(data,
@@ -179,14 +175,11 @@ class RLHFDataset(Dataset):
                     pad_token_id=self.tokenizer.pad_token_id,
                     left_pad=True,
                     truncation=self.truncation)
-                position_ids = compute_position_id_with_mask(attention_mask)
                 all_input_ids.append(input_ids[0])
                 all_attention_mask.append(attention_mask[0])
-                all_position_ids.append(position_ids[0])
 
             row_dict['input_ids'] = torch.cat(all_input_ids)
             row_dict['attention_mask'] = torch.cat(all_attention_mask)
-            row_dict['position_ids'] = torch.cat(all_position_ids)
 
         # 添加answer
         if self.use_ref_answer:
@@ -205,11 +198,9 @@ class RLHFDataset(Dataset):
                                                                          pad_token_id=self.tokenizer.pad_token_id,
                                                                          left_pad=True,
                                                                          truncation=self.truncation)
-        position_ids = compute_position_id_with_mask(attention_mask)
 
         row_dict['answer_input_ids'] = input_ids[0]
         row_dict['answer_attention_mask'] = attention_mask[0]
-        row_dict['answer_position_ids'] = position_ids[0]
 
         # encode prompts without chat template
         if self.return_raw_chat:
@@ -217,6 +208,12 @@ class RLHFDataset(Dataset):
 
         index = row_dict.get("extra_info", {}).get("index", 0)
         row_dict["index"] = index
+
+        # type cast to save memory
+        row_dict['input_ids'] = row_dict['input_ids'].to(torch.int32)
+        row_dict['attention_mask'] = row_dict['attention_mask'].to(torch.int8)
+        row_dict['answer_input_ids'] = row_dict['answer_input_ids'].to(torch.int32)
+        row_dict['answer_attention_mask'] = row_dict['answer_attention_mask'].to(torch.int8)
 
         return row_dict
 
@@ -226,17 +223,17 @@ if __name__ == '__main__':
 
     from torch.utils.data import DataLoader
 
-    local_path = "/opt/tiger/alpha-seed/alpha_seed/utils/dataset/global_step_58"
+    local_path = "p6_400m_moe_4T_sft_v27_bs128_lr4e-4_master_dyn_epoch4_hf"
     tokenizer = AutoTokenizer.from_pretrained(local_path)
     from verl.utils.seed import CHAT_TEMPLATE
     tokenizer.chat_template = CHAT_TEMPLATE
 
-    dataset = RLHFDataset(parquet_files='/opt/tiger/alpha-seed/train.parquet',
+    dataset = RLHFDataset(parquet_files='combine_math7k_aime800_mathv2_repeat10.parquet',
                           tokenizer=tokenizer,
                           prompt_key='prompt',
                           answer_key='answer',
                           use_ref_answer=True,
-                          max_prompt_length=256,
+                          max_prompt_length=4096,
                           multi_prompts="all",
                           num_prompts_per_data=1)
 

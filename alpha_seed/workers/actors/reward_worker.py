@@ -174,15 +174,15 @@ class RewardModelWorker(Worker):
             if self.config.get('use_rmpad', False):
                 # 重新组合input_ids和attention_mask
                 max_prompt_length = self.config['max_prompt_length']
-                response_ids = micro_batch['input_ids'][:, max_prompt_length:]
-                response_mask = micro_batch['attention_mask'][:, max_prompt_length:]
+                response_ids = micro_batch['input_ids'][:, max_prompt_length:].to(torch.int64)
+                response_mask = micro_batch['attention_mask'][:, max_prompt_length:].to(torch.int64)
                 reflection_nums = torch.zeros((response_mask.shape[0],))
                 if self.config.get('use_last_response', False):
                     response_ids, response_mask, reflection_nums = self.get_last_response(response_ids, response_mask)
 
-                prompt_ids = micro_batch['answer_input_ids']
+                prompt_ids = micro_batch['answer_input_ids'].to(torch.int64)
                 input_ids = torch.cat([prompt_ids, response_ids], dim=-1)
-                prompt_mask = micro_batch['answer_attention_mask']
+                prompt_mask = micro_batch['answer_attention_mask'].to(torch.int64)
                 attention_mask = torch.cat([prompt_mask, response_mask], dim=-1)
 
                 batch, seqlen = input_ids.shape
@@ -301,8 +301,8 @@ class RewardModelWorker(Worker):
     def _expand_to_token_level(self, data: DataProto, scores: torch.Tensor):
         batch_size = data.batch.batch_size[0]
         # expand as token_level_reward
-        attention_mask = data.batch['attention_mask']
-        position_ids = data.batch['position_ids']
+        attention_mask = data.batch['attention_mask'].to(torch.int64)
+        position_ids = compute_position_id_with_mask(attention_mask)
         response_length = data.batch['responses'].shape[-1]
         eos_mask_idx = torch.argmax(position_ids * attention_mask, dim=-1)  # (bsz,)
         token_level_scores = torch.zeros_like(attention_mask, dtype=scores.dtype)  # (bsz, seqlen)
@@ -314,6 +314,8 @@ class RewardModelWorker(Worker):
         return token_level_scores
 
     def _switch_chat_template(self, data: DataProto):
+        assert NotImplementedError
+
         src_max_length = data.batch['attention_mask'].shape[-1]
 
         src_tokenizer = self.input_tokenizer

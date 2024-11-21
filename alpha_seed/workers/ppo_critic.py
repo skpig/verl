@@ -27,6 +27,7 @@ from verl import DataProto
 from verl.trainer.ppo.critic import BasePPOCritic
 from verl.utils.py_functional import append_to_dict
 from verl.utils.torch_functional import masked_mean
+from verl.utils.model import compute_position_id_with_mask
 
 from alpha_seed.workers.hybrid_engine.fsdp_ulysses import ulysses_pad_and_slice_inputs
 from alpha_seed import core_algos
@@ -78,10 +79,10 @@ class DataParallelPPOCritic(BasePPOCritic):
         response_length = micro_batch['responses'].size(-1)
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
             if self.use_rmpad:
-                input_ids = micro_batch['input_ids']
+                input_ids = micro_batch['input_ids'].to(torch.int64)
                 batch, seqlen = input_ids.shape
-                attention_mask = micro_batch['attention_mask']
-                position_ids = micro_batch['position_ids']
+                attention_mask = micro_batch['attention_mask'].to(torch.int64)
+                position_ids = compute_position_id_with_mask(attention_mask)
                 input_ids_rmpad, indices, _, _ = unpad_input(input_ids.unsqueeze(-1),
                                                              attention_mask=attention_mask)  # (totol_nnz, 1)
                 input_ids_rmpad = input_ids_rmpad.transpose(0, 1)  # (1, total_nnz)
@@ -105,6 +106,8 @@ class DataParallelPPOCritic(BasePPOCritic):
                 # pad it back
                 values = pad_input(values_rmpad.unsqueeze(-1), indices=indices, batch=batch, seqlen=seqlen).squeeze(-1)
             else:
+                assert NotImplementedError('Only support rmpad mode')
+
                 sp_size = get_ulysses_sequence_parallel_world_size()
                 if sp_size > 1:
                     raise NotImplementedError("ulysses sequence parallelism w/o use_rmpad is not supported yet")
@@ -117,7 +120,7 @@ class DataParallelPPOCritic(BasePPOCritic):
             return values
 
     def _make_minibatch_iterator(self, data: DataProto) -> Iterable[DataProto]:
-        select_keys = ['input_ids', 'responses', 'attention_mask', 'position_ids', 'values', 'returns']
+        select_keys = ['input_ids', 'responses', 'attention_mask', 'values', 'returns']
         data = data.select(batch_keys=select_keys)
         return data.make_iterator(mini_batch_size=self.config.ppo_mini_batch_size,
                                   epochs=self.config.ppo_epochs,
@@ -139,7 +142,7 @@ class DataParallelPPOCritic(BasePPOCritic):
             max_token_len = data.meta_info['max_token_len']
         else:
             micro_batch_size = data.meta_info['micro_batch_size']
-        select_keys = ['responses', 'input_ids', 'attention_mask', 'position_ids']
+        select_keys = ['responses', 'input_ids', 'attention_mask']
         batch = data.select(batch_keys=select_keys).batch
         if use_dynamic_bsz:
             (micro_batches, num_micro_batches) = rearrange_micro_batches(batch=data.batch, max_token_len=max_token_len)
@@ -183,7 +186,6 @@ class DataParallelPPOCritic(BasePPOCritic):
                     input_ids = micro_data['input_ids']
                     responses = micro_data['responses']
                     attention_mask = micro_data['attention_mask']
-                    position_ids = micro_data['position_ids']
                     values = micro_data['values']
                     returns = micro_data['returns']
                     response_length = responses.size(1)

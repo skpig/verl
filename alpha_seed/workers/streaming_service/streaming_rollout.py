@@ -245,7 +245,6 @@ class AsyncXPerfGPTRollout(object):
         prompt_ids = prompts.batch['input_ids']  # (bs, prompt_length)
         # left-padded attention_mask
         attention_mask = prompts.batch['attention_mask']
-        position_ids = prompts.batch['position_ids']
         first_non_one_indices = (prompt_ids != 1).int().argmax(dim=1)
         rmv_padding_prompt_ids = [row[index:].tolist() for row, index in zip(prompt_ids, first_non_one_indices)]
         self.input_queue.put((rmv_padding_prompt_ids, complete_ratio, prompts.meta_info['generation_kwargs']))
@@ -270,7 +269,6 @@ class AsyncXPerfGPTRollout(object):
         response_ids = response_outputs["input_ids"].cuda()
         response_attention_mask = response_outputs["attention_mask"].cuda()
         attention_mask = torch.hstack((attention_mask, response_attention_mask))
-        position_ids = (attention_mask.cumsum(dim=-1) - 1).clamp(min=0)
         input_ids = torch.hstack((prompt_ids, response_ids))
 
         # all the tp ranks should contain the same data here. data in all ranks are valid
@@ -279,7 +277,6 @@ class AsyncXPerfGPTRollout(object):
             'responses': response_ids,
             'input_ids': input_ids,  # here input_ids become the whole sentences
             'attention_mask': attention_mask,
-            'position_ids': position_ids,
             'is_finished': is_finished
         }
 
