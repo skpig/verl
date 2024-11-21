@@ -806,17 +806,17 @@ class RayPPOTrainer(object):
                         batch = batch.unfold_column_chunks(self.config.data.num_prompts_per_data,
                                                            split_keys=['input_ids', 'attention_mask'])
 
+                    # hybrid rollout
                     batch = batch.repeat(self.num_bon)
-                    tmp_batch = copy.deepcopy(batch)
-                    gen_batch = tmp_batch.pop(batch_keys=['input_ids', 'attention_mask'])
-                    gen_batch.meta_info[
-                        'generation_kwargs'] = self.config.actor_rollout_ref.rollout.train_generate_kwargs
-                    if self.global_step < resume_step + self.config.streaming_rollout.warmup_step:
-                        complete_ratio = 1.0
-                    else:
-                        complete_ratio = self.config.actor_rollout_ref.rollout.get("complete_ratio", 1)
-                    gen_batch.meta_info['complete_ratio'] = complete_ratio
-                    pprint(f'start rollout, batches {len(gen_batch)}.')
+                    gen_batch = batch.select(batch_keys=['input_ids', 'attention_mask'])
+                    gen_batch.meta_info.update({
+                        'generation_kwargs':
+                            self.config.actor_rollout_ref.rollout.train_generate_kwargs,
+                        'complete_ratio':
+                            1.0 if self.global_step < resume_step + self.config.streaming_rollout.warmup_step else
+                            self.config.actor_rollout_ref.rollout.get("complete_ratio", 1.0)
+                    })
+                    pprint(f'start hybrid rollout, input batches {len(gen_batch)}.')
                     with Timer(name='gen', logger=None) as timer:
                         gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
                     metrics['timing/gen'] = timer.last
@@ -827,47 +827,46 @@ class RayPPOTrainer(object):
                             self.logger.log(data={"rollout/gen/hybrid_{}".format(name): wandb.Histogram(x_metric)},
                                             step=self.global_step)
 
-                    # prepare for standalone generation
-                    gen_batch_output = tmp_batch.union(gen_batch_output)
-                    is_finished = gen_batch_output.pop(batch_keys=['is_finished']).batch['is_finished']
-                    for i in range(len(gen_batch_output)):
-                        item = gen_batch_output[i] if is_finished[i] else batch[i]
+                    def _convert_item_to_dataproto(item):
                         item.batch = item.batch.unsqueeze(0)
                         for key, value in item.non_tensor_batch.items():
                             item.non_tensor_batch[key] = np.atleast_1d(np.array(value, dtype=object))
+                        return DataProto(item.batch, item.non_tensor_batch, item.meta_info)
+
+                    # prepare for standalone generation
+                    is_finished = gen_batch_output.pop(batch_keys=['is_finished']).batch['is_finished']
+                    for i in range(len(gen_batch_output)):
+                        ori_item = _convert_item_to_dataproto(batch[i])
+                        gen_item = _convert_item_to_dataproto(gen_batch_output[i])
                         if is_finished[i]:
-                            ready_batch_queue.put(item)
+                            ori_item.pop(batch_keys=['input_ids', 'attention_mask'])
+                            ready_batch_queue.put(gen_item.union(ori_item))
                         else:
-                            pending_batch_queue.put(item)
-                    pprint(
-                        f'stop rollout, get batches {ready_batch_queue.qsize()}, pending batches {pending_batch_queue.qsize()}.'
-                    )
+                            pending_batch_queue.put(ori_item)
                     finished_num = is_finished.sum().int().item()
+                    pprint(
+                        f'stop hybrid rollout, completed_batch {finished_num}, incompleted_batch {len(batch) - finished_num} \
+                          ready_queue {ready_batch_queue.qsize()}, pending_queue {pending_batch_queue.qsize()}.')
                     metrics['rollout/hybrid_completed_batch'] = finished_num
                     metrics['rollout/hybrid_incompleted_batch'] = len(batch) - finished_num
 
                     # stop standalone rollout to update model
-                    hybrid_ready_batch_num = ready_batch_queue.qsize()
-                    hybrid_pending_batch_num = pending_batch_queue.qsize()
                     finished_num = 0
                     if len(standalone_batch) > 0:
                         gen_batch_output = self.standalone_rollout_wg.generate_sequences_get(standalone_gen_batch)
-                        gen_batch_output = standalone_tmp_batch.union(gen_batch_output)
                         is_finished = gen_batch_output.pop(batch_keys=['is_finished']).batch['is_finished']
                         for i in range(len(gen_batch_output)):
-                            item = gen_batch_output[i] if is_finished[i] else standalone_batch[i]
-                            item.batch = item.batch.unsqueeze(0)
-                            for key, value in item.non_tensor_batch.items():
-                                item.non_tensor_batch[key] = np.atleast_1d(np.array(value, dtype=object))
-                            if is_finished[i] or self.config.streaming_rollout.force_eos:
-                                ready_batch_queue.put(item)
+                            ori_item = _convert_item_to_dataproto(standalone_batch[i])
+                            gen_item = _convert_item_to_dataproto(gen_batch_output[i])
+                            if is_finished[i]:
+                                ori_item.pop(batch_keys=['input_ids', 'attention_mask'])
+                                ready_batch_queue.put(gen_item.union(ori_item))
                             else:
-                                pending_batch_queue.put(item)
+                                pending_batch_queue.put(ori_item)
                         finished_num = is_finished.sum().int().item()
                         pprint(
-                            f'stop standalone rollout, get batches {ready_batch_queue.qsize() - hybrid_ready_batch_num}, actual finished {finished_num}, pending batches {pending_batch_queue.qsize() - hybrid_pending_batch_num}.'
-                        )
-                        pprint(f'total ready batch {ready_batch_queue.qsize()}')
+                            f'stop standalone rollout, completed_batch {finished_num}, incompleted_batch {len(standalone_batch) - finished_num} \
+                              ready_queue {ready_batch_queue.qsize()}, pending_queue {pending_batch_queue.qsize()}.')
                         # only report metrics from one generation replica
                         if 'xperf_metrics' in gen_batch_output.meta_info:
                             for name, x_metric in gen_batch_output.meta_info['xperf_metrics'].items():
@@ -892,14 +891,12 @@ class RayPPOTrainer(object):
                             standalone_batch.append(pending_batch_queue.get())
                     if len(standalone_batch) > 0:
                         standalone_batch = DataProto.concat(standalone_batch)
-                        standalone_tmp_batch = copy.deepcopy(standalone_batch)
-                        standalone_gen_batch = standalone_tmp_batch.pop(
-                            batch_keys=['input_ids', 'attention_mask', 'position_ids'])
+                        standalone_gen_batch = standalone_batch.select(batch_keys=['input_ids', 'attention_mask'])
                         standalone_gen_batch.meta_info[
                             'generation_kwargs'] = self.config.actor_rollout_ref.rollout.train_generate_kwargs
                         standalone_gen_batch.meta_info['complete_ratio'] = 1
                         self.standalone_rollout_wg.generate_sequences_put(standalone_gen_batch)
-                        pprint(f'start standalone rollout, batches {len(standalone_batch)}.')
+                        pprint(f'start standalone rollout, input batches {len(standalone_gen_batch)}.')
                     metrics['rollout/standalone_input_batch'] = len(standalone_batch)
 
                     # get training batch from ready queue
@@ -914,6 +911,7 @@ class RayPPOTrainer(object):
                     batch.meta_info['generation_kwargs'] = self.config.actor_rollout_ref.rollout.train_generate_kwargs
                     batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask'], dim=-1).tolist()
                     metrics['rollout/training_batch'] = len(batch)
+                    pprint(f'training batches {len(batch)}.')
 
                     # training
                     with Timer(name='rm_score', logger=None) as timer:
