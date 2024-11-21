@@ -219,8 +219,6 @@ class AsyncXPerfGPTRollout(object):
     def generate(self):
         while True:
             (query_pool, complete_ratio, generation_kwargs) = self.input_queue.get(block=True)
-            if os.getenv("LOCAL_RANK", "0") == "0":
-                print("query_pool length: ", len(query_pool))
             self.inference_engine.set_generator_strategy(**generation_kwargs)
             with logging_set_level(self.config.get('logging_level', 'WARN')):
                 self.inference_engine.execute(query_pool, complete_ratio=complete_ratio, stop_event=self.stop_event)

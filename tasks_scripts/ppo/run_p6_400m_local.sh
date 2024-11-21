@@ -61,6 +61,7 @@ python3 tasks/main_ppo.py \
     data.use_ref_answer=${use_ref_answer} \
     data.max_prompt_length=${max_prompt_length} \
     data.max_response_length=${max_response_length} \
+    trainer.resume_steps=disable \
     data.train_batch_size=${train_batch_size} \
     data.val_batch_size=${val_batch_size} \
     data.truncation='left' \
@@ -137,5 +138,6 @@ python3 tasks/main_ppo.py \
     trainer.n_gpus_per_node=4 \
     streaming_rollout.nnodes=1 \
     streaming_rollout.n_gpus_per_node=4 \
-    actor_rollout_ref.rollout.quant_mode=WFP8 \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.8
+    streaming_rollout.warmup_step=0 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
+    streaming_rollout.force_eos=True

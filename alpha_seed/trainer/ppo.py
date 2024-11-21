@@ -824,13 +824,15 @@ class RayPPOTrainer(object):
                         else:
                             pending_batch_queue.put(item)
                     pprint(
-                        f'stop rollout, ready batches {ready_batch_queue.qsize()}, pending batches {pending_batch_queue.qsize()}.'
+                        f'stop rollout, get batches {ready_batch_queue.qsize()}, pending batches {pending_batch_queue.qsize()}.'
                     )
                     finished_num = is_finished.sum().int().item()
                     metrics['rollout/hybrid_completed_batch'] = finished_num
                     metrics['rollout/hybrid_incompleted_batch'] = len(batch) - finished_num
 
                     # stop standalone rollout to update model
+                    hybrid_ready_batch_num = ready_batch_queue.qsize()
+                    hybrid_pending_batch_num = pending_batch_queue.qsize()
                     finished_num = 0
                     if len(standalone_batch) > 0:
                         gen_batch_output = self.standalone_rollout_wg.generate_sequences_get(standalone_gen_batch)
@@ -841,14 +843,15 @@ class RayPPOTrainer(object):
                             item.batch = item.batch.unsqueeze(0)
                             for key, value in item.non_tensor_batch.items():
                                 item.non_tensor_batch[key] = np.atleast_1d(np.array(value, dtype=object))
-                            if is_finished[i]:
+                            if is_finished[i] or self.config.streaming_rollout.force_eos:
                                 ready_batch_queue.put(item)
                             else:
                                 pending_batch_queue.put(item)
-                        pprint(
-                            f'stop standalone rollout, ready batches {ready_batch_queue.qsize()}, pending batches {pending_batch_queue.qsize()}.'
-                        )
                         finished_num = is_finished.sum().int().item()
+                        pprint(
+                            f'stop standalone rollout, get batches {ready_batch_queue.qsize() - hybrid_ready_batch_num}, actual finished {finished_num}, pending batches {pending_batch_queue.qsize() - hybrid_pending_batch_num}.'
+                        )
+                        pprint(f'total ready batch {ready_batch_queue.qsize()}')
                         # only report metrics from one generation replica
                         if 'xperf_metrics' in gen_batch_output.meta_info:
                             for name, x_metric in gen_batch_output.meta_info['xperf_metrics'].items():
