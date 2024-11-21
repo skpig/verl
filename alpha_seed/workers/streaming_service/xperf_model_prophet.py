@@ -18,7 +18,9 @@ class XperfModelProphet:
         self.model_cfg = model_cfg
         self.sched_cfg = sched_cfg
         self.model_type = model_cfg.get("model_name", "GPT2LMHeadModel")
-        self.supported_model_types = ["GPT2LMHeadModel", "GPT2LMHeadModelMoe", "LlamaForCausalLM"]
+        self.supported_model_types = [
+            "GPT2LMHeadModel", "GPT2LMHeadModelMoe", "LlamaForCausalLM", "SeedLLaMAForCausalLM"
+        ]
         if self.model_type not in self.supported_model_types:
             raise ValueError(f"XperfModelProphet not support [{self.model_type}] yet, can't auto configure scheduler.")
 
@@ -115,6 +117,7 @@ class XperfModelProphet:
             "GPT2LMHeadModel": calc_gpt2_model_size,
             "GPT2LMHeadModelMoe": calc_gpt2moe_model_size,
             "LlamaForCausalLM": calc_llama_model_size,
+            "SeedLLaMAForCausalLM": calc_llama_model_size,
         }
         total_weights_sz = model_size_calculator[self.model_type]()
         logging.info(f"XperfModelProphet get_model_size {total_weights_sz/1024**3}GB per card.")
@@ -204,6 +207,7 @@ class XperfModelProphet:
         io_buf_calculator = {
             "GPT2LMHeadModel": calc_gpt2_io_buffer,
             "GPT2LMHeadModelMoe": calc_gpt2moe_io_buffer,
+            "SeedLLaMAForCausalLM": calc_gpt2_io_buffer,
         }
 
         max_io_buf_size = io_buf_calculator[self.model_type]()
