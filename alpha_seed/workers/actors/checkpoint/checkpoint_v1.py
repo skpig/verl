@@ -65,7 +65,10 @@ class CheckpointManagerV1:
             return
 
         # every rank download its own checkpoint
-        state_idx = device_mesh.get_local_rank(device_mesh.ndim - 1)
+        if device_mesh is None:
+            state_idx = self.rank
+        else:
+            state_idx = device_mesh.get_local_rank(device_mesh.ndim - 1)
         remote_path = os.path.join(hdfs_path, f'model_optim_rank_{state_idx}.pt')
         print(f'[rank-{self.rank}]: Loading from {remote_path}')
         local_path = copy_local_path_from_hdfs(remote_path)
@@ -102,9 +105,14 @@ class CheckpointManagerV1:
 
         torch.distributed.barrier()
 
-        should_save_ckpt = device_mesh.ndim > 1 and device_mesh.get_local_rank(0) == 0  # HSDP's first FSDP group
-        should_save_ckpt = should_save_ckpt or (device_mesh.ndim == 1)  # FSDP
-        state_idx = device_mesh.get_local_rank(device_mesh.ndim - 1)
+        if device_mesh is None:
+            # handle deprecated case: critic model is saved as ShardedTensor
+            should_save_ckpt = True
+            state_idx = self.rank
+        else:
+            should_save_ckpt = device_mesh.ndim > 1 and device_mesh.get_local_rank(0) == 0  # HSDP's first FSDP group
+            should_save_ckpt = should_save_ckpt or (device_mesh.ndim == 1)  # FSDP
+            state_idx = device_mesh.get_local_rank(device_mesh.ndim - 1)
 
         state_dict_cfg = ShardedStateDictConfig(offload_to_cpu=True)
         optim_cfg = ShardedOptimStateDictConfig(offload_to_cpu=True)

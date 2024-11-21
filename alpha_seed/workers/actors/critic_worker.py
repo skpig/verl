@@ -71,7 +71,11 @@ class CriticWorker(Worker):
 
         world_size = torch.distributed.get_world_size()
 
-        self.device_mesh = create_device_mesh(config.fsdp_size, 'Critic')
+        # Deprecated case: critic model is saved as ShardedTensor
+        # so we cannot create device_mesh
+        self.device_mesh = None
+        if not config.NO_DEVICE_MESH:
+            self.device_mesh = create_device_mesh(config.fsdp_size, 'Critic')
         # create ulysses sequence parallel device mesh
         sp_size = config.ulysses_sequence_parallel_size
         self.ulysses_sp_device_mesh = None
