@@ -230,6 +230,7 @@ trainer:
   save_cases_to_hdfs: True # save all cases to hdfs each step
   # auto: find the last ckpt to resume. If can't find, start from scratch
   resume_steps: auto
+  set_fake_attention_mask: False
   league_training_config: 
     enable: False
     buffer_size: 1

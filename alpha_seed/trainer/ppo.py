@@ -819,6 +819,14 @@ class RayPPOTrainer(object):
                     pprint(f'start hybrid rollout, input batches {len(gen_batch)}.')
                     with Timer(name='gen', logger=None) as timer:
                         gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+
+                    # for debugging purpose only. we manually set all the attention_mask to 1 to
+                    # test the training performance under maximum workload.
+                    if self.config.trainer.set_fake_attention_mask:
+                        gen_batch_output.batch['attention_mask'] = torch.ones_like(
+                            gen_batch_output.batch['attention_mask'])
+                        pprint(f'set fake attention mask')
+
                     metrics['timing/gen'] = timer.last
                     metrics['rollout/hybrid_input_batch'] = len(batch)
                     # only report metrics from one generation replica
