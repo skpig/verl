@@ -6,6 +6,7 @@ using TP
 import os
 
 os.environ['NCCL_DEBUG'] = 'WARN'
+os.environ['USE_SESSION_CACHE'] = '0'
 
 import seed_models  # noqa
 
@@ -27,7 +28,7 @@ local_rank, rank, world_size = initialize_global_process_group()
 device_mesh = init_device_mesh('cuda', mesh_shape=(world_size,), mesh_dim_names=['fsdp'])
 
 model_path = copy_local_path_from_hdfs(
-    'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/P6.1_12B_32k_SFT29_Fix_RoPE_Base_hf')
+    'hdfs://haruna/home/byte_data_seed/ssd_lq/public/seed_models/Seed-2B5-P7_32k_sft29_32gpu')
 tokenizer = AutoTokenizer.from_pretrained(model_path)
 tokenizer.padding_side = "left"
 
@@ -66,7 +67,7 @@ rollout_config = OmegaConf.create({
     'prompt_length': 256,
     'response_length': 256,
     'micro_batch_size': 128,
-    'tensor_model_parallel_size': 4,
+    'tensor_model_parallel_size': 2,
     'train_generate_kwargs': {
         'do_sample': False,
         'top_k': 0,
@@ -111,5 +112,5 @@ with sharding_manager:
 
 output_ids = output.batch['input_ids']
 
-text_out = tokenizer.batch_decode(output_ids, skip_special_tokens=True)
-print(text_out)
+text_out = tokenizer.batch_decode(output_ids, skip_special_tokens=False)
+print(text_out[0].replace(tokenizer.pad_token, ''))

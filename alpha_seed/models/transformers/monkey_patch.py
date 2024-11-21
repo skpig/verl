@@ -20,53 +20,11 @@ Apply monkey-patch function to models
 #### Open Source Models
 
 
-def apply_monkey_patch_to_llama():
-    from transformers.models.llama.modeling_llama import LlamaFlashAttention2, LlamaModel
-    from verl.models.transformers.llama import flash_attn2_rmpad_forward, llama_model_rmpad_forward
-    LlamaFlashAttention2.forward = flash_attn2_rmpad_forward
-    LlamaModel.forward = llama_model_rmpad_forward
-
-    from liger_kernel.transformers.monkey_patch import apply_liger_kernel_to_llama
-    apply_liger_kernel_to_llama(rope=False,
-                                cross_entropy=False,
-                                fused_linear_cross_entropy=False,
-                                rms_norm=True,
-                                swiglu=True)
-
-
-def apply_monkey_patch_to_qwen2():
-    from transformers.models.qwen2.modeling_qwen2 import Qwen2FlashAttention2, Qwen2ForCausalLM
-    from verl.models.transformers.qwen2 import flash_attn2_rmpad_forward, lce_forward
-    Qwen2FlashAttention2.forward = flash_attn2_rmpad_forward
-    Qwen2ForCausalLM.forward = lce_forward
-
-    from liger_kernel.transformers.monkey_patch import apply_liger_kernel_to_qwen2
-    apply_liger_kernel_to_qwen2(rope=False,
-                                cross_entropy=False,
-                                fused_linear_cross_entropy=False,
-                                rms_norm=True,
-                                swiglu=True)
-
-
 #### Seed Models
-
-
-def apply_monkey_patch_to_p4():
-    from seed_models.models.p4.modeling_p4 import P4FlashAttention2
-    from alpha_seed.models.transformers.seed_flash_attn_rmpad import flash_attn2_rmpad_forward
-    P4FlashAttention2.forward = flash_attn2_rmpad_forward
-
-
-def apply_monkey_patch_to_p5():
-    from seed_models.models.p5.modeling_p5 import P5FlashAttention2
-    from alpha_seed.models.transformers.seed_flash_attn_rmpad import flash_attn2_rmpad_forward
-    P5FlashAttention2.forward = flash_attn2_rmpad_forward
-
-
 def apply_monkey_patch_to_p6():
     from seed_models.models.p6.modeling_p6 import P6FlashAttention2
     from verl.models.transformers.seed_mlp import swiglu_mlp_forward
-    from alpha_seed.models.transformers.seed_flash_attn_rmpad import flash_attn2_rmpad_forward
+    from alpha_seed.models.transformers.modeling_p6 import flash_attn2_rmpad_forward
     P6FlashAttention2.forward = flash_attn2_rmpad_forward
     # P6ExpertMLP.forward = swiglu_mlp_forward
     from seed_models.integrations import apply_liger_kernel_to_p6
@@ -78,13 +36,18 @@ def apply_monkey_patch_to_p6_dense():
     apply_liger_kernel_to_p6d()
 
 
+def apply_monkey_patch_to_p7():
+    from seed_models.models.p7.modeling_p7 import P7FlashAttention2
+    from alpha_seed.models.transformers.modeling_p7 import flash_attn2_rmpad_forward
+    P7FlashAttention2.forward = flash_attn2_rmpad_forward
+    from seed_models.integrations import apply_liger_kernel_to_p7
+    apply_liger_kernel_to_p7()
+
+
 _PATCH_NAME_TO_FUNC = {
-    'llama': apply_monkey_patch_to_llama,
-    'qwen2': apply_monkey_patch_to_qwen2,
-    'seed_p4': apply_monkey_patch_to_p4,
-    'seed_p5': apply_monkey_patch_to_p5,
     'seed_p6': apply_monkey_patch_to_p6,
-    'seed_p6dense': apply_monkey_patch_to_p6_dense
+    'seed_p6dense': apply_monkey_patch_to_p6_dense,
+    'seed_p7': apply_monkey_patch_to_p7
 }
 
 from transformers import PretrainedConfig

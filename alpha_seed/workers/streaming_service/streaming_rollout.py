@@ -64,7 +64,7 @@ def remove_nccl_files():
     print(f'cwd: {cwd}')
     for p in Path(cwd).glob("xperf_gpt_nccl_file*"):
         print(f'Removing file {p.name}')
-        p.unlink()
+        p.unlink(missing_ok=True)
 
 
 class AsyncXPerfGPTRollout(object):

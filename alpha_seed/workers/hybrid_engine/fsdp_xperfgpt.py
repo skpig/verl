@@ -42,8 +42,12 @@ from alpha_seed.workers.xperf_rollout.utils.weight_loader import get_xperf_gpt_w
 
 class FSDPXPerfGPTShardingManager(BaseShardingManager):
 
-    def __init__(self, module: FSDP, model_config, inference_engine: InferenceSession, device_mesh: DeviceMesh,
-                 standalone):
+    def __init__(self,
+                 module: FSDP,
+                 model_config,
+                 inference_engine: InferenceSession,
+                 device_mesh: DeviceMesh,
+                 standalone=False):
         super().__init__()
         self.module = module
         self.inference_engine = inference_engine
