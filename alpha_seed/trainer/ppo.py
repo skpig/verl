@@ -858,7 +858,7 @@ class RayPPOTrainer(object):
                         for i in range(len(gen_batch_output)):
                             ori_item = _convert_item_to_dataproto(standalone_batch[i])
                             gen_item = _convert_item_to_dataproto(gen_batch_output[i])
-                            if is_finished[i]:
+                            if is_finished[i] or self.config.streaming_rollout.force_eos:
                                 ori_item.pop(batch_keys=['input_ids', 'attention_mask'])
                                 ready_batch_queue.put(gen_item.union(ori_item))
                             else:
@@ -895,6 +895,7 @@ class RayPPOTrainer(object):
                         standalone_gen_batch.meta_info[
                             'generation_kwargs'] = self.config.actor_rollout_ref.rollout.train_generate_kwargs
                         standalone_gen_batch.meta_info['complete_ratio'] = 1
+                        standalone_gen_batch.non_tensor_batch = {}
                         self.standalone_rollout_wg.generate_sequences_put(standalone_gen_batch)
                         pprint(f'start standalone rollout, input batches {len(standalone_gen_batch)}.')
                     metrics['rollout/standalone_input_batch'] = len(standalone_batch)
