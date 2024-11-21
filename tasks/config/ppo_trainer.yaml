@@ -29,6 +29,7 @@ actor_rollout_ref:
     strategy: fsdp  # This is for backward-compatibility
     ppo_mini_batch_size: 512
     ulysses_sequence_parallel_size: 1
+    fsdp_size: -1
     ppo_micro_batch_size: 64
     use_dynamic_bsz: True
     ppo_max_token_len: -1
@@ -70,12 +71,14 @@ actor_rollout_ref:
       enable: False
   ref:
     fsdp_config:
+      sharding_strategy: FULL_SHARD # https://pytorch.org/docs/stable/fsdp.html#torch.distributed.fsdp.ShardingStrategy
       param_offload: True
       wrap_policy:
         # transformer_layer_cls_to_wrap: None
         min_num_params: 0
     log_prob_micro_batch_size: 128
     ulysses_sequence_parallel_size: 1
+    fsdp_size: -1
     use_dynamic_bsz: True
     max_token_len: -1
   rollout:
@@ -149,6 +152,7 @@ critic:
         # transformer_layer_cls_to_wrap: None
         min_num_params: 0
   ulysses_sequence_parallel_size: 1
+  fsdp_size: -1
   ppo_mini_batch_size: ${actor_rollout_ref.actor.ppo_mini_batch_size}
   ppo_micro_batch_size: 64
   use_dynamic_bsz: True
@@ -173,9 +177,11 @@ reward_model:
     path: hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/models/FsfairX-LLaMA3-RM-v0.1
     external_lib: ${actor_rollout_ref.model.external_lib}
     fsdp_config:
+      sharding_strategy: FULL_SHARD # https://pytorch.org/docs/stable/fsdp.html#torch.distributed.fsdp.ShardingStrategy
       min_num_params: 0
       param_offload: True
   ulysses_sequence_parallel_size: 1
+  fsdp_size: -1
   micro_batch_size: 64
   use_dynamic_bsz: True
   max_token_len: -1

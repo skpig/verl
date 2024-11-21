@@ -36,6 +36,7 @@ from verl.utils.debug import log_gpu_memory_usage
 from torch.distributed.device_mesh import init_device_mesh
 
 from alpha_seed.workers.hybrid_engine.fsdp_ulysses import FSDPUlyssesShardingManager
+from alpha_seed.workers.hybrid_engine.hsdp import create_device_mesh
 from alpha_seed.workers.ppo_critic import DataParallelPPOCritic
 
 from seed_models.utils.count_flops import FlopsCounter
@@ -70,6 +71,7 @@ class CriticWorker(Worker):
 
         world_size = torch.distributed.get_world_size()
 
+        self.device_mesh = create_device_mesh(config.fsdp_size, 'Critic')
         # create ulysses sequence parallel device mesh
         sp_size = config.ulysses_sequence_parallel_size
         self.ulysses_sp_device_mesh = None
@@ -194,6 +196,7 @@ class CriticWorker(Worker):
                              auto_wrap_policy=auto_wrap_policy,
                              device_id=torch.cuda.current_device(),
                              sharding_strategy=sharding_strategy,
+                             device_mesh=self.device_mesh,
                              mixed_precision=mixed_precision,
                              forward_prefetch=True,
                              sync_module_states=True,
@@ -295,8 +298,10 @@ class CriticWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, hdfs_path=None):
-        self.checkpoint_manager.load_checkpoint(hdfs_path=hdfs_path)
+        self.checkpoint_manager.load_checkpoint(hdfs_path=hdfs_path, device_mesh=self.device_mesh)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def save_checkpoint(self, local_path, hdfs_path=None):
-        self.checkpoint_manager.save_checkpoint(local_path=local_path, hdfs_path=hdfs_path)
+        self.checkpoint_manager.save_checkpoint(local_path=local_path,
+                                                hdfs_path=hdfs_path,
+                                                device_mesh=self.device_mesh)

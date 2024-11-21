@@ -12,6 +12,7 @@ import warnings
 
 import torch
 import torch.distributed
+from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, StateDictType
 from torch.distributed.fsdp import ShardedStateDictConfig, ShardedOptimStateDictConfig
 
@@ -59,13 +60,14 @@ class CheckpointManagerV1:
         assert isinstance(self.model, FSDP)
         self.rank = torch.distributed.get_rank()
 
-    def load_checkpoint(self, hdfs_path=None):
+    def load_checkpoint(self, hdfs_path=None, device_mesh: DeviceMesh = None):
         if hdfs_path is None:
             return
 
         # every rank download its own checkpoint
-        remote_path = os.path.join(hdfs_path, f'model_optim_rank_{self.rank}.pt')
-        print(f'Loading from {remote_path}')
+        state_idx = device_mesh.get_local_rank(device_mesh.ndim - 1)
+        remote_path = os.path.join(hdfs_path, f'model_optim_rank_{state_idx}.pt')
+        print(f'[rank-{self.rank}]: Loading from {remote_path}')
         local_path = copy_local_path_from_hdfs(remote_path)
 
         state_dict = torch.load(local_path)
@@ -82,7 +84,7 @@ class CheckpointManagerV1:
 
         self.lr_scheduler.load_state_dict(lr_scheduler_state_dict)
 
-    def save_checkpoint(self, local_path: str, hdfs_path: str):
+    def save_checkpoint(self, local_path: str, hdfs_path: str, device_mesh: DeviceMesh):
         # wait for previous upload to hdfs
         if self.upload_sharded_future is not None:
             ray.get(self.upload_sharded_future)
@@ -100,6 +102,10 @@ class CheckpointManagerV1:
 
         torch.distributed.barrier()
 
+        should_save_ckpt = device_mesh.ndim > 1 and device_mesh.get_local_rank(0) == 0  # HSDP's first FSDP group
+        should_save_ckpt = should_save_ckpt or (device_mesh.ndim == 1)  # FSDP
+        state_idx = device_mesh.get_local_rank(device_mesh.ndim - 1)
+
         state_dict_cfg = ShardedStateDictConfig(offload_to_cpu=True)
         optim_cfg = ShardedOptimStateDictConfig(offload_to_cpu=True)
         with warnings.catch_warnings():
@@ -112,10 +118,13 @@ class CheckpointManagerV1:
                     'optimizer': optimizer_state_dict,
                     'lr_scheduler': self.lr_scheduler.state_dict()
                 }
-                path = os.path.join(local_path, f'model_optim_rank_{self.rank}.pt')
+                path = os.path.join(local_path, f'model_optim_rank_{state_idx}.pt')
 
-                print(f'Saving checkpoint to {os.path.abspath(path)}')
-                torch.save(state_dict, path)
+                if should_save_ckpt:
+                    print(f'[rank-{self.rank}]: Saving checkpoint to {os.path.abspath(path)}')
+                    torch.save(state_dict, path)
+                else:
+                    print(f'[rank-{self.rank}]: Skip saving checkpoint to {os.path.abspath(path)}')
 
         if self.rank == 0:
             hdfs_io.makedirs(hdfs_path, exist_ok=True)
@@ -127,7 +136,7 @@ class CheckpointManagerV1:
         # causes local_dir not found error.
 
         # upload to hdfs
-        if hdfs_path is not None:
+        if hdfs_path is not None and should_save_ckpt:
             # everyone upload its own checkpoint
             assert os.path.isfile(path), f'local path {path} does not exist'
             self.upload_sharded_future = upload_ckpt.options(scheduling_strategy=NodeAffinitySchedulingStrategy(

@@ -42,6 +42,7 @@ from verl.utils.torch_functional import broadcast_dict_tensor, allgather_dict_te
 from verl.utils.model import compute_position_id_with_mask
 import numpy as np
 
+from alpha_seed.workers.hybrid_engine.hsdp import create_device_mesh
 from alpha_seed.workers.hybrid_engine.fsdp_ulysses import FSDPUlyssesShardingManager
 from .initialize import get_device_init_context, create_init_fn
 from alpha_seed.workers.utils import rearrange_micro_batches
@@ -82,7 +83,9 @@ class AsyncActorRolloutRefWorker(Worker):
 
         print(f'Master address: {self.master_address}, Master port: {self.master_port}')
         world_size = torch.distributed.get_world_size()
-        self.device_mesh = init_device_mesh('cuda', mesh_shape=(world_size,), mesh_dim_names=['fsdp'])
+
+        self.device_mesh = create_device_mesh(config.actor.fsdp_size, role)
+
         self.role = role
         assert self.role in ['actor', 'rollout', 'ref', 'actor_rollout', 'actor_rollout_ref', 'standalone_rollout']
 
@@ -107,13 +110,13 @@ class AsyncActorRolloutRefWorker(Worker):
 
         # normalize config
         if self._is_actor:
-            self.config.actor.ppo_mini_batch_size //= self.device_mesh.shape[0] // sp_size
-            self.config.actor.ppo_micro_batch_size //= self.device_mesh.shape[0] // sp_size
+            self.config.actor.ppo_mini_batch_size //= world_size // sp_size
+            self.config.actor.ppo_micro_batch_size //= world_size // sp_size
         if self._is_rollout or self._is_standalone_rollout:
-            self.config.rollout.micro_batch_size //= self.device_mesh.shape[0]  # for xperf-gpt
-            self.config.rollout.log_prob_micro_batch_size //= self.device_mesh.shape[0] // sp_size
+            self.config.rollout.micro_batch_size //= world_size  # for xperf-gpt
+            self.config.rollout.log_prob_micro_batch_size //= world_size // sp_size
         if self._is_ref:
-            self.config.ref.log_prob_micro_batch_size //= self.device_mesh.shape[0] // sp_size
+            self.config.ref.log_prob_micro_batch_size //= world_size // sp_size
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def get_master_addr(self):
@@ -325,6 +328,9 @@ class AsyncActorRolloutRefWorker(Worker):
             if self._is_actor:
                 optim_config = self.config.actor.optim
                 fsdp_config = self.config.actor.fsdp_config
+            elif self._is_ref:
+                optim_config = None
+                fsdp_config = self.config.ref.fsdp_config
             else:
                 optim_config = None
                 fsdp_config = OmegaConf.create()
@@ -537,10 +543,10 @@ class AsyncActorRolloutRefWorker(Worker):
     def load_checkpoint(self, hdfs_path=None):
         assert self._is_actor
         # TODO: support omnistore
-        self.checkpoint_manager.load_checkpoint(hdfs_path)
+        self.checkpoint_manager.load_checkpoint(hdfs_path, device_mesh=self.device_mesh)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def save_checkpoint(self, local_path, hdfs_path=None):
         # TODO: support omnistore
         assert self._is_actor
-        self.checkpoint_manager.save_checkpoint(local_path, hdfs_path)
+        self.checkpoint_manager.save_checkpoint(local_path, hdfs_path, self.device_mesh)

@@ -36,6 +36,7 @@ from torch.distributed.device_mesh import init_device_mesh
 from verl.utils.model import compute_position_id_with_mask
 import numpy as np
 
+from alpha_seed.workers.hybrid_engine.hsdp import create_device_mesh
 from alpha_seed.workers.hybrid_engine.fsdp_ulysses import (FSDPUlyssesShardingManager, ulysses_pad_and_slice_inputs)
 from alpha_seed.workers.utils import rearrange_micro_batches
 from dist_attn.ulysses.ops import slice_input_tensor, gather_outputs
@@ -67,6 +68,7 @@ class RewardModelWorker(Worker):
         self.config = config
 
         world_size = torch.distributed.get_world_size()
+        self.device_mesh = create_device_mesh(config.fsdp_size, 'Reward')
 
         self.ulysses_sp_device_mesh = None
         sp_size = config.ulysses_sequence_parallel_size
@@ -136,13 +138,18 @@ class RewardModelWorker(Worker):
         if self.config.model.fsdp_config.param_offload:
             cpu_offload = CPUOffload(offload_params=True)
 
+        fsdp_config = self.config.model.fsdp_config
+        sharding_strategy_config = fsdp_config.get('sharding_strategy', 'FULL_SHARD')  # zero3
+        sharding_strategy = getattr(ShardingStrategy, sharding_strategy_config)
+
         reward_module = FSDP(
             reward_module,
             param_init_fn=create_init_fn(reward_module),
             use_orig_params=False,
             auto_wrap_policy=auto_wrap_policy,
             device_id=torch.cuda.current_device(),
-            sharding_strategy=ShardingStrategy.FULL_SHARD,  # zero3
+            sharding_strategy=sharding_strategy,  # zero3
+            device_mesh=self.device_mesh,
             sync_module_states=True,
             forward_prefetch=True,
             cpu_offload=cpu_offload)  # we always offload reward
