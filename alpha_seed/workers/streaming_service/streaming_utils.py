@@ -54,8 +54,9 @@ def process_output(input_batch,
                                                 value=tokenizer.pad_token_id)
                 item.batch['responses'] = item.batch['input_ids'][:, item.batch['prompts'].shape[1]:]
                 if config.streaming_rollout.force_eos and need_eos[i]:
-                    item.batch['input_ids'][:, left_pad_len + real_len - 1] = tokenizer.eos_token_id
-                    item.batch['responses'][:, left_pad_len + real_len - 1] = tokenizer.eos_token_id
+                    item.batch['input_ids'][:, left_pad_len + real_len] = tokenizer.eos_token_id
+                    gen_len = item.batch['attention_mask'][:, item.batch['prompts'].shape[1]:].sum(-1)
+                    item.batch['responses'][:, gen_len] = tokenizer.eos_token_id
                 ready_batch_queue.put(item)
             else:
                 pending_batch_queue.put(rmpad(item))
