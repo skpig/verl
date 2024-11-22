@@ -213,10 +213,10 @@ def compute_policy_loss(old_log_prob, ref_log_prob, log_prob, advantages, upgo_a
     ppo_kl = verl_F.masked_mean(-negative_approx_kl, eos_mask)
     ppo_kl_sum = torch.mean(torch.sum(negative_approx_kl * eos_mask, dim=1))
 
-    pg_losses = -advantages * ratio
+    pg_losses1 = -advantages * ratio
     pg_losses2 = -advantages * torch.clamp(ratio, 1.0 - cliprange, 1.0 + cliprange)
     pg_losses3 = torch.abs(-advantages * cliprange2)
-    pg_losses_clip = torch.maximum(pg_losses, pg_losses2)
+    pg_losses_clip = torch.maximum(pg_losses1, pg_losses2)
     pg_losses = torch.minimum(pg_losses_clip, pg_losses3)  # 这个应该对advantage为正的情况不影响
     pg_loss = torch.sum(pg_losses * eos_mask, dim=1) / seq_len_per_sample
 
@@ -238,8 +238,8 @@ def compute_policy_loss(old_log_prob, ref_log_prob, log_prob, advantages, upgo_a
         upgo_loss = torch.zeros(()).to(pg_loss.device)
     total_loss = pg_loss + upgo_loss_weight * upgo_loss
 
-    pg_clipfrac = verl_F.masked_mean(torch.gt(pg_losses2, pg_losses).float(), eos_mask)
-    pg_clipfrac2 = verl_F.masked_mean(torch.gt(pg_losses, pg_losses3).float(), eos_mask)
+    pg_clipfrac = verl_F.masked_mean(torch.gt(pg_losses2, pg_losses1).float(), eos_mask)
+    pg_clipfrac2 = verl_F.masked_mean(torch.gt(pg_losses1, pg_losses3).float(), eos_mask)
     return total_loss, pg_loss, upgo_loss, pg_clipfrac, pg_clipfrac2, ppo_kl, ppo_kl_sum
 
 
