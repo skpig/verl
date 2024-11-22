@@ -423,15 +423,24 @@ class RayPPOTrainer(object):
                                          multi_prompts=self.config.data.get("multi_prompts", "none"),
                                          num_prompts_per_data=self.config.data.get("num_prompts_per_data", 1))
 
-        train_dataloader_generator = torch.Generator()
-        train_dataloader_generator.manual_seed(self.config.data.get('seed', 1))
+        if self.config.data.BITWISE_RESUME:
+            from alpha_seed.utils.dataset.sampler import RandomSampler, SequentialSampler
+        else:
+            from torch.utils.data import RandomSampler, SequentialSampler
+
+        if self.config.data.shuffle:
+            train_dataloader_generator = torch.Generator()
+            train_dataloader_generator.manual_seed(self.config.data.get('seed', 1))
+            sampler = RandomSampler(data_source=self.train_dataset, generator=train_dataloader_generator)
+        else:
+            sampler = SequentialSampler(data_source=self.train_dataset)
 
         self.train_dataloader = DataLoader(dataset=self.train_dataset,
                                            batch_size=train_batch_size,
-                                           shuffle=self.config.data.shuffle,
+                                           shuffle=None,
                                            drop_last=True,
-                                           generator=train_dataloader_generator,
-                                           collate_fn=collate_fn)
+                                           collate_fn=collate_fn,
+                                           sampler=sampler)
 
         self.val_dataset = RLHFDataset(parquet_files=self.config.data.val_files,
                                        tokenizer=self.tokenizer,

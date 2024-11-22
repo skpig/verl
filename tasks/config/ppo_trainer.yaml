@@ -16,6 +16,7 @@ data:
   shuffle: True
   multi_prompts: none
   num_prompts_per_data: 1
+  BITWISE_RESUME: True  # this enables by default. If you seed checkpoint load fails, set to false
 
 
 actor_rollout_ref:

@@ -17,7 +17,7 @@ ppo_mini_batch_size=256
 ppo_micro_batch_size=64
 total_epochs=100
 test_freq=10
-save_freq=10000
+save_freq=-1
 # 算法相关的参数
 actor_lr=1e-6
 critic_lr=1e-5
@@ -70,7 +70,7 @@ python3 tasks/main_ppo.py \
     critic.optim.lr=${critic_lr} \
     critic.optim.lr_warmup_steps_ratio=${lr_warmup_steps_ratio} \
     critic.model.path=${RM_MODEL_PATH} \
-    critic.model.enable_gradient_checkpointing=False \
+    critic.model.enable_gradient_checkpointing=True \
     critic.ppo_micro_batch_size=${ppo_micro_batch_size} \
     critic.model.fsdp_config.param_offload=False \
     critic.model.fsdp_config.grad_offload=False \

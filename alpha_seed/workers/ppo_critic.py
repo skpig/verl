@@ -138,6 +138,8 @@ class DataParallelPPOCritic(BasePPOCritic):
         return grad_norm
 
     def compute_values(self, data: DataProto) -> torch.Tensor:
+        self.critic_module.eval()
+
         use_dynamic_bsz = data.meta_info['use_dynamic_bsz']
         if use_dynamic_bsz:
             max_token_len = data.meta_info['max_token_len']
@@ -161,6 +163,8 @@ class DataParallelPPOCritic(BasePPOCritic):
         return values
 
     def update_critic(self, data: DataProto):
+        self.critic_module.train()
+
         metrics = {}
 
         dataloader = self._make_minibatch_iterator(data)

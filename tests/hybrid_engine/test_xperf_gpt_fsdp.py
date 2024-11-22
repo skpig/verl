@@ -28,17 +28,17 @@ local_rank, rank, world_size = initialize_global_process_group()
 device_mesh = init_device_mesh('cuda', mesh_shape=(world_size,), mesh_dim_names=['fsdp'])
 
 model_path = copy_local_path_from_hdfs(
-    'hdfs://haruna/home/byte_data_seed/ssd_lq/public/seed_models/Seed-2B5-P7_32k_sft29_32gpu')
+    'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/alphaseed/20241107/ct128kv2_baseline_sft32k_v27_lr2e5_epoch4_rope1000_hf'
+)
 tokenizer = AutoTokenizer.from_pretrained(model_path)
 tokenizer.padding_side = "left"
 
 with torch.device('cpu'):
     # model = mariana_models.P5ForCausalLM(config=config)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path,
-        torch_dtype=torch.float32,
-        attn_implementation="flash_attention_2",
-    )
+    model = AutoModelForCausalLM.from_pretrained(model_path,
+                                                 torch_dtype=torch.float32,
+                                                 attn_implementation="flash_attention_2",
+                                                 _moe_implementation='fused')
 
     config = model.config
 
