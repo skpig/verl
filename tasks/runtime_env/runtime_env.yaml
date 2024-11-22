@@ -2,5 +2,4 @@ working_dir: ./
 excludes: ["/.git/"]
 env_vars:
   TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
-  XGPT_TUNER_ENABLE: "1"
   PYTHONPATH: /opt/tiger/verl:/opt/tiger/seed_models:/opt/tiger/verifiable_tasks:/opt/tiger/bpex_triton

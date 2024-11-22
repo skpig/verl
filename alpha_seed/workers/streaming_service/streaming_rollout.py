@@ -209,7 +209,6 @@ class AsyncXPerfGPTRollout(object):
 
     def __init_sub_process(self):
         os.environ["USE_SESSION_CACHE"] = "0"
-        os.environ["XGPT_TUNER_ENABLE"] = "1"
         self.input_queue = queue.Queue()
         self.output_queue = queue.Queue()
         self.stop_event = threading.Event()
@@ -226,8 +225,7 @@ class AsyncXPerfGPTRollout(object):
             response_outputs = []
             is_finished = []
             for v in self.inference_engine.get_inorder_responses():
-                response_outputs.append(
-                    v.new_token_ids if v.is_finished else [self.inference_engine.tokenizer.eos_token_id])
+                response_outputs.append(v.new_token_ids)
                 is_finished.append(v.is_finished)
             is_finished = torch.Tensor(is_finished)
 
