@@ -164,13 +164,16 @@ from alpha_seed.trainer.ppo import RayPPOTrainer
 def main(config):
     if not ray.is_initialized():
         # this is for local ray cluster
-        ray.init(runtime_env={
-            'env_vars': {
-                'TOKENIZERS_PARALLELISM': 'true',
-                'NCCL_DEBUG': 'WARN',
-                'BPEX_NO_WARN_ON_UNTUNED_CASE': '1'
-            }
-        })
+        ray.init(
+            runtime_env={
+                'env_vars': {
+                    'TOKENIZERS_PARALLELISM': 'true',
+                    'NCCL_DEBUG': 'WARN',
+                    'BPEX_NO_WARN_ON_UNTUNED_CASE': '1',
+                    'TRITON_CACHE_MANAGER': 'triton.runtime.cache:RemoteCacheManager',
+                    'TRITON_REMOTE_CACHE_BACKEND': 'alpha_seed.utils.redis.triton_redis:BytedRedisRemoteCacheBackend'
+                }
+            })
 
     ray.get(main_task.remote(config))
 

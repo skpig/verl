@@ -17,7 +17,7 @@ ppo_mini_batch_size=256
 ppo_micro_batch_size=64
 total_epochs=100
 test_freq=10
-save_freq=1
+save_freq=10000
 # 算法相关的参数
 actor_lr=1e-6
 critic_lr=1e-5
@@ -31,6 +31,7 @@ gae_lam=0.95
 # tracking实验名
 project_name='verl_example_math_ci'
 experiment_name='p6_400m_math-v1'
+
 export PYTHONPATH=$PYTHONPATH:/opt/tiger/verl:/opt/tiger/seed_models:/opt/tiger/verifiable_tasks:/opt/tiger/bpex_triton
 python3 tasks/main_ppo.py \
     data.train_files=${TRAIN_FILE} \
