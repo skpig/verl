@@ -74,9 +74,8 @@ class CriticWorker(Worker):
 
         # Deprecated case: critic model is saved as ShardedTensor
         # we will always use full FSDP
-        if config.NO_DEVICE_MESH:
-            self.device_mesh = create_device_mesh(-1, 'Critic')
-        else:
+        self.device_mesh = None
+        if not config.NO_DEVICE_MESH:
             self.device_mesh = create_device_mesh(config.fsdp_size, 'Critic')
         # create ulysses sequence parallel device mesh
         sp_size = config.ulysses_sequence_parallel_size
@@ -195,7 +194,7 @@ class CriticWorker(Worker):
             cpu_offload = CPUOffload(offload_params=True)
 
         # we only support ZeRO3 of hybrid DP+FSDP or full FSDP
-        if self.device_mesh.ndim == 1:
+        if self.device_mesh is None or self.device_mesh.ndim == 1:
             sharding_strategy = ShardingStrategy.FULL_SHARD
         elif self.device_mesh.ndim == 2:
             sharding_strategy = ShardingStrategy.HYBRID_SHARD
