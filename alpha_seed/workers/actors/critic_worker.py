@@ -76,7 +76,7 @@ class CriticWorker(Worker):
         # so we cannot create device_mesh
         self.device_mesh = None
         if not config.NO_DEVICE_MESH:
-            self.device_mesh = create_device_mesh(config.fsdp_size, 'Critic')
+            self.device_mesh = create_device_mesh(-1, 'Critic')  # use full FSDP
         # create ulysses sequence parallel device mesh
         sp_size = config.ulysses_sequence_parallel_size
         self.ulysses_sp_device_mesh = None
@@ -172,8 +172,6 @@ class CriticWorker(Worker):
             print_model_size(critic_module)
 
         fsdp_config = self.config.model.fsdp_config
-        sharding_strategy_config = fsdp_config.get('sharding_strategy', 'FULL_SHARD')  # zero3
-        sharding_strategy = getattr(ShardingStrategy, sharding_strategy_config)
 
         mixed_precision_config = fsdp_config.get('mixed_precision', None)
         if mixed_precision_config is not None:
@@ -194,6 +192,14 @@ class CriticWorker(Worker):
         cpu_offload = None
         if self.config.model.fsdp_config.param_offload:
             cpu_offload = CPUOffload(offload_params=True)
+
+        # we only support ZeRO3 of hybrid DP+FSDP or full FSDP
+        if self.device_mesh.ndim == 1:
+            sharding_strategy = ShardingStrategy.FULL_SHARD
+        elif self.device_mesh.ndim == 2:
+            sharding_strategy = ShardingStrategy.HYBRID_SHARD
+        else:
+            raise NotImplementedError(f"get device mesh ndim={self.device_mesh.ndim}, but only support 1 or 2")
 
         critic_module = FSDP(critic_module,
                              param_init_fn=init_fn,

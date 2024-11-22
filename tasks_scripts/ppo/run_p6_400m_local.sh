@@ -50,7 +50,9 @@ gen_micro_batch_size=512
 infer_micro_batch_size=512
 train_micro_batch_size=64
 ulysses_sequence_parallel_size=1
-param_offload=False
+param_offload=False  # this only applies to actor and critic, while ref / reward model are defaultly True
+offload_train_mem=True
+fsdp_size=2
 
 
 python3 tasks/main_ppo.py \
@@ -78,6 +80,7 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.actor.optim.lr_warmup_steps=${lr_warmup_steps} \
     actor_rollout_ref.actor.ppo_mini_batch_size=${ppo_mini_batch_size} \
     actor_rollout_ref.actor.ppo_micro_batch_size=${train_micro_batch_size} \
+    actor_rollout_ref.actor.fsdp_size=${fsdp_size} \
     actor_rollout_ref.actor.fsdp_config.param_offload=${param_offload} \
     actor_rollout_ref.actor.entropy_coeff=0.0 \
     actor_rollout_ref.actor.clip_ratio2=${clip_ratio2} \
@@ -86,11 +89,11 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     +actor_rollout_ref.rollout.complete_ratio=0.5 \
     actor_rollout_ref.rollout.name=xperf_gpt \
-    +actor_rollout_ref.rollout.use_vllm=False \
+    +actor_rollout_ref.rollout.use_vllm=True \
     +actor_rollout_ref.rollout.num_slots=256 \
     +actor_rollout_ref.rollout.slot_block_size=1024 \
+    actor_rollout_ref.ref.fsdp_size=${fsdp_size} \
     actor_rollout_ref.ref.log_prob_micro_batch_size=${infer_micro_batch_size} \
-    actor_rollout_ref.ref.fsdp_config.param_offload=${param_offload} \
     actor_rollout_ref.actor.scale_pg_by_kl=True \
     actor_rollout_ref.actor.upgo_loss_weight=${upgo_loss_weight} \
     actor_rollout_ref.actor.upgo_loss_version=${upgo_loss_version} \
@@ -100,6 +103,7 @@ python3 tasks/main_ppo.py \
     critic.model.enable_gradient_checkpointing=True \
     critic.ppo_micro_batch_size=${train_micro_batch_size} \
     critic.infer_micro_batch_size=${infer_micro_batch_size} \
+    critic.fsdp_size=${fsdp_size} \
     critic.model.fsdp_config.param_offload=${param_offload} \
     +critic.model.override_config.attention_dropout=0. \
     +critic.model.override_config.embd_pdrop=0. \
@@ -109,6 +113,7 @@ python3 tasks/main_ppo.py \
     reward_model.enable=False \
     reward_model.model.input_tokenizer=null \
     reward_model.model.path=${RM_MODEL_PATH} \
+    reward_model.fsdp_size=${fsdp_size} \
     reward_model.model.fsdp_config.param_offload=${param_offload} \
     reward_model.micro_batch_size=${infer_micro_batch_size} \
     reward_model.mean=0.0 \
@@ -126,6 +131,7 @@ python3 tasks/main_ppo.py \
     trainer.project_name=${project_name} \
     trainer.experiment_name=${experiment_name} \
     trainer.default_hdfs_dir=${default_hdfs_dir} \
+    trainer.offload_train_memory=${offload_train_mem} \
     trainer.save_freq=${save_freq} \
     trainer.test_freq=${test_freq} \
     trainer.total_epochs=${total_epochs} \

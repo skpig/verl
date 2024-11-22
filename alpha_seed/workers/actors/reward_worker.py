@@ -138,9 +138,13 @@ class RewardModelWorker(Worker):
         if self.config.model.fsdp_config.param_offload:
             cpu_offload = CPUOffload(offload_params=True)
 
-        fsdp_config = self.config.model.fsdp_config
-        sharding_strategy_config = fsdp_config.get('sharding_strategy', 'FULL_SHARD')  # zero3
-        sharding_strategy = getattr(ShardingStrategy, sharding_strategy_config)
+        # we only support ZeRO3 of hybrid DP+FSDP or full FSDP
+        if self.device_mesh.ndim == 1:
+            sharding_strategy = ShardingStrategy.FULL_SHARD
+        elif self.device_mesh.ndim == 2:
+            sharding_strategy = ShardingStrategy.HYBRID_SHARD
+        else:
+            raise NotImplementedError(f"get device mesh ndim={self.device_mesh.ndim}, but only support 1 or 2")
 
         reward_module = FSDP(
             reward_module,

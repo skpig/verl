@@ -207,10 +207,6 @@ class AsyncActorRolloutRefWorker(Worker):
 
         log_gpu_memory_usage('After init from HF AutoModel', logger=logger)
 
-        # We wrap FSDP for rollout as well
-        sharding_strategy_config = fsdp_config.get('sharding_strategy', 'FULL_SHARD')  # zero3
-        sharding_strategy = getattr(ShardingStrategy, sharding_strategy_config)
-
         mixed_precision_config = fsdp_config.get('mixed_precision', None)
         if mixed_precision_config is not None:
             param_dtype = PrecisionType.to_dtype(mixed_precision_config.get('param_dtype', 'bf16'))
@@ -241,19 +237,26 @@ class AsyncActorRolloutRefWorker(Worker):
         if self._is_ref and self.config.ref.fsdp_config.param_offload:
             cpu_offload = CPUOffload(offload_params=True)
 
+        # we only support ZeRO3 of hybrid DP+FSDP or full FSDP
+        if self.device_mesh.ndim == 1:
+            sharding_strategy = ShardingStrategy.FULL_SHARD
+        elif self.device_mesh.ndim == 2:
+            sharding_strategy = ShardingStrategy.HYBRID_SHARD
+        else:
+            raise NotImplementedError(f"get device mesh ndim={self.device_mesh.ndim}, but only support 1 or 2")
+
         # TODO: add transformer policy
-        actor_module_fsdp = FSDP(
-            actor_module,
-            param_init_fn=create_init_fn(actor_module),
-            use_orig_params=False,
-            auto_wrap_policy=auto_wrap_policy,
-            device_id=torch.cuda.current_device(),
-            sharding_strategy=sharding_strategy,  # zero3
-            mixed_precision=mixed_precision,
-            sync_module_states=True,
-            forward_prefetch=True,
-            device_mesh=self.device_mesh,
-            cpu_offload=cpu_offload)
+        actor_module_fsdp = FSDP(actor_module,
+                                 param_init_fn=create_init_fn(actor_module),
+                                 use_orig_params=False,
+                                 auto_wrap_policy=auto_wrap_policy,
+                                 device_id=torch.cuda.current_device(),
+                                 sharding_strategy=sharding_strategy,
+                                 mixed_precision=mixed_precision,
+                                 sync_module_states=True,
+                                 forward_prefetch=True,
+                                 device_mesh=self.device_mesh,
+                                 cpu_offload=cpu_offload)
 
         log_gpu_memory_usage('After Actor FSDP init', logger=logger)
 
