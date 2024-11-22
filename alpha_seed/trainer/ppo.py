@@ -731,7 +731,11 @@ class RayPPOTrainer(object):
         from verl.utils.fs import copy_local_path_from_hdfs
         # find the latest global step
         if self.config.trainer.resume_steps == 'auto':
-            from omnistore.utilities.ckpt_format_tool import find_latest_ckpt_path
+            try:
+                from omnistore.utilities.ckpt_format_tool import find_latest_ckpt_path
+            except ImportError:
+                from omnistore.utilities.ckpt_format.common_utils import find_latest_ckpt_path
+
             remote_checkpoint_folder = os.path.join(self.config.trainer.default_hdfs_dir, 'checkpoints')
             remote_checkpoint_folder = os.path.join(self.config.trainer.default_hdfs_dir, 'checkpoints')
             remote_global_step_folder = find_latest_ckpt_path(remote_checkpoint_folder)
