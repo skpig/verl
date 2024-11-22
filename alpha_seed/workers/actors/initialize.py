@@ -75,7 +75,7 @@ def create_init_fn(module: torch.nn.Module) -> Callable:
                 if state not in materialized_states:
                     materialized_states[state] = torch.nn.Parameter(torch.empty_like(state.data, device=device),
                                                                     requires_grad=state.requires_grad)
-                materialize_state = materialized_states[param]
+                materialize_state = materialized_states[state]
             else:
                 materialize_state = torch.nn.Parameter(torch.empty_like(state.data, device=device),
                                                        requires_grad=state.requires_grad)

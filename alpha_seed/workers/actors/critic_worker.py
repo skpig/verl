@@ -31,6 +31,7 @@ from single_controller.base.decorator import register, Dispatch
 from verl import DataProto
 from verl.utils.fs import copy_local_path_from_hdfs
 from verl.utils.fsdp_utils import get_fsdp_wrap_policy, init_fn, get_init_weight_context_manager
+from verl.utils.fsdp_utils import offload_fsdp_optimizer, offload_fsdp_param_and_grad, load_fsdp_optimizer, load_fsdp_param_and_grad
 from verl.utils.import_utils import import_external_libs
 from verl.utils.debug import log_gpu_memory_usage
 from torch.distributed.device_mesh import init_device_mesh
@@ -228,6 +229,19 @@ class CriticWorker(Worker):
                                                                 num_warmup_steps=num_warmup_steps)
 
         return critic_module, critic_optimizer, critic_lr_scheduler, critic_model_config
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def to(self, device: str):
+        assert device in ("cuda", "cpu")
+        if self.config.model.fsdp_config.param_offload:
+            return
+        if device == "cuda":
+            device = torch.cuda.current_device()
+            load_fsdp_param_and_grad(self.critic_module, device)
+            load_fsdp_optimizer(self.critic_optimizer, device)
+        elif device == "cpu":
+            offload_fsdp_param_and_grad(self.critic_module)
+            offload_fsdp_optimizer(self.critic_optimizer)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):

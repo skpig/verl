@@ -623,17 +623,6 @@ class RayPPOTrainer(object):
             spawn_wg = wg_dict.spawn(prefix_set=class_dict.keys())
             all_wg.update(spawn_wg)
 
-        if self.use_critic:
-            self.critic_wg = all_wg['critic']
-            self.critic_wg.init_model()
-
-        if self.use_reference_policy:
-            self.ref_policy_wg = all_wg['ref']
-            self.ref_policy_wg.init_model()
-
-        if self.use_rm:
-            self.rm_wg = all_wg['rm']
-            self.rm_wg.init_model()
         # breakpoint()
         if self.config.streaming_rollout.nnodes > 0:
             # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
@@ -651,6 +640,18 @@ class RayPPOTrainer(object):
         if self.config.actor_rollout_ref.actor.kl_loss_weight >= 1e-10:
             # 两种情况下使用kl loss，一种是grpo，另一种是在rewards里不加kl惩罚
             assert self.config.algorithm.adv_estimator == 'grpo' or self.config.algorithm.kl_ctrl.kl_coef <= 1e-10
+
+        if self.use_critic:
+            self.critic_wg = all_wg['critic']
+            self.critic_wg.init_model()
+
+        if self.use_reference_policy:
+            self.ref_policy_wg = all_wg['ref']
+            self.ref_policy_wg.init_model()
+
+        if self.use_rm:
+            self.rm_wg = all_wg['rm']
+            self.rm_wg.init_model()
 
     def save_checkpoint(self):
         """Save checkpoint to hdfs.
@@ -793,6 +794,12 @@ class RayPPOTrainer(object):
 
         # Note that we start from step 1. After resume, we increment step by 1 to start next step
         self.global_step += 1
+
+        # before training, move out the training resource as rollout begins first
+        if self.config.trainer.offload_train_memory:
+            self.actor_rollout_wg.to("cpu", model=False, optimizer=True)
+            if self.use_critic:
+                self.critic_wg.to("cpu")
 
         # TODO: add staleness
         standalone_batch = []
@@ -978,8 +985,16 @@ class RayPPOTrainer(object):
                             batch = batch.union(ref_log_prob)
                         metrics['timing/ref'] = timer.last
 
+                    metrics.setdefault('timing/train_mem_offload', 0)
+
                     # compute values
                     if self.use_critic:
+                        # load critic
+                        with Timer(name='train_mem_offload', logger=None) as timer:
+                            if self.config.trainer.offload_train_memory:
+                                self.critic_wg.to("cuda")
+                        metrics['timing/train_mem_offload'] += timer.last
+
                         with Timer(name='values', logger=None) as timer:
                             values = self.critic_wg.compute_values(batch)
                             batch = batch.union(values)
@@ -1011,14 +1026,30 @@ class RayPPOTrainer(object):
                         critic_output_metrics = reduce_metrics(critic_output.meta_info['metrics'])
                         metrics.update(critic_output_metrics)
 
+                        with Timer(name='train_mem_offload', logger=None) as timer:
+                            if self.config.trainer.offload_train_memory:
+                                self.critic_wg.to("cpu")
+                        metrics['timing/train_mem_offload'] += timer.last
+
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_step and self.global_step % self.config.trainer.actor_update_freq == 0:
+
+                        with Timer(name='train_mem_offload', logger=None) as timer:
+                            if self.config.trainer.offload_train_memory:
+                                self.actor_rollout_wg.to("cuda", model=False, optimizer=True)
+                        metrics['timing/train_mem_offload'] += timer.last
+
                         # update actor
                         with Timer(name='update_actor', logger=None) as timer:
                             actor_output = self.actor_rollout_wg.update_actor(batch)
                         metrics['timing/update_actor'] = timer.last
                         actor_output_metrics = reduce_metrics(actor_output.meta_info['metrics'])
                         metrics.update(actor_output_metrics)
+
+                        with Timer(name='train_mem_offload', logger=None) as timer:
+                            if self.config.trainer.offload_train_memory:
+                                self.actor_rollout_wg.to("cpu", model=False, optimizer=True)
+                        metrics['timing/train_mem_offload'] += timer.last
 
                     # validate
                     if self.val_reward_fn is not None and self.global_step % self.config.trainer.test_freq == 0:
@@ -1040,7 +1071,17 @@ class RayPPOTrainer(object):
 
                     with Timer(name='save_checkpoint', logger=None) as timer:
                         if self.config.trainer.save_freq > 0 and self.global_step % self.config.trainer.save_freq == 0:
+
+                            if self.config.trainer.offload_train_memory:
+                                self.actor_rollout_wg.to("cuda", model=False, optimizer=True)
+                                self.critic_wg.to("cuda")
+
                             self.save_checkpoint()
+
+                            if self.config.trainer.offload_train_memory:
+                                self.actor_rollout_wg.to("cpu", model=False, optimizer=True)
+                                self.critic_wg.to("cpu")
+
                     metrics['timing/save_checkpoint'] = timer.last
 
                 metrics['timing/step'] = step_timer.last

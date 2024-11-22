@@ -72,12 +72,13 @@ class DataParallelPPOActor(BasePPOActor):
                                                          profile_on_ranks=self.config.profile.profile_on_ranks,
                                                          default_hdfs_dir=self.config.profile.default_hdfs_dir,
                                                          upload_to_mlx=self.config.profile.upload_to_mlx,
-                                                         enable=self.config.profile.enable)
+                                                         enable=self.config.profile.enable,
+                                                         wait=10)
             self.memory_profiler = MemoryProfiler(filename=self.config.profile.filename + 'memory',
                                                   enable=torch.distributed.get_rank() == 0 and
                                                   self.config.profile.enable,
                                                   upload_to_mlx=self.config.profile.upload_to_mlx,
-                                                  active=1)
+                                                  wait=10)
 
         self.compute_entropy_loss = torch.compile(core_algos.compute_entropy_loss, dynamic=True)
         self.entropy_from_logits = torch.compile(verl_F.entropy_from_logits, dynamic=True)

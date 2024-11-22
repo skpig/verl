@@ -235,6 +235,7 @@ trainer:
     enable: False
     buffer_size: 1
     strategy: hard
+  offload_train_memory: False
 
 streaming_rollout:
   n_gpus_per_node: 0

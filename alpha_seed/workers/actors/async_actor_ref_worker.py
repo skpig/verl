@@ -313,6 +313,33 @@ class AsyncActorRolloutRefWorker(Worker):
         log_gpu_memory_usage('After FSDPXPerfGPTShardingManager init', logger=logger)
         return rollout, sharding_manager
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def to(self, device: str, model: bool = True, optimizer: bool = True):
+        if self._is_actor and self.config.actor.fsdp_config.param_offload:
+            return
+        if self._is_ref and self.config.ref.fsdp_config.param_offload:
+            return
+        assert device in ("cuda", "cpu")
+        if device == "cuda":
+            device = torch.cuda.current_device()
+            if self._is_actor:
+                if model:
+                    load_fsdp_param_and_grad(self.actor_module_fsdp, device)
+                if optimizer:
+                    load_fsdp_optimizer(self.actor_optimizer, device)
+            if self._is_ref:
+                if model:
+                    load_fsdp_param_and_grad(self.ref_module_fsdp, device)
+        elif device == "cpu":
+            if self._is_actor:
+                if model:
+                    offload_fsdp_param_and_grad(self.actor_module_fsdp)
+                if optimizer:
+                    offload_fsdp_optimizer(self.actor_optimizer)
+            if self._is_ref:
+                if model:
+                    offload_fsdp_param_and_grad(self.ref_module_fsdp)
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def init_model(self, hybrid_master_address=None, standalone_master_address=None):
         # This is used to import external_lib into the huggingface systems
