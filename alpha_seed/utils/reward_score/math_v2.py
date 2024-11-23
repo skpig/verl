@@ -266,8 +266,8 @@ def is_correct_integer(
     og_pred,
     gt,
 ):
-    numbers = re.sub(r'\D', ' ', og_pred[-100:])
-    numbers = numbers.strip().split(" ")[-1]  # 很难通过枚举把最后一个搞成正确答案
+    numbers = re.findall(r'-?\d+', og_pred[-100:])
+    numbers = numbers[-1]  # 很难通过枚举把最后一个搞成正确答案
     correctness = gt == numbers
     return correctness, og_pred[-100:]
 
@@ -344,4 +344,16 @@ if __name__ == "__main__":
 
     pred = "So we have 1,2,3,4,5,6,7,8,9,10,11,12,13 as answer."
     answer = "11"
+    assert verify(pred, answer, 0, 16384, False, "v0") == -1
+
+    pred = "So we have 1,2,3,4,5,6,7,8,9,10,11,12,-13 as answer."
+    answer = "-13"
+    assert verify(pred, answer, 0, 16384, False, "v0") == 1
+
+    pred = "So we have \(-1\) as answer."
+    answer = "-1"
+    assert verify(pred, answer, 0, 16384, False, "v0") == 1
+
+    pred = "So we have \(-1\) as answer."
+    answer = "1"
     assert verify(pred, answer, 0, 16384, False, "v0") == -1
