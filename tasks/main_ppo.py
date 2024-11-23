@@ -32,6 +32,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 user_email = os.getenv('ARNOLD_LARK_RECEIVER', '')
 task_url = os.getenv('ARNOLD_ORIGIN_PLATFORM_URL', '')
+ARNOLD_REGION = os.getenv("ARNOLD_REGION", "CN")
 
 
 def _select_rm_score_fn(reward_style):
@@ -164,16 +165,22 @@ from alpha_seed.trainer.ppo import RayPPOTrainer
 def main(config):
     if not ray.is_initialized():
         # this is for local ray cluster
-        ray.init(
-            runtime_env={
-                'env_vars': {
-                    'TOKENIZERS_PARALLELISM': 'true',
-                    'NCCL_DEBUG': 'WARN',
-                    'BPEX_NO_WARN_ON_UNTUNED_CASE': '1',
-                    'TRITON_CACHE_MANAGER': 'triton.runtime.cache:RemoteCacheManager',
-                    'TRITON_REMOTE_CACHE_BACKEND': 'alpha_seed.utils.redis.triton_redis:BytedRedisRemoteCacheBackend'
-                }
-            })
+        remote_cache_env = {
+            'TRITON_CACHE_MANAGER': 'triton.runtime.cache:RemoteCacheManager',
+            'TRITON_REMOTE_CACHE_BACKEND': 'alpha_seed.utils.redis.triton_redis:BytedRedisRemoteCacheBackend'
+        }
+        runtime_env = {
+            'env_vars': {
+                'TOKENIZERS_PARALLELISM': 'true',
+                'NCCL_DEBUG': 'WARN',
+                'BPEX_NO_WARN_ON_UNTUNED_CASE': '1'
+            }
+        }
+        # NOTE(zr): redis service is not available in US.
+        if ARNOLD_REGION == "CN":
+            runtime_env['env_vars'].update(remote_cache_env)
+
+        ray.init(runtime_env=runtime_env)
 
     ray.get(main_task.remote(config))
 
