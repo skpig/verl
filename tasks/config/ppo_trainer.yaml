@@ -205,6 +205,7 @@ algorithm:
 
 trainer:
   total_epochs: 30
+  total_steps: null  # if total_steps is not None, it is prioritized over total_epochs
   project_name: verl_examples
   experiment_name: gsm8k
   logger: ['console', 'tracking']
@@ -228,6 +229,7 @@ trainer:
   # auto: find the last ckpt to resume. If can't find, start from scratch
   resume_steps: auto
   set_fake_attention_mask: False
+  fake_seqlen_ratio: 0.5
   league_training_config: 
     enable: False
     buffer_size: 1

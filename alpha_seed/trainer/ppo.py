@@ -465,6 +465,10 @@ class RayPPOTrainer(object):
 
         # inject total_training_steps to actor/critic optim_config. This is hacky.
         total_training_steps = len(self.train_dataloader) * self.config.trainer.total_epochs
+
+        if self.config.trainer.total_steps is not None:
+            total_training_steps = self.config.trainer.total_steps
+
         self.total_training_steps = total_training_steps
 
         OmegaConf.set_struct(self.config, True)
@@ -845,8 +849,27 @@ class RayPPOTrainer(object):
                     # for debugging purpose only. we manually set all the attention_mask to 1 to
                     # test the training performance under maximum workload.
                     if self.config.trainer.set_fake_attention_mask:
-                        gen_batch_output.batch['attention_mask'] = torch.ones_like(
-                            gen_batch_output.batch['attention_mask'])
+                        from verl.utils.model import create_random_mask
+                        total_length = self.config.data.max_prompt_length + self.config.data.max_response_length
+
+                        min_ratio_of_valid_token = self.config.trainer.fake_seqlen_ratio
+                        max_ratio_of_valid_token = self.config.trainer.fake_seqlen_ratio
+
+                        assert self.config.trainer.fake_seqlen_ratio > (self.config.data.max_prompt_length +
+                                                                        1) / total_length
+
+                        max_ratio_of_left_padding = 0
+                        attention_mask = create_random_mask(gen_batch_output.batch['input_ids'],
+                                                            max_ratio_of_valid_token=max_ratio_of_valid_token,
+                                                            max_ratio_of_left_padding=max_ratio_of_left_padding,
+                                                            min_ratio_of_valid_token=min_ratio_of_valid_token)
+
+                        gen_batch_output.batch['attention_mask'] = attention_mask
+
+                        # force actor and critic stop updating weights because the data is fake
+                        self.config.actor_rollout_ref.actor.optim.lr = 0
+                        self.config.critic.optim.lr = 0
+
                         pprint(f'set fake attention mask')
 
                     metrics['timing/gen'] = timer.last

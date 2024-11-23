@@ -108,4 +108,6 @@ python3 tasks/main_ppo.py \
     trainer.val_epoch=1 \
     trainer.need_log=False \
     trainer.log_file=/opt/tiger/alpha-seed/log.jsonl \
-    trainer.resume_steps=disable
+    trainer.resume_steps=disable \
+    trainer.set_fake_attention_mask=False \
+    trainer.fake_seqlen_ratio=0.5
