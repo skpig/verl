@@ -46,7 +46,7 @@ from codetiming import Timer
 
 from datetime import timedelta
 
-from .checkpoint import CheckpointManagerV1
+from .checkpoint import CheckpointManager
 
 logger = logging.getLogger(__file__)
 
@@ -265,10 +265,10 @@ class CriticWorker(Worker):
         if self.rank == 0:
             print(self.critic_model_config)
 
-        self.checkpoint_manager = CheckpointManagerV1(model=self.critic_module,
-                                                      optimizer=self.critic_optimizer,
-                                                      lr_scheduler=self.critic_lr_scheduler,
-                                                      tokenizer=self.tokenizer)
+        self.checkpoint_manager = CheckpointManager(model=self.critic_module,
+                                                    optimizer=self.critic_optimizer,
+                                                    lr_scheduler=self.critic_lr_scheduler,
+                                                    tokenizer=self.tokenizer)
 
         torch.cuda.empty_cache()
 
@@ -321,11 +321,12 @@ class CriticWorker(Worker):
         return output
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def load_checkpoint(self, hdfs_path=None):
-        self.checkpoint_manager.load_checkpoint(hdfs_path=hdfs_path, device_mesh=self.device_mesh)
+    def load_checkpoint(self, hdfs_path=None, version='v1'):
+        self.checkpoint_manager.load_checkpoint(version, hdfs_path=hdfs_path, device_mesh=self.device_mesh)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    def save_checkpoint(self, local_path, hdfs_path=None):
-        self.checkpoint_manager.save_checkpoint(local_path=local_path,
+    def save_checkpoint(self, local_path, hdfs_path=None, version='v1'):
+        self.checkpoint_manager.save_checkpoint(version=version,
+                                                local_path=local_path,
                                                 hdfs_path=hdfs_path,
                                                 device_mesh=self.device_mesh)

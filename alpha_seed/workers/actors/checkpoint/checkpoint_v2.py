@@ -31,8 +31,41 @@ def upload_ckpt(local_path, hdfs_path):
     print(f'Finish uploading checkpoint from {local_path} to {hdfs_path}')
 
 
-class CheckpointManagerV1:
+from torch.distributed._tensor.api import DTensor, Shard, Replicate
+
+
+def remove_replicate_in_dtensor(state_dict, device_mesh: DeviceMesh):
+    if device_mesh.ndim == 1:
+        return state_dict
+    for k in state_dict.keys():
+        if isinstance(state_dict[k], DTensor):
+            v: DTensor = state_dict[k]
+            shape, stride = v.shape, v.stride()
+            state_dict[k] = DTensor.from_local(v._local_tensor,
+                                               device_mesh['fsdp'], [Shard(dim=0)],
+                                               shape=shape,
+                                               stride=stride)
+    return state_dict
+
+
+def replicate_in_dtensor(state_dict, device_mesh: DeviceMesh):
+    if device_mesh.ndim == 1:
+        return state_dict
+    for k in state_dict.keys():
+        if isinstance(state_dict[k], DTensor):
+            v: DTensor = state_dict[k]
+            shape, stride = v.shape, v.stride()
+            state_dict[k] = DTensor.from_local(state_dict[k]._local_tensor,
+                                               device_mesh, [Replicate(), Shard(dim=0)],
+                                               shape=shape,
+                                               stride=stride)
+    return state_dict
+
+
+class CheckpointManagerV2:
     """
+    Diffs from V1: use LocalStateDict for saving ckpt
+
     A checkpoint manager that saves and loads
     - model
     - optimizer
@@ -64,15 +97,16 @@ class CheckpointManagerV1:
         if hdfs_path is None:
             return
 
-        # every rank download its own checkpoint
-        remote_path = os.path.join(hdfs_path, f'model_optim_rank_{self.rank}.pt')
+        # NOTE (jianyujiang): v2 ckpt must have device_mesh
+        state_idx = device_mesh.get_local_rank(device_mesh.ndim - 1)
+        remote_path = os.path.join(hdfs_path, f'model_optim_rank_{state_idx}.pt')
         print(f'[rank-{self.rank}]: Loading from {remote_path}')
         local_path = copy_local_path_from_hdfs(remote_path)
 
         state_dict = torch.load(local_path)
 
-        model_state_dict = state_dict['model']
-        optimizer_state_dict = state_dict['optimizer']
+        model_state_dict = replicate_in_dtensor(state_dict['model'], device_mesh)
+        optimizer_state_dict = replicate_in_dtensor(state_dict['optimizer'], device_mesh)
         lr_scheduler_state_dict = state_dict['lr_scheduler']
 
         state_dict_cfg = ShardedStateDictConfig(offload_to_cpu=True)
@@ -101,6 +135,11 @@ class CheckpointManagerV1:
 
         torch.distributed.barrier()
 
+        # NOTE (jianyujiang): v2 ckpt must have device_mesh
+        should_save_ckpt = device_mesh.ndim > 1 and device_mesh.get_local_rank(0) == 0  # HSDP's first FSDP group
+        should_save_ckpt = should_save_ckpt or (device_mesh.ndim == 1)  # FSDP
+        state_idx = device_mesh.get_local_rank(device_mesh.ndim - 1)
+
         state_dict_cfg = ShardedStateDictConfig(offload_to_cpu=True)
         optim_cfg = ShardedOptimStateDictConfig(offload_to_cpu=True)
         with warnings.catch_warnings():
@@ -108,15 +147,22 @@ class CheckpointManagerV1:
             with FSDP.state_dict_type(self.model, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg):
                 model_state = self.model.state_dict()
                 optimizer_state_dict = self.optimizer.state_dict()
+
+                # we have to remove replication to ease merging
+                remove_replicate_in_dtensor(model_state, device_mesh)
+                remove_replicate_in_dtensor(optimizer_state_dict, device_mesh)
                 state_dict = {
                     'model': model_state,
                     'optimizer': optimizer_state_dict,
                     'lr_scheduler': self.lr_scheduler.state_dict()
                 }
-                path = os.path.join(local_path, f'model_optim_rank_{self.rank}.pt')
+                path = os.path.join(local_path, f'model_optim_rank_{state_idx}.pt')
 
-                print(f'[rank-{self.rank}]: Saving checkpoint to {os.path.abspath(path)}')
-                torch.save(state_dict, path)
+                if should_save_ckpt:
+                    print(f'[rank-{self.rank}]: Saving checkpoint to {os.path.abspath(path)}')
+                    torch.save(state_dict, path)
+                else:
+                    print(f'[rank-{self.rank}]: Skip saving checkpoint to {os.path.abspath(path)}')
 
         if self.rank == 0:
             hdfs_io.makedirs(hdfs_path, exist_ok=True)
@@ -128,7 +174,7 @@ class CheckpointManagerV1:
         # causes local_dir not found error.
 
         # upload to hdfs
-        if hdfs_path is not None:
+        if hdfs_path is not None and should_save_ckpt:
             # everyone upload its own checkpoint
             assert os.path.isfile(path), f'local path {path} does not exist'
             self.upload_sharded_future = upload_ckpt.options(scheduling_strategy=NodeAffinitySchedulingStrategy(

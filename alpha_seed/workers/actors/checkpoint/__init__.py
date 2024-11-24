@@ -1,1 +1,1 @@
-from .checkpoint_v1 import CheckpointManagerV1
+from .checkpoint_manager import CheckpointManager

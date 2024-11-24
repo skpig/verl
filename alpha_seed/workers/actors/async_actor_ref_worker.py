@@ -57,7 +57,7 @@ from codetiming import Timer
 
 from datetime import timedelta
 
-from .checkpoint import CheckpointManagerV1
+from .checkpoint import CheckpointManager
 
 logger = logging.getLogger(__file__)
 
@@ -408,10 +408,10 @@ class AsyncActorRolloutRefWorker(Worker):
 
         if self._is_actor:
             self.flops_counter = FlopsCounter(self.actor_model_config)
-            self.checkpoint_manager = CheckpointManagerV1(model=self.actor.actor_module,
-                                                          optimizer=self.actor.actor_optimizer,
-                                                          lr_scheduler=self.actor_lr_scheduler,
-                                                          tokenizer=self.tokenizer)
+            self.checkpoint_manager = CheckpointManager(model=self.actor.actor_module,
+                                                        optimizer=self.actor.actor_optimizer,
+                                                        lr_scheduler=self.actor_lr_scheduler,
+                                                        tokenizer=self.tokenizer)
 
         torch.cuda.empty_cache()
 
@@ -570,13 +570,13 @@ class AsyncActorRolloutRefWorker(Worker):
         return output
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def load_checkpoint(self, hdfs_path=None):
+    def load_checkpoint(self, hdfs_path=None, version='v1'):
         assert self._is_actor
         # TODO: support omnistore
-        self.checkpoint_manager.load_checkpoint(hdfs_path, device_mesh=self.device_mesh)
+        self.checkpoint_manager.load_checkpoint(version, hdfs_path, device_mesh=self.device_mesh)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    def save_checkpoint(self, local_path, hdfs_path=None):
+    def save_checkpoint(self, local_path, hdfs_path=None, version='v1'):
         # TODO: support omnistore
         assert self._is_actor
-        self.checkpoint_manager.save_checkpoint(local_path, hdfs_path, self.device_mesh)
+        self.checkpoint_manager.save_checkpoint(version, local_path, hdfs_path, self.device_mesh)

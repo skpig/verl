@@ -18,6 +18,7 @@ from seed_models.commands.convert_to_megatron import convert_seed_models_to_mega
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--hdfs_path', required=True)
+    parser.add_argument('--fsdp_size', required=False, type=int, default=-1)
     args = parser.parse_args()
 
     print('Downloading model shards')
@@ -26,7 +27,8 @@ if __name__ == '__main__':
 
     # find how many shards
     files = [filename for filename in os.listdir(local_path) if filename.startswith('model_optim_rank')]
-    total_shards = len(files)
+    # to support HSDP with v1 ckpt
+    total_shards = len(files) if args.fsdp_size == -1 else args.fsdp_size
 
     print('Processing model shards')
 
