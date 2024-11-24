@@ -267,7 +267,7 @@ def is_correct_integer(
     gt,
 ):
     numbers = re.findall(r'-?\d+', og_pred[-100:])
-    numbers = numbers[-1]  # 很难通过枚举把最后一个搞成正确答案
+    numbers = numbers[-1] if len(numbers) > 0 else ""  # 很难通过枚举把最后一个搞成正确答案
     correctness = gt == numbers
     return correctness, og_pred[-100:]
 
