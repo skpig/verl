@@ -15,6 +15,7 @@
 Contains utilities to bind weights to XPerfGPT. It is model agnostic
 """
 
+import os
 import torch
 import torch.distributed
 
@@ -28,6 +29,16 @@ from torch.distributed.device_mesh import DeviceMesh
 from seed_models import P4Config, P5Config, P6Config
 
 from alpha_seed.workers.xperf_rollout.utils.layout_convert_helper import _fix_qkv_ordering, _fix_o_ordering, load_to_cuda
+
+
+def assert_not_nan(tensor: torch.Tensor):
+    if torch.distributed.is_initialized():
+        rank = torch.distributed.get_rank()
+    else:
+        rank = 0
+
+    if os.getenv('XPERF_CHECK_NAN', '0') == '1':
+        assert not torch.any(torch.isnan(tensor)).item(), f'Got nan in parameter {tensor} on rank {rank}'
 
 
 def _reshard_fsdp_state_dict_to_xperf_p4(tp_model, state_dict, device_mesh: DeviceMesh, model_config: P4Config):
@@ -373,6 +384,8 @@ def _reshard_fsdp_state_dict_to_xperf_p6(tp_model, state_dict, device_mesh: Devi
 
     tp_model.layernorm_weight.data = ln_f
 
+    assert_not_nan(tp_model.layernorm_weight.data)
+
     del ln_f_weight, ln_f_bias
 
     # TODO: use xperf vocab_tp
@@ -398,6 +411,9 @@ def _reshard_fsdp_state_dict_to_xperf_p6(tp_model, state_dict, device_mesh: Devi
     tp_model.wte_weight.data = wte_weight_tp.contiguous()
     tp_model.lm_head_weight.data = lm_head_tp.contiguous()  # tied weights
 
+    assert_not_nan(tp_model.wte_weight.data)
+    assert_not_nan(tp_model.lm_head_weight.data)
+
     for layer_index, (ln_1, key_norm, context_norm, qkv_w, qkv_b, dense_w, dense_b, ln_2, gate_w, _, fc1_w, _, fc2_w, _,
                       *_) in enumerate(tp_model.layers_weight):
         # torch.distributed.breakpoint()
@@ -407,6 +423,8 @@ def _reshard_fsdp_state_dict_to_xperf_p6(tp_model, state_dict, device_mesh: Devi
         assert ln_1.data.shape == ln_1_weight.shape
         ln_1.data = ln_1_weight.contiguous()
 
+        assert_not_nan(ln_1.data)
+
         del ln_1_bias
 
         key_norm_weight = state_dict[f'transformer.h.{layer_index}.attn.key_layernorm.weight'].full_tensor()
@@ -415,6 +433,8 @@ def _reshard_fsdp_state_dict_to_xperf_p6(tp_model, state_dict, device_mesh: Devi
         assert key_norm.data.shape == key_norm_weight.shape
         key_norm.data = key_norm_weight.contiguous()
 
+        assert_not_nan(key_norm.data)
+
         del key_norm_bias
 
         context_norm_weight = state_dict[f'transformer.h.{layer_index}.attn.context_norm.weight'].full_tensor()
@@ -422,6 +442,8 @@ def _reshard_fsdp_state_dict_to_xperf_p6(tp_model, state_dict, device_mesh: Devi
         context_norm_weight = torch.stack((context_norm_weight, context_norm_bias), dim=0).to(torch.bfloat16)
         assert context_norm.data.shape == context_norm_weight.shape
         context_norm.data = context_norm_weight.contiguous()
+
+        assert_not_nan(context_norm.data)
 
         del context_norm_bias
 
@@ -447,6 +469,9 @@ def _reshard_fsdp_state_dict_to_xperf_p6(tp_model, state_dict, device_mesh: Devi
         assert qkv_weight.shape == qkv_w.shape
         qkv_w.data = qkv_weight.contiguous()
 
+        # check nan
+        assert_not_nan(qkv_w.data)
+
         q_proj_bias = state_dict.pop(f'transformer.h.{layer_index}.attn.q_proj.bias').full_tensor().to(torch.bfloat16)
         k_proj_bias = state_dict.pop(f'transformer.h.{layer_index}.attn.k_proj.bias').full_tensor().to(torch.bfloat16)
         v_proj_bias = state_dict.pop(f'transformer.h.{layer_index}.attn.v_proj.bias').full_tensor().to(torch.bfloat16)
@@ -463,6 +488,8 @@ def _reshard_fsdp_state_dict_to_xperf_p6(tp_model, state_dict, device_mesh: Devi
         assert qkv_bias.shape == qkv_b.shape
         qkv_b.data = qkv_bias.contiguous()
 
+        assert_not_nan(qkv_b.data)
+
         o_proj_weight = state_dict.pop(f'transformer.h.{layer_index}.attn.o_proj.weight').full_tensor().to(
             torch.bfloat16)
         if device_mesh is not None:
@@ -471,15 +498,21 @@ def _reshard_fsdp_state_dict_to_xperf_p6(tp_model, state_dict, device_mesh: Devi
         assert o_proj_weight.shape == dense_w.shape
         dense_w.data = o_proj_weight.contiguous()
 
+        assert_not_nan(dense_w.data)
+
         o_proj_bias = state_dict.pop(f'transformer.h.{layer_index}.attn.o_proj.bias').full_tensor().to(torch.bfloat16)
         assert o_proj_bias.shape == dense_b.shape
         dense_b.data = o_proj_bias.contiguous()
+
+        assert_not_nan(dense_b.data)
 
         ln_2_weight = state_dict.pop(f'transformer.h.{layer_index}.ln_2.weight').full_tensor().to(torch.bfloat16)
         ln_2_bias = state_dict.pop(f'transformer.h.{layer_index}.ln_2.bias').full_tensor().to(torch.bfloat16)
         ln_2_weight = torch.stack((ln_2_weight, ln_2_bias), dim=0)
         assert ln_2_weight.shape == ln_2.shape
         ln_2.data = ln_2_weight.contiguous()
+
+        assert_not_nan(ln_2.data)
 
         del ln_2_bias
 
@@ -490,6 +523,8 @@ def _reshard_fsdp_state_dict_to_xperf_p6(tp_model, state_dict, device_mesh: Devi
 
         assert gate_wg.shape == gate_w.shape
         gate_w.data = gate_wg.contiguous()
+
+        assert_not_nan(gate_w.data)
 
         use_grouped_gemm_weight = getattr(model_config, '_moe_implementation', 'eager') == 'fused'
 
@@ -549,6 +584,8 @@ def _reshard_fsdp_state_dict_to_xperf_p6(tp_model, state_dict, device_mesh: Devi
         assert fc1_weight.shape == fc1_w.shape
         fc1_w.data = fc1_weight.contiguous()
 
+        assert_not_nan(fc1_w.data)
+
         if use_grouped_gemm_weight:
             fc2_weight = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts.fc2').to(
                 torch.bfloat16).full_tensor()
@@ -576,6 +613,8 @@ def _reshard_fsdp_state_dict_to_xperf_p6(tp_model, state_dict, device_mesh: Devi
         # (num_experts, intermediate_size // tp, hidden_size)
         assert fc2_weight.shape == fc2_w.shape, f'{fc2_weight.shape=}, {fc2_w.shape=}'
         fc2_w.data = fc2_weight.contiguous()
+
+        assert_not_nan(fc2_w.data)
 
     load_to_cuda(tp_model=tp_model)
 
@@ -609,6 +648,8 @@ def _reshard_fsdp_state_dict_to_xperf_p6dense(tp_model, state_dict, device_mesh:
     assert norm.shape == tp_model.layernorm_weight.shape
     tp_model.layernorm_weight.data = norm
 
+    assert_not_nan(tp_model.layernorm_weight.data)
+
     wte_weight = state_dict.pop('model.embed_tokens.weight').full_tensor().to(torch.bfloat16)
     lm_head = state_dict.pop('lm_head.weight').full_tensor().to(torch.bfloat16)
 
@@ -636,6 +677,9 @@ def _reshard_fsdp_state_dict_to_xperf_p6dense(tp_model, state_dict, device_mesh:
     tp_model.wte_weight.data = wte_weight_tp
     tp_model.lm_head_weight.data = lm_head_tp
 
+    assert_not_nan(tp_model.wte_weight.data)
+    assert_not_nan(tp_model.lm_head_weight.data)
+
     for layer_index, (ln_1, qkv_w, _, dense_w, _, ln_2, fc12, _, fc2, *_) in enumerate(tp_model.layers_weight):
         # model.layers.0.input_layernorm.weight
         ln_1_weight = state_dict.pop(f'model.layers.{layer_index}.input_layernorm.weight').full_tensor()
@@ -643,11 +687,15 @@ def _reshard_fsdp_state_dict_to_xperf_p6dense(tp_model, state_dict, device_mesh:
         assert ln_1.data.shape == ln_1_weight.shape
         ln_1.data = ln_1_weight.contiguous()
 
+        assert_not_nan(ln_1.data)
+
         # model.layers.0.post_attention_layernorm.weight
         ln_2_weight = state_dict.pop(f'model.layers.{layer_index}.post_attention_layernorm.weight').full_tensor()
         ln_2_weight = torch.unsqueeze(ln_2_weight, dim=0).to(torch.bfloat16)
         assert ln_2.data.shape == ln_2_weight.shape
         ln_2.data = ln_2_weight.contiguous()
+
+        assert_not_nan(ln_2.data)
 
         # model.layers.0.self_attn.q_proj.weight
         # model.layers.0.self_attn.k_proj.weight
@@ -688,6 +736,8 @@ def _reshard_fsdp_state_dict_to_xperf_p6dense(tp_model, state_dict, device_mesh:
         assert qkv_w.data.shape == qkv_weight.shape
         qkv_w.data = qkv_weight.contiguous()
 
+        assert_not_nan(qkv_w.data)
+
         # model.layers.0.self_attn.o_proj.weight
         o_proj_weight = state_dict.pop(f'model.layers.{layer_index}.self_attn.o_proj.weight').full_tensor().to(
             torch.bfloat16)
@@ -707,6 +757,8 @@ def _reshard_fsdp_state_dict_to_xperf_p6dense(tp_model, state_dict, device_mesh:
 
         assert dense_w.data.shape == o_proj_weight.shape
         dense_w.data = o_proj_weight
+
+        assert_not_nan(dense_w.data)
 
         # model.layers.0.mlp.gate_proj.weight
 
@@ -740,6 +792,8 @@ def _reshard_fsdp_state_dict_to_xperf_p6dense(tp_model, state_dict, device_mesh:
         assert fc12.data.shape == gate_up_proj_weight.shape
         fc12.data = gate_up_proj_weight.contiguous()
 
+        assert_not_nan(fc12.data)
+
         # model.layers.0.mlp.down_proj.weight
 
         down_proj_weight = state_dict.pop(f'model.layers.{layer_index}.mlp.down_proj.weight').full_tensor().to(
@@ -756,6 +810,8 @@ def _reshard_fsdp_state_dict_to_xperf_p6dense(tp_model, state_dict, device_mesh:
 
         assert fc2.data.shape == down_proj_weight.shape
         fc2.data = down_proj_weight.contiguous()
+
+        assert_not_nan(fc2.data)
 
     load_to_cuda(tp_model=tp_model)
 
