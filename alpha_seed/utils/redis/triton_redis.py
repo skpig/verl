@@ -1,4 +1,5 @@
 import os
+from typing import Dict, List
 import bytedredis
 from triton.runtime.cache import RedisRemoteCacheBackend
 
@@ -16,3 +17,12 @@ class BytedRedisRemoteCacheBackend(RedisRemoteCacheBackend):
         super().__init__(key)
         self._redis = bytedredis.Client.from_url(
             f"redis://?db=0&redis_psm={BYTED_SEED_KV_PSM}&socket_connect_timeout=25&socket_timeout=30")
+
+    def get(self, filenames: List[str]) -> Dict[str, str]:
+        try:
+            results = self._redis.mget([self._get_key(f) for f in filenames])
+        except Exception as e:
+            print(e)
+            results = [None] * len(filenames)
+
+        return {filename: result for filename, result in zip(filenames, results) if result is not None}
