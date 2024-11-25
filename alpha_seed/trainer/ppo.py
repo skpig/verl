@@ -188,6 +188,7 @@ def compute_data_metrics(batch, use_critic, mean, std):
     response_mask = batch.batch['attention_mask'][:, -response_length:]
 
     old_log_probs = batch.batch['old_log_probs']
+    old_entropy = batch.batch['old_entropy']
 
     prompt_length = prompt_mask.sum(-1).float()
     response_length = response_mask.sum(-1).float()  # (batch_size,)
@@ -209,6 +210,9 @@ def compute_data_metrics(batch, use_critic, mean, std):
                                     index=response_length.unsqueeze(dim=1).long() - 1).reshape(-1)
 
     metrics = {
+        # actor
+        'actor/entropy':
+            masked_mean(old_entropy, response_mask).detach().item(),
         # score
         'critic/score/mean':
             torch.mean(sequence_score).detach().item(),

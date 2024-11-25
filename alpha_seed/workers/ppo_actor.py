@@ -87,7 +87,7 @@ class DataParallelPPOActor(BasePPOActor):
         self.compute_entropy_loss = torch.compile(core_algos.compute_entropy_loss, dynamic=True)
         self.entropy_from_logits = torch.compile(verl_F.entropy_from_logits, dynamic=True)
 
-    def _forward_micro_batch(self, micro_batch, temperature):
+    def _forward_micro_batch(self, micro_batch, temperature, compute_entropy):
         from flash_attn.bert_padding import index_first_axis, rearrange
 
         response_length = micro_batch['responses'].size(-1)
@@ -119,9 +119,14 @@ class DataParallelPPOActor(BasePPOActor):
 
                 batch_size, seqlen = input_ids.shape
 
+                if compute_entropy:
+                    inplace_backward = False
+                else:
+                    inplace_backward = True
+
                 # TODO: we should carefully determine whether to turn on inplace_backward
-                full_log_probs_rmpad = -cross_entropy_loss(logits_rmpad, input_ids_rmpad_rolled,
-                                                           inplace_backward=False)[0]  # (total_nnz,)
+                full_log_probs_rmpad = -cross_entropy_loss(
+                    logits_rmpad, input_ids_rmpad_rolled, inplace_backward=inplace_backward)[0]  # (total_nnz,)
                 if sp_size > 1:
                     full_log_probs_rmpad = gather_outputs(full_log_probs_rmpad,
                                                           gather_dim=0,
@@ -133,37 +138,26 @@ class DataParallelPPOActor(BasePPOActor):
                                         seqlen=seqlen)
                 log_probs = full_output.squeeze(-1)[:, -response_length - 1:-1]  # [batch_size, response_length]
 
-                # compute entropy loss
-                full_response_mask = attention_mask.clone()
-                full_response_mask[:, :-response_length] = 0  # set the prompt part to zero
-                full_response_mask_rmpad = index_first_axis(
-                    rearrange(full_response_mask.unsqueeze(-1), "b s ... -> (b s) ..."),
-                    indices).squeeze(-1)  # (total_nnz,)
-
-                if sp_size > 1:
-                    entropy = self.entropy_from_logits(logits_rmpad)
-                    entropy = gather_outputs(entropy, gather_dim=0, padding_dim=0, unpad_dim_size=total_nnz)
-                    entropy_loss = verl_F.masked_mean(entropy, mask=full_response_mask_rmpad)
+                if compute_entropy:
+                    entropy_rmpad = self.entropy_from_logits(logits_rmpad)  # (total_nnz // sp_size)
+                    if sp_size > 1:
+                        entropy_rmpad = gather_outputs(entropy_rmpad,
+                                                       gather_dim=0,
+                                                       padding_dim=0,
+                                                       unpad_dim_size=total_nnz)  # (total_nnz,)
+                    # pad it back
+                    entropy = pad_input(hidden_states=entropy_rmpad.unsqueeze(-1),
+                                        indices=indices,
+                                        batch=batch_size,
+                                        seqlen=seqlen).squeeze(-1)[:, -response_length -
+                                                                   1:-1]  # (batch_size, response_length)
                 else:
-                    entropy_loss = self.compute_entropy_loss(logits_rmpad, full_response_mask_rmpad)  # (total_nnz,)
+                    entropy = None
 
             else:
                 assert NotImplementedError('Only support rmpad mode')
 
-                sp_size = get_ulysses_sequence_parallel_world_size()
-                if sp_size > 1:
-                    raise NotImplementedError("ulysses sequence parallelism w/o use_rmpad is not supported yet")
-                output = self.actor_module(input_ids=micro_batch['input_ids'],
-                                           attention_mask=micro_batch['attention_mask'],
-                                           position_ids=micro_batch['position_ids'],
-                                           use_cache=False)  # prevent model thinks we are generating
-                logits = output.logits
-                logits.div_(temperature)
-                logits = logits[:, -response_length - 1:-1]
-                log_probs = logprobs_from_logits(logits, micro_batch['responses'])
-                entropy_loss = self.compute_entropy_loss(logits, attention_mask[:, -response_length:])
-
-            return entropy_loss, log_probs
+            return entropy, log_probs
 
     def _make_minibatch_iterator(self, data: DataProto) -> Iterable[DataProto]:
         select_keys = [
@@ -204,14 +198,20 @@ class DataParallelPPOActor(BasePPOActor):
             # split batch into micro_batches
             micro_batches = batch.split(micro_batch_size)
             num_micro_batches = len(micro_batches)
+
+        entropy_lst = []
         log_probs_lst = []
         for i, micro_batch in enumerate(micro_batches):
             with torch.inference_mode():
-                _, log_probs = self._forward_micro_batch(micro_batch, temperature=temperature)
+                entropy, log_probs = self._forward_micro_batch(micro_batch,
+                                                               temperature=temperature,
+                                                               compute_entropy=True)
             if i < num_micro_batches:
                 log_probs_lst.append(log_probs)
+                entropy_lst.append(entropy)
         log_probs = torch.concat(log_probs_lst, dim=0)
-        return log_probs
+        entropy = torch.concat(entropy_lst, dim=0)
+        return entropy, log_probs
 
     def update_policy(self, data: DataProto):
         # make sure we are in training mode
@@ -258,7 +258,14 @@ class DataParallelPPOActor(BasePPOActor):
                     kl_loss_weight = self.config.kl_loss_weight
                     kl_penalty = self.config.kl_penalty
 
-                    entropy_loss, log_prob = self._forward_micro_batch(micro_batch=micro_data, temperature=temperature)
+                    if entropy_coeff <= 0.:
+                        compute_entropy = False
+                    else:
+                        compute_entropy = True
+
+                    full_entropy, log_prob = self._forward_micro_batch(micro_batch=micro_data,
+                                                                       temperature=temperature,
+                                                                       compute_entropy=compute_entropy)
 
                     total_loss, pg_loss, upgo_loss, pg_clipfrac, pg_clipfrac2, ppo_kl, ppo_kl_sum = core_algos.compute_policy_loss(
                         old_log_prob=old_log_prob,
@@ -275,7 +282,13 @@ class DataParallelPPOActor(BasePPOActor):
                     if kl_loss_weight > 0.0:
                         kl_loss = core_algos.compute_kl_loss(log_prob, ref_log_prob, response_mask, kl_penalty)
                     else:
-                        kl_loss = torch.zeros(()).to(pg_loss.device)
+                        kl_loss = torch.zeros((), device=pg_loss.device)
+
+                    if compute_entropy:
+                        entropy_loss = verl_F.masked_mean(full_entropy, response_mask)
+                    else:
+                        entropy_loss = torch.zeros((), device=pg_loss.device)
+
                     policy_loss = total_loss - entropy_loss * entropy_coeff + kl_loss_weight * kl_loss
 
                     if self.config.use_dynamic_bsz:
@@ -289,7 +302,7 @@ class DataParallelPPOActor(BasePPOActor):
                     loss.backward()
 
                     micro_data_metric = {
-                        'actor/entropy': entropy_loss.detach().item(),
+                        # 'actor/entropy': entropy_loss.detach().item(),
                         'actor/pg_loss': pg_loss.detach().item(),
                         'actor/upgo_loss': upgo_loss.detach().item(),
                         'actor/kl_loss': kl_loss.detach().item(),

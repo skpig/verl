@@ -473,8 +473,9 @@ class AsyncActorRolloutRefWorker(Worker):
                 output.meta_info['micro_batch_size'] = self.config.rollout.log_prob_micro_batch_size
             with self.ulysses_sharding_manager:
                 output = self.ulysses_sharding_manager.preprocess_data(output)
-                old_log_probs = self.actor.compute_log_prob(data=output)
+                old_entropy, old_log_probs = self.actor.compute_log_prob(data=output)
                 output.batch['old_log_probs'] = old_log_probs
+                output.batch['old_entropy'] = old_entropy
                 output = self.ulysses_sharding_manager.postprocess_data(output)
 
         output = output.to('cpu')
@@ -556,7 +557,7 @@ class AsyncActorRolloutRefWorker(Worker):
 
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
-            output = self.ref_policy.compute_log_prob(data=data)
+            _, output = self.ref_policy.compute_log_prob(data=data)
             output = DataProto.from_dict(tensors={'ref_log_prob': output})
             output = self.ulysses_sharding_manager.postprocess_data(output)
 
