@@ -40,6 +40,8 @@ def remove_replicate_in_dtensor(state_dict, device_mesh: DeviceMesh):
     for k in state_dict.keys():
         if isinstance(state_dict[k], DTensor):
             v: DTensor = state_dict[k]
+            # NOTE(jianyujiang): we must save the shape and stride, as
+            # from_local assumes evenly sharded across ranks w/o them
             shape, stride = v.shape, v.stride()
             state_dict[k] = DTensor.from_local(v._local_tensor,
                                                device_mesh['fsdp'], [Shard(dim=0)],
@@ -49,14 +51,14 @@ def remove_replicate_in_dtensor(state_dict, device_mesh: DeviceMesh):
 
 
 def replicate_in_dtensor(state_dict, device_mesh: DeviceMesh):
-    if device_mesh.ndim == 1:
-        return state_dict
+    replicate_mesh = [Replicate()] * (device_mesh.ndim - 1)
     for k in state_dict.keys():
         if isinstance(state_dict[k], DTensor):
             v: DTensor = state_dict[k]
             shape, stride = v.shape, v.stride()
             state_dict[k] = DTensor.from_local(state_dict[k]._local_tensor,
-                                               device_mesh, [Replicate(), Shard(dim=0)],
+                                               device_mesh,
+                                               replicate_mesh + [Shard(dim=0)],
                                                shape=shape,
                                                stride=stride)
     return state_dict
