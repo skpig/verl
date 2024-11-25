@@ -32,6 +32,9 @@ def apply_monkey_patch_to_p6():
 
 
 def apply_monkey_patch_to_p6_dense():
+    from seed_models.models.p6dense.modeling_p6d import P6DenseFlashAttention2
+    from alpha_seed.models.transformers.modeling_p6d import flash_attn2_rmpad_forward
+    P6DenseFlashAttention2.forward = flash_attn2_rmpad_forward
     from seed_models.integrations import apply_liger_kernel_to_p6d
     apply_liger_kernel_to_p6d()
 
