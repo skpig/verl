@@ -92,70 +92,67 @@ class DataParallelPPOActor(BasePPOActor):
 
         response_length = micro_batch['responses'].size(-1)
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-            if self.use_rmpad:
-                # TODO(zhangchi.usc1992): we can actually remove padding for the whole batch and perform balancing to reduce peak memory
-                input_ids = micro_batch['input_ids'].to(torch.int64)
-                attention_mask = micro_batch['attention_mask'].to(torch.int64)
-                position_ids = compute_position_id_with_mask(attention_mask)
-                input_ids_rmpad, indices, cu_seqlens, max_seqlen_in_batch = unpad_input(
-                    input_ids.unsqueeze(-1), attention_mask=attention_mask)  # (totol_nnz, 1)
-                input_ids_rmpad = input_ids_rmpad.transpose(0, 1)  # (1, total_nnz)
-                input_ids_rmpad_rolled = torch.roll(input_ids_rmpad, shifts=-1, dims=1)
-                position_ids_rmpad = index_first_axis(rearrange(position_ids.unsqueeze(-1), "b s ... -> (b s) ..."),
-                                                      indices).transpose(0, 1)
+            if not self.use_rmpad:
+                raise NotImplementedError('only support rmpad mode')
 
-                # handle ulysses sequence parallelism
-                sp_size = get_ulysses_sequence_parallel_world_size()
-                total_nnz = input_ids_rmpad.size(1)
-                input_ids_rmpad, position_ids_rmpad, pad_size = ulysses_pad_and_slice_inputs(
-                    input_ids_rmpad, position_ids_rmpad, sp_size)
-                input_ids_rmpad_rolled, _, _ = ulysses_pad_and_slice_inputs(input_ids_rmpad_rolled, None, sp_size)
-                input_ids_rmpad_rolled = input_ids_rmpad_rolled.squeeze(0)
-                # forward
-                output = self.actor_module(input_ids=input_ids_rmpad, position_ids=position_ids_rmpad, use_cache=False)
+            # TODO(zhangchi.usc1992): we can actually remove padding for the whole batch and perform balancing to reduce peak memory
+            input_ids = micro_batch['input_ids'].to(torch.int64)
+            attention_mask = micro_batch['attention_mask'].to(torch.int64)
+            position_ids = compute_position_id_with_mask(attention_mask)
+            input_ids_rmpad, indices, cu_seqlens, max_seqlen_in_batch = unpad_input(
+                input_ids.unsqueeze(-1), attention_mask=attention_mask)  # (totol_nnz, 1)
+            input_ids_rmpad = input_ids_rmpad.transpose(0, 1)  # (1, total_nnz)
+            input_ids_rmpad_rolled = torch.roll(input_ids_rmpad, shifts=-1, dims=1)
+            position_ids_rmpad = index_first_axis(rearrange(position_ids.unsqueeze(-1), "b s ... -> (b s) ..."),
+                                                  indices).transpose(0, 1)
 
-                logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
-                logits_rmpad.div_(temperature)
+            # handle ulysses sequence parallelism
+            sp_size = get_ulysses_sequence_parallel_world_size()
+            total_nnz = input_ids_rmpad.size(1)
+            input_ids_rmpad, position_ids_rmpad, pad_size = ulysses_pad_and_slice_inputs(
+                input_ids_rmpad, position_ids_rmpad, sp_size)
+            input_ids_rmpad_rolled, _, _ = ulysses_pad_and_slice_inputs(input_ids_rmpad_rolled, None, sp_size)
+            input_ids_rmpad_rolled = input_ids_rmpad_rolled.squeeze(0)
+            # forward
+            output = self.actor_module(input_ids=input_ids_rmpad, position_ids=position_ids_rmpad, use_cache=False)
 
-                batch_size, seqlen = input_ids.shape
+            logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
+            logits_rmpad.div_(temperature)
 
-                if compute_entropy:
-                    inplace_backward = False
-                else:
-                    inplace_backward = True
+            batch_size, seqlen = input_ids.shape
 
-                # TODO: we should carefully determine whether to turn on inplace_backward
-                full_log_probs_rmpad = -cross_entropy_loss(
-                    logits_rmpad, input_ids_rmpad_rolled, inplace_backward=inplace_backward)[0]  # (total_nnz,)
-                if sp_size > 1:
-                    full_log_probs_rmpad = gather_outputs(full_log_probs_rmpad,
-                                                          gather_dim=0,
-                                                          padding_dim=0,
-                                                          unpad_dim_size=total_nnz)
-                full_output = pad_input(hidden_states=full_log_probs_rmpad.unsqueeze(-1),
-                                        indices=indices,
-                                        batch=batch_size,
-                                        seqlen=seqlen)
-                log_probs = full_output.squeeze(-1)[:, -response_length - 1:-1]  # [batch_size, response_length]
-
-                if compute_entropy:
-                    entropy_rmpad = self.entropy_from_logits(logits_rmpad)  # (total_nnz // sp_size)
-                    if sp_size > 1:
-                        entropy_rmpad = gather_outputs(entropy_rmpad,
-                                                       gather_dim=0,
-                                                       padding_dim=0,
-                                                       unpad_dim_size=total_nnz)  # (total_nnz,)
-                    # pad it back
-                    entropy = pad_input(hidden_states=entropy_rmpad.unsqueeze(-1),
-                                        indices=indices,
-                                        batch=batch_size,
-                                        seqlen=seqlen).squeeze(-1)[:, -response_length -
-                                                                   1:-1]  # (batch_size, response_length)
-                else:
-                    entropy = None
-
+            if compute_entropy:
+                inplace_backward = False
             else:
-                assert NotImplementedError('Only support rmpad mode')
+                inplace_backward = True
+
+            # TODO: we should carefully determine whether to turn on inplace_backward
+            full_log_probs_rmpad = -cross_entropy_loss(
+                logits_rmpad, input_ids_rmpad_rolled, inplace_backward=inplace_backward)[0]  # (total_nnz,)
+            if sp_size > 1:
+                full_log_probs_rmpad = gather_outputs(full_log_probs_rmpad,
+                                                      gather_dim=0,
+                                                      padding_dim=0,
+                                                      unpad_dim_size=total_nnz)
+            full_output = pad_input(hidden_states=full_log_probs_rmpad.unsqueeze(-1),
+                                    indices=indices,
+                                    batch=batch_size,
+                                    seqlen=seqlen)
+            log_probs = full_output.squeeze(-1)[:, -response_length - 1:-1]  # [batch_size, response_length]
+
+            if compute_entropy:
+                entropy_rmpad = self.entropy_from_logits(logits_rmpad)  # (total_nnz // sp_size)
+                if sp_size > 1:
+                    entropy_rmpad = gather_outputs(entropy_rmpad, gather_dim=0, padding_dim=0,
+                                                   unpad_dim_size=total_nnz)  # (total_nnz,)
+                # pad it back
+                entropy = pad_input(hidden_states=entropy_rmpad.unsqueeze(-1),
+                                    indices=indices,
+                                    batch=batch_size,
+                                    seqlen=seqlen).squeeze(-1)[:,
+                                                               -response_length - 1:-1]  # (batch_size, response_length)
+            else:
+                entropy = None
 
             return entropy, log_probs
 
