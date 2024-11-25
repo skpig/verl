@@ -848,34 +848,37 @@ class RayPPOTrainer(object):
                     with Timer(name='gen', logger=None) as timer:
                         gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
 
+                    metrics['timing/gen'] = timer.last
+                    metrics['rollout/hybrid_input_batch'] = len(batch)
+
                     # for debugging purpose only. we manually set all the attention_mask to 1 to
                     # test the training performance under maximum workload.
                     if self.config.trainer.set_fake_attention_mask:
-                        from verl.utils.model import create_random_mask
-                        total_length = self.config.data.max_prompt_length + self.config.data.max_response_length
+                        with Timer(name='fake_mask', logger=None) as timer:
+                            from verl.utils.model import create_random_mask
+                            total_length = self.config.data.max_prompt_length + self.config.data.max_response_length
 
-                        min_ratio_of_valid_token = self.config.trainer.fake_seqlen_ratio
-                        max_ratio_of_valid_token = self.config.trainer.fake_seqlen_ratio
+                            min_ratio_of_valid_token = self.config.trainer.fake_seqlen_ratio
+                            max_ratio_of_valid_token = self.config.trainer.fake_seqlen_ratio
 
-                        assert self.config.trainer.fake_seqlen_ratio > (self.config.data.max_prompt_length +
-                                                                        1) / total_length
+                            assert self.config.trainer.fake_seqlen_ratio > (self.config.data.max_prompt_length +
+                                                                            1) / total_length
 
-                        max_ratio_of_left_padding = 0
-                        attention_mask = create_random_mask(gen_batch_output.batch['input_ids'],
-                                                            max_ratio_of_valid_token=max_ratio_of_valid_token,
-                                                            max_ratio_of_left_padding=max_ratio_of_left_padding,
-                                                            min_ratio_of_valid_token=min_ratio_of_valid_token)
+                            max_ratio_of_left_padding = 0
+                            attention_mask = create_random_mask(gen_batch_output.batch['input_ids'],
+                                                                max_ratio_of_valid_token=max_ratio_of_valid_token,
+                                                                max_ratio_of_left_padding=max_ratio_of_left_padding,
+                                                                min_ratio_of_valid_token=min_ratio_of_valid_token)
 
-                        gen_batch_output.batch['attention_mask'] = attention_mask
+                            gen_batch_output.batch['attention_mask'] = attention_mask
 
-                        # force actor and critic stop updating weights because the data is fake
-                        self.config.actor_rollout_ref.actor.optim.lr = 0
-                        self.config.critic.optim.lr = 0
+                            # force actor and critic stop updating weights because the data is fake
+                            self.config.actor_rollout_ref.actor.optim.lr = 0
+                            self.config.critic.optim.lr = 0
 
+                        metrics['timing/fake_mask'] = timer.last
                         pprint(f'set fake attention mask')
 
-                    metrics['timing/gen'] = timer.last
-                    metrics['rollout/hybrid_input_batch'] = len(batch)
                     # only report metrics from one generation replica
                     if 'xperf_metrics' in gen_batch_output.meta_info:
                         for name, x_metric in gen_batch_output.meta_info['xperf_metrics'].items():
@@ -957,6 +960,21 @@ class RayPPOTrainer(object):
                     batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask'], dim=-1).tolist()
                     metrics['rollout/training_batch'] = len(batch)
                     pprint(f'training batches {len(batch)}.')
+
+                    # perform global sequence balancing here
+                    from alpha_seed.utils.seqlen_balance import get_seqlen_balanced_partitions, log_seqlen_unbalance
+                    global_seqlen_lst = batch.batch['attention_mask'].sum(-1).tolist()  # (train_batch_size,)
+                    world_size = self.actor_rollout_wg.world_size
+                    global_partition_lst = get_seqlen_balanced_partitions(global_seqlen_lst,
+                                                                          k_partitions=world_size,
+                                                                          equal_size=True)
+                    # reorder based on index. The data will be automatically equally partitioned by dispatch function
+                    global_idx = torch.tensor([j for partition in global_partition_lst for j in partition])
+                    batch.reorder(global_idx)
+                    global_balance_stats = log_seqlen_unbalance(seqlen_list=global_seqlen_lst,
+                                                                partitions=global_partition_lst,
+                                                                prefix='global_seqlen')
+                    metrics.update(global_balance_stats)
 
                     # training
                     with Timer(name='rm_score', logger=None) as timer:

@@ -34,7 +34,10 @@ from alpha_seed import core_algos
 
 from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
 from dist_attn.ulysses.ops import gather_outputs
+# Note that this one doesn't change the original order
 from .utils import rearrange_micro_batches
+# Note that this one should only used for training because it changes the original order
+from alpha_seed.utils.seqlen_balance import rearrange_micro_batches as rearrange_micro_batches_train
 from contextlib import nullcontext
 
 __all__ = ['DataParallelPPOCritic']
@@ -179,8 +182,8 @@ class DataParallelPPOCritic(BasePPOCritic):
             with self.profiler_context as p:
                 if self.config.use_dynamic_bsz:
                     (micro_batches,
-                     num_micro_batches) = rearrange_micro_batches(batch=data.batch,
-                                                                  max_token_len=self.config.ppo_max_token_len)
+                     num_micro_batches) = rearrange_micro_batches_train(batch=data.batch,
+                                                                        max_token_len=self.config.ppo_max_token_len)
                 else:
                     # split batch into micro_batches
                     micro_batches = data.batch.split(self.config.ppo_micro_batch_size)
