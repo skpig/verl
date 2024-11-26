@@ -76,7 +76,7 @@ class AsyncXPerfGPTRollout(object):
     If tp_device_mesh is None, we assume it is executed on a single GPU
     """
 
-    def __init__(self, config, tokenizer, model_hf_config):
+    def __init__(self, config, tokenizer, model_hf_config, is_standalone=False):
         self.config = config
         self.profiler_context = get_profiler_context(filename=config.profile.filename,
                                                      profile_on_ranks=config.profile.profile_on_ranks,
@@ -85,7 +85,8 @@ class AsyncXPerfGPTRollout(object):
                                                      enable=config.profile.enable)
 
         # auto infer rollout running config
-        use_vllm = self.config.get('use_vllm', False)
+        # off-policy rollout should disable paged attention, for maintaining FIFO order
+        use_vllm = self.config.get('enable_paged_attention', True) and not is_standalone
         enable_cuda_graph = self.config.get('enable_cuda_graph', False)
         slot_block_size = self.config.get('slot_block_size', 1024)
 
@@ -142,7 +143,7 @@ class AsyncXPerfGPTRollout(object):
                                           vocab_tp=False,
                                           context_limit_bs=max_ctx_batch_size,
                                           enable_cuda_graph=enable_cuda_graph)
-
+        inference_sess.max_off_policy_steps = self.config.get('max_off_policy_steps', 5)
         with tempfile.NamedTemporaryFile(mode='w', suffix=".json") as f:
             json.dump(model_cfg, f)
             f.flush()
@@ -217,10 +218,13 @@ class AsyncXPerfGPTRollout(object):
 
     def generate(self):
         while True:
-            (query_pool, complete_ratio, generation_kwargs) = self.input_queue.get(block=True)
+            (query_pool, complete_ratio, generation_kwargs, off_policy_steps) = self.input_queue.get(block=True)
             self.inference_engine.set_generator_strategy(**generation_kwargs)
             with logging_set_level(self.config.get('logging_level', 'WARN')):
-                self.inference_engine.execute(query_pool, complete_ratio=complete_ratio, stop_event=self.stop_event)
+                self.inference_engine.execute(query_pool,
+                                              complete_ratio=complete_ratio,
+                                              stop_event=self.stop_event,
+                                              off_policy_steps=off_policy_steps)
 
             response_outputs = []
             is_finished = []
@@ -243,9 +247,11 @@ class AsyncXPerfGPTRollout(object):
         prompt_ids = prompts.batch['input_ids']  # (bs, prompt_length)
         # left-padded attention_mask
         attention_mask = prompts.batch['attention_mask']
+        off_policy_steps = prompts.batch["off_policy_steps"]
         first_non_one_indices = (prompt_ids != 1).int().argmax(dim=1)
         rmv_padding_prompt_ids = [row[index:].tolist() for row, index in zip(prompt_ids, first_non_one_indices)]
-        self.input_queue.put((rmv_padding_prompt_ids, complete_ratio, prompts.meta_info['generation_kwargs']))
+        self.input_queue.put((rmv_padding_prompt_ids, complete_ratio, prompts.meta_info['generation_kwargs'],
+                              off_policy_steps.reshape(-1).tolist()))
 
         if is_async:
             yield
@@ -275,9 +281,11 @@ class AsyncXPerfGPTRollout(object):
             'responses': response_ids,
             'input_ids': input_ids,  # here input_ids become the whole sentences
             'attention_mask': attention_mask,
-            'is_finished': is_finished
+            'is_finished': is_finished,
+            'off_policy_steps': off_policy_steps,
         }
 
         out = DataProto.from_dict(batch)
+        metrics["max_off_policy_steps"] = off_policy_steps.max().item()
         out.meta_info["xperf_metrics"] = metrics
         yield out

@@ -240,5 +240,5 @@ trainer:
 streaming_rollout:
   n_gpus_per_node: 0
   nnodes: 0
-  warmup_step: 5
+  warmup_step: 0
   force_eos: False

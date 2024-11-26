@@ -31,6 +31,7 @@ def process_output(input_batch,
             if is_finished[i]:
                 ready_batch_queue.put(item)
             else:
+                item.batch['off_policy_steps'] += 1
                 item.pop(batch_keys=['responses'])
                 pending_batch_queue.put(rmpad(item))
     else:
@@ -59,5 +60,6 @@ def process_output(input_batch,
                     item.batch['responses'][:, gen_len] = tokenizer.eos_token_id
                 ready_batch_queue.put(item)
             else:
+                item.batch['off_policy_steps'] += 1
                 pending_batch_queue.put(rmpad(item))
     return is_finished.sum().int().item(), ready_batch_queue, pending_batch_queue

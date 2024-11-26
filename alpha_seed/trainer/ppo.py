@@ -490,7 +490,7 @@ class RayPPOTrainer(object):
             for val_idx, test_data in enumerate(self.val_dataloader):
                 test_batch = DataProto.from_single_dict(test_data)
 
-                test_gen_batch = test_batch.pop(['input_ids', 'attention_mask'])
+                test_gen_batch = test_batch.pop(['input_ids', 'attention_mask', 'off_policy_steps'])
                 test_gen_batch.meta_info = {
                     'eos_token_id': self.tokenizer.eos_token_id,
                     'pad_token_id': self.tokenizer.pad_token_id,
@@ -835,12 +835,13 @@ class RayPPOTrainer(object):
                     print_dataproto_size(batch)
 
                     if self.config.data.num_prompts_per_data > 1:
-                        batch = batch.unfold_column_chunks(self.config.data.num_prompts_per_data,
-                                                           split_keys=['input_ids', 'attention_mask'])
+                        batch = batch.unfold_column_chunks(
+                            self.config.data.num_prompts_per_data,
+                            split_keys=['input_ids', 'attention_mask', 'off_policy_steps'])
 
                     # hybrid rollout
                     batch = batch.repeat(self.num_bon)
-                    gen_batch = batch.pop(batch_keys=['input_ids', 'attention_mask'])
+                    gen_batch = batch.pop(batch_keys=['input_ids', 'attention_mask', 'off_policy_steps'])
                     gen_batch.meta_info.update({
                         'generation_kwargs':
                             self.config.actor_rollout_ref.rollout.train_generate_kwargs,
@@ -849,6 +850,7 @@ class RayPPOTrainer(object):
                             self.config.actor_rollout_ref.rollout.get("complete_ratio", 1.0)
                     })
                     pprint(f'start hybrid rollout, input batches {len(gen_batch)}.')
+                    # breakpoint()
                     with Timer(name='gen', logger=None) as timer:
                         gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
 
@@ -943,14 +945,14 @@ class RayPPOTrainer(object):
                         standalone_batch[i] = pad(standalone_batch[i], max_standalone_len, self.tokenizer)
                     if len(standalone_batch) > 0:
                         standalone_batch = DataProto.concat(standalone_batch)
-                        standalone_gen_batch = standalone_batch.pop(batch_keys=['input_ids', 'attention_mask'])
+                        standalone_gen_batch = standalone_batch.pop(
+                            batch_keys=['input_ids', 'attention_mask', 'off_policy_steps'])
                         standalone_gen_batch.meta_info[
                             'generation_kwargs'] = self.config.actor_rollout_ref.rollout.train_generate_kwargs
                         standalone_gen_batch.meta_info['complete_ratio'] = 1
                         self.standalone_rollout_wg.generate_sequences_put(standalone_gen_batch)
                         pprint(f'start standalone rollout, input batches {len(standalone_gen_batch)}.')
                     metrics['rollout/standalone_input_batch'] = len(standalone_batch)
-
                     # get training batch from ready queue
                     ready_batch = []
                     while ready_batch_queue.qsize() >= self.config.actor_rollout_ref.actor.ppo_mini_batch_size:

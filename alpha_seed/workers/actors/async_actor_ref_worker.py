@@ -300,7 +300,8 @@ class AsyncActorRolloutRefWorker(Worker):
         log_gpu_memory_usage('Before AsyncXPerfGPTRollout init', logger=logger)
         rollout = AsyncXPerfGPTRollout(config=self.config.rollout,
                                        tokenizer=self.tokenizer,
-                                       model_hf_config=self.actor_model_config)
+                                       model_hf_config=self.actor_model_config,
+                                       is_standalone=self._is_standalone_rollout)
         log_gpu_memory_usage('After AsyncXPerfGPTRollout init', logger=logger)
         sharding_manager = FSDPXPerfGPTShardingManager(module=self.actor_module_fsdp,
                                                        model_config=self.actor_model_config,

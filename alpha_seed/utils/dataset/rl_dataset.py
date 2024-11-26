@@ -214,7 +214,7 @@ class RLHFDataset(Dataset):
         row_dict['attention_mask'] = row_dict['attention_mask'].to(torch.int8)
         row_dict['answer_input_ids'] = row_dict['answer_input_ids'].to(torch.int32)
         row_dict['answer_attention_mask'] = row_dict['answer_attention_mask'].to(torch.int8)
-
+        row_dict['off_policy_steps'] = torch.zeros([1]).to(torch.int8)
         return row_dict
 
 
