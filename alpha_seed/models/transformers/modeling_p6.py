@@ -31,8 +31,9 @@ from dist_attn.ulysses.ops import gather_seq_scatter_heads, gather_heads_scatter
 
 import torch.nn.functional as F
 
-logger = logging.getLogger(__file__)
+from .modeling_flash_attention_utils import _flash_attention_forward, _flash_supports_window_size
 
+logger = logging.getLogger(__file__)
 
 def flash_attn2_rmpad_forward(
     self,
@@ -49,8 +50,7 @@ def flash_attn2_rmpad_forward(
 ):
     assert (past_key_value is None) and (not use_cache)
     assert cu_seqlens is None
-    from seed_models.models.p6.modeling_p6 import (apply_rotary_pos_emb, _flash_attention_forward,
-                                                   _flash_supports_window_size, repeat_kv)
+    from seed_models.models.p6.modeling_p6 import (apply_rotary_pos_emb, repeat_kv)
     if "padding_mask" in kwargs:
         warnings.warn(
             "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"

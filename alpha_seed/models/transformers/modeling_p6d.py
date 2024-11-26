@@ -28,9 +28,10 @@ import torch.nn.functional as F
 
 from seed_models.models.p6dense.modeling_p6d import (
     P6DenseFlashAttention2,
-    _flash_attention_forward,
     apply_rotary_pos_emb,
 )
+
+from .modeling_flash_attention_utils import _flash_attention_forward
 
 logger = logging.getLogger(__file__)
 
