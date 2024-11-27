@@ -16,6 +16,7 @@ Create a XPerfGPT Rollout
 """
 
 from verl import DataProto
+from contextlib import contextmanager, nullcontext
 
 from torch import nn
 import tempfile
@@ -44,6 +45,7 @@ from alpha_seed.workers.streaming_service.xperf_model_prophet import XperfModelP
 
 try:
     from verl.utils.debug import get_profiler_context
+    from verl.utils.debug.performance import NullProfileEnter
 except:
     print('Cannot find profile utilities. Please use latest verl master')
     raise
@@ -78,11 +80,14 @@ class AsyncXPerfGPTRollout(object):
 
     def __init__(self, config, tokenizer, model_hf_config, is_standalone=False):
         self.config = config
-        self.profiler_context = get_profiler_context(filename=config.profile.filename,
-                                                     profile_on_ranks=config.profile.profile_on_ranks,
-                                                     default_hdfs_dir=config.profile.default_hdfs_dir,
-                                                     upload_to_mlx=config.profile.upload_to_mlx,
-                                                     enable=config.profile.enable)
+        if hasattr(config, 'profile'):
+            self.profiler_context = get_profiler_context(filename=config.profile.filename,
+                                                         profile_on_ranks=config.profile.profile_on_ranks,
+                                                         default_hdfs_dir=config.profile.default_hdfs_dir,
+                                                         upload_to_mlx=config.profile.upload_to_mlx,
+                                                         enable=config.profile.enable)
+        else:
+            self.profiler_context = nullcontext(enter_result=NullProfileEnter())
 
         # auto infer rollout running config
         # off-policy rollout should disable paged attention, for maintaining FIFO order
@@ -217,6 +222,7 @@ class AsyncXPerfGPTRollout(object):
         self.process_thread.start()
 
     def generate(self):
+        torch.cuda.set_device(int(os.getenv('LOCAL_RANK', '0')))
         while True:
             (query_pool, complete_ratio, generation_kwargs, off_policy_steps) = self.input_queue.get(block=True)
             self.inference_engine.set_generator_strategy(**generation_kwargs)

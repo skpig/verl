@@ -301,7 +301,8 @@ class XperfModelProphet:
             )
 
         kv_cache_len = (sum(self.window_size) / len(self.window_size) if
-                        (len(self.window_size) > 0 and not self.force_use_full_cache) else self.max_sequence_length)
+                        (self.window_size is not None and len(self.window_size) > 0 and
+                         not self.force_use_full_cache) else self.max_sequence_length)
 
         # First, let's assume that all decode_batch_size is 0, and estimate the maximum context_batch_size.
         orca_max_context_batch_sz = avaliable_buf_sz / (

@@ -31,7 +31,7 @@ p6_path = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl
 p7_path = 'hdfs://haruna/home/byte_data_seed/ssd_lq/public/seed_models/Seed-2B5-P7_32k_sft29_32gpu'
 m8_path = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/25B_MoE_SFT29_32k_bsz6_lr2e5_tp4_hf'
 
-model_path = copy_local_path_from_hdfs(m8_path)
+model_path = copy_local_path_from_hdfs(p6_path)
 tokenizer = AutoTokenizer.from_pretrained(model_path)
 tokenizer.padding_side = "left"
 
@@ -60,7 +60,7 @@ actor_module_fsdp = FSDP(
     device_id=torch.cuda.current_device(),
     device_mesh=device_mesh)
 
-from alpha_seed.workers.xperf_rollout.xperf_gpt_rollout import XPerfGPTRollout
+from alpha_seed.workers.streaming_service.streaming_rollout import AsyncXPerfGPTRollout
 from alpha_seed.workers.hybrid_engine.fsdp_xperfgpt import FSDPXPerfGPTShardingManager
 
 from omegaconf import OmegaConf
@@ -75,20 +75,20 @@ rollout_config = OmegaConf.create({
         'top_k': 0,
         'top_p': 1.,
         'temperature': 1.,
-    }
+    },
+    'enable_paged_attention': False
 })
 
 import xperf_gpt
 
 xperf_gpt.load_xperf_gpt()
 
-rollout = XPerfGPTRollout(config=rollout_config, tokenizer=tokenizer, model_hf_config=config)
+rollout = AsyncXPerfGPTRollout(config=rollout_config, tokenizer=tokenizer, model_hf_config=config)
 sharding_manager = FSDPXPerfGPTShardingManager(module=actor_module_fsdp,
                                                model_config=config,
                                                inference_engine=rollout.inference_engine,
                                                device_mesh=rollout.device_mesh)
 
-from verl.utils.model import create_random_mask, compute_position_id_with_mask
 from verl import DataProto
 
 prompt = "Natalia sold clips to 48 of her friends in April, and then she sold half as many clips in May. How many clips did Natalia sell altogether in April and May?"
@@ -101,14 +101,15 @@ input_data = tokenizer(sentences, return_tensors='pt').to('cuda')
 
 input_ids = input_data['input_ids']
 attention_mask = input_data['attention_mask']
+off_policy_steps = torch.tensor([0]).to('cuda')
 
-data = {'input_ids': input_ids, 'attention_mask': attention_mask}
+data = {'input_ids': input_ids, 'attention_mask': attention_mask, 'off_policy_steps': off_policy_steps}
 
 data = DataProto.from_dict(data, meta_info={'generation_kwargs': rollout_config.train_generate_kwargs})
 
 with sharding_manager:
     data = sharding_manager.preprocess_data(data)
-    output = rollout.generate_sequences(data)
+    output = next(rollout.generate_sequences(data))
     output = sharding_manager.postprocess_data(output)
 
 output_ids = output.batch['input_ids']
