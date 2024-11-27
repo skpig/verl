@@ -32,6 +32,8 @@ def get_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
         return _get_p6dense_xperf_gpt_config(model_config, tokenizer)
     elif model_config.model_type == 'seed_p7':
         return _get_p7_xperf_gpt_config(model_config, tokenizer)
+    elif model_config.model_type == 'seed_m8':
+        return _get_m8_xperf_gpt_config(model_config, tokenizer)
     else:
         raise NotImplementedError(f'Unsupported model {model_config.model_type}')
 
@@ -217,6 +219,83 @@ def _get_p7_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
             config.sliding_window,
         "gqa_weights_layout":
             "AABB",
+    }
+
+    return xperf_config
+
+
+def _get_m8_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
+    from seed_models import M8Config
+    assert isinstance(model_config, M8Config)
+    config = model_config
+    xperf_config = {
+        "dtype":
+            "bfloat16",
+        "vocab_size":
+            config.vocab_size,
+        "max_position_embeddings":
+            config.max_position_embeddings,
+        "embed_dim":
+            config.hidden_size,
+        "hidden_size":
+            config.hidden_size,
+        "num_heads":
+            config.num_attention_heads,
+        "q_head_times":
+            config.query_head_scale_factor,
+        "num_layers":
+            config.num_hidden_layers,
+        "num_kv_heads":
+            config.num_key_value_heads,
+        "has_mqa":
+            config.num_attention_heads != config.num_key_value_heads,
+        "moe_ffn_internal_dim":
+            int(config.intermediate_size),
+        "moe_expert_num":
+            config.moe_num_expert,
+        "moe_topk":
+            config.moe_topk,
+        "is_exp_moe":
+            False,
+        "share_expert_num":
+            int(config.share_expert_num),
+        "moe_ffn_has_bias":
+            False,
+        "model_name":
+            "GPT2LMHeadModelMoe" if config.moe_num_expert else "GPT2LMHeadModel",
+        "is_meta":
+            True,
+        "has_k_layernorm":
+            config.use_key_layernorm,
+        "has_context_layernorm":
+            config.use_context_groupnorm,
+        "has_attn_bias":
+            config.attention_bias,
+        "use_rmsnorm":
+            True,
+        "tokenizer_path":
+            tokenizer.name_or_path,  # donot download from huggingface
+        "has_mlp_gate":
+            True,
+        "rope_mode":
+            config.rope_scaling['rope_type'],
+        "rope_base":
+            int(config.rope_theta),
+        "rope_scale":
+            config.rope_scaling['factor'],
+        "rope_cut":
+            True,
+        "rope_cut_head_dim":
+            config.rope_scaling["rope_cut_head_dim"],
+        "rope_percentage":
+            config.rope_scaling["rope_cut_head_dim"] / (config.hidden_size // config.num_attention_heads),
+        "window_size":
+            config.sliding_window,
+        "gqa_weights_layout":
+            "AABB",
+        "residual_post_ln_layers": [layer_idx + 1 for layer_idx in config.pre_post_layernorm_layers],
+        "kv_mirror_imitated_layers": [layer_idx + 1 for layer_idx in config.kv_mirror_imitated_layers],
+        "kv_mirror_layers": [layer_idx + 1 for layer_idx in config.kv_mirror_layers],
     }
 
     return xperf_config

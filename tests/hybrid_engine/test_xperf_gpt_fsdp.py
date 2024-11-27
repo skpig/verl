@@ -27,9 +27,11 @@ local_rank, rank, world_size = initialize_global_process_group()
 
 device_mesh = init_device_mesh('cuda', mesh_shape=(world_size,), mesh_dim_names=['fsdp'])
 
-model_path = copy_local_path_from_hdfs(
-    'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/alphaseed/20241107/ct128kv2_baseline_sft32k_v27_lr2e5_epoch4_rope1000_hf'
-)
+p6_path = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/alphaseed/20241107/ct128kv2_baseline_sft32k_v27_lr2e5_epoch4_rope1000_hf'
+p7_path = 'hdfs://haruna/home/byte_data_seed/ssd_lq/public/seed_models/Seed-2B5-P7_32k_sft29_32gpu'
+m8_path = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/25B_MoE_SFT29_32k_bsz6_lr2e5_tp4_hf'
+
+model_path = copy_local_path_from_hdfs(m8_path)
 tokenizer = AutoTokenizer.from_pretrained(model_path)
 tokenizer.padding_side = "left"
 
@@ -67,7 +69,7 @@ rollout_config = OmegaConf.create({
     'prompt_length': 256,
     'response_length': 256,
     'micro_batch_size': 128,
-    'tensor_model_parallel_size': 2,
+    'tensor_model_parallel_size': 4,
     'train_generate_kwargs': {
         'do_sample': False,
         'top_k': 0,
