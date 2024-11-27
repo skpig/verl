@@ -285,7 +285,13 @@ def is_correct_minerva(og_pred, gt, gt_need_extract=False):
     return (pred == gt), pred
 
 
-def verify(pred, answer, resp_len, max_resp_len, reward_0_for_overlong_rsp=False, punish_no_answer="v0"):
+def verify(pred,
+           answer,
+           resp_len,
+           max_resp_len,
+           reward_0_for_overlong_rsp=False,
+           punish_no_answer="v0",
+           add_int_verify=True):
     """
     default行为：对给1，其余给-1
     punish_no_answer:
@@ -296,9 +302,13 @@ def verify(pred, answer, resp_len, max_resp_len, reward_0_for_overlong_rsp=False
     # breakpoint()
     corr_minerva, pred_minerva = is_correct_minerva(pred,
                                                     answer)  # To remove if math is also converted to interger format
-    corr_integer, pred_integer = is_correct_integer(pred, answer)
-    pred = pred_minerva if corr_minerva else pred_integer
-    corr = corr_minerva or corr_integer
+    if add_int_verify:
+        corr_integer, pred_integer = is_correct_integer(pred, answer)
+        pred = pred_minerva if corr_minerva else pred_integer
+        corr = corr_minerva or corr_integer
+    else:
+        pred = pred_minerva
+        corr = corr_minerva
 
     reward = 1 if corr else -1
     if reward_0_for_overlong_rsp and reward == -1 and pred == "[INVALID]" and (max_resp_len - resp_len) < 100:
@@ -319,7 +329,9 @@ def compute_score(batch_info, solution_str, ground_truth, config, **argv) -> flo
     resp_len = sum(batch_info['attention_mask'][prompt_length:].tolist())
     reward_0_for_overlong_rsp = config.reward_model.reward_0_for_overlong_rsp and argv.get('rm_name') == "train"
     punish_no_answer = config.reward_model.punish_no_answer if argv.get('rm_name') == "train" else "v0"
-    return verify(solution_str, ground_truth, resp_len, max_resp_len, reward_0_for_overlong_rsp, punish_no_answer)
+    add_int_verify = config.reward_model.add_int_verify
+    return verify(solution_str, ground_truth, resp_len, max_resp_len, reward_0_for_overlong_rsp, punish_no_answer,
+                  add_int_verify)
 
 
 if __name__ == "__main__":
@@ -357,3 +369,11 @@ if __name__ == "__main__":
     pred = "So we have \(-1\) as answer."
     answer = "1"
     assert verify(pred, answer, 0, 16384, False, "v0") == -1
+
+    pred = "So we have \(-1\) as answer."
+    answer = "-1"
+    assert verify(pred, answer, 0, 16384, False, "v0", True) == 1
+
+    pred = "So we have \(-1\) as answer."
+    answer = "-1"
+    assert verify(pred, answer, 0, 16384, False, "v0", False) == -1

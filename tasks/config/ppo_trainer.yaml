@@ -186,6 +186,7 @@ reward_model:
   std: 1.0
   use_last_response: False
   reward_0_for_overlong_rsp: False
+  add_int_verify: True
   punish_no_answer: v0
 
 algorithm:
