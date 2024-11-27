@@ -2,28 +2,19 @@ set -x
 
 ray stop --force
 
-# should run
-# pip install https://luban-source.byted.org/repository/scm/data.aml.xperf_gpt_th24_cu124_abi0_sdist_1.0.0.316.tar.gz
-
 # ckpt和路径
 
-# 12B
-# SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/P6.1_12B_32k_SFT29_Fix_RoPE_Base_hf
-# RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/rm_p6_dense_12b_phase2_exp1_hf
-
-# 70B
-SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/70bdense_P61_D7_wd01_sft29_1022_2e_64gpu_hf
-RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhiqi.0/rlhf/p6dense_70b_rm
-
-TRAIN_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/hard60_format_repeat10.parquet
-TEST_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/math_500.parquet
-default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhiqi.0/alpha-seed/experiments/p6d-70b/
+SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/ct128kv2_baseline_sft32k_v27_lr2e5_epoch4_rope1000_hf_new
+RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/rm_p6_moe_3b3_0812_sftv27_stage2_fix_order_aux_32k_v2_hf
+TRAIN_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/train_with_ref_ans.parquet
+TEST_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/test_with_ref_ans.parquet
+default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhiqi.0/alpha-seed/experiments/p6-3b3/
 
 # 训练长度
 max_prompt_length=2048
 max_response_length=16384
 # batch size && 训练epoch
-train_batch_size=4096
+train_batch_size=2048
 ppo_mini_batch_size=1024
 val_batch_size=500
 total_epochs=5000
@@ -42,22 +33,30 @@ force_append_eos=True
 upgo_loss_weight=0.2
 upgo_loss_version=1
 clip_ratio2=2.0
-# tracking实验名
-project_name='verl_example_math'
-experiment_name=p6d_70b_tp${xperf_tp_size}_fsdp${fsdp_size}
 # 工程参数
 use_dynamic_bsz=True
-actor_ppo_max_token_len=18432
-critic_ppo_max_token_len=18432
+actor_ppo_max_token_len=100352
+critic_ppo_max_token_len=200704
 infer_ppo_max_token_len=36864
-actor_sp_size=2
-critic_sp_size=2
+actor_sp_size=4
+critic_sp_size=4
 ref_sp_size=1
 reward_sp_size=1
-fsdp_size=16
+fsdp_size=64
 xperf_tp_size=4
-offload=True
-offload_train_memory=True
+# only enable offload=True for 1 node
+offload=False
+offload_train_memory=False
+# special config for 8-GPU execution
+if [ $ARNOLD_WORKER_NUM -eq 1 ]; then
+    actor_ppo_max_token_len=81920
+    critic_ppo_max_token_len=163840
+    infer_ppo_max_token_len=36864
+    offload=True
+fi
+# tracking实验名
+project_name='verl_example_math'
+experiment_name=p6_3b3_tp${xperf_tp_size}_fsdp${fsdp_size}
 
 python3 tasks/main_ppo.py \
     data.train_files=${TRAIN_FILE} \
@@ -94,7 +93,6 @@ python3 tasks/main_ppo.py \
     +actor_rollout_ref.rollout.num_slots=256 \
     +actor_rollout_ref.rollout.slot_block_size=1024 \
     actor_rollout_ref.ref.log_prob_micro_batch_size=512 \
-    actor_rollout_ref.ref.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.scale_pg_by_kl=True \
     actor_rollout_ref.actor.upgo_loss_weight=${upgo_loss_weight} \
     actor_rollout_ref.actor.upgo_loss_version=${upgo_loss_version} \
