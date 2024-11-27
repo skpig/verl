@@ -22,10 +22,11 @@ Apply monkey-patch function to models
 
 #### Seed Models
 def apply_monkey_patch_to_p6():
-    from seed_models.models.p6.modeling_p6 import P6FlashAttention2
+    from seed_models.models.p6.modeling_p6 import P6FlashAttention2, P6ForCausalLM
     from verl.models.transformers.seed_mlp import swiglu_mlp_forward
-    from alpha_seed.models.transformers.modeling_p6 import flash_attn2_rmpad_forward
+    from alpha_seed.models.transformers.modeling_p6 import flash_attn2_rmpad_forward, p6_model_forward
     P6FlashAttention2.forward = flash_attn2_rmpad_forward
+    P6ForCausalLM.forward = p6_model_forward
     # P6ExpertMLP.forward = swiglu_mlp_forward
     from seed_models.integrations import apply_liger_kernel_to_p6
     apply_liger_kernel_to_p6()

@@ -353,6 +353,7 @@ class AsyncActorRolloutRefWorker(Worker):
         override_model_config = OmegaConf.to_container(self.config.model.get('override_config', OmegaConf.create()))
 
         use_rmpad = self.config.model.get('use_rmpad', False)
+        use_ce_loss_fusion = self.config.model.get('use_ce_loss_fusion', False)
 
         if self._is_actor or self._is_rollout or self._is_standalone_rollout:
             # we need the model for actor and rollout
@@ -384,6 +385,7 @@ class AsyncActorRolloutRefWorker(Worker):
             OmegaConf.set_struct(self.config.actor, True)
             with open_dict(self.config.actor):
                 self.config.actor.use_rmpad = use_rmpad
+                self.config.actor.use_ce_loss_fusion = use_ce_loss_fusion
             self.actor = DataParallelPPOActor(config=self.config.actor,
                                               actor_module=self.actor_module_fsdp,
                                               actor_optimizer=self.actor_optimizer)
@@ -405,6 +407,7 @@ class AsyncActorRolloutRefWorker(Worker):
             OmegaConf.set_struct(self.config.ref, True)
             with open_dict(self.config.ref):
                 self.config.ref.use_rmpad = use_rmpad
+                self.config.ref.use_ce_loss_fusion = use_ce_loss_fusion
             self.ref_policy = DataParallelPPOActor(config=self.config.ref, actor_module=self.ref_module_fsdp)
 
         if self._is_actor:
@@ -554,7 +557,7 @@ class AsyncActorRolloutRefWorker(Worker):
             data.meta_info['micro_batch_size'] = micro_batch_size
         data.meta_info['temperature'] = self.config.rollout.train_generate_kwargs.temperature
 
-        log_gpu_memory_usage('Bfore reference recompute log prob', logger=logger)
+        log_gpu_memory_usage('Before reference recompute log prob', logger=logger)
 
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)

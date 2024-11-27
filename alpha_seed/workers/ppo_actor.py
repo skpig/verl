@@ -62,13 +62,18 @@ class DataParallelPPOActor(BasePPOActor):
         actor_module: nn.Module,
         actor_optimizer: torch.optim.Optimizer = None,
     ):
-        """When optimizer is None, it is Reference Policy"""
+        """When optimizer is None, it is Reference Policy.
+
+        Note that the class is instantiated more than once in PPO training, whose config is
+        created with a dedicated struct instead of using users' config directly.
+        """
         super().__init__(config)
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
         self.use_rmpad = self.config.get('use_rmpad', False)
         if torch.distributed.get_rank() == 0:
             print(f'Actor use_rmpad={self.use_rmpad}')
+        self.use_ce_loss_fusion = config.get('use_ce_loss_fusion', False)
 
         if hasattr(self.config, 'profile'):
             # refernce doesn't need debug
@@ -113,22 +118,39 @@ class DataParallelPPOActor(BasePPOActor):
                 input_ids_rmpad, position_ids_rmpad, sp_size)
             input_ids_rmpad_rolled, _, _ = ulysses_pad_and_slice_inputs(input_ids_rmpad_rolled, None, sp_size)
             input_ids_rmpad_rolled = input_ids_rmpad_rolled.squeeze(0)
-            # forward
-            output = self.actor_module(input_ids=input_ids_rmpad, position_ids=position_ids_rmpad, use_cache=False)
-
-            logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
-            logits_rmpad.div_(temperature)
-
             batch_size, seqlen = input_ids.shape
 
-            if compute_entropy:
-                inplace_backward = False
+            # forward
+            if self.use_ce_loss_fusion and not compute_entropy:
+                # forward with lm_head CE fusion
+                kwargs = {
+                    'input_ids': input_ids_rmpad,
+                    'position_ids': position_ids_rmpad,
+                    'labels': input_ids_rmpad_rolled,
+                    'temperature': temperature,
+                    'fuse_lm_head_ce_loss': True,
+                }
+                output = self.actor_module(
+                    **kwargs,
+                    use_cache=False,
+                    output_hidden_states=True,
+                )
+                full_log_probs_rmpad = output.loss * (-1.0)
             else:
-                inplace_backward = True
+                output = self.actor_module(input_ids=input_ids_rmpad, position_ids=position_ids_rmpad, use_cache=False)
 
-            # TODO: we should carefully determine whether to turn on inplace_backward
-            full_log_probs_rmpad = -cross_entropy_loss(
-                logits_rmpad, input_ids_rmpad_rolled, inplace_backward=inplace_backward)[0]  # (total_nnz,)
+                logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
+                logits_rmpad.div_(temperature)
+
+                if compute_entropy:
+                    inplace_backward = False
+                else:
+                    inplace_backward = True
+
+                # TODO: we should carefully determine whether to turn on inplace_backward
+                full_log_probs_rmpad = -cross_entropy_loss(
+                    logits_rmpad, input_ids_rmpad_rolled, inplace_backward=inplace_backward)[0]  # (total_nnz,)
+
             if sp_size > 1:
                 full_log_probs_rmpad = gather_outputs(full_log_probs_rmpad,
                                                       gather_dim=0,
