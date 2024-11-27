@@ -5,10 +5,9 @@ from triton.runtime.cache import RedisRemoteCacheBackend
 
 ARNOLD_REGION = os.getenv("ARNOLD_REGION", "CN")
 if ARNOLD_REGION == "CN":
-    # NOTE(zr): we could not use the default psm in CN, because 'lf' does not exit.
-    BYTED_SEED_KV_PSM = "toutiao.redis.seed_kv.service.lq"
+    BYTED_SEED_KV_PSM = "toutiao.redis.seed_kv"
 else:
-    BYTED_SEED_KV_PSM = ""
+    BYTED_SEED_KV_PSM = "toutiao.redis.seed_kv.service.maliva"
 
 
 class BytedRedisRemoteCacheBackend(RedisRemoteCacheBackend):

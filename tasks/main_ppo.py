@@ -33,6 +33,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 user_email = os.getenv('ARNOLD_LARK_RECEIVER', '')
 task_url = os.getenv('ARNOLD_ORIGIN_PLATFORM_URL', '')
 ARNOLD_REGION = os.getenv("ARNOLD_REGION", "CN")
+ENABLE_REDIS_TRITON_CACHE = int(os.getenv("ENABLE_REDIS_TRITON_CACHE", '1'))
 
 
 def _select_rm_score_fn(reward_style):
@@ -176,8 +177,7 @@ def main(config):
                 'BPEX_NO_WARN_ON_UNTUNED_CASE': '1'
             }
         }
-        # NOTE(zr): redis service is not available in US.
-        if ARNOLD_REGION == "CN":
+        if ENABLE_REDIS_TRITON_CACHE:
             runtime_env['env_vars'].update(remote_cache_env)
 
         ray.init(runtime_env=runtime_env)
