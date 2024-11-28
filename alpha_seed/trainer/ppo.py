@@ -17,6 +17,7 @@ This trainer supports model-agonistic model initialization with huggingface
 """
 
 import ray
+import random
 import os
 import copy
 import json
@@ -1022,11 +1023,19 @@ class RayPPOTrainer(object):
                         self.standalone_rollout_wg.generate_sequences_put(standalone_gen_batch)
                         pprint(f'start standalone rollout, input batches {len(standalone_gen_batch)}.')
                     metrics['rollout/standalone_input_batch'] = len(standalone_batch)
-                    # get training batch from ready queue
-                    ready_batch = []
-                    while ready_batch_queue.qsize() >= self.config.actor_rollout_ref.actor.ppo_mini_batch_size:
-                        for _ in range(self.config.actor_rollout_ref.actor.ppo_mini_batch_size):
-                            ready_batch.append(ready_batch_queue.get())
+                    # get training batch from ready queue, make it stable by random pick
+                    ready_batch = [
+                        ready_batch_queue.get()
+                        for _ in range(min(self.config.data.train_batch_size, ready_batch_queue.qsize()))
+                    ]
+                    random_choise_batch = []
+                    if len(ready_batch) < self.config.data.train_batch_size:
+                        random_choise_batch.extend([
+                            random.choice(ready_batch)
+                            for _ in range(self.config.data.train_batch_size - len(ready_batch))
+                        ])
+                    ready_batch.extend(random_choise_batch)
+
                     batch = DataProto.concat(ready_batch)
                     if self.config.algorithm.force_append_eos:
                         batch.batch["input_ids"][:, -1] = self.tokenizer.eos_token_id

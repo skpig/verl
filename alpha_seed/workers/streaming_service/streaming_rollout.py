@@ -258,7 +258,6 @@ class AsyncXPerfGPTRollout(object):
                 response_outputs.append(v.new_token_ids)
                 is_finished.append(v.is_finished)
             is_finished = torch.Tensor(is_finished)
-
             metrics = {}
             if hasattr(self.inference_engine.pp_scheduler,
                        "init_metrics") and self.inference_engine.pp_scheduler.enable_metrics:

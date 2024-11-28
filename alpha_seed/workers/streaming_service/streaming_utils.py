@@ -25,6 +25,7 @@ def process_output(input_batch,
                    config,
                    standalone=False):
     is_finished = output_batch.pop(batch_keys=['is_finished']).batch['is_finished']
+    finished_num = is_finished.sum().int().item()
     if not standalone:
         output_batch.union(input_batch)
         for i, item in enumerate(output_batch.chunk(len(output_batch))):
@@ -40,6 +41,10 @@ def process_output(input_batch,
             is_finished = torch.ones_like(is_finished)
         output_batch.pop(batch_keys=['prompts', 'responses'])
         output_batch.union(input_batch)
+
+        # rearrange...
+        #   prompts layout: [00111111] left-padding only, shape [bs, max_prompt_length]
+        #   input_ids layout: [00111111 11111111100] prompts's left-padding + response's right-padding, shape [bs, max_prompt_length + max_response_length]
         for i, item in enumerate(output_batch.chunk(len(output_batch))):
             if is_finished[i]:
                 left_pad_len = (item.batch['prompts'] != tokenizer.pad_token_id).int().argmax(dim=1)
@@ -55,11 +60,13 @@ def process_output(input_batch,
                                                 value=tokenizer.pad_token_id)
                 item.batch['responses'] = item.batch['input_ids'][:, item.batch['prompts'].shape[1]:]
                 if config.streaming_rollout.force_eos and need_eos[i]:
-                    item.batch['input_ids'][:, left_pad_len + real_len] = tokenizer.eos_token_id
+                    item.batch['input_ids'][:, -1 if left_pad_len + real_len >= total_len else left_pad_len +
+                                            real_len] = tokenizer.eos_token_id
                     gen_len = item.batch['attention_mask'][:, item.batch['prompts'].shape[1]:].sum(-1)
-                    item.batch['responses'][:, gen_len] = tokenizer.eos_token_id
+                    item.batch['responses'][:, -1 if gen_len >=
+                                            config.data.max_response_length else gen_len] = tokenizer.eos_token_id
                 ready_batch_queue.put(item)
             else:
                 item.batch['off_policy_steps'] += 1
                 pending_batch_queue.put(rmpad(item))
-    return is_finished.sum().int().item(), ready_batch_queue, pending_batch_queue
+    return finished_num, ready_batch_queue, pending_batch_queue
