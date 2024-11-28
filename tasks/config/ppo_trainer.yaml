@@ -219,8 +219,8 @@ trainer:
   val_epoch: 1
   need_log: False
   log_file: /opt/tiger/alpha-seed/log.jsonl
-  num_cases_to_wandb: 2 # number of samples log to wandb each step
-  logger_step_interval: 10 # how many steps to log to wandb
+  num_cases_to_wandb: 10 # number of samples log to wandb each step
+  logger_step_interval: 5 # how many steps to log to wandb
   code_sandbox_psm: ""
   save_cases_to_hdfs: True # save all cases to hdfs each step
   # auto: find the last ckpt to resume. If can't find, start from scratch

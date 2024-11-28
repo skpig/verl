@@ -62,10 +62,16 @@ def load_prompts(prompt_names):
 
 
 def random_transform(prompts, question):
-    return random.choice(prompts).transform(question)
+    prompt = random.choice(prompts)
+    return prompt.transform(question), prompt.__class__.__name__
+
+
+def ith_transform(prompts, question, idx):
+    prompt = prompts[idx]
+    return prompt.transform(question), prompt.__class__.__name__
 
 
 if __name__ == "__main__":
     prompts = load_prompts(prompt_names="all:-random_prompt_example:-action_space_simple")
-    msg = random_transform(prompts, "What is the capital of France?")
+    msg, _ = random_transform(prompts, "What is the capital of France?")
     print(msg)

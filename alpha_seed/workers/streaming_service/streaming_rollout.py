@@ -42,6 +42,8 @@ import logging
 from alpha_seed.workers.xperf_rollout.utils import get_xperf_gpt_config
 from alpha_seed.workers.xperf_rollout.utils.layout_convert_helper import init_meta
 from alpha_seed.workers.streaming_service.xperf_model_prophet import XperfModelProphet
+from alpha_seed.workers.xperf_rollout.utils.logits_manipulate import logits_manipulate_fn_core
+from functools import partial
 
 try:
     from verl.utils.debug import get_profiler_context
@@ -134,11 +136,29 @@ class AsyncXPerfGPTRollout(object):
             f"use_vllm, enable_cuda_graph, sched_cfg, prophet_cfg, device {use_vllm}, {enable_cuda_graph}, {sched_cfg}, {prophet_cfg}, {enable_cuda_graph}, {os.getenv('CUDA_VISIBLE_DEVICES')}"
         )
         torch.manual_seed(9898)
+
+        if config.get('enable_eot', False):
+            bothink = tokenizer.convert_tokens_to_ids("<Begin_of_Thinking>")
+            eothink = tokenizer.convert_tokens_to_ids("<End_of_Thinking>")
+            boresponse = tokenizer.convert_tokens_to_ids("<Begin_of_Response>")
+            eoresponse = tokenizer.convert_tokens_to_ids("<End_of_Response>")
+
+            logits_manipulate_fn = partial(logits_manipulate_fn_core,
+                                           manipulate_args={
+                                               'eothink': eothink,
+                                               'response_length': config.response_length,
+                                               'soft_interval': config.get('soft_interval', 512),
+                                               'summary_min_space': config.get('summary_min_space', 1024)
+                                           })
+        else:
+            logits_manipulate_fn = None
+
         generate_kwargs = dict(max_new_tokens=config.response_length,
                                do_sample=config.train_generate_kwargs.do_sample,
                                top_k=config.train_generate_kwargs.top_k,
                                top_p=config.train_generate_kwargs.top_p,
-                               temperature=config.train_generate_kwargs.temperature)
+                               temperature=config.train_generate_kwargs.temperature,
+                               logits_manipulate_fn=logits_manipulate_fn)
 
         inference_sess = InferenceSession(num_slots=num_slots,
                                           max_batch_size=max_batch_size,

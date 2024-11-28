@@ -454,7 +454,11 @@ class RayPPOTrainer(object):
                                        max_prompt_length=self.config.data.max_prompt_length,
                                        filter_prompts=True,
                                        return_raw_chat=self.config.data.get('return_raw_chat', False),
-                                       truncation=self.config.data.get('truncation', 'error'))
+                                       truncation=self.config.data.get('truncation', 'error'),
+                                       multi_prompts=self.config.data.get("multi_prompts", "none"),
+                                       num_prompts_per_data=1,
+                                       is_eval=True)
+
         self.val_dataloader = DataLoader(dataset=self.val_dataset,
                                          batch_size=min(self.config.data.val_batch_size, len(self.val_dataset)),
                                          shuffle=self.config.data.shuffle,
@@ -484,12 +488,23 @@ class RayPPOTrainer(object):
         metric_dict = {}
         reward_tensor_lst = []
         data_source_lst = []
+        prompt_name_lst = []
+        bopxn_lst = []
         if need_log:
             f = open(log_file, "w")
         for val_epoch_idx in range(val_epoch):
             for val_idx, test_data in enumerate(self.val_dataloader):
                 test_batch = DataProto.from_single_dict(test_data)
 
+                prompt_names = test_batch.non_tensor_batch['prompt_names'][0]
+                num_prompts_per_data = len(prompt_names)
+
+                if num_prompts_per_data > 1:
+                    test_batch = test_batch.unfold_column_chunks(
+                        num_prompts_per_data, split_keys=['input_ids', 'attention_mask', 'prompt_names'])
+
+                eval_bon = self.config.actor_rollout_ref.rollout.get("eval_bon", 1)
+                test_batch = test_batch.repeat(eval_bon)
                 test_gen_batch = test_batch.pop(['input_ids', 'attention_mask', 'off_policy_steps'])
                 test_gen_batch.meta_info = {
                     'eos_token_id': self.tokenizer.eos_token_id,
@@ -504,17 +519,12 @@ class RayPPOTrainer(object):
                 test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch,
                                                                            self.actor_rollout_wg.world_size)
 
-                eval_bon = self.config.actor_rollout_ref.rollout.get("eval_bon", 1)
-                test_gen_batch_padded.meta_info["num_bon"] = eval_bon
-
                 test_output_gen_batch = self.actor_rollout_wg.generate_sequences(test_gen_batch_padded)
-                test_output_gen_batch = unpad_dataproto(test_output_gen_batch, pad_size=pad_size * eval_bon)
+                test_output_gen_batch = unpad_dataproto(test_output_gen_batch, pad_size=pad_size)
 
                 print(
                     f'{val_epoch_idx + 1}-th/{val_epoch} {val_idx + 1}-th/{len(self.val_dataloader)} validation generation end'
                 )
-                if eval_bon > 1:
-                    test_batch = test_batch.repeat(eval_bon)
 
                 test_batch = test_batch.union(test_output_gen_batch)
 
@@ -534,20 +544,28 @@ class RayPPOTrainer(object):
                 reward_tensor_before_select = reward_tensor.clone()  # (B x bon, seqlen)
                 if eval_bon > 1 and self.global_step % self.config.actor_rollout_ref.rollout.get("eval_bon_every",
                                                                                                  20) == 0:
-                    from alpha_seed.utils.reward_score.boostrap_bon import bootstrap_bon_metric
+                    print("begin compute bon")
+                    from alpha_seed.utils.reward_score.bootstrap_bon import bootstrap_bon_metric
                     nxm_mat = reward_tensor_before_select.sum(-1).reshape(-1, eval_bon)
+                    bopxn_mat = reward_tensor_before_select.sum(-1).reshape(-1, num_prompts_per_data * eval_bon)
+
                     bon_matrix, bon_metric = bootstrap_bon_metric(nxm_mat)  #  nxm
-                    print("Bon matrix: {}".format(bon_matrix.mean(0).tolist()))
-                    metric_dict.update({f"diversity/eval_bo{k}": v for k, v in bon_metric.items()})
-                    metric_dict['diversity/eval_bon_hist'] = wandb.Histogram(np_histogram=np.histogram(
-                        np.arange(0, eval_bon) + 0.5, bins=eval_bon, weights=bon_matrix.mean(0)))
-                    reward_tensor = bon_matrix[:, 0]  # bo1 as reward
+                    bopxn, _ = bootstrap_bon_metric(bopxn_mat)
+                    bopxn_lst.append(bopxn)
+                    # metric_dict.update({f"diversity/eval_bo{k}": v for k, v in bon_metric.items()})
+                    # metric_dict['diversity/eval_bon_hist'] = wandb.Histogram(np_histogram=np.histogram(
+                    #     np.arange(0, eval_bon) + 0.5, bins=eval_bon, weights=bon_matrix.mean(0)))
+                    reward_tensor = bon_matrix  #[:, 0]  # bo1 as reward
                 else:
-                    reward_tensor = reward_tensor.sum(-1)  # sum over seqlen
+                    reward_tensor = reward_tensor.sum(-1).unsqueeze(-1)  # sum over seqlen
 
                 reward_tensor_lst.append(reward_tensor)
                 data_source_lst.append(
-                    test_batch.non_tensor_batch.get('data_source', ['unknown'] * reward_tensor.shape[0]))
+                    test_batch.non_tensor_batch.get('data_source',
+                                                    ['unknown'] * reward_tensor.shape[0]).reshape(-1, eval_bon)[:, 0])
+                prompt_name_lst.append(
+                    test_batch.non_tensor_batch.get('prompt_names',
+                                                    ['unknown'] * reward_tensor.shape[0]).reshape(-1, eval_bon)[:, 0])
                 if need_log:
                     input_ids = test_output_gen_batch.batch['input_ids'].cpu().numpy()
                     prompt_ids = input_ids[:, :self.config.data.max_prompt_length]
@@ -560,19 +578,71 @@ class RayPPOTrainer(object):
                         f.write(json.dumps(data, ensure_ascii=False) + "\n")
                         f.flush()
 
-        reward_tensor = torch.cat(reward_tensor_lst, dim=0).cpu()  # (batch_size,)
+        reward_tensor = torch.cat(reward_tensor_lst, dim=0).cpu()  # (valsize*num_prompt_per_data, eval_bon)
+        bopxn = torch.cat(bopxn_lst, dim=0).cpu(
+        ) if eval_bon > 1 and num_prompts_per_data > 0 else None  # (valsize, num_prompt_per_data*eval_bon)
+
+        def compute_metric(reward_tensor, bopxn, metric_dict, data_source="all"):
+            '''reward_tensor : (datasize*num_prompt_per_data, eval_bon)
+               bobon_reward: (datasize, num_prompt_per_data*eval_bon)
+            '''
+            logN = int(np.log(eval_bon) / np.log(2))
+            power_index = torch.LongTensor([2**i for i in range(logN)] + [eval_bon]) - 1
+            format_fn = lambda lst: ",\t".join("{:.3f}".format(x) for x in lst)
+            if num_prompts_per_data > 0:
+                reward_tensor_per_prompt = [
+                    row for row in reward_tensor.reshape(-1, num_prompts_per_data, eval_bon).transpose(0, 1).mean(1)
+                ]
+            avgp_bon = reward_tensor.mean(0)
+            print("{}, avgpbon\t\t {}".format(data_source, format_fn(avgp_bon[power_index])))
+            if bopxn is not None:
+                # bopboN = reward_tensor.reshape(-1, num_prompts_per_data, eval_bon).max(dim=1).values.mean(0)
+                bopxn = bopxn.mean(0)[(num_prompts_per_data - 1)::num_prompts_per_data]
+                # print("{}, bopboN\t\t {}".format(data_source, format_fn(bopboN[power_index])))
+                print("{}, bopxn\t\t {}".format(data_source, format_fn(bopxn[power_index])))
+
+            if num_prompts_per_data > 0:
+                for pid in range(num_prompts_per_data):
+                    print("{} BoN (prompt {}):\t {}".format(data_source, prompt_names[pid],
+                                                            format_fn(reward_tensor_per_prompt[pid][power_index])))
+
+            for N in power_index:
+                metric_dict[f'test_score/{data_source}_avgpbo{N}'] = avgp_bon[N]
+                if bopxn is not None:
+                    # metric_dict[f'test_score/{data_source}_bopbo{N}'] = bopboN[N]
+                    metric_dict[f'test_score/{data_source}_bopxn{N}'] = bopxn[N]
+                if num_prompts_per_data > 0:
+                    for pid in range(num_prompts_per_data):
+                        metric_dict[f'test_score/all_{prompt_names[pid]}_bo{N}'] = reward_tensor_per_prompt[pid][N]
+            metric_dict[f'test_cnt/{data_source}'] = len(
+                reward_tensor) // num_prompts_per_data if num_prompts_per_data > 0 else len(reward_tensor)
+
+        compute_metric(reward_tensor, bopxn, metric_dict, data_source="all")
+
+        # group by data source metrics
         data_sources = np.concatenate(data_source_lst, axis=0)
+        prompt_names_per_sample = np.concatenate(prompt_name_lst, axis=0)  # not useful for now
+
         # evaluate test_score based on data source
         data_source_reward = {}
         for i in range(reward_tensor.shape[0]):
             data_source = data_sources[i]
             if data_source not in data_source_reward:
                 data_source_reward[data_source] = []
-            data_source_reward[data_source].append(reward_tensor[i].item())
+            data_source_reward[data_source].append(reward_tensor[i])
+
+        if bopxn is not None:
+            data_source_bopxn = {}
+            for i in range(bopxn.shape[0]):
+                data_source = data_sources[i]
+                if data_source not in data_source_bopxn:
+                    data_source_bopxn[data_source] = []
+                data_source_bopxn[data_source].append(bopxn[i])
 
         for data_source, rewards in data_source_reward.items():
-            metric_dict[f'test_score/{data_source}'] = np.mean(rewards)
-            metric_dict[f'test_cnt/{data_source}'] = len(rewards)
+            rewards_tensor_data_source = torch.vstack(rewards)
+            bopxn_data_source = torch.vstack(data_source_bopxn[data_source]) if bopxn is not None else None
+            compute_metric(rewards_tensor_data_source, bopxn_data_source, metric_dict, data_source=data_source)
 
         if need_log:
             f.close()
@@ -640,7 +710,6 @@ class RayPPOTrainer(object):
             spawn_wg = wg_dict.spawn(prefix_set=class_dict.keys())
             all_wg.update(spawn_wg)
 
-        # breakpoint()
         if self.config.streaming_rollout.nnodes > 0:
             # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
             self.actor_rollout_wg = all_wg['actor_rollout']
@@ -850,7 +919,7 @@ class RayPPOTrainer(object):
                             self.config.actor_rollout_ref.rollout.get("complete_ratio", 1.0)
                     })
                     pprint(f'start hybrid rollout, input batches {len(gen_batch)}.')
-                    # breakpoint()
+
                     with Timer(name='gen', logger=None) as timer:
                         gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
 

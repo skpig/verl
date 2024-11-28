@@ -113,7 +113,8 @@ class RewardManager():
             rm_res_future_list.append(self.rm_req_executor.submit(get_rm_score, i))
         fail_cnt = 0
         total_cnt = 0
-        for res in as_completed(rm_res_future_list):
+        from tqdm import tqdm
+        for res in tqdm(as_completed(rm_res_future_list), total=len(data), desc="get_rm_score"):
             prompt_str, solution_str, ground_truth, reward_style, valid_response_length, score, idx = res.result()
             if reward_style == "code-sandbox":
                 total_cnt += 1

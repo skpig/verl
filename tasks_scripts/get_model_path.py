@@ -27,6 +27,16 @@ PATH_DICT = {
             "i18n_OCI": "hdfs://harunava/home/byte_data_seed_us/hdd_va/user/shengdinghu.98/models_rm/400m_p60905_137k_revisedonly_scalingexp_5xsample_bsz400_lr5e6_tp4pp2_hf",
         }
     },
+    "2b5": {
+        "sft_baseline": {
+            "CN": "hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/20241123/sft_v30_pe_correct_1120_num10_v2_styletransfer_2.5b",
+            "i18n_azure": "hdfs://harunava/home/byte_data_seed_azure/seed_research/shengdinghu/rl/models/sft_v30_pe_correct_1120_num10_v2_styletransfer_2.5b"
+        },
+        "rm_baseline": {
+            "CN": "hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/rm_p7_moe_2b5_phase2_godelsft_v2_m2_hf",
+            "i18n_azure": "hdfs://harunava/home/byte_data_seed_azure/seed_research/shengdinghu/rl/models/rm_p7_moe_2b5_phase2_godelsft_v2_m2_hf"
+        }
+    },
     "3b3": {
         "sft_legacy": {
             "CN": "hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/3b3.sft27.M.CNEN.reflect.v0_hf_new",
@@ -51,6 +61,10 @@ PATH_DICT = {
         "prm": {
             "CN": "hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/alphaseed/20241107/3b3p60905_137k_revisedonly_scalingexp_5xsample_bsz1600_lr5e6_tp4pp5_hf",
             "i18n_OCI": "hdfs://harunava/home/byte_data_seed_us/hdd_va/user/shengdinghu.98/models_rm/3b3p60905_137k_revisedonly_scalingexp_5xsample_bsz1600_lr5e6_tp4pp5_hf",
+        },
+        "sft_eot_jiaze1126": {
+            "CN": "hdfs://haruna/home/byte_data_seed/lf_lq/user/shengdinghu/rl/models/3b3_jiaze_1125a7_eot/241114_3b3_sft30_12b-kd-bo128_hf_eottokv2",
+            "i18n_azure": "hdfs://harunava/home/byte_data_seed_azure/seed_research/shengdinghu/rl/models/3b3_jiaze_1126a1_eot/241114_3b3_sft30_12b-kd-bo128_hf_eottokv2",
         }
     },
     "12b": {

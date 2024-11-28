@@ -33,7 +33,7 @@ from verl.utils.fs import copy_local_path_from_hdfs
 from verl.utils.model import compute_position_id_with_mask
 import verl.utils.torch_functional as verl_F
 
-from alpha_seed.prompts.load import random_transform, load_prompts
+from alpha_seed.prompts.load import random_transform, load_prompts, ith_transform
 
 
 def collate_fn(data_list: list[dict]) -> dict:
@@ -81,7 +81,8 @@ class RLHFDataset(Dataset):
                  return_raw_chat=False,
                  truncation='error',
                  multi_prompts="none",
-                 num_prompts_per_data=1):
+                 num_prompts_per_data=1,
+                 is_eval=False):
 
         if not isinstance(parquet_files, (List, ListConfig)):
             parquet_files = [parquet_files]
@@ -102,10 +103,14 @@ class RLHFDataset(Dataset):
 
         self.multi_prompts = multi_prompts
         self.num_prompts_per_data = num_prompts_per_data
+        self.is_eval = is_eval
 
         self._download()
         self._read_files_and_tokenize()
         self._initialize_prompts()
+
+        if self.is_eval:
+            self.num_prompts_per_data = len(self.prompts)  # every prompt need eval
 
     def _initialize_prompts(
         self,
@@ -147,6 +152,7 @@ class RLHFDataset(Dataset):
 
         chat = row_dict.pop(self.prompt_key)
 
+        prompt_names = []
         if self.multi_prompts == "none":
             # chat[0] is dict({'content': '', 'role': ''})
             prompt_with_chat_template = self.tokenizer.apply_chat_template(chat,
@@ -164,7 +170,12 @@ class RLHFDataset(Dataset):
             all_input_ids = []
             all_attention_mask = []
             for i in range(self.num_prompts_per_data):
-                data = random_transform(self.prompts, chat[0]['content'])  # -> str
+                if not self.is_eval:  # random
+                    data, prompt_name = random_transform(self.prompts, chat[0]['content'])  # -> str
+                else:
+                    data, prompt_name = ith_transform(self.prompts, chat[0]['content'], idx=i)  # -> str
+
+                prompt_names.append(prompt_name)
                 prompt_with_chat_template = self.tokenizer.apply_chat_template(data,
                                                                                add_generation_prompt=True,
                                                                                tokenize=False)
@@ -208,6 +219,7 @@ class RLHFDataset(Dataset):
 
         index = row_dict.get("extra_info", {}).get("index", 0)
         row_dict["index"] = index
+        row_dict['prompt_names'] = prompt_names
 
         # type cast to save memory
         row_dict['input_ids'] = row_dict['input_ids'].to(torch.int32)
