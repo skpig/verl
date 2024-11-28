@@ -26,6 +26,7 @@ import torch
 import torch.distributed
 from omegaconf import DictConfig, open_dict, OmegaConf
 from typing import List
+from typing import Union
 
 import verl.utils.torch_functional as verl_F
 from single_controller.base import Worker
@@ -117,6 +118,26 @@ class AsyncActorRolloutRefWorker(Worker):
             self.config.rollout.log_prob_micro_batch_size //= world_size // sp_size
         if self._is_ref:
             self.config.ref.log_prob_micro_batch_size //= world_size // sp_size
+        self.save_sequences = self.config.rollout.get('save_sequences', None)
+        self.load_sequences = self.config.rollout.get('load_sequences', None)
+
+    def _sequence_uuid(self):
+        """Encode model ckpt, seqlen info for sequence generation, used for performance profiling
+
+        TODO(haibin.lin): encode dataset info into uuid"""
+        model_path = self.config.model.path.split('/')[-1]
+        num_bon = self.config.rollout.num_bon
+        max_token_len = self.config.rollout.max_token_len
+        response_length = self.config.rollout.response_length
+        prompt_length = self.config.rollout.prompt_length
+        my_rank = torch.distributed.get_rank()
+        world_size = torch.distributed.get_world_size()
+        fields = [
+            model_path, 'num_bon', num_bon, 'max_token_len', max_token_len, 'response_length', response_length,
+            'prompt_length', prompt_length, 'rank', my_rank, world_size
+        ]
+        uuid = '_'.join([str(x) for x in fields])
+        return uuid
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def get_master_addr(self):
@@ -489,6 +510,38 @@ class AsyncActorRolloutRefWorker(Worker):
         log_gpu_memory_usage('After recompute log prob', logger=logger)
         return output
 
+    def _load_sequences_offline(self):
+        """load pre-generated sequences from hdfs"""
+        uuid = self._sequence_uuid()
+        fname = f'{uuid}.pt'
+        from hdfs_io.hdfs_io import hcopy
+        if not os.path.exists(fname):
+            hcopy(f'{self.load_sequences}/{fname}', fname)
+        data = torch.load(fname, map_location='cpu')
+        output = DataProto(**data)
+        if self.rank == 0:
+            print("loaded pre-generated sequences", flush=True)
+        return output
+
+    def _save_sequences_offline(self, output):
+        # TODO(haibin.lin): save to hdfs with hdfs_io
+        uuid = self._sequence_uuid()
+        output_to_save = {
+            'batch': output.batch,
+            'non_tensor_batch': output.non_tensor_batch,
+            'meta_info': output.meta_info
+        }
+        fname = f'{uuid}.pt'
+        torch.save(output_to_save, fname)
+        from hdfs_io.hdfs_io import hcopy, hmkdir
+        hmkdir(self.save_sequences)
+        hcopy(fname, f'{self.save_sequences}/{fname}')
+        print('Saved sequences and shutting down... Summary:', summerize_data(output.batch), uuid, flush=True)
+        torch.distributed.barrier()
+        # TODO(haibin.lin): typically we should throw an exception instead,
+        # for perf tuning we directly quit from here
+        exit()
+
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def generate_sequences(self, prompts: DataProto):
         prompts = prompts.to('cuda')
@@ -500,10 +553,16 @@ class AsyncActorRolloutRefWorker(Worker):
         prompts.meta_info.update(meta_info)
         with self.sharding_manager:
             log_gpu_memory_usage('After entering sharding manager', logger=logger)
-
             prompts = self.sharding_manager.preprocess_data(prompts)
-            generator = self.rollout.generate_sequences(prompts=prompts)
-            output = next(generator)
+
+            if self.load_sequences:
+                output = self._load_sequences_offline()
+            else:
+                generator = self.rollout.generate_sequences(prompts=prompts)
+                output = next(generator)
+
+                if self.save_sequences:
+                    self._save_sequences_offline(output)
 
             output = self.sharding_manager.postprocess_data(output)
 
@@ -585,3 +644,45 @@ class AsyncActorRolloutRefWorker(Worker):
         # TODO: support omnistore
         assert self._is_actor
         self.checkpoint_manager.save_checkpoint(version, local_path, hdfs_path, self.device_mesh)
+
+
+def summerize_data(data: Union[dict, tuple, list], name: str = 'summary', level: int = 0, show_value=False) -> str:
+    """Return the summary of a Tensor dict/tuple.
+
+    Example::
+
+      >>> data = (torch.ones(32,3,224,224), torch.zeros(32, 768))
+      >>> label = torch.ones(32, 1)
+      >>> data_batch = {'data': data, 'label': label}
+      >>> summerize_data(data_batch)
+      summary: dict, len: 2
+        data: <class 'tuple'>, len: 2
+          0: Tensor, len: torch.Size([32, 3, 224, 224]), dtype: torch.float32, val: 1.0
+          1: Tensor, len: torch.Size([32, 768]), dtype: torch.float32, val: 0.0
+        label: Tensor, len: torch.Size([32, 1]), dtype: torch.float32, val: 1.0
+
+    """
+    import torch
+    indentation = '  ' * level
+    summary = ''
+    if isinstance(data, dict) or hasattr(data, 'items'):
+        summary += indentation + f'{name}: dict, len: {len(data)}\n'
+        for k, v in data.items():
+            summary += summerize_data(v, k, level + 1)
+    elif isinstance(data, (tuple, list)):
+        summary += indentation + f'{name}: {type(data)}, len: {len(data)}\n'
+        for idx, v in enumerate(data):
+            summary += summerize_data(v, idx, level + 1)
+    elif isinstance(data, torch.Tensor):
+        summary += indentation + f'{name}: Tensor, len: {data.size()}, dtype: {data.dtype}'
+        if show_value:
+            summary += f', val: {data.detach().cpu().numpy().reshape(-1)[0]}\n'
+        else:
+            summary += '\n'
+    else:
+        summary += indentation + f'{name}: {type(data)}'
+        if show_value:
+            summary += f', val: {data}\n'
+        else:
+            summary += '\n'
+    return summary

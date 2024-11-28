@@ -248,6 +248,7 @@ class AsyncXPerfGPTRollout(object):
 
     @torch.no_grad()
     def generate_sequences(self, prompts: DataProto, is_async=False):
+
         complete_ratio = prompts.meta_info.get('complete_ratio', 1)
 
         prompt_ids = prompts.batch['input_ids']  # (bs, prompt_length)
