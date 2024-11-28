@@ -26,7 +26,11 @@ if is_flash_attn_2_available():
 
     # we left a fallback option in case flash 3 has convergence issue
     if torch.cuda.get_device_capability()[0] >= 9 and not os.getenv('USE_FLASH_ATTENTION_2', '0') == '1':
-        from flash_attn_hopper import flash_attn_func, flash_attn_varlen_func
+        try:
+            from flash_attn_hopper import flash_attn_func, flash_attn_varlen_func
+        except ImportError:
+            print("Unable to import FA3. Pls upgrade image to v72, or set env var USE_FLASH_ATTENTION_2=1")
+            raise
 
     _flash_supports_window_size = "window_size" in list(inspect.signature(flash_attn_func).parameters)
 else:

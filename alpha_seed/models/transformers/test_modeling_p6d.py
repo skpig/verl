@@ -1,13 +1,13 @@
 import seed_models
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM
-from seed_models.models.p6.modeling_p6 import P6ForCausalLM
+from seed_models.models.p6dense import P6DenseForCausalLM
 from test_utils import ref_loss_fn, compare_tensors, prepare_data
 
 
 def build_model():
     # hdfs path available at tasks_scripts/ci/run_p6_400m_math_v1.sh
-    config = AutoConfig.from_pretrained('p6_400m_moe_4T_sft_v27_bs128_lr4e-4_master_dyn_epoch4_hf/config.json',
+    config = AutoConfig.from_pretrained('P6.1_12B_32k_SFT29_Fix_RoPE_Base_hf/config.json',
                                         attn_implementation='flash_attention_2')
     config.num_hidden_layers = 8
     # must set dropout to 0.0 for consistency
@@ -25,8 +25,8 @@ def test_logits_cross_entropy_fusion():
     model_v2.load_state_dict(model.state_dict())
 
     # apply monkey patch
-    from alpha_seed.models.transformers.modeling_p6 import p6_model_forward
-    P6ForCausalLM.forward = p6_model_forward
+    from alpha_seed.models.transformers.modeling_p6d import p6d_model_forward
+    P6DenseForCausalLM.forward = p6d_model_forward
 
     input_ids_rmpad, input_ids_rmpad_rolled, full_response_mask_rmpad, position_ids_rmpad = prepare_data()
 
@@ -56,7 +56,7 @@ def test_logits_cross_entropy_fusion():
         print(f'{k}: {v}')
     print(f'================ grad diff summary ================')
     # sometimes a small number of elements mismatches:
-    # Mismatched elements: 1666189 / 238288896 (0.7%)
+    # Mismatched elements: 6612641 / 714866688 (0.9%)
     assert torch.testing.assert_close(model.lm_head.weight.grad, model_v2.lm_head.weight.grad)
     print("passed")
 

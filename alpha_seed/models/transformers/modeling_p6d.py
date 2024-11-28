@@ -30,6 +30,8 @@ from seed_models.models.p6dense.modeling_p6d import (
     P6DenseFlashAttention2,
     apply_rotary_pos_emb,
 )
+from typing import Optional, Tuple, Union, List
+from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from .modeling_flash_attention_utils import _flash_attention_forward
 
@@ -131,3 +133,129 @@ def flash_attn2_rmpad_forward(
     attn_output = attn_output.reshape(bsz, q_len, -1)
     attn_output = self.o_proj(attn_output)
     return attn_output, None, None
+
+
+def p6d_model_forward(
+    self,
+    input_ids: torch.LongTensor = None,
+    attention_mask: Optional[torch.Tensor] = None,
+    position_ids: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.IntTensor] = None,
+    past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
+    inputs_embeds: Optional[torch.FloatTensor] = None,
+    labels: Optional[torch.LongTensor] = None,
+    use_cache: Optional[bool] = None,
+    output_attentions: Optional[bool] = None,
+    output_hidden_states: Optional[bool] = None,
+    return_dict: Optional[bool] = None,
+    cache_position: Optional[torch.LongTensor] = None,
+    fuse_lm_head_ce_loss: Optional[bool] = None,
+    temperature: Optional[float] = None,
+) -> Union[Tuple, CausalLMOutputWithPast]:
+    r"""
+    Args:
+        labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
+            Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
+            config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
+            (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.
+
+    Returns:
+
+    Example:
+
+    ```python
+    >>> from transformers import AutoTokenizer, P6DenseForCausalLM
+
+    >>> model = P6DenseForCausalLM.from_pretrained("path/to/P6Dense")
+    >>> tokenizer = AutoTokenizer.from_pretrained("path/to/P6Dense")
+
+    >>> prompt = "Hey, are you conscious? Can you talk to me?"
+    >>> inputs = tokenizer(prompt, return_tensors="pt")
+
+    >>> # Generate
+    >>> generate_ids = model.generate(inputs.input_ids, max_length=30)
+    >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+    "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
+    ```"""
+    output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+    output_hidden_states = (output_hidden_states
+                            if output_hidden_states is not None else self.config.output_hidden_states)
+    return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+    # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
+    outputs = self.model(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        position_ids=position_ids,
+        cu_seqlens=cu_seqlens,
+        past_key_values=past_key_values,
+        inputs_embeds=inputs_embeds,
+        use_cache=use_cache,
+        output_attentions=output_attentions,
+        output_hidden_states=output_hidden_states,
+        return_dict=return_dict,
+        cache_position=cache_position,
+    )
+
+    hidden_states = outputs[0]
+
+    if fuse_lm_head_ce_loss:
+        assert labels is not None
+        try:
+            from bumi.function.flash_cross_entropy import FlashCrossEntropy
+        except ImportError:
+            scm = 'pip3 install http://luban-source.byted.org/repository/scm/seed.speech.bumi_1.7.0.0.tar.gz'
+            raise ImportError(f"Please install bumi via {scm}")
+        if temperature is not None:
+            hidden_states = hidden_states / temperature
+        # 2 means recompute the logits in the backward pass
+        recompute_level = 2
+        hidden_states_2d = hidden_states.reshape(-1, hidden_states.shape[-1])
+        # TODO(haibin.lin): accuracy metric is not necessarily needed, to be optimized further
+        compute_accuracy = True
+        # this gives better precision alignment with the torch implementation, with potentially lower precision with bf16 casts
+        align_precision = True
+        loss, _ = FlashCrossEntropy.apply(hidden_states_2d.bfloat16(), self.lm_head.weight, labels, recompute_level,
+                                          compute_accuracy, align_precision)
+        logits = None
+    else:
+        logits = self.lm_head(hidden_states)
+
+        loss = None
+        if labels is not None:
+            # Upcast to float if we need to compute the loss to avoid potential precision issues
+            logits = logits.float()
+            # Shift so that tokens < n predict n
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+
+            # Flatten the tokens
+            shift_logits = shift_logits.view(-1, self.vocab_size)
+            shift_labels = shift_labels.view(-1)
+
+            if cu_seqlens is not None:
+                # Mask the last token of each sequence to torch.CrossEntropyLoss ignore_index, default is -100
+                shift_labels[cu_seqlens[1:-1] - 1] = -100
+            elif position_ids is not None:
+                position_ids_ = position_ids.flatten()
+                indices_q = torch.arange(position_ids_.size(0), device=position_ids_.device, dtype=torch.int32)
+                cu_seq_lens = torch.cat((
+                    indices_q[position_ids_ == 0],
+                    torch.tensor(position_ids_.size(), device=position_ids_.device, dtype=torch.int32),
+                ))
+                shift_labels[cu_seq_lens[1:-1] - 1] = -100
+            # Enable model parallelism
+            shift_labels = shift_labels.to(shift_logits.device)
+            loss = self.loss_fct(shift_logits, shift_labels)
+
+    if not return_dict:
+        output = (logits,) + outputs[1:]
+        return (loss,) + output if loss is not None else output
+
+    return CausalLMOutputWithPast(
+        loss=loss,
+        logits=logits,
+        past_key_values=outputs.past_key_values,
+        hidden_states=outputs.hidden_states,
+        attentions=outputs.attentions,
+    )

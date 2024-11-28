@@ -252,10 +252,10 @@ def p6_model_forward(
         hidden_states_2d = hidden_states.reshape(-1, hidden_states.shape[-1])
         # TODO(haibin.lin): accuracy metric is not necessarily needed, to be optimized further
         compute_accuracy = True
-        # this gives better precision alignment with the flash-attn implementation, but potentially lower precision with bf16 casts
-        align_flash_precision = True
+        # this gives better precision alignment with the torch implementation, with potentially lower precision with bf16 casts
+        align_precision = True
         loss, _ = FlashCrossEntropy.apply(hidden_states_2d.bfloat16(), self.lm_head.weight, labels, recompute_level,
-                                          compute_accuracy, align_flash_precision)
+                                          compute_accuracy, align_precision)
         logits = None
     else:
         logits = self.lm_head(hidden_states)
