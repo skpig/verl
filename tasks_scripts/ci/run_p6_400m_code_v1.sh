@@ -3,16 +3,16 @@ set -x
 # ckpt和路径
 SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/p6_400m_moe_4T_sft_v27_bs128_lr4e-4_master_dyn_epoch4_hf
 RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/rm_p6_moe_400m_0716_sftv27_stage2_hf
-TRAIN_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/train_with_ref_ans.parquet
-TEST_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/test_with_ref_ans.parquet
-default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/test/p6_400m_omnistore_test_1
+TRAIN_FILE=hdfs://haruna/home/byte_data_seed/ssd_hldy/user/duzhengyin/data/alpha/code/train.rl.16384.alpha.parquet
+TEST_FILE=hdfs://haruna/home/byte_data_seed/ssd_hldy/user/duzhengyin/data/alpha/code/test.rl.383.alpha.parquet
+default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/duzhengyin/test/code_p6_400m_omnistore_test_1
 
 # 训练长度
 max_prompt_length=1024 # 16384
 max_response_length=2048 # 16384
 # batch size && 训练epoch
 train_batch_size=1024
-val_batch_size=5000
+val_batch_size=384
 ppo_mini_batch_size=256
 ppo_micro_batch_size=64
 total_epochs=100
@@ -29,8 +29,8 @@ use_ref_answer=True
 gae_gamma=1.0
 gae_lam=0.95
 # tracking实验名
-project_name='verl_example_math_ci'
-experiment_name='p6_400m_math-v1'
+project_name='verl_example_code_ci'
+experiment_name='p6_400m_code-v1'
 export PYTHONPATH=$PYTHONPATH:/opt/tiger/verl:/opt/tiger/seed_models:/opt/tiger/verifiable_tasks:/opt/tiger/bpex_triton
 python3 tasks/main_ppo.py \
     data.train_files=${TRAIN_FILE} \
@@ -105,4 +105,5 @@ python3 tasks/main_ppo.py \
     trainer.log_file=/opt/tiger/alpha-seed/log.jsonl \
     trainer.resume_steps=disable \
     trainer.set_fake_attention_mask=False \
-    trainer.fake_seqlen_ratio=0.5
+    trainer.fake_seqlen_ratio=0.5 \
+    trainer.code_sandbox_psm='seed.alpha.sandboxd1112.service.hl'

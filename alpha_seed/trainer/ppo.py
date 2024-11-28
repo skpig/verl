@@ -198,8 +198,6 @@ def compute_data_metrics(batch, use_critic, mean, std):
 
     returns = batch.batch['returns']
 
-    reflection_nums = batch.batch.get('reflection_nums', torch.Tensor([0.0]))
-
     response_mask_bool = response_mask.bool()
     valid_adv = torch.masked_select(advantages, response_mask_bool)
     valid_origin_adv = torch.masked_select(origin_advantages, response_mask_bool)
@@ -279,10 +277,6 @@ def compute_data_metrics(batch, use_critic, mean, std):
             torch.max(response_length).detach().item(),
         'response_length/min':
             torch.min(response_length).detach().item(),
-        'response_length/mean_reflection_num':
-            torch.mean(reflection_nums.float()).detach().item(),
-        'response_length/reflection_ratio':
-            torch.mean(torch.gt(reflection_nums, 0.0).float()).detach().item(),
         ## response clip ratio
         'response_length/clip_ratio':
             torch.mean(torch.eq(response_length, max_response_length).float()).detach().item(),

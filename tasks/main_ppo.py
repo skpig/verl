@@ -24,7 +24,7 @@ import pandas as pd
 import hdfs_io
 
 # rule-based reward score
-from alpha_seed.utils.reward_score import gsm8k, math, math_v2, model_score_fn, logic_puzzle, oj_utils, math_verifier
+from alpha_seed.utils.reward_score import gsm8k, math, math_v2, model_score_fn, logic_puzzle, oj_utils, math_verifier, response_post_proc
 from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRefWorker
 from alpha_seed.workers.actors.critic_worker import CriticWorker
 from alpha_seed.utils.alarm.lark_util import send_message_to_employee
@@ -66,7 +66,8 @@ class RewardManager():
         self.rm_name = rm_name
         self.config = config
         self.case_study_dir = config.trainer.default_hdfs_dir + "/cases/"
-        self.rm_req_executor = ThreadPoolExecutor(max_workers=128)
+        self.rm_req_executor = ThreadPoolExecutor(
+            max_workers=int(self.config.reward_model.get('reward_executor_maxnum', 128)))
         self.mean = self.config.reward_model.mean
         self.std = self.config.reward_model.std
 
@@ -93,6 +94,19 @@ class RewardManager():
             prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
             solution_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
 
+            if self.config.reward_model.use_last_response == 'summarize':
+                solution_str_post_proc = response_post_proc.summary_postprocess(
+                    solution_str,
+                    last_response_sep=self.config.reward_model.last_response_sep,
+                    last_response_strict=self.config.reward_model.last_response_strict)
+            elif self.config.reward_model.use_last_response == 'lastcodeblock':
+                solution_str_post_proc = response_post_proc.last_codeblock_postprocess(
+                    solution_str,
+                    codeblock_seps=self.config.reward_model.last_response_sep,
+                    last_response_strict=self.config.reward_model.last_response_strict)
+            else:
+                solution_str_post_proc = solution_str
+
             # select rm_score
             reward_style = data_item.non_tensor_batch['reward_model']['style']
             compute_score_fn = _select_rm_score_fn(reward_style)
@@ -100,14 +114,14 @@ class RewardManager():
             score_fn_inputs = {
                 "batch_info": data_item.batch,
                 "tokenizer": self.tokenizer,
-                "solution_str": solution_str,
+                "solution_str": solution_str_post_proc,
                 "ground_truth": ground_truth,
                 "config": self.config
             }
             if reward_style == "code-sandbox":
                 score_fn_inputs["code_sandbox_psm"] = self.config.trainer.code_sandbox_psm
             score = compute_score_fn(**score_fn_inputs)
-            return prompt_str, solution_str, ground_truth, reward_style, valid_response_length, score, idx
+            return prompt_str, solution_str, ground_truth, reward_style, valid_response_length, score, idx, solution_str_post_proc
 
         for i in range(len(data)):
             rm_res_future_list.append(self.rm_req_executor.submit(get_rm_score, i))
@@ -115,12 +129,14 @@ class RewardManager():
         total_cnt = 0
         from tqdm import tqdm
         for res in tqdm(as_completed(rm_res_future_list), total=len(data), desc="get_rm_score"):
-            prompt_str, solution_str, ground_truth, reward_style, valid_response_length, score, idx = res.result()
+            prompt_str, solution_str, ground_truth, reward_style, valid_response_length, score, idx, solution_str_post_proc = res.result(
+            )
             if reward_style == "code-sandbox":
                 total_cnt += 1
-                # 访问失败的score现在设置成-3，用来计数，但是训练的时候还是当做没做对来处理
-                fail_cnt += int(score < -2)
-                score = max(score, -2)
+                # 访问失败的score现在设置成-2，用来计数，但是训练的时候还是当做没做对来处理
+                if score == -2:
+                    score = 0
+                    fail_cnt += 1
             # train的时候做这个norm，但是打点的时候恢复，打原始值
             # eval的时候不做这个norm
             if need_norm:
@@ -133,24 +149,32 @@ class RewardManager():
             if already_print_data_sources[reward_style] < self.config.trainer.num_cases_to_wandb:
                 already_print_data_sources[reward_style] += 1
                 if reward_style == "code-sandbox":
-                    ground_truth = {}  # 对于OJ问题，ground_truth会比较大，扛不住
-                self.log_table.append([global_step, prompt_str, solution_str, ground_truth, score])
-            save_to_hdfs.append([global_step, prompt_str, solution_str, ground_truth, score])
-        if fail_cnt >= 1:
+                    ground_truth = ''  # 对于OJ问题，ground_truth会比较大，扛不住
+                self.log_table.append(
+                    [global_step, prompt_str, solution_str, ground_truth, score, solution_str_post_proc])
+            save_to_hdfs.append([global_step, prompt_str, solution_str, ground_truth, score, solution_str_post_proc])
+
+        self.logger.log(data={"oj/fail_rate": fail_cnt / total_cnt if total_cnt > 0 else -1}, step=global_step)
+
+        if total_cnt > 0 and fail_cnt / total_cnt >= 0.01:
             send_message_to_employee("alpha seed任务oj失败率过高", f"任务链接: {task_url}, 失败率: {round(fail_cnt/total_cnt, 2)}",
                                      user_email)
+
         if self.config.trainer.num_cases_to_wandb > 0:
             logger_step = global_step - global_step % self.config.trainer.logger_step_interval
             self.logger.log(
                 {
                     f"gen&score_{self.rm_name}_{logger_step}":
-                        wandb.Table(columns=["Step", "Prompt", "Gen Sequence", "GroundTruth", "Score"],
-                                    data=self.log_table)
+                        wandb.Table(
+                            columns=["Step", "Prompt", "Gen Sequence", "GroundTruth", "Score", "Gen Sequence PostProc"],
+                            data=self.log_table)
                 },
                 step=global_step,
                 backend='tracking')
         if self.config.trainer.save_cases_to_hdfs:
-            df = pd.DataFrame(columns=["Step", "Prompt", "Gen Sequence", "GroundTruth", "Score"], data=save_to_hdfs)
+            df = pd.DataFrame(
+                columns=["Step", "Prompt", "Gen Sequence", "GroundTruth", "Score", "Gen Sequence PostProc"],
+                data=save_to_hdfs)
             df.to_parquet(f"{self.rm_name}.{str(global_step)}.parquet")
             hdfs_io.hput(f"{self.rm_name}.{str(global_step)}.parquet", self.case_study_dir)
             os.remove(f"{self.rm_name}.{str(global_step)}.parquet")

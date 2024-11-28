@@ -185,6 +185,9 @@ reward_model:
   mean: 0.0
   std: 1.0
   use_last_response: False
+  last_response_strict: False
+  reward_executor_maxnum: 128
+  last_response_sep: ['<summarize>', '</summarize>']
   reward_0_for_overlong_rsp: False
   add_int_verify: True
   punish_no_answer: v0
