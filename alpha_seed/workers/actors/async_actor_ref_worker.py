@@ -645,6 +645,10 @@ class AsyncActorRolloutRefWorker(Worker):
         assert self._is_actor
         self.checkpoint_manager.save_checkpoint(version, local_path, hdfs_path, self.device_mesh)
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def release_param_and_cache(self):
+        self.sharding_manager.release_param_and_cache()
+
 
 def summerize_data(data: Union[dict, tuple, list], name: str = 'summary', level: int = 0, show_value=False) -> str:
     """Return the summary of a Tensor dict/tuple.

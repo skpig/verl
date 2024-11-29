@@ -26,6 +26,7 @@ from torch.distributed.fsdp.api import StateDictType, ShardedStateDictConfig
 from torch.distributed.device_mesh import DeviceMesh
 
 from verl.utils.torch_functional import broadcast_dict_tensor, allgather_dict_tensors
+from verl.utils.debug import log_gpu_memory_usage
 
 from xperf_gpt.inference.session import InferenceSession
 
@@ -38,6 +39,9 @@ from verl import DataProto
 
 from alpha_seed.workers.xperf_rollout.utils.layout_convert_helper import offload_to_cpu
 from alpha_seed.workers.xperf_rollout.utils.weight_loader import get_xperf_gpt_weight_bind_fn
+import logging
+
+logger = logging.getLogger(__file__)
 
 
 class FSDPXPerfGPTShardingManager(BaseShardingManager):
@@ -104,6 +108,7 @@ class FSDPXPerfGPTShardingManager(BaseShardingManager):
         """Release the GPU memory occupied by xperf parameter and cache"""
         offload_to_cpu(tp_model=self.inference_engine.engine.module)
         torch.cuda.empty_cache()
+        log_gpu_memory_usage('After release_param_and_cache', logger=logger)
 
     def __enter__(self):
         # gather full state_dict in CPU
@@ -212,3 +217,5 @@ class FSDPXPerfGPTShardingManager(BaseShardingManager):
             # restore random states
             if self.device_mesh is not None:
                 torch.cuda.set_rng_state(self.gen_random_states)
+
+        log_gpu_memory_usage('After standalone update', logger=logger)

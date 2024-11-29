@@ -65,6 +65,8 @@ def process_output(input_batch,
                     gen_len = item.batch['attention_mask'][:, item.batch['prompts'].shape[1]:].sum(-1)
                     item.batch['responses'][:, -1 if gen_len >=
                                             config.data.max_response_length else gen_len] = tokenizer.eos_token_id
+                    item.batch['attention_mask'][:, -1 if item.batch['prompts'].shape[1] +
+                                                 gen_len >= total_len else item.batch['prompts'].shape[1] + gen_len] = 1
                 ready_batch_queue.put(item)
             else:
                 item.batch['off_policy_steps'] += 1

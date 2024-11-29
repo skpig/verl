@@ -573,6 +573,9 @@ class RayPPOTrainer(object):
                         f.write(json.dumps(data, ensure_ascii=False) + "\n")
                         f.flush()
 
+        # validation release memory
+        self.actor_rollout_wg.release_param_and_cache()
+
         reward_tensor = torch.cat(reward_tensor_lst, dim=0).cpu()  # (valsize*num_prompt_per_data, eval_bon)
         bopxn = torch.cat(bopxn_lst, dim=0).cpu(
         ) if eval_bon > 1 and num_prompts_per_data > 0 else None  # (valsize, num_prompt_per_data*eval_bon)
@@ -638,7 +641,6 @@ class RayPPOTrainer(object):
             rewards_tensor_data_source = torch.vstack(rewards)
             bopxn_data_source = torch.vstack(data_source_bopxn[data_source]) if bopxn is not None else None
             compute_metric(rewards_tensor_data_source, bopxn_data_source, metric_dict, data_source=data_source)
-
         if need_log:
             f.close()
         return metric_dict
