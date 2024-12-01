@@ -301,9 +301,8 @@ def main_task(config):
     from alpha_seed.trainer.ppo import ResourcePoolManager, Role
 
     role_worker_mapping = {
-        Role.ActorRollout: AsyncActorRolloutRefWorker,
+        Role.ActorRolloutRef: AsyncActorRolloutRefWorker,
         Role.Critic: CriticWorker,
-        Role.RefPolicy: AsyncActorRolloutRefWorker,
         Role.Rollout: AsyncActorRolloutRefWorker,
     }
 
@@ -314,9 +313,8 @@ def main_task(config):
         standalone_pool_id: [config.streaming_rollout.n_gpus_per_node] * config.streaming_rollout.nnodes,
     }
     mapping = {
-        Role.ActorRollout: global_pool_id,
+        Role.ActorRolloutRef: global_pool_id,
         Role.Critic: global_pool_id,
-        Role.RefPolicy: global_pool_id,
         Role.Rollout: standalone_pool_id,
     }
 

@@ -375,11 +375,17 @@ class RayPPOTrainer(object):
         assert self.hybrid_engine, 'Currently, only support hybrid engine'
 
         if self.hybrid_engine:
-            assert Role.ActorRollout in role_worker_mapping, f'{role_worker_mapping.keys()=}'
+            assert Role.ActorRollout in role_worker_mapping or Role.ActorRolloutRef in role_worker_mapping, \
+                  f'{role_worker_mapping.keys()=}'
 
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
-        self.use_reference_policy = Role.RefPolicy in role_worker_mapping
+
+        self.use_standalone_reference_policy = Role.RefPolicy in role_worker_mapping
+        self.use_colocate_reference_policy = Role.ActorRolloutRef in role_worker_mapping
+
+        self.use_reference_policy = self.use_standalone_reference_policy or self.use_colocate_reference_policy
+
         self.use_rm = Role.RewardModel in role_worker_mapping
         self.ray_worker_group_cls = ray_worker_group_cls
         self.num_bon = self.config.actor_rollout_ref.rollout.get("num_bon", 1)
@@ -653,11 +659,20 @@ class RayPPOTrainer(object):
 
         # create actor and rollout
         if self.hybrid_engine:
-            resource_pool = self.resource_pool_manager.get_resource_pool(Role.ActorRollout)
-            actor_rollout_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.ActorRollout],
-                                                     config=self.config.actor_rollout_ref,
-                                                     role='actor_rollout')
-            self.resource_pool_to_cls[resource_pool]['actor_rollout'] = actor_rollout_cls
+            if self.use_standalone_reference_policy or not self.use_reference_policy:
+                resource_pool = self.resource_pool_manager.get_resource_pool(Role.ActorRollout)
+                actor_rollout_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.ActorRollout],
+                                                         config=self.config.actor_rollout_ref,
+                                                         role='actor_rollout')
+                self.resource_pool_to_cls[resource_pool]['actor_rollout'] = actor_rollout_cls
+            elif self.use_colocate_reference_policy:
+                resource_pool = self.resource_pool_manager.get_resource_pool(Role.ActorRolloutRef)
+                actor_rollout_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.ActorRolloutRef],
+                                                         config=self.config.actor_rollout_ref,
+                                                         role='actor_rollout_ref')
+                self.resource_pool_to_cls[resource_pool]['actor_rollout_ref'] = actor_rollout_cls
+            else:
+                raise NotImplementedError('Must instantiate actor and rollout')
 
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.Rollout)
             rollout_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Rollout],
@@ -685,7 +700,7 @@ class RayPPOTrainer(object):
             self.use_critic = False
 
         # create reference policy if needed
-        if self.use_reference_policy:
+        if self.use_standalone_reference_policy:
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.RefPolicy)
             ref_policy_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RefPolicy],
                                                   config=self.config.actor_rollout_ref,
@@ -709,7 +724,10 @@ class RayPPOTrainer(object):
 
         if self.config.streaming_rollout.nnodes > 0:
             # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
-            self.actor_rollout_wg = all_wg['actor_rollout']
+            if self.use_standalone_reference_policy or not self.use_reference_policy:
+                self.actor_rollout_wg = all_wg['actor_rollout']
+            elif self.use_colocate_reference_policy:
+                self.actor_rollout_wg = all_wg['actor_rollout_ref']
             self.standalone_rollout_wg = all_wg['standalone_rollout']
             hybrid_master_address = self.actor_rollout_wg.get_master_addr()
             standalone_master_address = self.standalone_rollout_wg.get_master_addr()
@@ -717,7 +735,10 @@ class RayPPOTrainer(object):
             self.actor_rollout_wg.init_model(hybrid_master_address, standalone_master_address)
             self.standalone_rollout_wg.init_model(hybrid_master_address, standalone_master_address)
         else:
-            self.actor_rollout_wg = all_wg['actor_rollout']
+            if self.use_standalone_reference_policy or not self.use_reference_policy:
+                self.actor_rollout_wg = all_wg['actor_rollout']
+            elif self.use_colocate_reference_policy:
+                self.actor_rollout_wg = all_wg['actor_rollout_ref']
             self.actor_rollout_wg.init_model()
 
         if self.config.actor_rollout_ref.actor.kl_loss_weight >= 1e-10:
@@ -728,9 +749,11 @@ class RayPPOTrainer(object):
             self.critic_wg = all_wg['critic']
             self.critic_wg.init_model()
 
-        if self.use_reference_policy:
+        if self.use_standalone_reference_policy:
             self.ref_policy_wg = all_wg['ref']
             self.ref_policy_wg.init_model()
+        elif self.use_colocate_reference_policy:
+            self.ref_policy_wg = all_wg['actor_rollout_ref']
 
         if self.use_rm:
             self.rm_wg = all_wg['rm']
@@ -1182,6 +1205,11 @@ class RayPPOTrainer(object):
                             if self.config.trainer.offload_train_memory:
                                 self.actor_rollout_wg.to("cpu", model=False, optimizer=True)
                         metrics['timing/train_mem_offload'] += timer.last
+
+                    # update ref ema
+                    with Timer(name='update_ref_ema', logger=None) as timer:
+                        self.ref_policy_wg.update_ref_ema()
+                    metrics['timing/update_ref_ema'] = timer.last
 
                     # validate
                     if self.val_reward_fn is not None and self.global_step % self.config.trainer.test_freq == 0:

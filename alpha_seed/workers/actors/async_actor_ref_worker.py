@@ -72,6 +72,9 @@ class AsyncActorRolloutRefWorker(Worker):
 
     def __init__(self, config: DictConfig, role: str):
         super().__init__()
+
+        warnings.simplefilter(action='ignore', category=FutureWarning)
+
         self.config = config
         import torch.distributed
         if not torch.distributed.is_initialized():
@@ -85,6 +88,7 @@ class AsyncActorRolloutRefWorker(Worker):
         print(f'Master address: {self.master_address}, Master port: {self.master_port}')
         world_size = torch.distributed.get_world_size()
 
+        # Note that here we assume actor and refernce policy have the same device mesh
         self.device_mesh = create_device_mesh(config.actor.fsdp_size, role)
 
         self.role = role
@@ -95,19 +99,30 @@ class AsyncActorRolloutRefWorker(Worker):
         self._is_standalone_rollout = self.role in ['standalone_rollout']
         self._is_ref = self.role in ['ref', 'actor_rollout_ref']
 
-        # build device mesh for ulysses parallel
-        sp_size = 1
+        # build device mesh for ulysses parallel. Note that we need to split the naming for actor and ref
+        # to handle the case that actor and ref can colocate or not colocate
+        # for actor
         if self._is_actor:
             sp_size = config.actor.ulysses_sequence_parallel_size
-        elif self._is_ref:
+            if sp_size > 1:
+                self.actor_ulysses_sp_device_mesh = init_device_mesh('cuda',
+                                                                     mesh_shape=(world_size // sp_size, sp_size),
+                                                                     mesh_dim_names=['dp', 'sp'])
+            else:
+                self.actor_ulysses_sp_device_mesh = None
+
+            self.actor_ulysses_sharding_manager = FSDPUlyssesShardingManager(self.actor_ulysses_sp_device_mesh)
+
+        if self._is_ref:
             sp_size = config.ref.ulysses_sequence_parallel_size
-        self.ulysses_sp_device_mesh = None
-        if sp_size > 1:
-            self.ulysses_sp_device_mesh = init_device_mesh('cuda',
-                                                           mesh_shape=(world_size // sp_size, sp_size),
-                                                           mesh_dim_names=['dp', 'sp'])
-        if self._is_actor or self._is_ref:
-            self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_sp_device_mesh)
+            if sp_size > 1:
+                self.ref_ulysses_sp_device_mesh = init_device_mesh('cuda',
+                                                                   mesh_shape=(world_size // sp_size, sp_size),
+                                                                   mesh_dim_names=['dp', 'sp'])
+            else:
+                self.ref_ulysses_sp_device_mesh = None
+
+            self.ref_ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ref_ulysses_sp_device_mesh)
 
         # normalize config
         if self._is_actor:
@@ -152,7 +167,11 @@ class AsyncActorRolloutRefWorker(Worker):
                                override_model_config,
                                use_rmpad=False,
                                enable_gradient_checkpointing=False,
-                               trust_remote_code=False):
+                               trust_remote_code=False,
+                               role='actor'):
+        if self.rank == 0:
+            print(f'Build model and optimizer for {role}')
+
         from verl.utils.model import print_model_size, update_model_config
         from verl.utils.torch_dtypes import PrecisionType
         from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
@@ -240,23 +259,19 @@ class AsyncActorRolloutRefWorker(Worker):
 
         mixed_precision = MixedPrecision(param_dtype=param_dtype, reduce_dtype=reduce_dtype, buffer_dtype=buffer_dtype)
 
-        # if self._is_ref:
-        #     mixed_precision = None
-
         auto_wrap_policy = get_fsdp_wrap_policy(module=actor_module, config=fsdp_config.get('wrap_policy', None))
-
-        if self._is_rollout and self.config.rollout.name == 'hf':
-            # TODO(zhangchi.usc1992, shengguangming) fix me. Current, auto_wrap_policy causes HFRollout to hang in Gemma
-            auto_wrap_policy = None
 
         if self.rank == 0:
             print(f'wrap_policy: {auto_wrap_policy}')
 
         cpu_offload = None
-        if self._is_actor and self.config.actor.fsdp_config.param_offload:
-            cpu_offload = CPUOffload(offload_params=True)
-        if self._is_ref and self.config.ref.fsdp_config.param_offload:
-            cpu_offload = CPUOffload(offload_params=True)
+
+        if role == 'actor':
+            if self.config.actor.fsdp_config.param_offload:
+                cpu_offload = CPUOffload(offload_params=True)
+        elif role == 'ref':
+            if self.config.ref.fsdp_config.param_offload:
+                cpu_offload = CPUOffload(offload_params=True)
 
         # we only support ZeRO3 of hybrid DP+FSDP or full FSDP
         if self.device_mesh.ndim == 1:
@@ -282,7 +297,7 @@ class AsyncActorRolloutRefWorker(Worker):
         log_gpu_memory_usage('After Actor FSDP init', logger=logger)
 
         # TODO: add more optimizer args into config
-        if self._is_actor:
+        if role == 'actor':
             from verl.utils.torch_functional import get_constant_schedule_with_warmup
             actor_optimizer = optim.AdamW(actor_module_fsdp.parameters(),
                                           lr=optim_config.lr,
@@ -365,7 +380,7 @@ class AsyncActorRolloutRefWorker(Worker):
                 if model:
                     offload_fsdp_param_and_grad(self.ref_module_fsdp)
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
     def init_model(self, hybrid_master_address=None, standalone_master_address=None):
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get('external_lib', None))
@@ -394,7 +409,8 @@ class AsyncActorRolloutRefWorker(Worker):
                 override_model_config=override_model_config,
                 enable_gradient_checkpointing=self.config.model.get('enable_gradient_checkpointing', False),
                 use_rmpad=use_rmpad,
-                trust_remote_code=self.config.model.get('trust_remote_code', False))
+                trust_remote_code=self.config.model.get('trust_remote_code', False),
+                role='actor')
 
             # get the original unwrapped module
             self.actor_module = self.actor_module_fsdp._fsdp_wrapped_module
@@ -422,7 +438,8 @@ class AsyncActorRolloutRefWorker(Worker):
                                                                use_rmpad=use_rmpad,
                                                                override_model_config=override_model_config,
                                                                trust_remote_code=self.config.model.get(
-                                                                   'trust_remote_code', False))[0]
+                                                                   'trust_remote_code', False),
+                                                               role='ref')[0]
             self.ref_module_fsdp.eval()
 
             OmegaConf.set_struct(self.config.ref, True)
@@ -454,8 +471,8 @@ class AsyncActorRolloutRefWorker(Worker):
 
         log_gpu_memory_usage('Before update policy', logger=logger)
 
-        with self.ulysses_sharding_manager:
-            data = self.ulysses_sharding_manager.preprocess_data(data)
+        with self.actor_ulysses_sharding_manager:
+            data = self.actor_ulysses_sharding_manager.preprocess_data(data)
 
             with Timer(name='update_critic', logger=None) as timer:
                 metrics = self.actor.update_policy(data=data)
@@ -464,7 +481,7 @@ class AsyncActorRolloutRefWorker(Worker):
             estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
             metrics['mfu/actor'] = estimated_flops * self.config.actor.ppo_epochs / promised_flops / self.world_size
 
-            data = self.ulysses_sharding_manager.postprocess_data(data)
+            data = self.actor_ulysses_sharding_manager.postprocess_data(data)
 
         self.actor_lr_scheduler.step()
         lr = self.actor_lr_scheduler.get_last_lr()[0]
@@ -496,12 +513,12 @@ class AsyncActorRolloutRefWorker(Worker):
                 output.meta_info['max_token_len'] = self.config.rollout.max_token_len
             else:
                 output.meta_info['micro_batch_size'] = self.config.rollout.log_prob_micro_batch_size
-            with self.ulysses_sharding_manager:
-                output = self.ulysses_sharding_manager.preprocess_data(output)
+            with self.actor_ulysses_sharding_manager:
+                output = self.actor_ulysses_sharding_manager.preprocess_data(output)
                 old_entropy, old_log_probs = self.actor.compute_log_prob(data=output)
                 output.batch['old_log_probs'] = old_log_probs
                 output.batch['old_entropy'] = old_entropy
-                output = self.ulysses_sharding_manager.postprocess_data(output)
+                output = self.actor_ulysses_sharding_manager.postprocess_data(output)
 
         output = output.to('cpu')
 
@@ -618,11 +635,11 @@ class AsyncActorRolloutRefWorker(Worker):
 
         log_gpu_memory_usage('Before reference recompute log prob', logger=logger)
 
-        with self.ulysses_sharding_manager:
-            data = self.ulysses_sharding_manager.preprocess_data(data)
+        with self.ref_ulysses_sharding_manager:
+            data = self.ref_ulysses_sharding_manager.preprocess_data(data)
             _, output = self.ref_policy.compute_log_prob(data=data)
             output = DataProto.from_dict(tensors={'ref_log_prob': output})
-            output = self.ulysses_sharding_manager.postprocess_data(output)
+            output = self.ref_ulysses_sharding_manager.postprocess_data(output)
 
         output = output.to('cpu')
 
@@ -648,6 +665,28 @@ class AsyncActorRolloutRefWorker(Worker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def release_param_and_cache(self):
         self.sharding_manager.release_param_and_cache()
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def update_ref_ema(self):
+        """
+        Update the reference policy via ema
+        """
+        assert self._is_actor and self._is_ref
+
+        beta = self.config.ref.ema
+        assert beta >= 0 and beta <= 1
+
+        if beta == 1:
+            # this is a small optimization, we can skip the copy
+            return
+
+        for (name, param), (name_ema, param_ema) in zip(self.actor_module_fsdp.named_parameters(),
+                                                        self.ref_module_fsdp.named_parameters()):
+            assert name == name_ema
+            with torch.no_grad():
+                # Note that the param here is sharded
+                # Note (zhangchi.usc1992) this may be running on CPU and potentially slow
+                param_ema.copy_(param.to(param_ema.device) * (1 - beta) + beta * param_ema)
 
 
 def summerize_data(data: Union[dict, tuple, list], name: str = 'summary', level: int = 0, show_value=False) -> str:

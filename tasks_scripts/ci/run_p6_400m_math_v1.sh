@@ -64,6 +64,7 @@ python3 tasks/main_ppo.py \
     +actor_rollout_ref.rollout.num_slots=256 \
     +actor_rollout_ref.rollout.slot_block_size=1024 \
     actor_rollout_ref.ref.log_prob_micro_batch_size=512 \
+    actor_rollout_ref.ref.ema=0.99 \
     critic.optim.lr=${critic_lr} \
     critic.optim.lr_warmup_steps_ratio=${lr_warmup_steps_ratio} \
     critic.model.path=${RM_MODEL_PATH} \
@@ -98,7 +99,7 @@ python3 tasks/main_ppo.py \
     trainer.save_freq=${save_freq} \
     trainer.test_freq=${test_freq} \
     trainer.total_epochs=${total_epochs} \
-    trainer.eval_before_training=False \
+    trainer.eval_before_training=True \
     trainer.val_only=False \
     trainer.val_epoch=1 \
     trainer.need_log=False \

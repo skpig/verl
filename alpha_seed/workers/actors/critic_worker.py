@@ -64,6 +64,9 @@ class CriticWorker(Worker):
 
     def __init__(self, config):
         super().__init__()
+
+        warnings.simplefilter(action='ignore', category=FutureWarning)
+
         import torch.distributed
         if not torch.distributed.is_initialized():
             timeout = timedelta(minutes=int(os.getenv('NCCL_TIMEOUT', 60)))
