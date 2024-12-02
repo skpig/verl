@@ -1263,13 +1263,15 @@ class RayPPOTrainer(object):
 
                             if self.config.trainer.offload_train_memory:
                                 self.actor_rollout_wg.to("cuda", model=False, optimizer=True)
-                                self.critic_wg.to("cuda")
+                                if self.use_critic:
+                                    self.critic_wg.to("cuda")
 
                             self.save_checkpoint()
 
                             if self.config.trainer.offload_train_memory:
                                 self.actor_rollout_wg.to("cpu", model=False, optimizer=True)
-                                self.critic_wg.to("cpu")
+                                if self.use_critic:
+                                    self.critic_wg.to("cpu")
 
                     metrics['timing/save_checkpoint'] = timer.last
 
