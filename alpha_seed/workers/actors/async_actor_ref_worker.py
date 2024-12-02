@@ -41,11 +41,12 @@ from verl.utils.debug import log_gpu_memory_usage
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from verl.utils.torch_functional import broadcast_dict_tensor, allgather_dict_tensors
 from verl.utils.model import compute_position_id_with_mask
+from verl.utils.debug import get_profiler_context
 import numpy as np
 
 from alpha_seed.workers.hybrid_engine.hsdp import create_device_mesh
 from alpha_seed.workers.hybrid_engine.fsdp_ulysses import FSDPUlyssesShardingManager
-from .initialize import get_device_init_context, create_init_fn
+from .initialize import parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init
 from alpha_seed.workers.utils import rearrange_micro_batches
 from dist_attn.ulysses.parallel_states import set_ulysses_sequence_parallel_group, get_ulysses_sequence_parallel_world_size
 from dist_attn.ulysses.ops import slice_input_tensor, gather_outputs
@@ -99,6 +100,15 @@ class AsyncActorRolloutRefWorker(Worker):
         self._is_standalone_rollout = self.role in ['standalone_rollout']
         self._is_ref = self.role in ['ref', 'actor_rollout_ref']
 
+        profile_fname = f"trace_{self.role}_rank{self.rank}.json"
+        self.profiler_context = get_profiler_context(filename=profile_fname,
+                                                     profile_on_ranks=[0],
+                                                     default_hdfs_dir=None,
+                                                     upload_to_mlx=False,
+                                                     enable=False,
+                                                     wait=0,
+                                                     warmup=0,
+                                                     active=1)
         # build device mesh for ulysses parallel. Note that we need to split the naming for actor and ref
         # to handle the case that actor and ref can colocate or not colocate
         # for actor
@@ -215,15 +225,12 @@ class AsyncActorRolloutRefWorker(Worker):
                 config=actor_model_config,
                 verbose=self.rank == 0), f'Cannot find rmpad version of {actor_model_config.model_type}'
 
-        init_context = get_device_init_context(use_meta_tensor=True)
-
-        with init_context(), warnings.catch_warnings():
+        with meta_device_init(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            actor_module = AutoModelForCausalLM.from_pretrained(pretrained_model_name_or_path=local_path,
-                                                                torch_dtype=torch_dtype,
-                                                                config=actor_model_config,
-                                                                attn_implementation='flash_attention_2',
-                                                                trust_remote_code=trust_remote_code)
+            actor_module = AutoModelForCausalLM.from_config(actor_model_config,
+                                                            torch_dtype=torch_dtype,
+                                                            attn_implementation='flash_attention_2',
+                                                            trust_remote_code=trust_remote_code)
             # some parameters may not in torch_dtype. TODO(zhangchi.usc1992) remove this after we switch to fsdp2
             actor_module.to(torch_dtype)
 
@@ -286,13 +293,14 @@ class AsyncActorRolloutRefWorker(Worker):
 
         # TODO: add transformer policy
         actor_module_fsdp = FSDP(actor_module,
-                                 param_init_fn=create_init_fn(actor_module),
+                                 param_init_fn=parallel_init_fsdp_fn(actor_module,
+                                                                     parallel_load_safetensors(local_path)),
                                  use_orig_params=False,
                                  auto_wrap_policy=auto_wrap_policy,
                                  device_id=torch.cuda.current_device(),
                                  sharding_strategy=sharding_strategy,
                                  mixed_precision=mixed_precision,
-                                 sync_module_states=True,
+                                 sync_module_states=False,
                                  forward_prefetch=True,
                                  device_mesh=self.device_mesh,
                                  cpu_offload=cpu_offload)
@@ -385,6 +393,10 @@ class AsyncActorRolloutRefWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def init_model(self, hybrid_master_address=None, standalone_master_address=None):
+        with self.profiler_context:
+            self._init_model(hybrid_master_address, standalone_master_address)
+
+    def _init_model(self, hybrid_master_address=None, standalone_master_address=None):
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get('external_lib', None))
 

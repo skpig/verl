@@ -82,14 +82,12 @@ class AsyncXPerfGPTRollout(object):
 
     def __init__(self, config, tokenizer, model_hf_config, is_standalone=False):
         self.config = config
-        if hasattr(config, 'profile'):
-            self.profiler_context = get_profiler_context(filename=config.profile.filename,
-                                                         profile_on_ranks=config.profile.profile_on_ranks,
-                                                         default_hdfs_dir=config.profile.default_hdfs_dir,
-                                                         upload_to_mlx=config.profile.upload_to_mlx,
-                                                         enable=config.profile.enable)
-        else:
-            self.profiler_context = nullcontext(enter_result=NullProfileEnter())
+        self.profiler_context = get_profiler_context(filename=config.profile.filename,
+                                                     profile_on_ranks=config.profile.profile_on_ranks,
+                                                     default_hdfs_dir=config.profile.default_hdfs_dir,
+                                                     upload_to_mlx=config.profile.upload_to_mlx,
+                                                     enable=config.profile.enable,
+                                                     wait=10)
 
         # auto infer rollout running config
         # off-policy rollout should disable paged attention, for maintaining FIFO order
@@ -246,11 +244,12 @@ class AsyncXPerfGPTRollout(object):
         while True:
             (query_pool, complete_ratio, generation_kwargs, off_policy_steps) = self.input_queue.get(block=True)
             self.inference_engine.set_generator_strategy(**generation_kwargs)
-            with logging_set_level(self.config.get('logging_level', 'WARN')):
+            with logging_set_level(self.config.get('logging_level', 'WARN')), self.profiler_context as p:
                 self.inference_engine.execute(query_pool,
                                               complete_ratio=complete_ratio,
                                               stop_event=self.stop_event,
                                               off_policy_steps=off_policy_steps)
+                p.step()
 
             response_outputs = []
             is_finished = []

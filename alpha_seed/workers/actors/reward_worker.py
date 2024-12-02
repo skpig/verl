@@ -39,6 +39,7 @@ import numpy as np
 from alpha_seed.workers.hybrid_engine.hsdp import create_device_mesh
 from alpha_seed.workers.hybrid_engine.fsdp_ulysses import (FSDPUlyssesShardingManager, ulysses_pad_and_slice_inputs)
 from alpha_seed.workers.utils import rearrange_micro_batches
+from .initialize import parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init
 from dist_attn.ulysses.ops import slice_input_tensor, gather_outputs
 from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
 
@@ -48,7 +49,7 @@ from codetiming import Timer
 
 from datetime import timedelta
 
-from .initialize import get_device_init_context, create_init_fn
+from .initialize import get_device_init_context, create_init_fn, parallel_init_fsdp_fn, parallel_load_safetensors
 from ..utils import rearrange_micro_batches
 
 logger = logging.getLogger(__file__)
@@ -115,16 +116,15 @@ class RewardModelWorker(Worker):
 
         model_config.pad_token_id = self.tokenizer.pad_token_id
 
-        with init_context(), warnings.catch_warnings():
+        with meta_device_init(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
             # model_config.moe_implementation = 'group_gemm'  # Note that this is deprecated. Use seed-models stable
             setattr(model_config, '_moe_implementation', 'fused')
             setattr(model_config, 'classifier_dropout', 0.)
-            reward_module = AutoModelForTokenClassification.from_pretrained(pretrained_model_name_or_path=local_path,
-                                                                            torch_dtype=torch.bfloat16,
-                                                                            attn_implementation='flash_attention_2',
-                                                                            config=model_config,
-                                                                            trust_remote_code=trust_remote_code)
+            reward_module = AutoModelForTokenClassification.from_config(model_config,
+                                                                        torch_dtype=torch.bfloat16,
+                                                                        attn_implementation='flash_attention_2',
+                                                                        trust_remote_code=trust_remote_code)
             # with torch.no_grad():
             #     # set reward model score bias to zero
             #     if reward_module.score.bias is not None:
@@ -148,13 +148,13 @@ class RewardModelWorker(Worker):
 
         reward_module = FSDP(
             reward_module,
-            param_init_fn=create_init_fn(reward_module),
+            param_init_fn=parallel_init_fsdp_fn(reward_module, parallel_load_safetensors(local_path)),
             use_orig_params=False,
             auto_wrap_policy=auto_wrap_policy,
             device_id=torch.cuda.current_device(),
             sharding_strategy=sharding_strategy,  # zero3
             device_mesh=self.device_mesh,
-            sync_module_states=True,
+            sync_module_states=False,
             forward_prefetch=True,
             cpu_offload=cpu_offload)  # we always offload reward
 

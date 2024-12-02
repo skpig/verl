@@ -30,7 +30,8 @@ from single_controller.base import Worker
 from single_controller.base.decorator import register, Dispatch
 from verl import DataProto
 from verl.utils.fs import copy_local_path_from_hdfs
-from verl.utils.fsdp_utils import get_fsdp_wrap_policy, init_fn, get_init_weight_context_manager
+from verl.utils.fsdp_utils import get_fsdp_wrap_policy
+from .initialize import parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init
 from verl.utils.fsdp_utils import offload_fsdp_optimizer, offload_fsdp_param_and_grad, load_fsdp_optimizer, load_fsdp_param_and_grad
 from verl.utils.import_utils import import_external_libs
 from verl.utils.debug import log_gpu_memory_usage
@@ -137,16 +138,14 @@ class CriticWorker(Worker):
                 config=critic_model_config,
                 verbose=self.rank == 0), f'Cannot find rmpad version of {critic_model_config.model_type}'
 
-        init_context = get_init_weight_context_manager()
-        with init_context(), warnings.catch_warnings():
+        with meta_device_init(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
             setattr(critic_model_config, 'classifier_dropout', 0.)
             setattr(critic_model_config, '_moe_implementation', 'fused')
-            critic_module = AutoModelForTokenClassification.from_pretrained(pretrained_model_name_or_path=local_path,
-                                                                            torch_dtype=torch_dtype,
-                                                                            attn_implementation='flash_attention_2',
-                                                                            config=critic_model_config,
-                                                                            trust_remote_code=trust_remote_code)
+            critic_module = AutoModelForTokenClassification.from_config(critic_model_config,
+                                                                        torch_dtype=torch_dtype,
+                                                                        attn_implementation='flash_attention_2',
+                                                                        trust_remote_code=trust_remote_code)
             # reset score head parameter
             # critic_module.score.reset_parameters()
             # some parameters may not in torch_dtype
@@ -205,7 +204,7 @@ class CriticWorker(Worker):
             raise NotImplementedError(f"get device mesh ndim={self.device_mesh.ndim}, but only support 1 or 2")
 
         critic_module = FSDP(critic_module,
-                             param_init_fn=init_fn,
+                             param_init_fn=parallel_init_fsdp_fn(critic_module, parallel_load_safetensors(local_path)),
                              use_orig_params=False,
                              auto_wrap_policy=auto_wrap_policy,
                              device_id=torch.cuda.current_device(),
@@ -213,7 +212,7 @@ class CriticWorker(Worker):
                              device_mesh=self.device_mesh,
                              mixed_precision=mixed_precision,
                              forward_prefetch=True,
-                             sync_module_states=True,
+                             sync_module_states=False,
                              cpu_offload=cpu_offload)
 
         log_gpu_memory_usage('After critic FSDP', logger=logger)
