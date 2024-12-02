@@ -45,6 +45,7 @@ actor_rollout_ref:
     entropy_coeff: 0.001
     ppo_epochs: 1
     shuffle: True
+    use_ewma_loss: False
     optim:
       lr: 1e-5
       betas: [0.9, 0.95]

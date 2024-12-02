@@ -296,7 +296,8 @@ class DataParallelPPOActor(BasePPOActor):
                         cliprange=clip_ratio,
                         cliprange2=clip_ratio2,
                         scale_pg_by_kl=scale_pg_by_kl,
-                        upgo_loss_weight=upgo_loss_weight)
+                        upgo_loss_weight=upgo_loss_weight,
+                        use_ewma_loss=self.config.use_ewma_loss)
 
                     if kl_loss_weight > 0.0:
                         kl_loss = core_algos.compute_kl_loss(log_prob, ref_log_prob, response_mask, kl_penalty)

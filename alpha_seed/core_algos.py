@@ -185,7 +185,7 @@ def get_kl_logprobs(logprobs: torch.Tensor, ref_logprobs: torch.Tensor, reward_l
 
 
 def compute_policy_loss(old_log_prob, ref_log_prob, log_prob, advantages, upgo_advantages, eos_mask, cliprange,
-                        cliprange2, scale_pg_by_kl, upgo_loss_weight):
+                        cliprange2, scale_pg_by_kl, upgo_loss_weight, use_ewma_loss):
     """Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py#L1122
 
     Args:
@@ -208,17 +208,22 @@ def compute_policy_loss(old_log_prob, ref_log_prob, log_prob, advantages, upgo_a
 
     """
     seq_len_per_sample = torch.clamp(torch.sum(eos_mask, dim=1), min=1.0)
-    negative_approx_kl = log_prob - old_log_prob
-    ratio = torch.exp(negative_approx_kl)
-    ppo_kl = verl_F.masked_mean(-negative_approx_kl, eos_mask)
-    ppo_kl_sum = torch.mean(torch.sum(negative_approx_kl * eos_mask, dim=1))
-
+    if not use_ewma_loss:
+        ratio = torch.exp(log_prob - old_log_prob)
+    else:
+        ratio = torch.exp(log_prob - ref_log_prob)
     pg_losses1 = -advantages * ratio
     pg_losses2 = -advantages * torch.clamp(ratio, 1.0 - cliprange, 1.0 + cliprange)
     pg_losses3 = torch.abs(-advantages * cliprange2)
     pg_losses_clip = torch.maximum(pg_losses1, pg_losses2)
     pg_losses = torch.minimum(pg_losses_clip, pg_losses3)  # 这个应该对advantage为正的情况不影响
+    if use_ewma_loss:
+        pg_losses = torch.exp(ref_log_prob - old_log_prob) * pg_losses
     pg_loss = torch.sum(pg_losses * eos_mask, dim=1) / seq_len_per_sample
+
+    negative_approx_kl = log_prob - old_log_prob
+    ppo_kl = verl_F.masked_mean(-negative_approx_kl, eos_mask)
+    ppo_kl_sum = torch.mean(torch.sum(negative_approx_kl * eos_mask, dim=1))
 
     if scale_pg_by_kl:
         sqrt_kl = torch.sqrt(
