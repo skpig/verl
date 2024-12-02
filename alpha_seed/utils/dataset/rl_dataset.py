@@ -166,6 +166,7 @@ class RLHFDataset(Dataset):
                                                                              truncation=self.truncation)
             row_dict['input_ids'] = input_ids[0]
             row_dict['attention_mask'] = attention_mask[0]
+            prompt_names.append("")
         else:
             all_input_ids = []
             all_attention_mask = []

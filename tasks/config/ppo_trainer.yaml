@@ -239,6 +239,8 @@ trainer:
     enable: False
     buffer_size: 1
     strategy: hard
+    min_score: -1.0
+    max_score: 1.0
   offload_train_memory: False
 
 streaming_rollout:

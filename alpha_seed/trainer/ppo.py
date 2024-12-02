@@ -1045,17 +1045,20 @@ class RayPPOTrainer(object):
                         pprint(f'start standalone rollout, input batches {len(standalone_gen_batch)}.')
                     metrics['rollout/standalone_input_batch'] = len(standalone_batch)
                     # get training batch from ready queue, make it stable by random pick
+                    return_batch_size = self.config.data.train_batch_size * \
+                        self.config.trainer.league_training_config.buffer_size * \
+                        self.num_bon
                     ready_batch = [
-                        ready_batch_queue.get()
-                        for _ in range(min(self.config.data.train_batch_size, ready_batch_queue.qsize()))
+                        ready_batch_queue.get() for _ in range(min(return_batch_size, ready_batch_queue.qsize()))
                     ]
+                    real_bsz = len(ready_batch)
                     random_choise_batch = []
-                    if len(ready_batch) < self.config.data.train_batch_size:
-                        random_choise_batch.extend([
-                            random.choice(ready_batch)
-                            for _ in range(self.config.data.train_batch_size - len(ready_batch))
-                        ])
+                    if len(ready_batch) < return_batch_size:
+                        random_choise_batch.extend(
+                            [random.choice(ready_batch) for _ in range(return_batch_size - len(ready_batch))])
+                    fake_bsz = len(random_choise_batch)
                     ready_batch.extend(random_choise_batch)
+                    metrics.update({"rollout/real_bsz": real_bsz, "rollout/fake_bsz": fake_bsz})
 
                     batch = DataProto.concat(ready_batch)
                     if self.config.algorithm.force_append_eos:

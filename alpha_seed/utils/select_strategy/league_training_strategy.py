@@ -17,6 +17,16 @@ def league_training_filter_prompt(batch, strategy, config):
         sort_idex = torch.argsort(mean_scores, dim=0)
     elif strategy == "easy":
         sort_idex = torch.argsort(mean_scores, dim=0, descending=True)
+    elif strategy == "filter":
+        min_score = config.trainer.league_training_config.min_score
+        max_score = config.trainer.league_training_config.max_score
+        mask = torch.logical_and(torch.ge(mean_scores, min_score), torch.le(mean_scores, max_score)).long()
+        sort_idex = torch.argsort(mask, dim=0, descending=True)
+        filter_num = max(mask.sum().tolist(), 1)
+        sort_idex = sort_idex[:filter_num]
+        while sort_idex.size(0) < bsz * buffer_size:
+            sort_idex = torch.cat([sort_idex, sort_idex], dim=0)
+        sort_idex = sort_idex[:bsz * buffer_size]
     else:
         raise NotImplemented
 
@@ -80,6 +90,10 @@ def league_training_filter_prompt_v2(batch, strategy, config):
         key_score_pairs = sorted(key_score_pairs, key=lambda x: x[1], reverse=True)
     elif strategy == "easy":
         key_score_pairs = sorted(key_score_pairs, key=lambda x: x[1], reverse=True)
+    elif strategy == "filter":
+        min_score = config.trainer.league_training_config.min_score
+        max_score = config.trainer.league_training_config.max_score
+        key_score_pairs = list(filter(lambda x: x[1] >= min_score and x[1] <= max_score, key_score_pairs))
     else:
         raise NotImplemented
     final_samples = []
@@ -89,6 +103,11 @@ def league_training_filter_prompt_v2(batch, strategy, config):
         cur_len += len(id2feat[key])
         if cur_len >= final_bsz:
             break
+    final_samples = final_samples[:final_bsz]
+    uniq_bsz = len(final_samples)
+    while len(final_samples) < final_bsz:
+        random.shuffle(final_samples)
+        final_samples = final_samples + final_samples
     final_samples = final_samples[:final_bsz]
 
     # step3, 处理成DataProto格式
@@ -126,6 +145,7 @@ def league_training_filter_prompt_v2(batch, strategy, config):
         "league_training/response_num_min": min(response_num_per_prompt),
         "league_training/response_num_std": np.std(response_num_per_prompt),
         "league_training/final_bsz": final_bsz,
+        "league_training/uniq_bsz": uniq_bsz,
     }
 
     return DataProto(
