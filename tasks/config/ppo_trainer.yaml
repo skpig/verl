@@ -155,7 +155,8 @@ critic:
   use_dynamic_bsz: True
   ppo_max_token_len: -1
   infer_micro_batch_size: 128
-  ppo_epochs: ${actor_rollout_ref.actor.ppo_epochs}
+  ppo_epochs: 1
+  phasic_critic_epochs: 1
   shuffle: ${actor_rollout_ref.actor.shuffle}
   grad_clip: 1.0
   cliprange_value: 0.5
@@ -196,6 +197,7 @@ reward_model:
 
 algorithm:
   force_append_eos: False
+  phasic_critic_interval: 0
   gamma: 1.0
   lam: 0.95
   adv_estimator: gae

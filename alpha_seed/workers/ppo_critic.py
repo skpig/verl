@@ -127,7 +127,8 @@ class DataParallelPPOCritic(BasePPOCritic):
         select_keys = ['input_ids', 'responses', 'attention_mask', 'values', 'returns']
         data = data.select(batch_keys=select_keys)
         return data.make_iterator(mini_batch_size=self.config.ppo_mini_batch_size,
-                                  epochs=self.config.ppo_epochs,
+                                  epochs=self.config.ppo_epochs if not data.meta_info.get('phasic_update', False) else
+                                  self.config.phasic_critic_epochs,
                                   dataloader_kwargs={'shuffle': self.config.shuffle})
 
     def _optimizer_step(self):

@@ -408,6 +408,8 @@ class RayPPOTrainer(object):
 
         self.valid_hdfs_global_step = None
 
+        self.phasic_critic_buffer = None
+
     def _create_dataloader(self):
         from torch.utils.data import DataLoader
         version = self.config.data.get('version', 'v1')
@@ -1174,6 +1176,7 @@ class RayPPOTrainer(object):
                     metrics['timing/adv'] = timer.last
 
                     # update critic
+                    phasic_critic_update = self.config.algorithm.phasic_critic_interval > 0 and self.global_step % self.config.algorithm.phasic_critic_interval == 0
                     if self.use_critic:
                         with Timer(name='update_critic', logger=None) as timer:
                             critic_output = self.critic_wg.update_critic(batch)
@@ -1182,9 +1185,16 @@ class RayPPOTrainer(object):
                         metrics.update(critic_output_metrics)
 
                         with Timer(name='train_mem_offload', logger=None) as timer:
-                            if self.config.trainer.offload_train_memory:
+                            if self.config.trainer.offload_train_memory and not phasic_critic_update:
                                 self.critic_wg.to("cpu")
                         metrics['timing/train_mem_offload'] += timer.last
+                    if self.config.algorithm.phasic_critic_interval > 0:
+                        select_keys = ['input_ids', 'responses', 'attention_mask', 'values', 'returns']
+                        buffer_batch = batch.select(batch_keys=select_keys)
+                        if self.phasic_critic_buffer is None:
+                            self.phasic_critic_buffer = buffer_batch
+                        else:
+                            self.phasic_critic_buffer = DataProto.concat([self.phasic_critic_buffer, buffer_batch])
 
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_step and self.global_step % self.config.trainer.actor_update_freq == 0:
@@ -1205,6 +1215,22 @@ class RayPPOTrainer(object):
                             if self.config.trainer.offload_train_memory:
                                 self.actor_rollout_wg.to("cpu", model=False, optimizer=True)
                         metrics['timing/train_mem_offload'] += timer.last
+
+                    # phasic critic update
+                    if phasic_critic_update:
+                        self.phasic_critic_buffer.meta_info['phasic_update'] = True
+                        with Timer(name='phasic_critic_update', logger=None) as timer:
+                            critic_output = self.critic_wg.update_critic(self.phasic_critic_buffer)
+                        metrics['timing/phasic_critic_update'] = timer.last
+                        critic_output_metrics = reduce_metrics(critic_output.meta_info['metrics'])
+                        metrics.update(critic_output_metrics)
+
+                        with Timer(name='train_mem_offload', logger=None) as timer:
+                            if self.config.trainer.offload_train_memory:
+                                self.critic_wg.to("cpu")
+                        metrics['timing/train_mem_offload'] += timer.last
+
+                        self.phasic_critic_buffer = None
 
                     # update ref ema
                     with Timer(name='update_ref_ema', logger=None) as timer:
