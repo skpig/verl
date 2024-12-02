@@ -106,4 +106,8 @@ python3 tasks/main_ppo.py \
     trainer.log_file=/opt/tiger/alpha-seed/log.jsonl \
     trainer.resume_steps=disable \
     trainer.set_fake_attention_mask=False \
-    trainer.fake_seqlen_ratio=0.5
+    trainer.fake_seqlen_ratio=0.5 \
+    streaming_rollout.nnodes=0 \
+    streaming_rollout.n_gpus_per_node=4 \
+    streaming_rollout.warmup_step=0 \
+    streaming_rollout.force_eos=True

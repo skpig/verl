@@ -126,12 +126,15 @@ class AsyncActorRolloutRefWorker(Worker):
 
         # normalize config
         if self._is_actor:
+            sp_size = config.actor.ulysses_sequence_parallel_size
             self.config.actor.ppo_mini_batch_size //= world_size // sp_size
             self.config.actor.ppo_micro_batch_size //= world_size // sp_size
         if self._is_rollout or self._is_standalone_rollout:
+            sp_size = config.actor.ulysses_sequence_parallel_size
             self.config.rollout.micro_batch_size //= world_size  # for xperf-gpt
             self.config.rollout.log_prob_micro_batch_size //= world_size // sp_size
         if self._is_ref:
+            sp_size = config.ref.ulysses_sequence_parallel_size
             self.config.ref.log_prob_micro_batch_size //= world_size // sp_size
         self.save_sequences = self.config.rollout.get('save_sequences', None)
         self.load_sequences = self.config.rollout.get('load_sequences', None)
@@ -380,7 +383,7 @@ class AsyncActorRolloutRefWorker(Worker):
                 if model:
                     offload_fsdp_param_and_grad(self.ref_module_fsdp)
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def init_model(self, hybrid_master_address=None, standalone_master_address=None):
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get('external_lib', None))
@@ -396,9 +399,6 @@ class AsyncActorRolloutRefWorker(Worker):
             if self._is_actor:
                 optim_config = self.config.actor.optim
                 fsdp_config = self.config.actor.fsdp_config
-            elif self._is_ref:
-                optim_config = None
-                fsdp_config = self.config.ref.fsdp_config
             else:
                 optim_config = None
                 fsdp_config = OmegaConf.create()
@@ -410,7 +410,7 @@ class AsyncActorRolloutRefWorker(Worker):
                 enable_gradient_checkpointing=self.config.model.get('enable_gradient_checkpointing', False),
                 use_rmpad=use_rmpad,
                 trust_remote_code=self.config.model.get('trust_remote_code', False),
-                role='actor')
+                role='actor' if self._is_actor else 'rollout')
 
             # get the original unwrapped module
             self.actor_module = self.actor_module_fsdp._fsdp_wrapped_module
@@ -426,10 +426,6 @@ class AsyncActorRolloutRefWorker(Worker):
             self.actor = DataParallelPPOActor(config=self.config.actor,
                                               actor_module=self.actor_module_fsdp,
                                               actor_optimizer=self.actor_optimizer)
-
-        if self._is_rollout or self._is_standalone_rollout:
-            self.rollout, self.sharding_manager = self._build_rollout(hybrid_master_address, standalone_master_address)
-            self.rollout_async = None
 
         if self._is_ref:
             self.ref_module_fsdp = self._build_model_optimizer(model_path=self.config.model.path,
@@ -447,6 +443,10 @@ class AsyncActorRolloutRefWorker(Worker):
                 self.config.ref.use_rmpad = use_rmpad
                 self.config.ref.use_ce_loss_fusion = use_ce_loss_fusion
             self.ref_policy = DataParallelPPOActor(config=self.config.ref, actor_module=self.ref_module_fsdp)
+
+        if self._is_rollout or self._is_standalone_rollout:
+            self.rollout, self.sharding_manager = self._build_rollout(hybrid_master_address, standalone_master_address)
+            self.rollout_async = None
 
         if self._is_actor:
             self.flops_counter = FlopsCounter(self.actor_model_config)
