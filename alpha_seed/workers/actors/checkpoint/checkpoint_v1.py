@@ -93,7 +93,10 @@ class CheckpointManagerV1:
         # remove previous local_path
         if self.previous_save_local_path is not None:
             previous_save_local_path = os.path.join(self.previous_save_local_path, f'model_optim_rank_{self.rank}.pt')
-            shutil.rmtree(previous_save_local_path, ignore_errors=True)
+            if os.path.isfile(previous_save_local_path):
+                os.remove(previous_save_local_path)
+            else:
+                shutil.rmtree(previous_save_local_path, ignore_errors=True)
 
         with FileLock(os.path.join(tempfile.gettempdir(), local_path + '.lock')):
             # make a new dir
