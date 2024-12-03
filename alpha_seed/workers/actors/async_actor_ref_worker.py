@@ -123,6 +123,18 @@ class AsyncActorRolloutRefWorker(Worker):
 
             self.actor_ulysses_sharding_manager = FSDPUlyssesShardingManager(self.actor_ulysses_sp_device_mesh)
 
+            inference_sp_size = config.ref.ulysses_sequence_parallel_size
+            if inference_sp_size > 1:
+                self.actor_inference_ulysses_sp_device_mesh = init_device_mesh('cuda',
+                                                                               mesh_shape=(world_size // sp_size,
+                                                                                           sp_size),
+                                                                               mesh_dim_names=['dp', 'sp'])
+            else:
+                self.actor_inference_ulysses_sp_device_mesh = None
+
+            self.actor_inference_ulysses_sharding_manager = FSDPUlyssesShardingManager(
+                self.actor_inference_ulysses_sp_device_mesh)
+
         if self._is_ref:
             sp_size = config.ref.ulysses_sequence_parallel_size
             if sp_size > 1:
@@ -525,12 +537,12 @@ class AsyncActorRolloutRefWorker(Worker):
                 output.meta_info['max_token_len'] = self.config.rollout.max_token_len
             else:
                 output.meta_info['micro_batch_size'] = self.config.rollout.log_prob_micro_batch_size
-            with self.actor_ulysses_sharding_manager:
-                output = self.actor_ulysses_sharding_manager.preprocess_data(output)
+            with self.actor_inference_ulysses_sharding_manager:
+                output = self.actor_inference_ulysses_sharding_manager.preprocess_data(output)
                 old_entropy, old_log_probs = self.actor.compute_log_prob(data=output)
                 output.batch['old_log_probs'] = old_log_probs
                 output.batch['old_entropy'] = old_entropy
-                output = self.actor_ulysses_sharding_manager.postprocess_data(output)
+                output = self.actor_inference_ulysses_sharding_manager.postprocess_data(output)
 
         output = output.to('cpu')
 

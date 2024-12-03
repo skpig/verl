@@ -281,7 +281,7 @@ class CriticWorker(Worker):
         micro_batch_size = self.config.infer_micro_batch_size
         data.meta_info['use_dynamic_bsz'] = self.config.use_dynamic_bsz
         if self.config.use_dynamic_bsz:
-            data.meta_info['max_token_len'] = self.config.ppo_max_token_len
+            data.meta_info['max_token_len'] = self.config.get('infer_ppo_max_token_len', self.config.ppo_max_token_len)
         else:
             data.meta_info['micro_batch_size'] = micro_batch_size
         with self.ulysses_sharding_manager:
