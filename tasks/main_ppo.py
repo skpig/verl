@@ -74,8 +74,10 @@ class RewardManager():
         self.need_punish_duplicate = self.config.reward_model.get('need_punish_duplicate', False)
         self.punish_score = self.config.reward_model.get('punish_score', 'rule-lighteval/MATH_v2:-1,code-sandbox:0')
         self.punish_score = dict(map(lambda x: (x.split(':')[0], float(x.split(':')[1])), self.punish_score.split(',')))
+        self.need_punish_trunc = self.config.reward_model.get('need_punish_trunc', False)
+        self.trunc_punish_score = self.config.reward_model.get('trunc_punish_score', -5)
 
-    def __call__(self, data: DataProto, global_step=None, need_norm=True):
+    def __call__(self, data: DataProto, global_step=None, need_norm=True, is_validation=False):
         """We will expand this function gradually based on the available datasets"""
         reward_tensor = torch.zeros_like(data.batch['responses'], dtype=torch.float32)
         already_print_data_sources = {}
@@ -91,6 +93,7 @@ class RewardManager():
             valid_prompt_length = data_item.batch['attention_mask'][:prompt_length].sum()
             valid_prompt_ids = prompt_ids[-valid_prompt_length:]
             response_ids = data_item.batch['responses']
+            response_length = response_ids.shape[-1]
             valid_response_length = data_item.batch['attention_mask'][prompt_length:].sum()
             valid_response_ids = response_ids[:valid_response_length]
 
@@ -126,7 +129,8 @@ class RewardManager():
                 score_fn_inputs["code_sandbox_psm"] = self.config.trainer.code_sandbox_psm
             score = compute_score_fn(**score_fn_inputs)
             is_para_dup = para_dup.find_single_turn_duplicate(solution_str)[0]
-            return prompt_str, solution_str, ground_truth, reward_style, valid_response_length, score, is_para_dup, idx, solution_str_post_proc
+            is_trunc = response_length == valid_response_length
+            return prompt_str, solution_str, ground_truth, reward_style, valid_response_length, score, is_para_dup, is_trunc, idx, solution_str_post_proc
 
         for i in range(len(data)):
             rm_res_future_list.append(self.rm_req_executor.submit(get_rm_score, i))
@@ -137,7 +141,7 @@ class RewardManager():
         not_dup_lens = []
         from tqdm import tqdm
         for res in tqdm(as_completed(rm_res_future_list), total=len(data), desc="get_rm_score"):
-            prompt_str, solution_str, ground_truth, reward_style, valid_response_length, score, is_para_dup, idx, solution_str_post_proc = res.result(
+            prompt_str, solution_str, ground_truth, reward_style, valid_response_length, score, is_para_dup, is_trunc, idx, solution_str_post_proc = res.result(
             )
             if reward_style == "code-sandbox":
                 total_cnt += 1
@@ -152,10 +156,12 @@ class RewardManager():
             if is_para_dup:
                 dup_cnt += 1
                 dup_lens.append(valid_response_length)
-                if self.need_punish_duplicate:
+                if self.need_punish_duplicate and not is_validation:
                     score = self.punish_score.get(reward_style, -1)
             else:
                 not_dup_lens.append(valid_response_length)
+            if self.need_punish_trunc and is_trunc and not is_validation:
+                score = self.trunc_punish_score
             reward_tensor[idx, valid_response_length - 1] = score
 
             if reward_style not in already_print_data_sources:
@@ -169,11 +175,12 @@ class RewardManager():
                     [global_step, prompt_str, solution_str, ground_truth, score, solution_str_post_proc])
             save_to_hdfs.append([global_step, prompt_str, solution_str, ground_truth, score, solution_str_post_proc])
 
-        self.logger.log(data={"oj/fail_rate": fail_cnt / total_cnt if total_cnt > 0 else -1}, step=global_step)
+        prefix = "" if not is_validation else "val/"
         self.logger.log(data={
-            "dup/para_dup": dup_cnt / len(data),
-            "dup/dup_response_len": sum(dup_lens) / max(1, len(dup_lens)),
-            "dup/not_dup_response_len": sum(not_dup_lens) / max(1, len(not_dup_lens)),
+            prefix + "oj/fail_rate": fail_cnt / total_cnt if total_cnt > 0 else -1,
+            prefix + "dup/para_dup": dup_cnt / len(data),
+            prefix + "dup/dup_response_len": sum(dup_lens) / max(1, len(dup_lens)),
+            prefix + "dup/not_dup_response_len": sum(not_dup_lens) / max(1, len(not_dup_lens)),
         },
                         step=global_step)
 

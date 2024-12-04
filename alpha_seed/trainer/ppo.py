@@ -542,7 +542,10 @@ class RayPPOTrainer(object):
 
                 # evaluate using reward_function
                 # for certain reward function (e.g. sandbox), the generation can overlap with reward
-                reward_tensor = self.val_reward_fn(test_batch, global_step=self.global_step, need_norm=False)
+                reward_tensor = self.val_reward_fn(test_batch,
+                                                   global_step=self.global_step,
+                                                   need_norm=False,
+                                                   is_validation=True)
 
                 reward_tensor_before_select = reward_tensor.clone()  # (B x bon, seqlen)
                 if eval_bon > 1 and self.global_step % self.config.actor_rollout_ref.rollout.get("eval_bon_every",
