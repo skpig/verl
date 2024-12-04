@@ -149,7 +149,7 @@ class RewardManager():
             # eval的时候不做这个norm
             if need_norm:
                 score = (score - self.mean) / self.std
-            if self.need_punish_duplicate:
+            if is_para_dup:
                 dup_cnt += 1
                 dup_lens.append(valid_response_length)
                 if self.need_punish_duplicate:
