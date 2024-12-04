@@ -194,6 +194,8 @@ reward_model:
   reward_0_for_overlong_rsp: False
   add_int_verify: True
   punish_no_answer: v0
+  need_punish_duplicate: False
+  punish_score: rule-lighteval/MATH_v2:-1,code-sandbox:0
 
 algorithm:
   force_append_eos: False

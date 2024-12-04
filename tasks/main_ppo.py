@@ -25,6 +25,7 @@ import hdfs_io
 
 # rule-based reward score
 from alpha_seed.utils.reward_score import gsm8k, math, math_v2, model_score_fn, logic_puzzle, oj_utils, math_verifier, response_post_proc
+from alpha_seed.utils.duplicate import para_dup
 from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRefWorker
 from alpha_seed.workers.actors.critic_worker import CriticWorker
 from alpha_seed.utils.alarm.lark_util import send_message_to_employee
@@ -70,6 +71,9 @@ class RewardManager():
             max_workers=int(self.config.reward_model.get('reward_executor_maxnum', 128)))
         self.mean = self.config.reward_model.mean
         self.std = self.config.reward_model.std
+        self.need_punish_duplicate = self.config.reward_model.get('need_punish_duplicate', False)
+        self.punish_score = self.config.reward_model.get('punish_score', 'rule-lighteval/MATH_v2:-1,code-sandbox:0')
+        self.punish_score = dict(map(lambda x: (x.split(':')[0], float(x.split(':')[1])), self.punish_score.split(',')))
 
     def __call__(self, data: DataProto, global_step=None, need_norm=True):
         """We will expand this function gradually based on the available datasets"""
@@ -121,15 +125,19 @@ class RewardManager():
             if reward_style == "code-sandbox":
                 score_fn_inputs["code_sandbox_psm"] = self.config.trainer.code_sandbox_psm
             score = compute_score_fn(**score_fn_inputs)
-            return prompt_str, solution_str, ground_truth, reward_style, valid_response_length, score, idx, solution_str_post_proc
+            is_para_dup = para_dup.find_single_turn_duplicate(solution_str)[0]
+            return prompt_str, solution_str, ground_truth, reward_style, valid_response_length, score, is_para_dup, idx, solution_str_post_proc
 
         for i in range(len(data)):
             rm_res_future_list.append(self.rm_req_executor.submit(get_rm_score, i))
         fail_cnt = 0
         total_cnt = 0
+        dup_cnt = 0
+        dup_lens = []
+        not_dup_lens = []
         from tqdm import tqdm
         for res in tqdm(as_completed(rm_res_future_list), total=len(data), desc="get_rm_score"):
-            prompt_str, solution_str, ground_truth, reward_style, valid_response_length, score, idx, solution_str_post_proc = res.result(
+            prompt_str, solution_str, ground_truth, reward_style, valid_response_length, score, is_para_dup, idx, solution_str_post_proc = res.result(
             )
             if reward_style == "code-sandbox":
                 total_cnt += 1
@@ -141,6 +149,13 @@ class RewardManager():
             # eval的时候不做这个norm
             if need_norm:
                 score = (score - self.mean) / self.std
+            if self.need_punish_duplicate:
+                dup_cnt += 1
+                dup_lens.append(valid_response_length)
+                if self.need_punish_duplicate:
+                    score = self.punish_score.get(reward_style, -1)
+            else:
+                not_dup_lens.append(valid_response_length)
             reward_tensor[idx, valid_response_length - 1] = score
 
             if reward_style not in already_print_data_sources:
@@ -155,6 +170,12 @@ class RewardManager():
             save_to_hdfs.append([global_step, prompt_str, solution_str, ground_truth, score, solution_str_post_proc])
 
         self.logger.log(data={"oj/fail_rate": fail_cnt / total_cnt if total_cnt > 0 else -1}, step=global_step)
+        self.logger.log(data={
+            "dup/para_dup": dup_cnt / len(data),
+            "dup/dup_response_len": sum(dup_lens) / max(1, len(dup_lens)),
+            "dup/not_dup_response_len": sum(not_dup_lens) / max(1, len(not_dup_lens)),
+        },
+                        step=global_step)
 
         if total_cnt > 0 and fail_cnt / total_cnt >= 0.01:
             send_message_to_employee("alpha seed任务oj失败率过高", f"任务链接: {task_url}, 失败率: {round(fail_cnt/total_cnt, 2)}",
