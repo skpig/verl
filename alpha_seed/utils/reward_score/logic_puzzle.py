@@ -11,14 +11,17 @@ registried_tasks = {}
 import os
 import importlib
 
-folder_path = '/opt/tiger/verifiable_tasks/verifiable_tasks/tasks'
-for task in os.listdir(folder_path):
-    try:
-        if os.path.isdir(os.path.join(folder_path, task)):
-            module = importlib.import_module(f'verifiable_tasks.tasks.{task}.verifier')
-            registried_tasks[task] = module.verify
-    except:
-        continue
+try:
+    folder_path = '/opt/tiger/verifiable_tasks/verifiable_tasks/tasks'
+    for task in os.listdir(folder_path):
+        try:
+            if os.path.isdir(os.path.join(folder_path, task)):
+                module = importlib.import_module(f'verifiable_tasks.tasks.{task}.verifier')
+                registried_tasks[task] = module.verify
+        except:
+            continue
+except Exception:
+    print('Unable to find verifiable_tasks')
 
 
 def compute_score(solution_str, ground_truth, **argv) -> float:
