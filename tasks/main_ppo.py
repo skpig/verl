@@ -235,7 +235,8 @@ def main(config):
 
         ray.init(runtime_env=runtime_env)
 
-    ray.get(main_task.remote(config))
+    runner = TaskRunner.remote()
+    ray.get(runner.main.remote(main_task, config=config))
 
 
 def validate_config(config):
@@ -292,6 +293,12 @@ def validate_config(config):
 
 
 @ray.remote
+class TaskRunner:
+
+    def main(self, func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+
 def main_task(config):
     validate_config(config=config)
 

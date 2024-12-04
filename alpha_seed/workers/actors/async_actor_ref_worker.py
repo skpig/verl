@@ -488,10 +488,10 @@ class AsyncActorRolloutRefWorker(Worker):
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def update_actor(self, data: DataProto):
-        data = data.to('cuda')
+        # data = data.to('cuda')
 
         assert self._is_actor
-        data.batch = data.batch.cuda()
+        # data.batch = data.batch.cuda()
 
         log_gpu_memory_usage('Before update policy', logger=logger)
 
@@ -522,7 +522,7 @@ class AsyncActorRolloutRefWorker(Worker):
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def old_log_probs(self, prompts: DataProto):
-        prompts = prompts.to('cuda')
+        # prompts = prompts.to('cuda')
         # set to False if it is validation
         recompute_log_prob = prompts.meta_info.get('recompute_log_prob', True)
 
@@ -647,7 +647,7 @@ class AsyncActorRolloutRefWorker(Worker):
     def compute_ref_log_prob(self, data: DataProto):
         assert self._is_ref
 
-        data = data.to('cuda')
+        # data = data.to('cuda')
 
         micro_batch_size = self.config.ref.log_prob_micro_batch_size
         data.meta_info['use_dynamic_bsz'] = self.config.ref.use_dynamic_bsz

@@ -276,7 +276,7 @@ class CriticWorker(Worker):
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_values(self, data: DataProto):
-        data = data.to('cuda')
+        # data = data.to('cuda')
 
         micro_batch_size = self.config.infer_micro_batch_size
         data.meta_info['use_dynamic_bsz'] = self.config.use_dynamic_bsz
@@ -295,7 +295,7 @@ class CriticWorker(Worker):
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def update_critic(self, data: DataProto):
-        data = data.to('cuda')
+        # data = data.to('cuda')
 
         log_gpu_memory_usage('Before Critic update', logger=logger)
 

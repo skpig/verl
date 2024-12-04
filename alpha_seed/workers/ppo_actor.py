@@ -92,7 +92,7 @@ class DataParallelPPOActor(BasePPOActor):
         self.compute_entropy_loss = torch.compile(core_algos.compute_entropy_loss, dynamic=True)
         self.entropy_from_logits = torch.compile(verl_F.entropy_from_logits, dynamic=True)
 
-    def _forward_micro_batch(self, micro_batch, temperature, compute_entropy):
+    def _forward_micro_batch(self, micro_batch: TensorDict, temperature, compute_entropy):
         from flash_attn.bert_padding import index_first_axis, rearrange
 
         response_length = micro_batch['responses'].size(-1)
@@ -222,6 +222,8 @@ class DataParallelPPOActor(BasePPOActor):
         log_probs_lst = []
         for i, micro_batch in enumerate(micro_batches):
             with torch.inference_mode():
+                assert micro_batch.device == torch.device('cpu')
+                micro_batch = micro_batch.cuda()  # actor device is cpu when using offload
                 entropy, log_probs = self._forward_micro_batch(micro_batch,
                                                                temperature=temperature,
                                                                compute_entropy=True)
@@ -259,6 +261,7 @@ class DataParallelPPOActor(BasePPOActor):
                 self.actor_optimizer.zero_grad()
 
                 for i, micro_data in enumerate(micro_batches):
+                    assert micro_data.device == torch.device('cpu')
                     micro_data = micro_data.cuda()  # actor device is cpu when using offload
                     responses = micro_data['responses']
                     response_length = responses.size(1)

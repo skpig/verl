@@ -29,6 +29,8 @@ from verl.utils.py_functional import append_to_dict
 from verl.utils.torch_functional import masked_mean
 from verl.utils.model import compute_position_id_with_mask
 
+from tensordict import TensorDict
+
 from alpha_seed.workers.hybrid_engine.fsdp_ulysses import ulysses_pad_and_slice_inputs
 from alpha_seed import core_algos
 
@@ -77,7 +79,7 @@ class DataParallelPPOCritic(BasePPOCritic):
 
         self.value_loss = torch.compile(core_algos.compute_value_loss, disable=True)
 
-    def _forward_micro_batch(self, micro_batch):
+    def _forward_micro_batch(self, micro_batch: TensorDict):
         from flash_attn.bert_padding import pad_input, unpad_input, index_first_axis, rearrange
 
         response_length = micro_batch['responses'].size(-1)
@@ -159,6 +161,8 @@ class DataParallelPPOCritic(BasePPOCritic):
             num_micro_batches = len(micro_batches)
         values_lst = []
         for i, micro_batch in enumerate(micro_batches):
+            assert micro_batch.device == torch.device('cpu')
+            micro_batch = micro_batch.cuda()  # actor device is cpu when using offload
             with torch.no_grad():
                 values = self._forward_micro_batch(micro_batch)
             if i < num_micro_batches:
@@ -191,6 +195,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                 self.critic_optimizer.zero_grad()
 
                 for i, micro_data in enumerate(micro_batches):
+                    assert micro_data.device == torch.device('cpu')
                     micro_data = micro_data.cuda()  # critic device is cpu when using offload
                     input_ids = micro_data['input_ids']
                     responses = micro_data['responses']
