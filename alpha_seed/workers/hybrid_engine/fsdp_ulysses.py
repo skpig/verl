@@ -74,7 +74,11 @@ class FSDPUlyssesShardingManager(BaseShardingManager):
         if self.device_mesh is not None:
             sp_size = self.device_mesh['sp'].size()
             group = self.device_mesh['sp'].get_group()
+
+            prev_device = data.batch.device
+            data.batch = data.batch.cuda()
             data.batch = allgather_dict_tensors(data.batch.contiguous(), size=sp_size, group=group, dim=0)
+            data.batch = data.batch.to(prev_device)
             # all gather non_tensor_batch
             all_non_tensor_batch = [None for _ in range(sp_size)]
             torch.distributed.all_gather_object(all_non_tensor_batch, data.non_tensor_batch, group=group)

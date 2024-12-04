@@ -28,6 +28,12 @@ use_last_response=False
 use_ref_answer=True
 gae_gamma=1.0
 gae_lam=0.95
+# 工程参数
+actor_sp_size=2
+critic_sp_size=2
+ref_sp_size=1
+reward_sp_size=1
+
 # tracking实验名
 project_name='verl_example_math_ci'
 experiment_name='p6_400m_math-v1'
@@ -45,6 +51,10 @@ python3 tasks/main_ppo.py \
     data.truncation='left' \
     +data.chat_template=seed \
     actor_rollout_ref.model.path=${SFT_MODEL_PATH} \
+    actor_rollout_ref.actor.ulysses_sequence_parallel_size=${actor_sp_size} \
+    actor_rollout_ref.ref.ulysses_sequence_parallel_size=${ref_sp_size} \
+    critic.ulysses_sequence_parallel_size=${critic_sp_size} \
+    reward_model.ulysses_sequence_parallel_size=${reward_sp_size} \
     +actor_rollout_ref.model.use_rmpad=True \
     actor_rollout_ref.model.external_lib=seed_models \
     +actor_rollout_ref.model.override_config.attention_dropout=0. \
