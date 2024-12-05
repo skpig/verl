@@ -125,10 +125,10 @@ class AsyncActorRolloutRefWorker(Worker):
 
             inference_sp_size = config.ref.ulysses_sequence_parallel_size
             if inference_sp_size > 1:
-                self.actor_inference_ulysses_sp_device_mesh = init_device_mesh('cuda',
-                                                                               mesh_shape=(world_size // sp_size,
-                                                                                           sp_size),
-                                                                               mesh_dim_names=['dp', 'sp'])
+                self.actor_inference_ulysses_sp_device_mesh = init_device_mesh(
+                    'cuda',
+                    mesh_shape=(world_size // inference_sp_size, inference_sp_size),
+                    mesh_dim_names=['dp', 'sp'])
             else:
                 self.actor_inference_ulysses_sp_device_mesh = None
 
