@@ -110,8 +110,10 @@ def flash_attn2_rmpad_forward(
         query_states = gather_seq_scatter_heads(query_states, seq_dim=2, head_dim=1)
         key_states = gather_seq_scatter_heads(key_states, seq_dim=2, head_dim=1)
         value_states = gather_seq_scatter_heads(value_states, seq_dim=2, head_dim=1)
-        assert query_states.size(2) == position_ids.size(1), \
-            f"got seqlen mismatches: {query_states.size(2)} != {position_ids.size(1)}"
+        # the position_ids and max_seqlen is required to be global for flash attention
+        # TODO: optimize this, no need to allgather at each layer
+        position_ids = gather_outputs(position_ids, gather_dim=1)
+        max_seqlen = position_ids.max().item() + 1
     full_qlen = query_states.size(2)
 
     # In PEFT, usually we cast the layer norms in float32 for training stability reasons

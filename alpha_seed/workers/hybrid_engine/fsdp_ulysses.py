@@ -98,11 +98,7 @@ class FSDPUlyssesShardingManager(BaseShardingManager):
 def ulysses_pad_and_slice_inputs(input_ids_rmpad: torch.Tensor, position_ids_rmpad: Optional[torch.Tensor],
                                  sp_size: int):
     """
-    Pad and slice input_ids to be divisible by sp_size
-    Pad position_ids to be divisible by sp_size.
-
-    Note both input_ids_rmpad and position_ids_rmpad will be padded,
-    but only input_ids will be sliced.
+    Pad input_ids and position_ids to be divisible by sp_size
 
     The is the utility of pre-forward for ulysses sequence parallelism
 
@@ -129,7 +125,6 @@ def ulysses_pad_and_slice_inputs(input_ids_rmpad: torch.Tensor, position_ids_rmp
             pad_pos_ids = torch.arange(pad_size, device=position_ids_rmpad.device).unsqueeze(0)
             position_ids_rmpad = torch.cat((position_ids_rmpad, pad_pos_ids), dim=-1)
     input_ids_rmpad = slice_input_tensor(input_ids_rmpad, dim=1, padding=False)
-    # we don't need to slice position ids
-    # if position_ids_rmpad is not None:
-    #     position_ids_rmpad = slice_input_tensor(position_ids_rmpad, dim=1, padding=False)
+    if position_ids_rmpad is not None:
+        position_ids_rmpad = slice_input_tensor(position_ids_rmpad, dim=1, padding=False)
     return input_ids_rmpad, position_ids_rmpad, pad_size
