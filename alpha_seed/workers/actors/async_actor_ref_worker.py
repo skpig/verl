@@ -522,7 +522,7 @@ class AsyncActorRolloutRefWorker(Worker):
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def old_log_probs(self, prompts: DataProto):
-        # prompts = prompts.to('cuda')
+        prompts = prompts.to('cpu')
         # set to False if it is validation
         recompute_log_prob = prompts.meta_info.get('recompute_log_prob', True)
 
