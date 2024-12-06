@@ -172,11 +172,20 @@ def reduce_metrics(metrics: dict):
     return metrics
 
 
-def compute_data_metrics(batch, use_critic, mean, std):
-    # TODO: add response length
-    if torch.cuda.is_available():
-        print('Using GPU to compute_data_metrics')
-        batch = batch.to('cuda')
+def compute_data_metrics(self, batch: DataProto):
+    """
+    Important: Note that this function will be executed in distributed.
+    Note that you can't delete self in this function.
+    """
+    from verl.utils.torch_functional import distributed_mean_max_min_std
+    import torch.distributed as dist
+
+    use_critic = batch.meta_info['use_critic']
+    mean = batch.meta_info['mean']
+    std = batch.meta_info['std']
+
+    batch = batch.to('cuda')
+
     sequence_score = batch.batch['token_level_scores'].sum(-1)
     origin_sequence_score = sequence_score * std + mean  # 打原始的分数
     sequence_reward = batch.batch['token_level_rewards'].sum(-1)
@@ -199,6 +208,9 @@ def compute_data_metrics(batch, use_critic, mean, std):
     returns = batch.batch['returns']
 
     response_mask_bool = response_mask.bool()
+
+    valid_entropy = torch.masked_select(old_entropy, response_mask_bool)
+
     valid_adv = torch.masked_select(advantages, response_mask_bool)
     valid_origin_adv = torch.masked_select(origin_advantages, response_mask_bool)
     valid_returns = torch.masked_select(returns, response_mask_bool)
@@ -208,95 +220,96 @@ def compute_data_metrics(batch, use_critic, mean, std):
     eos_original_adv = torch.gather(origin_advantages, dim=1,
                                     index=response_length.unsqueeze(dim=1).long() - 1).reshape(-1)
 
+    mean_entropy = distributed_mean_max_min_std(valid_entropy, compute_max=False, compute_min=False,
+                                                compute_std=False)[0]
+
+    score_mean, score_max, score_min, score_std = distributed_mean_max_min_std(sequence_score)
+    original_score_mean, original_score_max, original_score_min, original_score_std = distributed_mean_max_min_std(
+        origin_sequence_score)
+    sequence_reward_mean, sequence_reward_max, sequence_reward_min, sequence_reward_std = distributed_mean_max_min_std(
+        sequence_reward)
+    valid_adv_mean, valid_adv_max, valid_adv_min, valid_adv_std = distributed_mean_max_min_std(valid_adv)
+    eos_adv_mean = distributed_mean_max_min_std(eos_adv, compute_max=False, compute_min=False, compute_std=False)[0]
+    valid_origin_adv_mean, valid_origin_adv_max, valid_origin_adv_min, valid_origin_adv_std = distributed_mean_max_min_std(
+        valid_origin_adv)
+    eos_original_adv_mean = distributed_mean_max_min_std(eos_original_adv,
+                                                         compute_max=False,
+                                                         compute_min=False,
+                                                         compute_std=False)[0]
+    valid_returns_mean, valid_returns_max, valid_returns_min, valid_returns_std = distributed_mean_max_min_std(
+        valid_returns)
+    response_length_mean, response_length_max, response_length_min, response_length_std = distributed_mean_max_min_std(
+        response_length, compute_std=False)
+    response_clip_ratio = distributed_mean_max_min_std(torch.eq(response_length, max_response_length).float(),
+                                                       compute_max=False,
+                                                       compute_min=False,
+                                                       compute_std=False)[0]
+    prompt_length_mean, prompt_length_max, prompt_length_min, prompt_length_std = distributed_mean_max_min_std(
+        prompt_length, compute_std=False)
+    prompt_length_clip_ratio = distributed_mean_max_min_std(torch.eq(prompt_length, max_prompt_length).float(),
+                                                            compute_max=False,
+                                                            compute_min=False,
+                                                            compute_std=False)[0]
+
+    prob_mean = distributed_mean_max_min_std(torch.exp(valid_old_logprob))[0]
+
     metrics = {
         # actor
-        'actor/entropy':
-            masked_mean(old_entropy, response_mask).detach().item(),
+        'actor/entropy': mean_entropy.detach().item(),
         # score
-        'critic/score/mean':
-            torch.mean(sequence_score).detach().item(),
-        'critic/score/max':
-            torch.max(sequence_score).detach().item(),
-        'critic/score/min':
-            torch.min(sequence_score).detach().item(),
-        'critic/score/std':
-            torch.std(sequence_score).detach().item(),
+        'critic/score/mean': score_mean.detach().item(),
+        'critic/score/max': score_max.detach().item(),
+        'critic/score/min': score_min.detach().item(),
+        'critic/score/std': score_std.detach().item(),
         # original score
-        'critic/original_score/mean':
-            torch.mean(origin_sequence_score).detach().item(),
-        'critic/original_score/max':
-            torch.max(origin_sequence_score).detach().item(),
-        'critic/original_score/min':
-            torch.min(origin_sequence_score).detach().item(),
-        'critic/original_score/std':
-            torch.std(origin_sequence_score).detach().item(),
+        'critic/original_score/mean': original_score_mean.detach().item(),
+        'critic/original_score/max': original_score_max.detach().item(),
+        'critic/original_score/min': original_score_min.detach().item(),
+        'critic/original_score/std': original_score_std.detach().item(),
         # reward
-        'critic/rewards/mean':
-            torch.mean(sequence_reward).detach().item(),
-        'critic/rewards/max':
-            torch.max(sequence_reward).detach().item(),
-        'critic/rewards/min':
-            torch.min(sequence_reward).detach().item(),
-        'critic/rewards/std':
-            torch.std(sequence_reward).detach().item(),
+        'critic/rewards/mean': sequence_reward_mean.detach().item(),
+        'critic/rewards/max': sequence_reward_max.detach().item(),
+        'critic/rewards/min': sequence_reward_min.detach().item(),
+        'critic/rewards/std': sequence_reward_std.detach().item(),
         # adv
-        'critic/advantages/mean':
-            masked_mean(advantages, response_mask).detach().item(),
-        'critic/advantages/eos_adv_mean':
-            torch.mean(eos_adv).detach().item(),
-        'critic/advantages/max':
-            torch.max(valid_adv).detach().item(),
-        'critic/advantages/min':
-            torch.min(valid_adv).detach().item(),
-        'critic/advantages/std':
-            torch.std(valid_adv).detach().item(),
+        'critic/advantages/mean': valid_adv_mean.detach().item(),
+        'critic/advantages/eos_adv_mean': eos_adv_mean.detach().item(),
+        'critic/advantages/max': valid_adv_max.detach().item(),
+        'critic/advantages/min': valid_adv_min.detach().item(),
+        'critic/advantages/std': valid_adv_std.detach().item(),
         # original adv
-        'critic/original_advantages/mean':
-            masked_mean(origin_advantages, response_mask).detach().item(),
-        'critic/original_advantages/eos_adv_mean':
-            torch.mean(eos_original_adv).detach().item(),
-        'critic/original_advantages/max':
-            torch.max(valid_origin_adv).detach().item(),
-        'critic/original_advantages/min':
-            torch.min(valid_origin_adv).detach().item(),
-        'critic/original_advantages/std':
-            torch.std(valid_origin_adv).detach().item(),
+        'critic/original_advantages/mean': valid_origin_adv_mean.detach().item(),
+        'critic/original_advantages/eos_adv_mean': eos_original_adv_mean.detach().item(),
+        'critic/original_advantages/max': valid_origin_adv_max.detach().item(),
+        'critic/original_advantages/min': valid_origin_adv_min.detach().item(),
+        'critic/original_advantages/std': valid_origin_adv_std.detach().item(),
         # returns
-        'critic/returns/mean':
-            masked_mean(returns, response_mask).detach().item(),
-        'critic/returns/max':
-            torch.max(valid_returns).detach().item(),
-        'critic/returns/min':
-            torch.min(valid_returns).detach().item(),
-        'critic/returns/std':
-            torch.std(valid_returns).detach().item(),
+        'critic/returns/mean': valid_returns_mean.detach().item(),
+        'critic/returns/max': valid_returns_max.detach().item(),
+        'critic/returns/min': valid_returns_min.detach().item(),
+        'critic/returns/std': valid_returns_std.detach().item(),
         # response length
-        'response_length/mean':
-            torch.mean(response_length).detach().item(),
-        'response_length/max':
-            torch.max(response_length).detach().item(),
-        'response_length/min':
-            torch.min(response_length).detach().item(),
+        'response_length/mean': response_length_mean.detach().item(),
+        'response_length/max': response_length_max.detach().item(),
+        'response_length/min': response_length_min.detach().item(),
         ## response clip ratio
-        'response_length/clip_ratio':
-            torch.mean(torch.eq(response_length, max_response_length).float()).detach().item(),
+        'response_length/clip_ratio': response_clip_ratio.detach().item(),
         # prompt length
-        'prompt_length/mean':
-            torch.mean(prompt_length).detach().item(),
-        'prompt_length/max':
-            torch.max(prompt_length).detach().item(),
-        'prompt_length/min':
-            torch.min(prompt_length).detach().item(),
+        'prompt_length/mean': prompt_length_mean.detach().item(),
+        'prompt_length/max': prompt_length_max.detach().item(),
+        'prompt_length/min': prompt_length_min.detach().item(),
         ## prompt clip ratio
-        'prompt_length/clip_ratio':
-            torch.mean(torch.eq(prompt_length, max_prompt_length).float()).detach().item(),
+        'prompt_length/clip_ratio': prompt_length_clip_ratio.detach().item(),
         # prob
-        'prob/mean':
-            torch.mean(torch.exp(valid_old_logprob)).detach().item(),
+        'prob/mean': prob_mean.detach().item(),
     }
     for threshold in [1e-6, 1e-5, 1e-4, 1e-3]:
         small_prob_mask = torch.logical_and(response_mask_bool, old_log_probs.exp() < threshold)
-        small_prob_ratio = small_prob_mask.float().sum() / response_mask_bool.float().sum()
+        small_prob_mask_sum = small_prob_mask.float().sum()
+        response_mask_bool_sum = response_mask_bool.float().sum()
+        dist.all_reduce(small_prob_mask_sum, op=dist.ReduceOp.SUM, group=None, async_op=False)
+        dist.all_reduce(response_mask_bool_sum, op=dist.ReduceOp.SUM, group=None, async_op=False)
+        small_prob_ratio = small_prob_mask_sum / response_mask_bool_sum
         small_prob_adv = torch.masked_select(advantages, small_prob_mask)
         metrics.update({
             f'prob/prob_lt_{threshold}_ratio': small_prob_ratio.detach().item(),
@@ -307,32 +320,39 @@ def compute_data_metrics(batch, use_critic, mean, std):
         upgo_advantages = batch.batch['upgo_advantages']
         valid_values = torch.masked_select(values, response_mask_bool)
         valid_upgo_adv = torch.masked_select(upgo_advantages, response_mask_bool)
+
+        valid_values_mean, valid_values_max, valid_values_min, valid_values_std = distributed_mean_max_min_std(
+            valid_values)
+        valid_upgo_adv_mean, valid_upgo_adv_max, valid_upgo_adv_min, valid_upgo_adv_std = distributed_mean_max_min_std(
+            valid_upgo_adv)
+
+        return_diff_std = distributed_mean_max_min_std(torch.masked_select(returns - values, response_mask_bool),
+                                                       compute_max=False,
+                                                       compute_min=False,
+                                                       compute_std=True)[-1]
+        return_std = distributed_mean_max_min_std(torch.masked_select(returns, response_mask_bool),
+                                                  compute_max=False,
+                                                  compute_min=False,
+                                                  compute_std=True)[-1]
+        return_diff_var = return_diff_std**2
+        return_var = return_std**2
+
         values_metrics = {
             # values
-            'critic/values/mean':
-                masked_mean(values, response_mask).detach().item(),
-            'critic/values/max':
-                torch.max(valid_values).detach().item(),
-            'critic/values/min':
-                torch.min(valid_values).detach().item(),
-            'critic/values/std':
-                torch.std(valid_values).detach().item(),
+            'critic/values/mean': valid_values_mean.detach().item(),
+            'critic/values/max': valid_values_max.detach().item(),
+            'critic/values/min': valid_values_min.detach().item(),
+            'critic/values/std': valid_values_std.detach().item(),
             # upgo adv
-            'critic/upgo_advantages/mean':
-                masked_mean(upgo_advantages, response_mask).detach().item(),
-            'critic/upgo_advantages/max':
-                torch.max(valid_upgo_adv).detach().item(),
-            'critic/upgo_advantages/min':
-                torch.min(valid_upgo_adv).detach().item(),
-            'critic/upgo_advantages/std':
-                torch.std(valid_upgo_adv).detach().item(),
+            'critic/upgo_advantages/mean': valid_upgo_adv_mean.detach().item(),
+            'critic/upgo_advantages/max': valid_upgo_adv_max.detach().item(),
+            'critic/upgo_advantages/min': valid_upgo_adv_min.detach().item(),
+            'critic/upgo_advantages/std': valid_upgo_adv_std.detach().item(),
             # vf explained var
-            'critic/vf/vf_explained_var':
-                (1.0 - torch.var(torch.masked_select(returns - values, response_mask_bool)) /
-                 (torch.var(torch.masked_select(returns, response_mask_bool)) + 1e-5)).detach().item(),
+            'critic/vf/vf_explained_var': (1.0 - return_diff_var / (return_var + 1e-5)).detach().item(),
         }
         metrics.update(values_metrics)
-    return metrics
+    return DataProto.from_dict({'dummy': torch.ones(size=(1,))}, meta_info={'metrics': metrics})
 
 
 def print_dataproto_size(data: DataProto):
@@ -346,6 +366,30 @@ def print_dataproto_size(data: DataProto):
     size_of_numpy_array /= 1024**3
     size_of_tensordict /= 1024**3
     print(f'Size of tensordict: {size_of_tensordict} GB, size of non_tensor_batch: {size_of_numpy_array} GB')
+
+
+@ray.remote
+class StandaloneValidator(object):
+    """
+    This is a standalone validator that runs in a single process. It controls a SPMD workergroup that performs generation.
+    The workergroup fetches latest weights from main task when it finishes the last iteration of validation
+    """
+
+    def __init__(self, config) -> None:
+        from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRefWorker
+
+        self._is_running = False
+        ray_cls = RayClassWithInitArgs(cls=AsyncActorRolloutRefWorker, config=config)
+
+    def init_workers(self):
+        """Initialize a standalone rollout"""
+
+    def is_running(self):
+        pass
+
+    def main(self):
+        """This is a long running process that runs in a sub-thread"""
+        pass
 
 
 class RayPPOTrainer(object):
@@ -1254,10 +1298,12 @@ class RayPPOTrainer(object):
                     # collect metrics
                     with Timer(name='compute_metrics', logger=None) as timer:
                         # Note that we can use any worker groups here
-                        data_metrics = self.actor_rollout_wg.execute_func_rank_zero(compute_data_metrics, batch,
-                                                                                    self.use_critic,
-                                                                                    self.config.reward_model.mean,
-                                                                                    self.config.reward_model.std)
+                        batch.meta_info['use_critic'] = self.use_critic
+                        batch.meta_info['mean'] = self.config.reward_model.mean
+                        batch.meta_info['std'] = self.config.reward_model.std
+                        data_metrics: DataProto = self.actor_rollout_wg.execute_with_func_generator(
+                            compute_data_metrics, batch)
+                        data_metrics = data_metrics.meta_info['metrics']
                     metrics['timing/compute_metrics'] = timer.last
                     metrics.update(data_metrics)
 
