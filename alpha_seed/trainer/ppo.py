@@ -567,6 +567,11 @@ class RayPPOTrainer(object):
                                                                            self.actor_rollout_wg.world_size)
 
                 test_output_gen_batch = self.actor_rollout_wg.generate_sequences(test_gen_batch_padded)
+                test_output_gen_batch.batch['prompts'] = test_output_gen_batch.batch['input_ids'][:, :self.config.data.
+                                                                                                  max_prompt_length]
+                test_output_gen_batch.batch['responses'] = test_output_gen_batch.batch['input_ids'][:, self.config.data.
+                                                                                                    max_prompt_length:]
+
                 test_output_gen_batch = unpad_dataproto(test_output_gen_batch, pad_size=pad_size)
 
                 print(
@@ -1248,7 +1253,8 @@ class RayPPOTrainer(object):
 
                     print_dataproto_size(batch, head='After compute adv')
 
-                    print('Debugging', batch.batch)
+                    if self.global_step == 1:
+                        print('Debugging', batch.batch)
 
                     # update critic
                     phasic_critic_update = self.config.algorithm.phasic_critic_interval > 0 and self.global_step % self.config.algorithm.phasic_critic_interval == 0
