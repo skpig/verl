@@ -65,23 +65,20 @@ def flash_attn2_rmpad_forward(
     key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
     value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
-    if position_embeddings is None:
-        cos, sin = self.rotary_emb(value_states, position_ids)
-    else:
-        cos, sin = position_embeddings
-    query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-
     if sp_size > 1:
         # (batch_size, num_head / sp_size, seq_length, head_size)
         query_states = gather_seq_scatter_heads(query_states, seq_dim=2, head_dim=1)
         key_states = gather_seq_scatter_heads(key_states, seq_dim=2, head_dim=1)
         value_states = gather_seq_scatter_heads(value_states, seq_dim=2, head_dim=1)
-        # the position_ids and max_seqlen is required to be global for flash attention
-        # TODO: optimize this, no need to allgather at each layer
-        position_ids = gather_outputs(position_ids, gather_dim=1)
-        max_seqlen = position_ids.max().item() + 1
-        assert position_ids.size(1) == query_states.size(2)
+        assert position_ids.size(1) == query_states.size(2), \
+            f"got seqlen mismatches: {query_states.size(2)} != {position_ids.size(1)}"
     full_q_len = query_states.size(2)  # full_q_len = seq_length
+
+    if position_embeddings is None:
+        cos, sin = self.rotary_emb(value_states, position_ids)
+    else:
+        cos, sin = position_embeddings
+    query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
     # Reashape to the expected shape for Flash Attention
     query_states = query_states.transpose(1, 2)

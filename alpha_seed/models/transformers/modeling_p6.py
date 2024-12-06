@@ -25,7 +25,7 @@ import torch.distributed as dist
 from transformers.cache_utils import Cache
 
 from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
-from dist_attn.ulysses.ops import gather_seq_scatter_heads, gather_heads_scatter_seq, gather_outputs
+from dist_attn.ulysses.ops import gather_seq_scatter_heads, gather_heads_scatter_seq, slice_input_tensor
 
 import torch.nn.functional as F
 
@@ -77,10 +77,18 @@ def flash_attn2_rmpad_forward(
     else:
         kv_seq_len = cu_seqlens.diff().max().item()
 
+    assert "dynamic" not in self.rotary_emb.rope_type, f"dynamic rope type doesn't support"
     if position_embeddings is None:
-        cos, sin = self.rotary_emb(value_states, position_ids)
+        if sp_size > 1:
+            sliced_pos_ids = slice_input_tensor(position_ids, dim=1, padding=False)
+        else:
+            sliced_pos_ids = position_ids
+        cos, sin = self.rotary_emb(value_states, sliced_pos_ids)
     else:
         cos, sin = position_embeddings
+        if sp_size > 1:
+            cos = slice_input_tensor(cos, dim=1, padding=False)
+            sin = slice_input_tensor(sin, dim=1, padding=False)
 
     # bsz, nhead, seqlen/sp, hdim
     query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
@@ -110,10 +118,8 @@ def flash_attn2_rmpad_forward(
         query_states = gather_seq_scatter_heads(query_states, seq_dim=2, head_dim=1)
         key_states = gather_seq_scatter_heads(key_states, seq_dim=2, head_dim=1)
         value_states = gather_seq_scatter_heads(value_states, seq_dim=2, head_dim=1)
-        # the position_ids and max_seqlen is required to be global for flash attention
-        # TODO: optimize this, no need to allgather at each layer
-        position_ids = gather_outputs(position_ids, gather_dim=1)
-        max_seqlen = position_ids.max().item() + 1
+        assert query_states.size(2) == position_ids.size(1), \
+            f"got seqlen mismatches: {query_states.size(2)} != {position_ids.size(1)}"
     full_qlen = query_states.size(2)
 
     # In PEFT, usually we cast the layer norms in float32 for training stability reasons
