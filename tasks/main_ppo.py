@@ -79,7 +79,9 @@ class RewardManager():
 
     def __call__(self, data: DataProto, global_step=None, need_norm=True, is_validation=False):
         """We will expand this function gradually based on the available datasets"""
-        reward_tensor = torch.zeros_like(data.batch['responses'], dtype=torch.float32)
+        response_ids = data.batch['input_ids'][:, self.config.data.max_prompt_length:]
+
+        reward_tensor = torch.zeros_like(response_ids, dtype=torch.float32)
         already_print_data_sources = {}
         save_to_hdfs = []
         rm_res_future_list = []
@@ -88,11 +90,13 @@ class RewardManager():
 
         def get_rm_score(idx):
             data_item = data[idx]  # DataProtoItem
-            prompt_ids = data_item.batch['prompts']
+
+            prompt_ids = data_item.batch['input_ids'][:self.config.data.max_prompt_length]
+            response_ids = data_item.batch['input_ids'][self.config.data.max_prompt_length:]
+
             prompt_length = prompt_ids.shape[-1]
             valid_prompt_length = data_item.batch['attention_mask'][:prompt_length].sum()
             valid_prompt_ids = prompt_ids[-valid_prompt_length:]
-            response_ids = data_item.batch['responses']
             response_length = response_ids.shape[-1]
             valid_response_length = data_item.batch['attention_mask'][prompt_length:].sum()
             valid_response_ids = response_ids[:valid_response_length]

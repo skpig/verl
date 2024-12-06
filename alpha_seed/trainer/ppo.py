@@ -355,7 +355,7 @@ def compute_data_metrics(self, batch: DataProto):
     return DataProto.from_dict({'dummy': torch.ones(size=(1,))}, meta_info={'metrics': metrics})
 
 
-def print_dataproto_size(data: DataProto):
+def print_dataproto_size(data: DataProto, head):
     size_of_tensordict = 0
     for key, tensor in data.batch.items():
         size_of_tensordict += tensor.element_size() * tensor.numel()
@@ -365,7 +365,7 @@ def print_dataproto_size(data: DataProto):
 
     size_of_numpy_array /= 1024**3
     size_of_tensordict /= 1024**3
-    print(f'Size of tensordict: {size_of_tensordict} GB, size of non_tensor_batch: {size_of_numpy_array} GB')
+    print(f'{head}, Size of tensordict: {size_of_tensordict} GB, size of non_tensor_batch: {size_of_numpy_array} GB')
 
 
 @ray.remote
@@ -970,7 +970,7 @@ class RayPPOTrainer(object):
                     batch: DataProto = DataProto.from_single_dict(batch_dict)
 
                     # print the size of each data proto before training
-                    print_dataproto_size(batch)
+                    print_dataproto_size(batch, head='Before generation')
 
                     if self.config.data.num_prompts_per_data > 1:
                         batch = batch.unfold_column_chunks(
@@ -991,6 +991,13 @@ class RayPPOTrainer(object):
 
                     with Timer(name='gen', logger=None) as timer:
                         gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+                        # TODO: The following two lines should be memory view. However it's not. Let's remove it by removing all its dependency
+                        gen_batch_output.batch['prompts'] = gen_batch_output.batch['input_ids'][:, :self.config.data.
+                                                                                                max_prompt_length]
+                        gen_batch_output.batch['responses'] = gen_batch_output.batch['input_ids'][:, self.config.data.
+                                                                                                  max_prompt_length:]
+
+                    print_dataproto_size(gen_batch_output, head='After generation')
 
                     metrics['timing/gen'] = timer.last
                     metrics['rollout/hybrid_input_batch'] = len(batch)
@@ -1116,6 +1123,8 @@ class RayPPOTrainer(object):
                     metrics['rollout/training_batch'] = len(batch)
                     pprint(f'training batches {len(batch)}.')
 
+                    print_dataproto_size(batch, head='Before Sequence Balancing')
+
                     # perform global sequence balancing here
                     from alpha_seed.utils.seqlen_balance import get_seqlen_balanced_partitions, log_seqlen_unbalance
                     global_seqlen_lst = batch.batch['attention_mask'].sum(-1).tolist()  # (train_batch_size,)
@@ -1131,6 +1140,8 @@ class RayPPOTrainer(object):
                                                                 prefix='global_seqlen')
                     metrics.update(global_balance_stats)
 
+                    print_dataproto_size(batch, head='After Sequence Balancing')
+
                     # training
                     with Timer(name='rm_score', logger=None) as timer:
                         # compute scores. Support both model and function-based.
@@ -1142,11 +1153,15 @@ class RayPPOTrainer(object):
                             batch = batch.union(reward_tensor)
                     metrics['timing/rm_score'] = timer.last
 
+                    print_dataproto_size(batch, head='After Reward Model')
+
                     with Timer(name='reward_fn', logger=None) as timer:
                         # we combine with rule-based rm
                         reward_tensor = self.reward_fn(batch, global_step=self.global_step)
                         batch.batch['token_level_scores'] = reward_tensor
                     metrics['timing/reward_fn'] = timer.last
+
+                    print_dataproto_size(batch, head='After Reward function')
 
                     # league training，筛选平均通过率低的prompt
                     use_async_gen = self.config.streaming_rollout.nnodes > 0
@@ -1185,12 +1200,16 @@ class RayPPOTrainer(object):
                         batch = self.actor_rollout_wg.old_log_probs(batch)
                     metrics['timing/old_log_probs'] = timer.last
 
+                    print_dataproto_size(batch, head='After old log probs')
+
                     if self.use_reference_policy:
                         # compute reference log_prob
                         with Timer(name='ref', logger=None) as timer:
                             ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)
                         metrics['timing/ref'] = timer.last
+
+                    print_dataproto_size(batch, head='After reference policy')
 
                     metrics.setdefault('timing/train_mem_offload', 0)
 
@@ -1206,6 +1225,8 @@ class RayPPOTrainer(object):
                             values = self.critic_wg.compute_values(batch)
                             batch = batch.union(values)
                         metrics['timing/values'] = timer.last
+
+                    print_dataproto_size(batch, head='After compute values')
 
                     with Timer(name='adv', logger=None) as timer:
                         # compute rewards. apply_kl_penalty if available
@@ -1224,6 +1245,10 @@ class RayPPOTrainer(object):
                             num_bon=self.config.actor_rollout_ref.rollout.num_bon,
                             adv_whiten=self.config.algorithm.adv_whiten)
                     metrics['timing/adv'] = timer.last
+
+                    print_dataproto_size(batch, head='After compute adv')
+
+                    print('Debugging', batch.batch)
 
                     # update critic
                     phasic_critic_update = self.config.algorithm.phasic_critic_interval > 0 and self.global_step % self.config.algorithm.phasic_critic_interval == 0

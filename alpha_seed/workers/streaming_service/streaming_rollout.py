@@ -295,19 +295,19 @@ class AsyncXPerfGPTRollout(object):
                                              max_length=self.config.response_length,
                                              return_tensors="pt")
 
-        response_ids = response_outputs["input_ids"].cuda()
-        response_attention_mask = response_outputs["attention_mask"].cuda()
+        response_ids = response_outputs["input_ids"].cuda().to(torch.int32)
+        response_attention_mask = response_outputs["attention_mask"].cuda().to(torch.int8)
         attention_mask = torch.hstack((attention_mask, response_attention_mask))
         input_ids = torch.hstack((prompt_ids, response_ids))
 
         # all the tp ranks should contain the same data here. data in all ranks are valid
         batch = {
-            'prompts': prompt_ids,
-            'responses': response_ids,
-            'input_ids': input_ids,  # here input_ids become the whole sentences
-            'attention_mask': attention_mask,
-            'is_finished': is_finished,
-            'off_policy_steps': off_policy_steps,
+            # 'prompts': prompt_ids,
+            # 'responses': response_ids,
+            'input_ids': input_ids.to(torch.int32),  # here input_ids become the whole sentences
+            'attention_mask': attention_mask.to(torch.int8),
+            'is_finished': is_finished.to(torch.int8),
+            'off_policy_steps': off_policy_steps.to(torch.int8),
         }
 
         out = DataProto.from_dict(batch)
