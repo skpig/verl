@@ -82,12 +82,15 @@ class AsyncXPerfGPTRollout(object):
 
     def __init__(self, config, tokenizer, model_hf_config, is_standalone=False):
         self.config = config
-        self.profiler_context = get_profiler_context(filename=config.profile.filename,
-                                                     profile_on_ranks=config.profile.profile_on_ranks,
-                                                     default_hdfs_dir=config.profile.default_hdfs_dir,
-                                                     upload_to_mlx=config.profile.upload_to_mlx,
-                                                     enable=config.profile.enable,
-                                                     wait=10)
+        if hasattr(config, 'profile'):
+            self.profiler_context = get_profiler_context(filename=config.profile.filename,
+                                                         profile_on_ranks=config.profile.profile_on_ranks,
+                                                         default_hdfs_dir=config.profile.default_hdfs_dir,
+                                                         upload_to_mlx=config.profile.upload_to_mlx,
+                                                         enable=config.profile.enable,
+                                                         wait=10)
+        else:
+            self.profiler_context = nullcontext(NullProfileEnter())
 
         # auto infer rollout running config
         # off-policy rollout should disable paged attention, for maintaining FIFO order

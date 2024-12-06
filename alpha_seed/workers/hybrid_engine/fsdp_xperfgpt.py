@@ -152,7 +152,7 @@ class FSDPXPerfGPTShardingManager(BaseShardingManager):
             group = self.device_mesh['tp'].get_group()
 
             prev_device = data.batch.device
-            data.batch = data.batch.cuda()
+            data.batch = data.batch.cuda(device=torch.cuda.current_device())
             data.batch = allgather_dict_tensors(data.batch.contiguous(), size=tp_size, group=group, dim=0)
             data.batch = data.batch.to(prev_device)
 
