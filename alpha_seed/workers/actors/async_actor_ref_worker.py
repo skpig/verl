@@ -47,6 +47,7 @@ import numpy as np
 from alpha_seed.workers.hybrid_engine.hsdp import create_device_mesh
 from alpha_seed.workers.hybrid_engine.fsdp_ulysses import FSDPUlyssesShardingManager
 from .initialize import parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init
+from .checkpoint.extensions import register_dtensor_save_hook
 from alpha_seed.workers.utils import rearrange_micro_batches
 from dist_attn.ulysses.parallel_states import set_ulysses_sequence_parallel_group, get_ulysses_sequence_parallel_world_size
 from dist_attn.ulysses.ops import slice_input_tensor, gather_outputs
@@ -316,6 +317,8 @@ class AsyncActorRolloutRefWorker(Worker):
                                  forward_prefetch=True,
                                  device_mesh=self.device_mesh,
                                  cpu_offload=cpu_offload)
+
+        register_dtensor_save_hook(actor_module_fsdp)
 
         log_gpu_memory_usage('After Actor FSDP init', logger=logger)
 

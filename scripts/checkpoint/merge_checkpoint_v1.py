@@ -1,7 +1,6 @@
 import seed_models
 import os
 import torch
-import torch.distributed._tensor
 import argparse
 import seed_models
 from transformers import AutoConfig, AutoModelForCausalLM
@@ -9,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 import hdfs_io
 from tqdm.auto import trange
 from seed_models.commands.convert_to_megatron import convert_seed_models_to_megatron
+from torch.distributed._tensor import DTensor, Replicate, Shard
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -72,23 +72,37 @@ if __name__ == '__main__':
 
     # reorder model_state_dict based on keys
     state_dict = {}
+    shard_dim = {}
     keys = set(model_state_dict_lst[0].keys())
     for key in keys:
         state_dict[key] = []
         for model_state_dict in model_state_dict_lst:
             tensor = model_state_dict.pop(key)
-            if isinstance(tensor, torch.distributed._tensor.DTensor):
+            if isinstance(tensor, DTensor):
                 state_dict[key].append(tensor._local_tensor.bfloat16())
+                if key in shard_dim:
+                    assert shard_dim[key] == tensor.placements[-1]
+                else:
+                    shard_dim[key] = tensor.placements[-1]
             else:
                 state_dict[key] = tensor.bfloat16()
 
     del model_state_dict_lst
 
     for key in sorted(state_dict):
-        # FSDP is shard-0 dtensor
         if isinstance(state_dict[key], list):
-            print(f'Concat key {key}')
-            state_dict[key] = torch.cat(state_dict[key], dim=0)
+            if isinstance(shard_dim[key], Shard):
+                sdim = shard_dim[key].dim
+                print(f"Merging sharded tensor {key} at dimension {sdim}")
+                state_dict[key] = torch.cat(state_dict[key], dim=sdim)
+            elif isinstance(shard_dim[key], Replicate):
+                print(f"Unexpected replicated tensor {key}. Only take the first one")
+                state_dict[key] = state_dict[key][0]
+            else:
+                raise ValueError(f'Unknown shard dim {shard_dim[key]}')
+            print(f'Merged {key} shape: {state_dict[key].size()}')
+        else:
+            print(f'No need to concat key {key}')
     print('Writing to local disk')
     hf_path = os.path.join(local_dir, 'huggingface')
     config = AutoConfig.from_pretrained(hf_path)

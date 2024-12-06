@@ -32,6 +32,7 @@ from verl import DataProto
 from verl.utils.fs import copy_local_path_from_hdfs
 from verl.utils.fsdp_utils import get_fsdp_wrap_policy
 from .initialize import parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init
+from .checkpoint.extensions import register_dtensor_save_hook
 from verl.utils.fsdp_utils import offload_fsdp_optimizer, offload_fsdp_param_and_grad, load_fsdp_optimizer, load_fsdp_param_and_grad
 from verl.utils.import_utils import import_external_libs
 from verl.utils.debug import log_gpu_memory_usage
@@ -214,6 +215,8 @@ class CriticWorker(Worker):
                              forward_prefetch=True,
                              sync_module_states=False,
                              cpu_offload=cpu_offload)
+
+        register_dtensor_save_hook(critic_module)
 
         log_gpu_memory_usage('After critic FSDP', logger=logger)
 

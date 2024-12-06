@@ -9,6 +9,8 @@ import hdfs_io
 
 import tempfile
 import warnings
+import numpy as np
+import random
 
 import torch
 import torch.distributed
@@ -74,12 +76,20 @@ class CheckpointManagerV1:
         model_state_dict = state_dict['model']
         optimizer_state_dict = state_dict['optimizer']
         lr_scheduler_state_dict = state_dict['lr_scheduler']
+        # can be None for backward compatibility
+        rng = state_dict.get('rng', None)
 
         state_dict_cfg = ShardedStateDictConfig(offload_to_cpu=True)
         optim_cfg = ShardedOptimStateDictConfig(offload_to_cpu=True)
         with FSDP.state_dict_type(self.model, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg):
             self.model.load_state_dict(model_state_dict)
             self.optimizer.load_state_dict(optimizer_state_dict)
+        # recover random state
+        if rng is not None:
+            torch.cuda.random.set_rng_state(rng['cuda'])
+            torch.random.set_rng_state(rng['cpu'])
+            np.random.set_state(rng['numpy'])
+            random.setstate(rng['random'])
 
         self.lr_scheduler.load_state_dict(lr_scheduler_state_dict)
 
@@ -111,10 +121,17 @@ class CheckpointManagerV1:
             with FSDP.state_dict_type(self.model, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg):
                 model_state = self.model.state_dict()
                 optimizer_state_dict = self.optimizer.state_dict()
+                rng = {
+                    'cpu': torch.random.get_rng_state(),
+                    'cuda': torch.cuda.get_rng_state(),
+                    'numpy': np.random.get_state(),
+                    'random': random.getstate(),
+                }
                 state_dict = {
                     'model': model_state,
                     'optimizer': optimizer_state_dict,
-                    'lr_scheduler': self.lr_scheduler.state_dict()
+                    'lr_scheduler': self.lr_scheduler.state_dict(),
+                    'rng': rng,
                 }
                 path = os.path.join(local_path, f'model_optim_rank_{self.rank}.pt')
 
