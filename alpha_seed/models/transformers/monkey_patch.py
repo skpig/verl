@@ -42,9 +42,10 @@ def apply_monkey_patch_to_p6_dense():
 
 
 def apply_monkey_patch_to_p7():
-    from seed_models.models.p7.modeling_p7 import P7FlashAttention2
-    from alpha_seed.models.transformers.modeling_p7 import flash_attn2_rmpad_forward
+    from seed_models.models.p7.modeling_p7 import P7FlashAttention2, P7ForCausalLM
+    from alpha_seed.models.transformers.modeling_p7 import flash_attn2_rmpad_forward, p7_model_forward
     P7FlashAttention2.forward = flash_attn2_rmpad_forward
+    P7ForCausalLM.forward = p7_model_forward
     from seed_models.integrations import apply_liger_kernel_to_p7
     apply_liger_kernel_to_p7()
 
