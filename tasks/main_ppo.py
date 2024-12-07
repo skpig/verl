@@ -22,6 +22,8 @@ import wandb
 import os
 import pandas as pd
 import hdfs_io
+from datetime import datetime
+from multiprocessing import Process
 
 # rule-based reward score
 from alpha_seed.utils.reward_score import gsm8k, math, math_v2, model_score_fn, logic_puzzle, oj_utils, math_verifier, response_post_proc
@@ -203,13 +205,22 @@ class RewardManager():
                 },
                 step=global_step,
                 backend='tracking')
+
         if self.config.trainer.save_cases_to_hdfs:
-            df = pd.DataFrame(
-                columns=["Step", "Prompt", "Gen Sequence", "GroundTruth", "Score", "Gen Sequence PostProc"],
-                data=save_to_hdfs)
-            df.to_parquet(f"{self.rm_name}.{str(global_step)}.parquet")
-            hdfs_io.hput(f"{self.rm_name}.{str(global_step)}.parquet", self.case_study_dir)
-            os.remove(f"{self.rm_name}.{str(global_step)}.parquet")
+            print(f"reward_fn begin hput: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            dir_name = self.case_study_dir
+            file_name = f"{self.rm_name}.{str(global_step)}.parquet"
+
+            def async_hput(save_to_hdfs, dir_name, file_name):
+                df = pd.DataFrame(
+                    columns=["Step", "Prompt", "Gen Sequence", "GroundTruth", "Score", "Gen Sequence PostProc"],
+                    data=save_to_hdfs)
+                df.to_parquet(f"{dir_name}{file_name}")
+
+            p = Process(target=async_hput, args=(save_to_hdfs, dir_name, file_name))
+            p.start()
+            print(f"reward_fn end hput: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
         return reward_tensor
 
 
