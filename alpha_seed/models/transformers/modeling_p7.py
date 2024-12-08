@@ -72,6 +72,9 @@ def flash_attn2_rmpad_forward(
         # overwrite attention_mask with padding_mask
         attention_mask = kwargs.pop("padding_mask")
     sp_size = get_ulysses_sequence_parallel_world_size()
+    if sp_size > 1:
+        if position_ids.size(0) != 1:
+            raise RuntimeError(f"You are using an old version of seed models, please upgrade to the latest one.")
     bsz, q_len, _ = hidden_states.size()  # q_len = seqlen/sp
 
     query_states = self.q_proj(hidden_states)  # bsz, seqlen/sp, hidden

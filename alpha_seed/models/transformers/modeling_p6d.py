@@ -55,6 +55,9 @@ def flash_attn2_rmpad_forward(
     assert not output_attentions
     assert (not past_key_value) and (not use_cache)
     sp_size = get_ulysses_sequence_parallel_world_size()
+    if sp_size > 1:
+        if position_ids.size(0) != 1:
+            raise RuntimeError(f"You are using an old version of seed models, please upgrade to the latest one.")
     bsz, q_len, _ = hidden_states.size()  # q_len = seq_length / sp_size
 
     query_states = self.q_proj(hidden_states)  # (batch_size, seq_length / sp_size, num_heads * head_size)

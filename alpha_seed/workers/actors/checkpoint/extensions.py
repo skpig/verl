@@ -40,8 +40,8 @@ class FlexDTensor(FSDPExtensions):
 
     def pre_load_state_dict_transform(self, tensor):
         # use default
-        from torch.distributed.fsdp._fsdp_extensions import _ext_pre_flatten_transform
-        return _ext_pre_flatten_transform(tensor)
+        from torch.distributed.fsdp._fsdp_extensions import _ext_pre_load_state_dict_transform
+        return _ext_pre_load_state_dict_transform(tensor)
 
     def post_unflatten_transform(self, tensor, param_extension):
         # use default
