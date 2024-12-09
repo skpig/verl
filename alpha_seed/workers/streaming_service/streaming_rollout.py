@@ -153,14 +153,12 @@ class AsyncXPerfGPTRollout(object):
                                            })
         else:
             logits_manipulate_fn = None
-
         generate_kwargs = dict(max_new_tokens=config.response_length,
                                do_sample=config.train_generate_kwargs.do_sample,
                                top_k=config.train_generate_kwargs.top_k,
                                top_p=config.train_generate_kwargs.top_p,
                                temperature=config.train_generate_kwargs.temperature,
                                logits_manipulate_fn=logits_manipulate_fn)
-
         inference_sess = InferenceSession(num_slots=num_slots,
                                           max_batch_size=max_batch_size,
                                           max_length=config.prompt_length + config.response_length,
@@ -248,11 +246,41 @@ class AsyncXPerfGPTRollout(object):
             (query_pool, complete_ratio, generation_kwargs, off_policy_steps) = self.input_queue.get(block=True)
             self.inference_engine.set_generator_strategy(**generation_kwargs)
             with logging_set_level(self.config.get('logging_level', 'WARN')), self.profiler_context as p:
-                self.inference_engine.execute(query_pool,
-                                              complete_ratio=complete_ratio,
-                                              stop_event=self.stop_event,
-                                              off_policy_steps=off_policy_steps)
-                p.step()
+                try:
+                    self.inference_engine.execute(query_pool,
+                                                  complete_ratio=complete_ratio,
+                                                  stop_event=self.stop_event,
+                                                  off_policy_steps=off_policy_steps)
+                    p.step()
+                except Exception as e:
+                    global_rank = 0 if not dist.is_initialized() else dist.get_rank()
+                    tp_rank = 0 if self.device_mesh is None else self.device_mesh['tp'].get_local_rank()
+                    tp_size = 1 if self.device_mesh is None else self.device_mesh['tp'].size()
+
+                    save_model_name = f"{global_rank}_{tp_rank}_{tp_size}"
+                    print("saving... inference engine ... ", f"{save_model_name}_model_engine")
+                    torch.save(self.inference_engine.engine.module.layers_weight,
+                               f"{save_model_name}_model_engine_layers_weight.pt")
+                    torch.save(self.inference_engine.engine.module.wte_weight,
+                               f"{save_model_name}_model_engine_wte_weight.pt")
+                    torch.save(self.inference_engine.engine.module.lm_head_weight,
+                               f"{save_model_name}_model_engine_lm_head_weight.pt")
+                    torch.save(self.inference_engine.engine.module.layernorm_weight,
+                               f"{save_model_name}_model_engine_layernorm_weight.pt")
+                    torch.save(query_pool, f"{save_model_name}_query_pool.pt")
+                    torch.save(self.inference_engine.get_inorder_responses(), f"{save_model_name}_output.pt")
+
+                    from hdfs_io.hdfs_io import hcopy, hmkdir
+                    assert (self.config.get("dump_nan", None) is not None)
+                    hmkdir(self.config.get("dump_nan", None))
+                    hcopy(f"{save_model_name}_model_engine_layers_weight.pt", self.config.get("dump_nan", None))
+                    hcopy(f"{save_model_name}_model_engine_wte_weight.pt", self.config.get("dump_nan", None))
+                    hcopy(f"{save_model_name}_model_engine_layernorm_weight.pt", self.config.get("dump_nan", None))
+                    hcopy(f"{save_model_name}_model_engine_lm_head_weight.pt", self.config.get("dump_nan", None))
+                    hcopy(f"{save_model_name}_query_pool.pt", self.config.get("dump_nan", None))
+                    hcopy(f"{save_model_name}_output.pt", self.config.get("dump_nan", None))
+
+                    raise (e)
 
             response_outputs = []
             is_finished = []
