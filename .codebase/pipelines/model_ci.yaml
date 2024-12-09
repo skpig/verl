@@ -1,0 +1,42 @@
+name: unit tests
+trigger:
+  change
+jobs:
+  model_tests:
+    # Merlin - data.aml.verl:v73
+    image: hub.byted.org/reckon/data.reckon.mlx.image_5940:f8b9d7b1087476fdf552e9251afb0252
+    if: ${{ !contains(Event.Change.Title, "WIP") }}
+    runs-on:
+      cluster: gpu-a100
+      docker:
+        shared-memory: 1024
+    envs:
+      LIBHDFS_OPTS: -Dhadoop.root.logger=warn,console
+    timeout: 10  # timeout 10min
+    retry: 3
+    steps:
+      - name: check env
+        commands:
+        - nvidia-smi
+      - &step_setup_bvc
+        name: setup bvc
+        commands:
+          - curl -s bvc-cdn.byted.org/non_ttp_tao_deploy.sh | sudo bash
+          - sudo ln -sf /usr/local/tao/agent/modules/bvc/bin/bvc /usr/bin/bvc
+          - mkdir -p /opt/tiger/bvc/bin/; ln -sf /usr/local/tao/agent/modules/bvc/bin/bvc /opt/tiger/bvc/bin/bvc
+      - &step_hadoop
+        name: setup hadoop
+        commands:
+          - bash ./tests/tools/setup_hdfs.sh
+      - &step_doas
+        name: setup doas
+        id: doas
+        uses: actions/doas
+      - name: monkey patch tests
+        commands:
+          - cd /opt/tiger
+          - git clone git@code.byted.org:data/verl
+          - git clone git@code.byted.org:seed/seed_models
+          - cd -
+          - pytest -s tests/models/transformers/test_ce_loss_op.py
+          # - /opt/tiger/arnold/hdfs_client/hdfs

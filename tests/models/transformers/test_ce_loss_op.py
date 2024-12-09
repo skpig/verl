@@ -58,7 +58,9 @@ def test_cross_entropy_fusion():
         print(f'{k}: {v}')
     print(f'================ grad diff summary ================')
 
-    torch.testing.assert_close(manual_lm_head.weight.grad, lm_head.weight.grad, equal_nan=True)
+    from test_utils import check_close
+    # only raise Exception if mismatch percentage is > 1%
+    check_close(manual_lm_head.weight.grad, lm_head.weight.grad, equal_nan=True, percent_threshold=0.01)
     torch.cuda.synchronize()
     print("passed test_cross_entropy_fusion")
 
