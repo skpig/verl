@@ -35,6 +35,7 @@ from codetiming import Timer
 from alpha_seed.utils.select_strategy.bon_strategy import *
 from alpha_seed.utils.select_strategy.league_training_strategy import *
 from alpha_seed.workers.streaming_service.streaming_utils import pad, process_output
+from alpha_seed.workers.actors.checkpoint import CkptGlobalUploader
 from single_controller.base import Worker
 from single_controller.ray import RayResourcePool, RayWorkerGroup, RayClassWithInitArgs
 from single_controller.ray.base import create_colocated_worker_cls
@@ -415,6 +416,9 @@ class RayPPOTrainer(object):
         self.val_reward_fn = val_reward_fn
         self.logger = logger
 
+        # ckpt global uploader will be instantiated in init_workers func
+        self.ckpt_global_uploader = None
+
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert self.hybrid_engine, 'Currently, only support hybrid engine'
 
@@ -449,8 +453,6 @@ class RayPPOTrainer(object):
             self.kl_ctrl = core_algos.FixedKLController(kl_coef=0.)
 
         self._create_dataloader()
-
-        self.valid_hdfs_global_step = None
 
         self.phasic_critic_buffer = None
 
@@ -813,6 +815,12 @@ class RayPPOTrainer(object):
             self.rm_wg = all_wg['rm']
             self.rm_wg.init_model()
 
+        # init ckpt global uploader
+        self.ckpt_global_uploader = CkptGlobalUploader.remote(use_critic=self.use_critic,
+                                                              ckpt_version=self.config.trainer.ckpt_version,
+                                                              default_local_dir=self.config.trainer.default_local_dir,
+                                                              default_remote_dir=self.config.trainer.default_hdfs_dir)
+
     def save_checkpoint(self):
         """Save checkpoint to hdfs.
         Checkpoint structure
@@ -851,38 +859,27 @@ class RayPPOTrainer(object):
         actor_remote_path = os.path.join(remote_global_step_folder, 'actor')
         critic_remote_path = os.path.join(remote_global_step_folder, 'critic')
 
-        actor_upload_future = self.actor_rollout_wg.save_checkpoint(actor_local_path, actor_remote_path,
-                                                                    self.config.trainer.ckpt_version)
-
-        if self.use_critic:
-            critic_upload_future = self.critic_wg.save_checkpoint(critic_local_path, critic_remote_path,
-                                                                  self.config.trainer.ckpt_version)
-        else:
-            critic_upload_future = None
-
         # save dataloader
         dataloader_local_path = os.path.join(local_global_step_folder, 'data.pt')
         import dill
         torch.save(self.train_dataloader, dataloader_local_path, pickle_module=dill)
         # upload to hdfs
-        hput(dataloader_local_path, remote_global_step_folder)
+        ray.get(
+            self.ckpt_global_uploader.register_upload_task.remote("default", self.global_step,
+                                                                  ray.get_runtime_context().get_node_id(),
+                                                                  dataloader_local_path, remote_global_step_folder))
+        self.ckpt_global_uploader.start_uploading.remote("default", self.global_step)
 
-        # TODO(zhangchi.usc1992). Actually, we should postpone writing latest_checkpointed_iteration when all the hdfs upload finishes
-        # save latest_checkpointed_iteration.txt
-        if self.valid_hdfs_global_step is not None:
-            local_latest_checkpointed_iteration = os.path.join(local_checkpoint_folder,
-                                                               'latest_checkpointed_iteration.txt')
-            with open(local_latest_checkpointed_iteration, 'w') as f:
-                f.write(str(self.valid_hdfs_global_step))
-            hput(local_latest_checkpointed_iteration, remote_checkpoint_folder)
+        actor_upload_future = self.actor_rollout_wg.save_checkpoint(actor_local_path, actor_remote_path,
+                                                                    self.config.trainer.ckpt_version, self.global_step,
+                                                                    self.ckpt_global_uploader)
 
-        self.valid_hdfs_global_step = self.global_step
-
-        # mark a checkpoint version for future checkpoint format change and compatibility
-        local_ckpt_version = os.path.join(local_checkpoint_folder, 'checkpoint_version.txt')
-        with open(local_ckpt_version, 'w') as f:
-            f.write(self.config.trainer.ckpt_version)
-        hput(local_ckpt_version, remote_checkpoint_folder)
+        if self.use_critic:
+            critic_upload_future = self.critic_wg.save_checkpoint(critic_local_path, critic_remote_path,
+                                                                  self.config.trainer.ckpt_version, self.global_step,
+                                                                  self.ckpt_global_uploader)
+        else:
+            critic_upload_future = None
 
         ray.get(actor_upload_future)
 
@@ -901,7 +898,6 @@ class RayPPOTrainer(object):
             except ImportError:
                 from omnistore.utilities.ckpt_format.common_utils import find_latest_ckpt_path
 
-            remote_checkpoint_folder = os.path.join(self.config.trainer.default_hdfs_dir, 'checkpoints')
             remote_checkpoint_folder = os.path.join(self.config.trainer.default_hdfs_dir, 'checkpoints')
             remote_global_step_folder = find_latest_ckpt_path(remote_checkpoint_folder)
 

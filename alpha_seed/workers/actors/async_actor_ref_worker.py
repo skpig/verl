@@ -681,13 +681,14 @@ class AsyncActorRolloutRefWorker(Worker):
     def load_checkpoint(self, hdfs_path=None, version='v1'):
         assert self._is_actor
         # TODO: support omnistore
-        self.checkpoint_manager.load_checkpoint(version, hdfs_path, device_mesh=self.device_mesh)
+        self.checkpoint_manager.load_checkpoint(version, hdfs_path, device_mesh=self.device_mesh, role='actor')
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    def save_checkpoint(self, local_path, hdfs_path=None, version='v1'):
+    def save_checkpoint(self, local_path, hdfs_path=None, version='v1', global_step=0, ckpt_global_uploader_ref=None):
         # TODO: support omnistore
         assert self._is_actor
-        self.checkpoint_manager.save_checkpoint(version, local_path, hdfs_path, self.device_mesh)
+        self.checkpoint_manager.save_checkpoint(version, local_path, hdfs_path, self.device_mesh, 'actor', global_step,
+                                                ckpt_global_uploader_ref)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def release_param_and_cache(self):

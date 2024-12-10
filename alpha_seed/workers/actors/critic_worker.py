@@ -53,14 +53,6 @@ from .checkpoint import CheckpointManager
 logger = logging.getLogger(__file__)
 
 
-# TODO: remove duplication
-@ray.remote
-def upload_ckpt(local_path, hdfs_path):
-    print(f'Start uploading checkpoint from {local_path} to {hdfs_path}')
-    hdfs_io.copy(src=local_path, dst=hdfs_path)
-    print(f'Finish uploading checkpoint from {local_path} to {hdfs_path}')
-
-
 @ray.remote
 class CriticWorker(Worker):
 
@@ -327,11 +319,17 @@ class CriticWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, hdfs_path=None, version='v1'):
-        self.checkpoint_manager.load_checkpoint(version, hdfs_path=hdfs_path, device_mesh=self.device_mesh)
+        self.checkpoint_manager.load_checkpoint(version,
+                                                hdfs_path=hdfs_path,
+                                                device_mesh=self.device_mesh,
+                                                role='critic')
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    def save_checkpoint(self, local_path, hdfs_path=None, version='v1'):
+    def save_checkpoint(self, local_path, hdfs_path=None, version='v1', global_step=0, ckpt_global_uploader_ref=None):
         self.checkpoint_manager.save_checkpoint(version=version,
                                                 local_path=local_path,
                                                 hdfs_path=hdfs_path,
-                                                device_mesh=self.device_mesh)
+                                                device_mesh=self.device_mesh,
+                                                role='critic',
+                                                global_step=global_step,
+                                                ckpt_global_uploader_ref=ckpt_global_uploader_ref)
