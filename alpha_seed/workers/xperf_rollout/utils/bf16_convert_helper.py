@@ -680,7 +680,8 @@ def _reshard_fsdp_state_dict_to_xperf_p6dense(tp_model, state_dict, device_mesh:
     assert_not_nan(tp_model.wte_weight.data)
     assert_not_nan(tp_model.lm_head_weight.data)
 
-    for layer_index, (ln_1, qkv_w, _, dense_w, _, ln_2, fc12, _, fc2, *_) in enumerate(tp_model.layers_weight):
+    for layer_index, (ln_1, qkv_w, qkv_bias, dense_w, dense_bias, ln_2, fc12, _, fc2,
+                      *_) in enumerate(tp_model.layers_weight):
         # model.layers.0.input_layernorm.weight
         ln_1_weight = state_dict.pop(f'model.layers.{layer_index}.input_layernorm.weight').full_tensor()
         ln_1_weight = torch.unsqueeze(ln_1_weight, dim=0).to(torch.bfloat16)
@@ -711,6 +712,19 @@ def _reshard_fsdp_state_dict_to_xperf_p6dense(tp_model, state_dict, device_mesh:
             torch.bfloat16)
         v_proj_weight = v_proj_weight.view(1, num_kv_heads, head_dim, hidden_size)
 
+        # optional has qkv bias and dense_bias
+        if qkv_bias is not None:
+            assert model_config.attention_bias
+            q_proj_bias = state_dict.pop(f'model.layers.{layer_index}.self_attn.q_proj.bias').full_tensor().to(
+                torch.bfloat16)
+            q_proj_bias = q_proj_bias.view(num_kv_heads, -1, head_dim).transpose(0, 1).contiguous()
+            k_proj_bias = state_dict.pop(f'model.layers.{layer_index}.self_attn.k_proj.bias').full_tensor().to(
+                torch.bfloat16)
+            k_proj_bias = k_proj_bias.view(1, num_kv_heads, head_dim)
+            v_proj_bias = state_dict.pop(f'model.layers.{layer_index}.self_attn.v_proj.bias').full_tensor().to(
+                torch.bfloat16)
+            v_proj_bias = v_proj_bias.view(1, num_kv_heads, head_dim)
+
         # shard qkv and concat
         if device_mesh is not None:
             q_proj_weight = DTensor.from_local(q_proj_weight,
@@ -731,12 +745,37 @@ def _reshard_fsdp_state_dict_to_xperf_p6dense(tp_model, state_dict, device_mesh:
             v_proj_weight = v_proj_weight.redistribute(device_mesh=device_mesh, placements=[Replicate(),
                                                                                             Shard(1)])._local_tensor
 
+            if qkv_bias is not None:
+                q_proj_bias = DTensor.from_local(q_proj_bias,
+                                                 device_mesh=device_mesh,
+                                                 placements=[Replicate(), Replicate()])
+                q_proj_bias = q_proj_bias.redistribute(device_mesh=device_mesh, placements=[Replicate(),
+                                                                                            Shard(1)])._local_tensor
+
+                k_proj_bias = DTensor.from_local(k_proj_bias,
+                                                 device_mesh=device_mesh,
+                                                 placements=[Replicate(), Replicate()])
+                k_proj_bias = k_proj_bias.redistribute(device_mesh=device_mesh, placements=[Replicate(),
+                                                                                            Shard(1)])._local_tensor
+
+                v_proj_bias = DTensor.from_local(v_proj_bias,
+                                                 device_mesh=device_mesh,
+                                                 placements=[Replicate(), Replicate()])
+                v_proj_bias = v_proj_bias.redistribute(device_mesh=device_mesh, placements=[Replicate(),
+                                                                                            Shard(1)])._local_tensor
+
         qkv_weight = torch.cat((q_proj_weight, k_proj_weight, v_proj_weight), dim=0).contiguous().view(-1, hidden_size)
 
         assert qkv_w.data.shape == qkv_weight.shape
         qkv_w.data = qkv_weight.contiguous()
 
         assert_not_nan(qkv_w.data)
+
+        if qkv_bias is not None:
+            qkv_bias_hf = torch.cat((q_proj_bias, k_proj_bias, v_proj_bias), dim=0).contiguous().view(-1)
+            assert qkv_bias.data.shape == qkv_bias_hf.shape
+            qkv_bias.data = qkv_bias_hf.contiguous()
+            assert_not_nan(qkv_bias.data)
 
         # model.layers.0.self_attn.o_proj.weight
         o_proj_weight = state_dict.pop(f'model.layers.{layer_index}.self_attn.o_proj.weight').full_tensor().to(
@@ -745,6 +784,12 @@ def _reshard_fsdp_state_dict_to_xperf_p6dense(tp_model, state_dict, device_mesh:
         # the XPerfGPT has different ordering
         o_proj_weight = o_proj_weight.view(hidden_size, num_kv_heads, -1,
                                            head_dim).transpose(1, 2)  # (hidden_size, -1, num_kv_heads, head_dim)
+
+        if dense_bias is not None:
+            assert model_config.attention_bias
+            o_proj_bias = state_dict.pop(f'model.layers.{layer_index}.self_attn.o_proj.bias').full_tensor().to(
+                torch.bfloat16)
+            o_proj_bias = o_proj_bias.view(num_kv_heads, -1, head_dim).transpose(1, 2)  # (-1, num_kv_heads, head_dim)
 
         if device_mesh is not None:
             o_proj_weight = DTensor.from_local(o_proj_weight,
@@ -759,6 +804,13 @@ def _reshard_fsdp_state_dict_to_xperf_p6dense(tp_model, state_dict, device_mesh:
         dense_w.data = o_proj_weight
 
         assert_not_nan(dense_w.data)
+
+        if dense_bias is not None:
+            # Note that o_proj_bias is NOT chunked in tp group
+            o_proj_bias = o_proj_bias.contiguous().view(-1).contiguous()
+            assert dense_bias.data.shape == o_proj_bias.shape
+            dense_bias.data = o_proj_bias
+            assert_not_nan(dense_bias.data)
 
         # model.layers.0.mlp.gate_proj.weight
 

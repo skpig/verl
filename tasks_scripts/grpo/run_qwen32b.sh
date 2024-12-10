@@ -1,24 +1,24 @@
 set -x
 
 # ckpt和路径
-SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/p6_400m_moe_4T_sft_v27_bs128_lr4e-4_master_dyn_epoch4_hf
+SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/qwen2.5_32b_v3.1.2_o1-mini-monologue_241201_hf
 RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/rm_p6_moe_400m_0716_sftv27_stage2_hf
-TRAIN_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/train_with_ref_ans.parquet
-TEST_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/test_with_ref_ans.parquet
-default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/test/p6_400m_omnistore_test_1
+TRAIN_FILE=hdfs://haruna/home/byte_data_seed/ssd_hldy/user/chenjiaze/alphaseed_workspace/data/total_math_1120_repeat10.parquet
+TEST_FILE=hdfs://haruna/home/byte_data_seed/ssd_hldy/user/chenjiaze/alphaseed_workspace/data/math_evals_20241128.parquet
+default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/test/p6dense_32b_qwen_grpo_1207a1
 
 # 训练长度
-max_prompt_length=1024
-max_response_length=2048
+max_prompt_length=2048
+max_response_length=16384
 # batch size && 训练epoch
 train_batch_size=1024
 ppo_mini_batch_size=1280
-val_batch_size=5000
+val_batch_size=6834
 total_epochs=200
 test_freq=5
-save_freq=-1
+save_freq=5
 # 算法相关的参数
-actor_lr=1e-5
+actor_lr=5e-6
 critic_lr=2e-6
 lr_warmup_steps=10
 kl_coef=0.0001
@@ -37,21 +37,21 @@ num_bon=5
 bon_strategy=all
 # tracking实验名
 project_name='verl_example_math_ci'
-experiment_name='1129a10'
+experiment_name='p6dense_32b_qwen_grpo_1207a1'
 # 工程参数
 gen_micro_batch_size=512 # use_dynamic_bsz=True时仍然生效
 infer_micro_batch_size=512 # use_dynamic_bsz=True时不生效
 train_micro_batch_size=64 # use_dynamic_bsz=True时不生效
 use_dynamic_bsz=True
-actor_ppo_max_token_len=18432
-critic_ppo_max_token_len=18432
-infer_ppo_max_token_len=18432
+actor_ppo_max_token_len=36864
+critic_ppo_max_token_len=36864
+infer_ppo_max_token_len=36864
 actor_sp_size=2
 critic_sp_size=2
 ref_sp_size=1
 reward_sp_size=1
-fsdp_size=8
-xperf_tp_size=1
+fsdp_size=-1
+xperf_tp_size=4
 offload=True
 offload_train_memory=True
 

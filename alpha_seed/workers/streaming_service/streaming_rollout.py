@@ -82,6 +82,7 @@ class AsyncXPerfGPTRollout(object):
 
     def __init__(self, config, tokenizer, model_hf_config, is_standalone=False):
         self.config = config
+        self.tokenizer = tokenizer
         if hasattr(config, 'profile'):
             self.profiler_context = get_profiler_context(filename=config.profile.filename,
                                                          profile_on_ranks=config.profile.profile_on_ranks,
@@ -304,7 +305,7 @@ class AsyncXPerfGPTRollout(object):
         # left-padded attention_mask
         attention_mask = prompts.batch['attention_mask']
         off_policy_steps = prompts.batch["off_policy_steps"]
-        first_non_one_indices = (prompt_ids != 1).int().argmax(dim=1)
+        first_non_one_indices = (prompt_ids != self.tokenizer.pad_token_id).int().argmax(dim=1)
         rmv_padding_prompt_ids = [row[index:].tolist() for row, index in zip(prompt_ids, first_non_one_indices)]
         self.input_queue.put((rmv_padding_prompt_ids, complete_ratio, prompts.meta_info['generation_kwargs'],
                               off_policy_steps.reshape(-1).tolist()))
@@ -319,7 +320,8 @@ class AsyncXPerfGPTRollout(object):
             # complete_ratio or all prompts are finished
             (response_outputs, is_finished, metrics) = self.output_queue.get()
 
-        tokenizer = self.inference_engine.tokenizer
+        # Note that the tokenizer may change at runtime
+        tokenizer = self.tokenizer
         with patch.object(tokenizer, "padding_side", "right"):
             response_outputs = tokenizer.pad(dict(input_ids=response_outputs),
                                              padding="max_length",

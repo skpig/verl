@@ -16,7 +16,7 @@ from verl.utils.fsdp_utils import get_fsdp_wrap_policy
 
 import torch
 import torch.distributed
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.api import ShardingStrategy, MixedPrecision
@@ -28,19 +28,27 @@ local_rank, rank, world_size = initialize_global_process_group()
 device_mesh = init_device_mesh('cuda', mesh_shape=(world_size,), mesh_dim_names=['fsdp'])
 
 p6_path = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/alphaseed/20241107/ct128kv2_baseline_sft32k_v27_lr2e5_epoch4_rope1000_hf'
+p6dense_path = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/P6.1_12B_32k_SFT29_Fix_RoPE_Base_hf'
 p7_path = 'hdfs://haruna/home/byte_data_seed/ssd_lq/public/seed_models/Seed-2B5-P7_32k_sft29_32gpu'
 m8_path = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/25B_MoE_SFT29_32k_bsz6_lr2e5_tp4_hf'
+p6_path_qwen = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/qwen2.5_32b_v3.1.2_o1-mini-monologue_241201_hf'
 
-model_path = copy_local_path_from_hdfs(p6_path)
+from verl.utils.seed import CHAT_TEMPLATE
+
+model_path = copy_local_path_from_hdfs(p6dense_path)
 tokenizer = AutoTokenizer.from_pretrained(model_path)
 tokenizer.padding_side = "left"
 
+tokenizer.chat_template = CHAT_TEMPLATE
+
 with torch.device('cpu'):
-    # model = mariana_models.P5ForCausalLM(config=config)
+    config = AutoConfig.from_pretrained(model_path)
+    setattr(config, '_moe_implementation', 'fused')
+
     model = AutoModelForCausalLM.from_pretrained(model_path,
                                                  torch_dtype=torch.float32,
                                                  attn_implementation="flash_attention_2",
-                                                 _moe_implementation='fused')
+                                                 config=config)
 
     config = model.config
 
@@ -67,7 +75,7 @@ from omegaconf import OmegaConf
 
 rollout_config = OmegaConf.create({
     'prompt_length': 256,
-    'response_length': 256,
+    'response_length': 2048,
     'micro_batch_size': 128,
     'tensor_model_parallel_size': 4,
     'train_generate_kwargs': {
@@ -114,5 +122,11 @@ with sharding_manager:
 
 output_ids = output.batch['input_ids']
 
-text_out = tokenizer.batch_decode(output_ids, skip_special_tokens=False)
-print(text_out[0].replace(tokenizer.pad_token, ''))
+if torch.distributed.get_rank() == 0:
+    text_out = tokenizer.batch_decode(output_ids, skip_special_tokens=False)
+    print(text_out[0].replace(tokenizer.pad_token, ''))
+
+    # from IPython import embed
+    # embed()
+
+torch.distributed.barrier()
