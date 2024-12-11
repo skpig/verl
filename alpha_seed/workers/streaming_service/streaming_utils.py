@@ -39,7 +39,7 @@ def process_output(input_batch,
         if config.streaming_rollout.force_eos:
             need_eos = is_finished == 0
             is_finished = torch.ones_like(is_finished)
-        output_batch.pop(batch_keys=['prompts', 'responses'])
+        # output_batch.pop(batch_keys=['prompts', 'responses'])
         output_batch.union(input_batch)
 
         # rearrange...
