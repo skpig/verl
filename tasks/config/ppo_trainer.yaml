@@ -256,3 +256,6 @@ streaming_rollout:
   nnodes: 0
   warmup_step: 0
   force_eos: False
+
+convert_ckpt_to_omnistore_task:
+  enable: False

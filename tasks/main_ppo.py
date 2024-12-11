@@ -396,7 +396,11 @@ def main_task(config):
                             logger=logger)
     trainer.init_workers()
     send_message_to_employee("alpha seed任务开始训练", f"任务链接: {task_url}", user_email)
-    trainer.fit()
+    if config.convert_ckpt_to_omnistore_task.enable:
+        trainer.convert_ckpt_to_omnistore()
+        send_message_to_employee("alpha seed任务转换ckpt到omnistore完成，任务结束", f"任务链接: {task_url}", user_email)
+    else:
+        trainer.fit()
 
 
 if __name__ == '__main__':

@@ -45,18 +45,25 @@ class CkptGlobalUploader:
         for remote_path in remote_path_set:
             hdfs_io.makedirs(remote_path, exist_ok=True)
 
-    def wait_all(self, global_step):
+    def wait_all(self, global_step, need_clear=True):
         for role in ['actor', 'critic', 'default']:
             self.wait_by_role(role, global_step)
-        self.clear_futures(global_step)
+        if need_clear:
+            self.clear_futures(global_step)
 
     def wait_by_role(self, role, global_step):
+        if global_step not in self.upload_shard_future_map:
+            return
         ray.get(self.upload_shard_future_map[global_step][role])
 
     def clear_futures(self, global_step):
+        if global_step not in self.upload_shard_future_map:
+            return
         del self.upload_shard_future_map[global_step]
 
     def clear_tasks(self, global_step):
+        if global_step not in self.upload_shard_task_map:
+            return
         del self.upload_shard_task_map[global_step]
 
     def write_tracker(self, global_step):

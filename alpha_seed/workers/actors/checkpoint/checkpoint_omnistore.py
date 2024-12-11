@@ -20,6 +20,20 @@ import random
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from transformers import PreTrainedTokenizer
+import importlib.metadata
+
+required_omnistore_version = '0.5.69'
+try:
+    omnistore_version = importlib.metadata.version('byted-omnistore')
+    print(f'byted-omnistore version: {omnistore_version}')
+    assert omnistore_version >= required_omnistore_version, \
+        f'byted-omnistore version {omnistore_version} is too old. Please upgrade to version ' \
+        f'{required_omnistore_version} or higher. Example command: pip3 install --upgrade byted-omnistore.'
+except importlib.metadata.PackageNotFoundError as e:
+    print(f'byted-omnistore not installed. Please install it and upgrade to version {required_omnistore_version} '
+          'or higher. Example command: pip3 install --upgrade byted-omnistore')
+    raise e
+
 from omnistore import RLFSDPCheckpointer
 
 from .uploader import CkptGlobalUploader

@@ -821,7 +821,7 @@ class RayPPOTrainer(object):
                                                               default_local_dir=self.config.trainer.default_local_dir,
                                                               default_remote_dir=self.config.trainer.default_hdfs_dir)
 
-    def save_checkpoint(self):
+    def save_checkpoint(self, specified_ckpt_version=None):
         """Save checkpoint to hdfs.
         Checkpoint structure
         default_local_dir:
@@ -870,14 +870,16 @@ class RayPPOTrainer(object):
                                                                   dataloader_local_path, remote_global_step_folder))
         self.ckpt_global_uploader.start_uploading.remote("default", self.global_step)
 
-        actor_upload_future = self.actor_rollout_wg.save_checkpoint(actor_local_path, actor_remote_path,
-                                                                    self.config.trainer.ckpt_version, self.global_step,
-                                                                    self.ckpt_global_uploader)
+        actor_upload_future = self.actor_rollout_wg.save_checkpoint(
+            actor_local_path, actor_remote_path,
+            specified_ckpt_version if specified_ckpt_version is not None else self.config.trainer.ckpt_version,
+            self.global_step, self.ckpt_global_uploader)
 
         if self.use_critic:
-            critic_upload_future = self.critic_wg.save_checkpoint(critic_local_path, critic_remote_path,
-                                                                  self.config.trainer.ckpt_version, self.global_step,
-                                                                  self.ckpt_global_uploader)
+            critic_upload_future = self.critic_wg.save_checkpoint(
+                critic_local_path, critic_remote_path,
+                specified_ckpt_version if specified_ckpt_version is not None else self.config.trainer.ckpt_version,
+                self.global_step, self.ckpt_global_uploader)
         else:
             critic_upload_future = None
 
@@ -1365,3 +1367,12 @@ class RayPPOTrainer(object):
                         pprint(f'Final validation metrics: {val_metrics}')
 
                     return
+
+    def convert_ckpt_to_omnistore(self):
+        self.global_step = 0
+
+        # load checkpoint before doing anything
+        _ = self.load_checkpoint()
+        # save omnistore ckpt
+        self.save_checkpoint(specified_ckpt_version='omnistore')
+        ray.get(self.ckpt_global_uploader.wait_all.remote(self.global_step, False))
