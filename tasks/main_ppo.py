@@ -179,7 +179,10 @@ class RewardManager():
                     ground_truth = ''  # 对于OJ问题，ground_truth会比较大，扛不住
                 self.log_table.append(
                     [global_step, prompt_str, solution_str, ground_truth, score, solution_str_post_proc])
-            save_to_hdfs.append([global_step, prompt_str, solution_str, ground_truth, score, solution_str_post_proc])
+            save_to_hdfs.append([
+                idx, global_step, prompt_str, solution_str, ground_truth, score, solution_str_post_proc, is_para_dup,
+                is_trunc.item()
+            ])
 
         prefix = "" if not is_validation else "val/"
         self.logger.log(data={
@@ -212,9 +215,10 @@ class RewardManager():
             file_name = f"{self.rm_name}.{str(global_step)}.parquet"
 
             def async_hput(save_to_hdfs, dir_name, file_name):
-                df = pd.DataFrame(
-                    columns=["Step", "Prompt", "Gen Sequence", "GroundTruth", "Score", "Gen Sequence PostProc"],
-                    data=save_to_hdfs)
+                df = pd.DataFrame(columns=[
+                    "idx", "step", "prompt", "gen", "groundtruth", "score", "gen_postproc", "is_dup", "is_trunc"
+                ],
+                                  data=save_to_hdfs)
                 df.to_parquet(f"{dir_name}{file_name}")
 
             p = Process(target=async_hput, args=(save_to_hdfs, dir_name, file_name))
