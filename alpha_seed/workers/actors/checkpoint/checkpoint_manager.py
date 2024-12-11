@@ -6,9 +6,10 @@ from .checkpoint_omnistore import CheckpointManagerOmniStore
 class CheckpointManager:
 
     def __init__(self, *args, **kwargs):
+        self.checkpoint_manager_omnistore = CheckpointManagerOmniStore(*args, **kwargs)
+        kwargs.pop('enable_flatten', False)
         self.checkpoint_manager_v1 = CheckpointManagerV1(*args, **kwargs)
         self.checkpoint_manager_v2 = CheckpointManagerV2(*args, **kwargs)
-        self.checkpoint_manager_omnistore = CheckpointManagerOmniStore(*args, **kwargs)
 
     def load_checkpoint(self, version, *args, **kwargs):
         if version == "v1":

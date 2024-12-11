@@ -149,7 +149,7 @@ class RewardModelWorker(Worker):
         reward_module = FSDP(
             reward_module,
             param_init_fn=parallel_init_fsdp_fn(reward_module, parallel_load_safetensors(local_path)),
-            use_orig_params=False,
+            use_orig_params=self.config.model.fsdp_config.use_orig_params,
             auto_wrap_policy=auto_wrap_policy,
             device_id=torch.cuda.current_device(),
             sharding_strategy=sharding_strategy,  # zero3

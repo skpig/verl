@@ -66,8 +66,12 @@ class CheckpointManagerOmniStore:
     - huggingface tokenizer and config for ckpt merge
     """
 
-    def __init__(self, model: FSDP, optimizer: torch.optim.Optimizer,
-                 lr_scheduler: torch.optim.lr_scheduler.LRScheduler, tokenizer: PreTrainedTokenizer):
+    def __init__(self,
+                 model: FSDP,
+                 optimizer: torch.optim.Optimizer,
+                 lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
+                 tokenizer: PreTrainedTokenizer,
+                 enable_flatten: bool = False):
         self.upload_future = None
         self.previous_save_local_path = None
 
@@ -75,6 +79,8 @@ class CheckpointManagerOmniStore:
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
         self.tokenizer = tokenizer
+
+        self.enable_flatten = enable_flatten
 
         assert isinstance(self.model, FSDP)
         self.rank = torch.distributed.get_rank()
@@ -92,8 +98,7 @@ class CheckpointManagerOmniStore:
                                 enable_shm_download_ckpt_tmp=True,
                                 allow_extra_states=True,
                                 rl_role=role,
-                                load_flatten_model_optimizer=True,
-                                tie_weight_map={'lm_head.weight': 'transformer.wte.weight'})
+                                load_flatten_model_optimizer=self.enable_flatten)
         # try loading lr scheduler state
         if 'lr_scheduler' in ckpt_state['extra_state']:
             self.lr_scheduler.load_state_dict(ckpt_state['extra_state']['lr_scheduler'])
@@ -150,8 +155,7 @@ class CheckpointManagerOmniStore:
                 enable_tree_topo=True,
                 global_steps=global_step,
                 rl_role=role,
-                save_flatten_model_optimizer=True,
-                tie_weight_map={'lm_head.weight': 'transformer.wte.weight'},
+                save_flatten_model_optimizer=self.enable_flatten,
             )
 
         if hdfs_path is not None:

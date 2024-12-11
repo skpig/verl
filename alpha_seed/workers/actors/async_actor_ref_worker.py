@@ -308,7 +308,7 @@ class AsyncActorRolloutRefWorker(Worker):
         actor_module_fsdp = FSDP(actor_module,
                                  param_init_fn=parallel_init_fsdp_fn(actor_module,
                                                                      parallel_load_safetensors(local_path)),
-                                 use_orig_params=False,
+                                 use_orig_params=self.config.actor.fsdp_config.use_orig_params,
                                  auto_wrap_policy=auto_wrap_policy,
                                  device_id=torch.cuda.current_device(),
                                  sharding_strategy=sharding_strategy,
@@ -480,7 +480,8 @@ class AsyncActorRolloutRefWorker(Worker):
             self.checkpoint_manager = CheckpointManager(model=self.actor.actor_module,
                                                         optimizer=self.actor.actor_optimizer,
                                                         lr_scheduler=self.actor_lr_scheduler,
-                                                        tokenizer=self.tokenizer)
+                                                        tokenizer=self.tokenizer,
+                                                        enable_flatten=self.config.actor.fsdp_config.use_orig_params)
 
         torch.cuda.empty_cache()
 

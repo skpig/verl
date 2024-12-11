@@ -198,7 +198,7 @@ class CriticWorker(Worker):
 
         critic_module = FSDP(critic_module,
                              param_init_fn=parallel_init_fsdp_fn(critic_module, parallel_load_safetensors(local_path)),
-                             use_orig_params=False,
+                             use_orig_params=self.config.model.fsdp_config.use_orig_params,
                              auto_wrap_policy=auto_wrap_policy,
                              device_id=torch.cuda.current_device(),
                              sharding_strategy=sharding_strategy,
@@ -265,7 +265,8 @@ class CriticWorker(Worker):
         self.checkpoint_manager = CheckpointManager(model=self.critic_module,
                                                     optimizer=self.critic_optimizer,
                                                     lr_scheduler=self.critic_lr_scheduler,
-                                                    tokenizer=self.tokenizer)
+                                                    tokenizer=self.tokenizer,
+                                                    enable_flatten=self.config.model.fsdp_config.use_orig_params)
 
         torch.cuda.empty_cache()
 
