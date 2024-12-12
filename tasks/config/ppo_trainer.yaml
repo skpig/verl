@@ -195,12 +195,13 @@ reward_model:
   reward_executor_maxnum: 128
   last_response_sep: ['<summarize>', '</summarize>']
   reward_0_for_overlong_rsp: False
-  add_int_verify: True
+  add_int_verify: False
   punish_no_answer: v0
   need_punish_duplicate: False
   punish_score: rule-lighteval/MATH_v2:-1,code-sandbox:0
   need_punish_trunc: False
   trunc_punish_score: -5
+  strict_box_verify: False
 
 algorithm:
   force_append_eos: False

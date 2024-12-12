@@ -253,6 +253,7 @@ def normalize_final_answer(final_answer: str) -> str:
 
 INVALID_ANS_GSM8k = "[invalid]"
 ANSWER_PATTERN = r"(?i)Answer\s*:\s*([^\n]+)"
+STRICT_BOX_PATTERN = r"\\boxed\{([^}]*)\}"
 
 
 def filter_ignores(st, regexes_to_ignore):
@@ -285,13 +286,23 @@ def is_correct_minerva(og_pred, gt, gt_need_extract=False):
     return (pred == gt), pred
 
 
+def is_correct_strict_box(pred, gt):
+    pattern = re.compile(STRICT_BOX_PATTERN)
+    match = pattern.search(pred)
+    if match:
+        extracted_answer = match.group(1)
+        return 1 if (extracted_answer == gt) else -1, extracted_answer
+    return -1, pred
+
+
 def verify(pred,
            answer,
            resp_len,
            max_resp_len,
            reward_0_for_overlong_rsp=False,
            punish_no_answer="v0",
-           add_int_verify=True):
+           add_int_verify=True,
+           strict_box_verify=False):
     """
     default行为：对给1，其余给-1
     punish_no_answer:
@@ -299,7 +310,10 @@ def verify(pred,
     * v1: -0.1
     * v2: -0.2
     """
-    # breakpoint()
+    if strict_box_verify:
+        corr_strict_box, pred_strict_box = is_correct_strict_box(pred, answer)
+        return corr_strict_box
+
     corr_minerva, pred_minerva = is_correct_minerva(pred,
                                                     answer)  # To remove if math is also converted to interger format
     if add_int_verify:
@@ -330,8 +344,9 @@ def compute_score(batch_info, solution_str, ground_truth, config, **argv) -> flo
     reward_0_for_overlong_rsp = config.reward_model.reward_0_for_overlong_rsp and argv.get('rm_name') == "train"
     punish_no_answer = config.reward_model.punish_no_answer if argv.get('rm_name') == "train" else "v0"
     add_int_verify = config.reward_model.add_int_verify
+    strict_box_verify = config.reward_model.strict_box_verify
     return verify(solution_str, ground_truth, resp_len, max_resp_len, reward_0_for_overlong_rsp, punish_no_answer,
-                  add_int_verify)
+                  add_int_verify, strict_box_verify)
 
 
 if __name__ == "__main__":
@@ -340,40 +355,24 @@ if __name__ == "__main__":
     # pred = r"""Another way is to look at the height of one corner of our shape considering the big square we are trying to find where this outer tangent line from the big circle to the adjacent small circles is touching the corners of those small circles at specific heights relative to the center of the big circle which may be related to the radius of the circle such as the bottom of the outer tangent line from the big excess outer circle to the adjacent small circles is some height relative to the center of the big outer circle which directly relates to the radius length of the small circles in relationship to the big outer shape in their outer area. We draw a line from the corner of one of the small circles to the outer edge of the big outer shape and from the center of the small circle perpendicular to the outer edge of the big outer shape so that it hits the outer edge of the big outer shape at a right angle which we call $ h $ which may be related to the radius of the small circle and the shape formed at that corner in relationship to the outer edges of the outer shapes. And the distance from the corner of one of the small circles to the outer edge of the big outer shape which includes the half of this figure that represents how high the outer tangent line from the big excess outer circle to the adjacent small circles is touching the corners of those small circles at specific heights relative to the center of the big circle which includes the radius part of the small circle which we call $ l $ . If we know the height of this line from the corner of the big outer main shape and the line perpendicular to the outer edge of the big outer shape which is what we call it as coming from the corner of the big outer main shape and is hitting the outer edge of the big outer shape with the half of this outer tangent line from the big excess outer circle to the adjacent small circles which we call it with the radius of the small circles which we call this value $ h $ which is what we are looking at in relationship to how that relates to the rest of the features of this outer shape. We might use some trigonometry involving the angle between this half part of the outer tangent line from the big excess outer circle to the adjacent small circles being some angle at one corner of one of the small circles in relationship to the other parts of the outer shape to figure out what the value of the radius of the small circle is. And if we have this value of the height of this line from the corner of the big outer main shape and the line perpendicular to the outer edge of the big outer shape which is what we have already called it as coming from the corner of the big outer main shape and is hitting the outer edge of the big outer shape with the half of this outer tangent line from the big excess outer circle to the adjacent small circles which we call it with the radius of the small circles which we call this value $ h $ which is what we have been using to think about in relationship to how that relates to the rest of the features of this outer shape and the angle at one corner of one of the small circles in relationship to the other parts of the outer shape which we call the "angle between relevant sides value" let's call it $ \theta_{rs} $ . Then using the height of this line from the corner of the big outer main shape and the line perpendicular to the outer edge of the big outer shape which is what we call it as coming from the corner of the big outer main shape and is hitting the outer edge of the big outer shape with the half of this outer tangent line"""
     answer = "22+12\sqrt{2}"
     pred = r"""Answer:22+12\sqrt{2}"""
-    assert verify(pred, answer, 0, 16384, False, "v0") == 1
+    assert verify(pred, answer, 0, 16384, False, "v0", strict_box_verify=True) == -1
 
     pred = "So we have 235 as answer."
     answer = "235"
-    assert verify(pred, answer, 0, 16384, False, "v0") == 1
+    assert verify(pred, answer, 0, 16384, False, "v0", strict_box_verify=True) == -1
 
-    pred = "So we have 1,2,3,4 as answer."
-    answer = "1"
-    assert verify(pred, answer, 0, 16384, False, "v0") == -1
+    pred = "So we have \\boxed{235} as answer."
+    answer = "235"
+    assert verify(pred, answer, 0, 16384, False, "v0", strict_box_verify=True) == 1
 
-    pred = "So we have 1,2,3,4,5,6,7,8,9,10,11 as answer."
+    pred = "Answer: 11"
     answer = "11"
-    assert verify(pred, answer, 0, 16384, False, "v0") == 1
+    assert verify(pred, answer, 0, 16384, False, "v0", strict_box_verify=True) == -1
 
-    pred = "So we have 1,2,3,4,5,6,7,8,9,10,11,12,13 as answer."
-    answer = "11"
-    assert verify(pred, answer, 0, 16384, False, "v0") == -1
-
-    pred = "So we have 1,2,3,4,5,6,7,8,9,10,11,12,-13 as answer."
+    pred = "Answer: \\boxed{11}"
     answer = "-13"
-    assert verify(pred, answer, 0, 16384, False, "v0") == 1
+    assert verify(pred, answer, 0, 16384, False, "v0", strict_box_verify=True) == -1
 
-    pred = "So we have \(-1\) as answer."
-    answer = "-1"
-    assert verify(pred, answer, 0, 16384, False, "v0") == 1
-
-    pred = "So we have \(-1\) as answer."
-    answer = "1"
-    assert verify(pred, answer, 0, 16384, False, "v0") == -1
-
-    pred = "So we have \(-1\) as answer."
-    answer = "-1"
-    assert verify(pred, answer, 0, 16384, False, "v0", True) == 1
-
-    pred = "So we have \(-1\) as answer."
-    answer = "-1"
-    assert verify(pred, answer, 0, 16384, False, "v0", False) == -1
+    pred = "Answer: \\boxed{11}"
+    answer = "11"
+    assert verify(pred, answer, 0, 16384, False, "v0", strict_box_verify=True) == 1
