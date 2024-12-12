@@ -129,7 +129,8 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
     return data, metrics
 
 
-def compute_advantage(data: DataProto, gamma, lam, adv_estimator, upgo_loss_version, num_bon, adv_whiten):
+def compute_advantage(data: DataProto, gamma, lam, adv_estimator, upgo_loss_version, num_bon, adv_whiten,
+                      use_async_gen):
     # TODO: add other ways to estimate advantages
     token_level_rewards = data.batch['token_level_rewards']
     responses = data.batch['responses']
@@ -155,9 +156,12 @@ def compute_advantage(data: DataProto, gamma, lam, adv_estimator, upgo_loss_vers
         data.batch['upgo_advantages'] = upgo_advantages
     elif adv_estimator == 'grpo':
         token_level_scores = data.batch['token_level_scores']
+        index = data.non_tensor_batch['index']
         advantages, returns = core_algos.compute_grpo_advantage_return(token_level_scores=token_level_scores,
                                                                        eos_mask=response_mask,
-                                                                       num_bon=num_bon)
+                                                                       index=index,
+                                                                       num_bon=num_bon,
+                                                                       use_async_gen=use_async_gen)
         data.batch['advantages'] = advantages
         data.batch['origin_advantages'] = advantages
         data.batch['returns'] = returns
@@ -1246,7 +1250,8 @@ class RayPPOTrainer(object):
                             adv_estimator=self.config.algorithm.adv_estimator,
                             upgo_loss_version=self.config.actor_rollout_ref.actor.upgo_loss_version,
                             num_bon=self.config.actor_rollout_ref.rollout.num_bon,
-                            adv_whiten=self.config.algorithm.adv_whiten)
+                            adv_whiten=self.config.algorithm.adv_whiten,
+                            use_async_gen=use_async_gen)
                     metrics['timing/adv'] = timer.last
 
                     print_dataproto_size(batch, head='After compute adv')
