@@ -17,7 +17,7 @@ def select_training_samples(batch, strategy, config):
     # calc select ids
     scores = batch.batch['token_level_scores'].sum(-1).reshape(bsz, num_bon)
     if strategy == "all":
-        final_idx = torch.range(0, num_bon - 1).unsqueeze(dim=0).tile([bsz, 1]).to(torch.int64).unsqueeze(dim=2)
+        final_idx = torch.arange(0, num_bon).unsqueeze(dim=0).tile([bsz, 1]).to(torch.int64).unsqueeze(dim=2)
         response_num_per_prompt = num_bon
     elif strategy == "best":
         final_idx = torch.argmax(scores, dim=1).unsqueeze(dim=1).unsqueeze(dim=2)

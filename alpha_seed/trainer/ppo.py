@@ -40,6 +40,7 @@ from single_controller.base import Worker
 from single_controller.ray import RayResourcePool, RayWorkerGroup, RayClassWithInitArgs
 from single_controller.ray.base import create_colocated_worker_cls
 from verl import DataProto
+from verl.protocol import unfold_batch_dim, fold_batch_dim
 
 from hdfs_io import makedirs, hput, hcopy
 
@@ -96,8 +97,7 @@ from verl.utils.torch_functional import masked_mean
 
 
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty='kl'):
-    responses = data.batch['responses']
-    response_length = responses.size(1)
+    response_length = data.meta_info['response_length']
     token_level_scores = data.batch['token_level_scores']
     batch_size = data.batch.batch_size[0]
     attention_mask = data.batch['attention_mask']
@@ -133,8 +133,7 @@ def compute_advantage(data: DataProto, gamma, lam, adv_estimator, upgo_loss_vers
                       use_async_gen):
     # TODO: add other ways to estimate advantages
     token_level_rewards = data.batch['token_level_rewards']
-    responses = data.batch['responses']
-    response_length = responses.size(1)
+    response_length = data.meta_info['response_length']
     attention_mask = data.batch['attention_mask']
     response_mask = attention_mask[:, -response_length:]
     if adv_estimator == 'gae':
@@ -197,7 +196,7 @@ def compute_data_metrics(self, batch: DataProto):
     origin_sequence_score = sequence_score * std + mean  # 打原始的分数
     sequence_reward = batch.batch['token_level_rewards'].sum(-1)
 
-    response_length = batch.batch['responses'].shape[-1]
+    response_length = batch.meta_info['response_length']
 
     advantages = batch.batch['advantages']
     origin_advantages = batch.batch['origin_advantages']
@@ -462,6 +461,11 @@ class RayPPOTrainer(object):
 
         self.phasic_critic_buffer = None
 
+        # TODO: add staleness
+        self.standalone_batch = []
+        self.pending_batch_queue = queue.Queue()
+        self.ready_batch_queue = queue.Queue()
+
     def _create_dataloader(self):
         from torch.utils.data import DataLoader
         version = self.config.data.get('version', 'v1')
@@ -575,10 +579,6 @@ class RayPPOTrainer(object):
                                                                            self.actor_rollout_wg.world_size)
 
                 test_output_gen_batch = self.actor_rollout_wg.generate_sequences(test_gen_batch_padded)
-                test_output_gen_batch.batch['prompts'] = test_output_gen_batch.batch['input_ids'][:, :self.config.data.
-                                                                                                  max_prompt_length]
-                test_output_gen_batch.batch['responses'] = test_output_gen_batch.batch['input_ids'][:, self.config.data.
-                                                                                                    max_prompt_length:]
 
                 test_output_gen_batch = unpad_dataproto(test_output_gen_batch, pad_size=pad_size)
 
@@ -592,6 +592,7 @@ class RayPPOTrainer(object):
                     # we first compute reward model score
                     test_batch_padded, pad_size = pad_dataproto_to_divisor(test_batch,
                                                                            size_divisor=self.rm_wg.world_size)
+                    test_batch_padded.meta_info['response_length'] = self.config.data.max_response_length
                     reward_tensor = self.rm_wg.compute_rm_score(test_batch_padded)
                     reward_tensor = unpad_dataproto(reward_tensor, pad_size=pad_size)
 
@@ -941,6 +942,353 @@ class RayPPOTrainer(object):
         self.train_dataloader = torch.load(dataloader_local_path)
         return self.global_step
 
+    def _generate(self, batch, resume_step, metrics):
+        standalone_batch = self.standalone_batch
+        pending_batch_queue = self.pending_batch_queue
+        ready_batch_queue = self.ready_batch_queue
+
+        # print the size of each data proto before training
+        print_dataproto_size(batch, head='Before generation')
+
+        if self.config.data.num_prompts_per_data > 1:
+            batch = batch.unfold_column_chunks(self.config.data.num_prompts_per_data,
+                                               split_keys=['input_ids', 'attention_mask', 'off_policy_steps'])
+
+        # hybrid rollout
+        batch = batch.repeat(self.num_bon)
+        gen_batch = batch.pop(batch_keys=['input_ids', 'attention_mask', 'off_policy_steps'])
+        gen_batch.meta_info.update({
+            'generation_kwargs':
+                self.config.actor_rollout_ref.rollout.train_generate_kwargs,
+            'complete_ratio':
+                1.0 if self.global_step < resume_step + self.config.streaming_rollout.warmup_step else
+                self.config.actor_rollout_ref.rollout.get("complete_ratio", 1.0)
+        })
+        pprint(f'start hybrid rollout, input batches {len(gen_batch)}.')
+
+        with Timer(name='gen', logger=None) as timer:
+            gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+
+        print_dataproto_size(gen_batch_output, head='After generation')
+
+        metrics['timing/gen'] = timer.last
+        metrics['rollout/hybrid_input_batch'] = len(batch)
+
+        # for debugging purpose only. we manually set all the attention_mask to 1 to
+        # test the training performance under maximum workload.
+        if self.config.trainer.set_fake_attention_mask:
+            with Timer(name='fake_mask', logger=None) as timer:
+                from verl.utils.model import create_random_mask
+                total_length = self.config.data.max_prompt_length + self.config.data.max_response_length
+
+                min_ratio_of_valid_token = self.config.trainer.fake_seqlen_ratio
+                max_ratio_of_valid_token = self.config.trainer.fake_seqlen_ratio
+
+                assert self.config.trainer.fake_seqlen_ratio > (self.config.data.max_prompt_length + 1) / total_length
+
+                max_ratio_of_left_padding = 0
+                attention_mask = create_random_mask(gen_batch_output.batch['input_ids'],
+                                                    max_ratio_of_valid_token=max_ratio_of_valid_token,
+                                                    max_ratio_of_left_padding=max_ratio_of_left_padding,
+                                                    min_ratio_of_valid_token=min_ratio_of_valid_token)
+
+                gen_batch_output.batch['attention_mask'] = attention_mask
+
+                # force actor and critic stop updating weights because the data is fake
+                self.config.actor_rollout_ref.actor.optim.lr = 0
+                self.config.critic.optim.lr = 0
+
+            metrics['timing/fake_mask'] = timer.last
+            pprint(f'set fake attention mask')
+
+        # only report metrics from one generation replica
+        if 'xperf_metrics' in gen_batch_output.meta_info:
+            for name, x_metric in gen_batch_output.meta_info['xperf_metrics'].items():
+                self.logger.log(data={"rollout/gen/hybrid_{}".format(name): wandb.Histogram(x_metric)},
+                                step=self.global_step)
+            gen_batch_output.meta_info.pop('xperf_metrics')
+
+        # stop hybrid rollout
+        finished_num, ready_batch_queue, pending_batch_queue = process_output(batch, gen_batch_output, self.tokenizer,
+                                                                              ready_batch_queue, pending_batch_queue,
+                                                                              self.config)
+        pprint(f'stop hybrid rollout, completed_batch {finished_num}, incompleted_batch {len(batch) - finished_num}' +
+               f'ready_queue {ready_batch_queue.qsize()}, pending_queue {pending_batch_queue.qsize()}.')
+        metrics['rollout/hybrid_completed_batch'] = finished_num
+        metrics['rollout/hybrid_incompleted_batch'] = len(batch) - finished_num
+
+        # stop standalone rollout to update model
+        finished_num = 0
+        if len(standalone_batch) > 0:
+            gen_batch_output = self.standalone_rollout_wg.generate_sequences_get(standalone_gen_batch)
+            # only report metrics from one generation replica
+            if 'xperf_metrics' in gen_batch_output.meta_info:
+                for name, x_metric in gen_batch_output.meta_info['xperf_metrics'].items():
+                    self.logger.log(data={"rollout/gen/standalone_{}".format(name): wandb.Histogram(x_metric)},
+                                    step=self.global_step)
+                gen_batch_output.meta_info.pop('xperf_metrics')
+            finished_num, ready_batch_queue, pending_batch_queue = process_output(standalone_batch,
+                                                                                  gen_batch_output,
+                                                                                  self.tokenizer,
+                                                                                  ready_batch_queue,
+                                                                                  pending_batch_queue,
+                                                                                  self.config,
+                                                                                  standalone=True)
+            pprint(
+                f'stop standalone rollout, completed_batch {finished_num}, incompleted_batch {len(standalone_batch) - finished_num}'
+                + f'ready_queue {ready_batch_queue.qsize()}, pending_queue {pending_batch_queue.qsize()}.')
+        metrics['rollout/standalone_completed_batch'] = finished_num
+        metrics['rollout/standalone_incompleted_batch'] = len(standalone_batch) - finished_num
+
+        # update standalone rollout weights
+        with Timer(name='update_standalone', logger=None) as timer:
+            if hasattr(self, "standalone_rollout_wg"):
+                self.actor_rollout_wg.update_standalone_rollout()
+                self.standalone_rollout_wg.update_standalone_rollout()
+        metrics['timing/update_standalone'] = timer.last
+
+        # standalone generate (off policy)
+        standalone_batch = []
+        max_standalone_len = 0
+        while hasattr(self,
+                      "standalone_rollout_wg") and pending_batch_queue.qsize() >= self.standalone_rollout_wg.world_size:
+            for _ in range(self.standalone_rollout_wg.world_size):
+                standalone_batch.append(pending_batch_queue.get())
+                max_standalone_len = max(max_standalone_len, standalone_batch[-1].batch['attention_mask'].sum(-1))
+        for i in range(len(standalone_batch)):
+            standalone_batch[i] = pad(standalone_batch[i], max_standalone_len, self.tokenizer)
+        if len(standalone_batch) > 0:
+            standalone_batch = DataProto.concat(standalone_batch)
+            standalone_gen_batch = standalone_batch.pop(batch_keys=['input_ids', 'attention_mask', 'off_policy_steps'])
+            standalone_gen_batch.meta_info[
+                'generation_kwargs'] = self.config.actor_rollout_ref.rollout.train_generate_kwargs
+            standalone_gen_batch.meta_info['complete_ratio'] = 1
+            self.standalone_rollout_wg.generate_sequences_put(standalone_gen_batch)
+            pprint(f'start standalone rollout, input batches {len(standalone_gen_batch)}.')
+        metrics['rollout/standalone_input_batch'] = len(standalone_batch)
+        # get training batch from ready queue, make it stable by random pick
+        return_batch_size = self.config.data.train_batch_size * \
+            self.config.trainer.league_training_config.buffer_size * \
+            self.num_bon
+        ready_batch = [ready_batch_queue.get() for _ in range(min(return_batch_size, ready_batch_queue.qsize()))]
+        real_bsz = len(ready_batch)
+        random_choise_batch = []
+        if len(ready_batch) < return_batch_size:
+            random_choise_batch.extend(
+                [random.choice(ready_batch) for _ in range(return_batch_size - len(ready_batch))])
+        fake_bsz = len(random_choise_batch)
+        ready_batch.extend(random_choise_batch)
+        metrics.update({"rollout/real_bsz": real_bsz, "rollout/fake_bsz": fake_bsz})
+
+        batch = DataProto.concat(ready_batch)
+        if self.config.algorithm.force_append_eos:
+            batch.batch["input_ids"][:, -1] = self.tokenizer.eos_token_id
+        batch.meta_info['generation_kwargs'] = self.config.actor_rollout_ref.rollout.train_generate_kwargs
+        batch.meta_info['response_length'] = self.config.data.max_response_length
+        metrics['rollout/training_batch'] = len(batch)
+        pprint(f'training batches {len(batch)}.')
+
+        print_dataproto_size(batch, head='Before Sequence Balancing')
+
+        # training
+        with Timer(name='rm_score', logger=None) as timer:
+            # compute scores. Support both model and function-based.
+            # We first compute the scores using reward model. Then, we call reward_fn to combine
+            # the results from reward model and rule-based results.
+            if self.use_rm:
+                # we first compute reward model score
+                reward_tensor = self.rm_wg.compute_rm_score(batch)
+                batch = batch.union(reward_tensor)
+        metrics['timing/rm_score'] = timer.last
+
+        print_dataproto_size(batch, head='After Reward Model')
+
+        with Timer(name='reward_fn', logger=None) as timer:
+            # we combine with rule-based rm
+            reward_tensor = self.reward_fn(batch, global_step=self.global_step)
+            batch.batch['token_level_scores'] = reward_tensor
+        metrics['timing/reward_fn'] = timer.last
+
+        print_dataproto_size(batch, head='After Reward function')
+
+        # league training，筛选平均通过率低的prompt
+        use_async_gen = self.config.streaming_rollout.nnodes > 0
+        if self.config.trainer.league_training_config.enable:
+            with Timer(name='select_league_training_prompts', logger=None) as timer:
+                if use_async_gen:
+                    batch, league_training_metrics = league_training_filter_prompt_v2(
+                        batch=batch, strategy=self.config.trainer.league_training_config.strategy, config=self.config)
+                    metrics.update(league_training_metrics)
+                else:
+                    batch = league_training_filter_prompt(batch=batch,
+                                                          strategy=self.config.trainer.league_training_config.strategy,
+                                                          config=self.config)
+            metrics['timing/select_league_training_prompts'] = timer.last
+
+        # bon策略，筛选prompt内部的response，有不同策略，all、best、best_mix_random、best_worst
+        if self.num_bon > 1:
+            with Timer(name='select_bon_samples', logger=None) as timer:
+                if use_async_gen:
+                    batch, bon_metrics = select_training_samples_v2(
+                        batch=batch, strategy=self.config.actor_rollout_ref.rollout.bon_strategy, config=self.config)
+                    metrics.update(bon_metrics)
+                else:
+                    batch = select_training_samples(batch=batch,
+                                                    strategy=self.config.actor_rollout_ref.rollout.bon_strategy,
+                                                    config=self.config)
+            metrics['timing/select_bon_samples'] = timer.last
+
+        return batch
+
+    def _prepare_experience(self, batch, metrics):
+        use_async_gen = self.config.streaming_rollout.nnodes > 0
+
+        with Timer(name='old_log_probs', logger=None) as timer:
+            batch = self.actor_rollout_wg.old_log_probs(batch)
+        metrics['timing/old_log_probs'] = timer.last
+
+        print_dataproto_size(batch, head='After old log probs')
+
+        if self.use_reference_policy:
+            # compute reference log_prob
+            with Timer(name='ref', logger=None) as timer:
+                ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
+                batch = batch.union(ref_log_prob)
+            metrics['timing/ref'] = timer.last
+
+        print_dataproto_size(batch, head='After reference policy')
+
+        # compute values
+        if self.use_critic:
+            # load critic
+            with Timer(name='train_mem_offload', logger=None) as timer:
+                if self.config.trainer.offload_train_memory:
+                    self.critic_wg.to("cuda")
+            metrics['timing/train_mem_offload'] += timer.last
+
+            with Timer(name='values', logger=None) as timer:
+                values = self.critic_wg.compute_values(batch)
+                batch = batch.union(values)
+            metrics['timing/values'] = timer.last
+
+        print_dataproto_size(batch, head='After compute values')
+
+        with Timer(name='adv', logger=None) as timer:
+            # compute rewards. apply_kl_penalty if available
+            batch, kl_metrics = apply_kl_penalty(batch,
+                                                 kl_ctrl=self.kl_ctrl,
+                                                 kl_penalty=self.config.algorithm.kl_penalty)
+            metrics.update(kl_metrics)
+
+            # compute advantages
+            batch, adv_metrics = compute_advantage(
+                batch,
+                self.config.algorithm.gamma,
+                self.config.algorithm.lam,
+                adv_estimator=self.config.algorithm.adv_estimator,
+                upgo_loss_version=self.config.actor_rollout_ref.actor.upgo_loss_version,
+                num_bon=self.config.actor_rollout_ref.rollout.num_bon,
+                adv_whiten=self.config.algorithm.adv_whiten,
+                use_async_gen=use_async_gen)
+            metrics.update(adv_metrics)
+        metrics['timing/adv'] = timer.last
+
+        print_dataproto_size(batch, head='After compute adv')
+
+        return batch
+
+    def _train(self, batch, metrics):
+        # update critic
+        phasic_critic_update = self.config.algorithm.phasic_critic_interval > 0 and self.global_step % self.config.algorithm.phasic_critic_interval == 0
+        if self.use_critic:
+            with Timer(name='update_critic', logger=None) as timer:
+                critic_output = self.critic_wg.update_critic(batch)
+            metrics['timing/update_critic'] = timer.last
+            critic_output_metrics = reduce_metrics(critic_output.meta_info['metrics'])
+            metrics.update(critic_output_metrics)
+
+            with Timer(name='train_mem_offload', logger=None) as timer:
+                if self.config.trainer.offload_train_memory and not phasic_critic_update:
+                    self.critic_wg.to("cpu")
+            metrics['timing/train_mem_offload'] += timer.last
+        if self.config.algorithm.phasic_critic_interval > 0:
+            select_keys = ['input_ids', 'responses', 'attention_mask', 'values', 'returns']
+            buffer_batch = batch.select(batch_keys=select_keys)
+            if self.phasic_critic_buffer is None:
+                self.phasic_critic_buffer = buffer_batch
+            else:
+                self.phasic_critic_buffer = DataProto.concat([self.phasic_critic_buffer, buffer_batch])
+
+        # implement critic warmup
+        if self.config.trainer.critic_warmup <= self.global_step and self.global_step % self.config.trainer.actor_update_freq == 0:
+
+            with Timer(name='train_mem_offload', logger=None) as timer:
+                if self.config.trainer.offload_train_memory:
+                    self.actor_rollout_wg.to("cuda", model=False, optimizer=True)
+            metrics['timing/train_mem_offload'] += timer.last
+
+            # update actor
+            with Timer(name='update_actor', logger=None) as timer:
+                actor_output = self.actor_rollout_wg.update_actor(batch)
+            metrics['timing/update_actor'] = timer.last
+            actor_output_metrics = reduce_metrics(actor_output.meta_info['metrics'])
+            metrics.update(actor_output_metrics)
+
+            with Timer(name='train_mem_offload', logger=None) as timer:
+                if self.config.trainer.offload_train_memory:
+                    self.actor_rollout_wg.to("cpu", model=False, optimizer=True)
+            metrics['timing/train_mem_offload'] += timer.last
+
+        # phasic critic update
+        if phasic_critic_update:
+            self.phasic_critic_buffer.meta_info['phasic_update'] = True
+            with Timer(name='phasic_critic_update', logger=None) as timer:
+                critic_output = self.critic_wg.update_critic(self.phasic_critic_buffer)
+            metrics['timing/phasic_critic_update'] = timer.last
+            critic_output_metrics = reduce_metrics(critic_output.meta_info['metrics'])
+            metrics.update(critic_output_metrics)
+
+            with Timer(name='train_mem_offload', logger=None) as timer:
+                if self.config.trainer.offload_train_memory:
+                    self.critic_wg.to("cpu")
+            metrics['timing/train_mem_offload'] += timer.last
+
+            self.phasic_critic_buffer = None
+
+        # update ref ema
+        with Timer(name='update_ref_ema', logger=None) as timer:
+            self.ref_policy_wg.update_ref_ema()
+        metrics['timing/update_ref_ema'] = timer.last
+
+    def _balance_batch(self, batch, metrics, logging_prefix='global_seqlen'):
+        # perform global sequence balancing here
+        from alpha_seed.utils.seqlen_balance import get_seqlen_balanced_partitions, log_seqlen_unbalance
+
+        # attention_mask can be [bsz * bon, seqlen] or [bsz, bon, seqlen]
+        attention_mask = batch.batch['attention_mask']
+
+        assert len(attention_mask.shape) == 2 or len(attention_mask.shape) == 3
+        print(f'Perform seqlen balancing with shape {attention_mask.shape}')
+        batch_size = attention_mask.shape[0]
+
+        global_seqlen_lst = batch.batch['attention_mask'].view(batch_size, -1).sum(-1).tolist()  # (train_batch_size,)
+
+        # note that this may be problematic when the world_size differs
+        world_size = self.actor_rollout_wg.world_size
+        global_partition_lst = get_seqlen_balanced_partitions(global_seqlen_lst,
+                                                              k_partitions=world_size,
+                                                              equal_size=True)
+        # reorder based on index. The data will be automatically equally partitioned by dispatch function
+        global_idx = torch.tensor([j for partition in global_partition_lst for j in partition])
+        batch.reorder(global_idx)
+        global_balance_stats = log_seqlen_unbalance(seqlen_list=global_seqlen_lst,
+                                                    partitions=global_partition_lst,
+                                                    prefix=logging_prefix)
+        metrics.update(global_balance_stats)
+
+        print_dataproto_size(batch, head='After Sequence Balancing')
+        return batch
+
     def fit(self):
         self.global_step = 0
 
@@ -967,362 +1315,37 @@ class RayPPOTrainer(object):
             if self.use_critic:
                 self.critic_wg.to("cpu")
 
-        # TODO: add staleness
-        standalone_batch = []
-        pending_batch_queue = queue.Queue()
-        ready_batch_queue = queue.Queue()
         while True:
             for batch_dict in self.train_dataloader:
                 metrics = {}
+                metrics.setdefault('timing/train_mem_offload', 0)
                 with Timer(name='step', logger=None) as step_timer:
                     # hybrid generate (on policy)
                     batch: DataProto = DataProto.from_single_dict(batch_dict)
 
-                    # print the size of each data proto before training
-                    print_dataproto_size(batch, head='Before generation')
+                    batch = self._generate(batch, resume_step=resume_step, metrics=metrics)
 
-                    if self.config.data.num_prompts_per_data > 1:
-                        batch = batch.unfold_column_chunks(
-                            self.config.data.num_prompts_per_data,
-                            split_keys=['input_ids', 'attention_mask', 'off_policy_steps'])
+                    batch.meta_info['response_length'] = self.config.data.max_response_length
 
-                    # hybrid rollout
-                    batch = batch.repeat(self.num_bon)
-                    gen_batch = batch.pop(batch_keys=['input_ids', 'attention_mask', 'off_policy_steps'])
-                    gen_batch.meta_info.update({
-                        'generation_kwargs':
-                            self.config.actor_rollout_ref.rollout.train_generate_kwargs,
-                        'complete_ratio':
-                            1.0 if self.global_step < resume_step + self.config.streaming_rollout.warmup_step else
-                            self.config.actor_rollout_ref.rollout.get("complete_ratio", 1.0)
-                    })
-                    pprint(f'start hybrid rollout, input batches {len(gen_batch)}.')
+                    # unfold the dataproto
+                    batch = unfold_batch_dim(
+                        batch, new_batch_size=self.config.data.train_batch_size)  # (train_batch_size, bon, seqlen, xxx)
+                    # balance in batch dim
+                    batch = self._balance_batch(batch, metrics=metrics, logging_prefix='global_seqlen_infer')
+                    # fold the dataproto
+                    batch = fold_batch_dim(batch, batch_dims=2)  # (train_batch_size * bon, seqlen, xxx)
 
-                    with Timer(name='gen', logger=None) as timer:
-                        gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
-                        # TODO: The following two lines should be memory view. However it's not. Let's remove it by removing all its dependency
-                        gen_batch_output.batch['prompts'] = gen_batch_output.batch['input_ids'][:, :self.config.data.
-                                                                                                max_prompt_length]
-                        gen_batch_output.batch['responses'] = gen_batch_output.batch['input_ids'][:, self.config.data.
-                                                                                                  max_prompt_length:]
-
-                    print_dataproto_size(gen_batch_output, head='After generation')
-
-                    metrics['timing/gen'] = timer.last
-                    metrics['rollout/hybrid_input_batch'] = len(batch)
-
-                    # for debugging purpose only. we manually set all the attention_mask to 1 to
-                    # test the training performance under maximum workload.
-                    if self.config.trainer.set_fake_attention_mask:
-                        with Timer(name='fake_mask', logger=None) as timer:
-                            from verl.utils.model import create_random_mask
-                            total_length = self.config.data.max_prompt_length + self.config.data.max_response_length
-
-                            min_ratio_of_valid_token = self.config.trainer.fake_seqlen_ratio
-                            max_ratio_of_valid_token = self.config.trainer.fake_seqlen_ratio
-
-                            assert self.config.trainer.fake_seqlen_ratio > (self.config.data.max_prompt_length +
-                                                                            1) / total_length
-
-                            max_ratio_of_left_padding = 0
-                            attention_mask = create_random_mask(gen_batch_output.batch['input_ids'],
-                                                                max_ratio_of_valid_token=max_ratio_of_valid_token,
-                                                                max_ratio_of_left_padding=max_ratio_of_left_padding,
-                                                                min_ratio_of_valid_token=min_ratio_of_valid_token)
-
-                            gen_batch_output.batch['attention_mask'] = attention_mask
-
-                            # force actor and critic stop updating weights because the data is fake
-                            self.config.actor_rollout_ref.actor.optim.lr = 0
-                            self.config.critic.optim.lr = 0
-
-                        metrics['timing/fake_mask'] = timer.last
-                        pprint(f'set fake attention mask')
-
-                    # only report metrics from one generation replica
-                    if 'xperf_metrics' in gen_batch_output.meta_info:
-                        for name, x_metric in gen_batch_output.meta_info['xperf_metrics'].items():
-                            self.logger.log(data={"rollout/gen/hybrid_{}".format(name): wandb.Histogram(x_metric)},
-                                            step=self.global_step)
-                        gen_batch_output.meta_info.pop('xperf_metrics')
-
-                    # stop hybrid rollout
-                    finished_num, ready_batch_queue, pending_batch_queue = process_output(
-                        batch, gen_batch_output, self.tokenizer, ready_batch_queue, pending_batch_queue, self.config)
-                    pprint(
-                        f'stop hybrid rollout, completed_batch {finished_num}, incompleted_batch {len(batch) - finished_num}'
-                        + f'ready_queue {ready_batch_queue.qsize()}, pending_queue {pending_batch_queue.qsize()}.')
-                    metrics['rollout/hybrid_completed_batch'] = finished_num
-                    metrics['rollout/hybrid_incompleted_batch'] = len(batch) - finished_num
-
-                    # stop standalone rollout to update model
-                    finished_num = 0
-                    if len(standalone_batch) > 0:
-                        gen_batch_output = self.standalone_rollout_wg.generate_sequences_get(standalone_gen_batch)
-                        # only report metrics from one generation replica
-                        if 'xperf_metrics' in gen_batch_output.meta_info:
-                            for name, x_metric in gen_batch_output.meta_info['xperf_metrics'].items():
-                                self.logger.log(
-                                    data={"rollout/gen/standalone_{}".format(name): wandb.Histogram(x_metric)},
-                                    step=self.global_step)
-                            gen_batch_output.meta_info.pop('xperf_metrics')
-                        finished_num, ready_batch_queue, pending_batch_queue = process_output(standalone_batch,
-                                                                                              gen_batch_output,
-                                                                                              self.tokenizer,
-                                                                                              ready_batch_queue,
-                                                                                              pending_batch_queue,
-                                                                                              self.config,
-                                                                                              standalone=True)
-                        pprint(
-                            f'stop standalone rollout, completed_batch {finished_num}, incompleted_batch {len(standalone_batch) - finished_num}'
-                            + f'ready_queue {ready_batch_queue.qsize()}, pending_queue {pending_batch_queue.qsize()}.')
-                    metrics['rollout/standalone_completed_batch'] = finished_num
-                    metrics['rollout/standalone_incompleted_batch'] = len(standalone_batch) - finished_num
-
-                    # update standalone rollout weights
-                    with Timer(name='update_standalone', logger=None) as timer:
-                        if hasattr(self, "standalone_rollout_wg"):
-                            self.actor_rollout_wg.update_standalone_rollout()
-                            self.standalone_rollout_wg.update_standalone_rollout()
-                    metrics['timing/update_standalone'] = timer.last
-
-                    # standalone generate (off policy)
-                    standalone_batch = []
-                    max_standalone_len = 0
-                    while hasattr(self, "standalone_rollout_wg") and pending_batch_queue.qsize(
-                    ) >= self.standalone_rollout_wg.world_size:
-                        for _ in range(self.standalone_rollout_wg.world_size):
-                            standalone_batch.append(pending_batch_queue.get())
-                            max_standalone_len = max(max_standalone_len,
-                                                     standalone_batch[-1].batch['attention_mask'].sum(-1))
-                    for i in range(len(standalone_batch)):
-                        standalone_batch[i] = pad(standalone_batch[i], max_standalone_len, self.tokenizer)
-                    if len(standalone_batch) > 0:
-                        standalone_batch = DataProto.concat(standalone_batch)
-                        standalone_gen_batch = standalone_batch.pop(
-                            batch_keys=['input_ids', 'attention_mask', 'off_policy_steps'])
-                        standalone_gen_batch.meta_info[
-                            'generation_kwargs'] = self.config.actor_rollout_ref.rollout.train_generate_kwargs
-                        standalone_gen_batch.meta_info['complete_ratio'] = 1
-                        self.standalone_rollout_wg.generate_sequences_put(standalone_gen_batch)
-                        pprint(f'start standalone rollout, input batches {len(standalone_gen_batch)}.')
-                    metrics['rollout/standalone_input_batch'] = len(standalone_batch)
-                    # get training batch from ready queue, make it stable by random pick
-                    return_batch_size = self.config.data.train_batch_size * \
-                        self.config.trainer.league_training_config.buffer_size * \
-                        self.num_bon
-                    ready_batch = [
-                        ready_batch_queue.get() for _ in range(min(return_batch_size, ready_batch_queue.qsize()))
-                    ]
-                    real_bsz = len(ready_batch)
-                    random_choise_batch = []
-                    if len(ready_batch) < return_batch_size:
-                        random_choise_batch.extend(
-                            [random.choice(ready_batch) for _ in range(return_batch_size - len(ready_batch))])
-                    fake_bsz = len(random_choise_batch)
-                    ready_batch.extend(random_choise_batch)
-                    metrics.update({"rollout/real_bsz": real_bsz, "rollout/fake_bsz": fake_bsz})
-
-                    batch = DataProto.concat(ready_batch)
-                    if self.config.algorithm.force_append_eos:
-                        batch.batch["input_ids"][:, -1] = self.tokenizer.eos_token_id
-                        batch.batch["responses"][:, -1] = self.tokenizer.eos_token_id
-                    batch.meta_info['generation_kwargs'] = self.config.actor_rollout_ref.rollout.train_generate_kwargs
-                    batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask'], dim=-1).tolist()
-                    metrics['rollout/training_batch'] = len(batch)
-                    pprint(f'training batches {len(batch)}.')
-
-                    print_dataproto_size(batch, head='Before Sequence Balancing')
-
-                    # perform global sequence balancing here
-                    from alpha_seed.utils.seqlen_balance import get_seqlen_balanced_partitions, log_seqlen_unbalance
-                    global_seqlen_lst = batch.batch['attention_mask'].sum(-1).tolist()  # (train_batch_size,)
-                    world_size = self.actor_rollout_wg.world_size
-                    global_partition_lst = get_seqlen_balanced_partitions(global_seqlen_lst,
-                                                                          k_partitions=world_size,
-                                                                          equal_size=True)
-                    # reorder based on index. The data will be automatically equally partitioned by dispatch function
-                    global_idx = torch.tensor([j for partition in global_partition_lst for j in partition])
-                    batch.reorder(global_idx)
-                    global_balance_stats = log_seqlen_unbalance(seqlen_list=global_seqlen_lst,
-                                                                partitions=global_partition_lst,
-                                                                prefix='global_seqlen')
-                    metrics.update(global_balance_stats)
-
-                    print_dataproto_size(batch, head='After Sequence Balancing')
-
-                    # training
-                    with Timer(name='rm_score', logger=None) as timer:
-                        # compute scores. Support both model and function-based.
-                        # We first compute the scores using reward model. Then, we call reward_fn to combine
-                        # the results from reward model and rule-based results.
-                        if self.use_rm:
-                            # we first compute reward model score
-                            reward_tensor = self.rm_wg.compute_rm_score(batch)
-                            batch = batch.union(reward_tensor)
-                    metrics['timing/rm_score'] = timer.last
-
-                    print_dataproto_size(batch, head='After Reward Model')
-
-                    with Timer(name='reward_fn', logger=None) as timer:
-                        # we combine with rule-based rm
-                        reward_tensor = self.reward_fn(batch, global_step=self.global_step)
-                        batch.batch['token_level_scores'] = reward_tensor
-                    metrics['timing/reward_fn'] = timer.last
-
-                    print_dataproto_size(batch, head='After Reward function')
-
-                    # league training，筛选平均通过率低的prompt
-                    use_async_gen = self.config.streaming_rollout.nnodes > 0
-                    if self.config.trainer.league_training_config.enable:
-                        with Timer(name='select_league_training_prompts', logger=None) as timer:
-                            if use_async_gen:
-                                batch, league_training_metrics = league_training_filter_prompt_v2(
-                                    batch=batch,
-                                    strategy=self.config.trainer.league_training_config.strategy,
-                                    config=self.config)
-                                metrics.update(league_training_metrics)
-                            else:
-                                batch = league_training_filter_prompt(
-                                    batch=batch,
-                                    strategy=self.config.trainer.league_training_config.strategy,
-                                    config=self.config)
-                        metrics['timing/select_league_training_prompts'] = timer.last
-
-                    # bon策略，筛选prompt内部的response，有不同策略，all、best、best_mix_random、best_worst
-                    if self.num_bon > 1:
-                        with Timer(name='select_bon_samples', logger=None) as timer:
-                            if use_async_gen:
-                                batch, bon_metrics = select_training_samples_v2(
-                                    batch=batch,
-                                    strategy=self.config.actor_rollout_ref.rollout.bon_strategy,
-                                    config=self.config)
-                                metrics.update(bon_metrics)
-                            else:
-                                batch = select_training_samples(
-                                    batch=batch,
-                                    strategy=self.config.actor_rollout_ref.rollout.bon_strategy,
-                                    config=self.config)
-                        metrics['timing/select_bon_samples'] = timer.last
-
-                    with Timer(name='old_log_probs', logger=None) as timer:
-                        batch = self.actor_rollout_wg.old_log_probs(batch)
-                    metrics['timing/old_log_probs'] = timer.last
-
-                    print_dataproto_size(batch, head='After old log probs')
-
-                    if self.use_reference_policy:
-                        # compute reference log_prob
-                        with Timer(name='ref', logger=None) as timer:
-                            ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
-                            batch = batch.union(ref_log_prob)
-                        metrics['timing/ref'] = timer.last
-
-                    print_dataproto_size(batch, head='After reference policy')
-
-                    metrics.setdefault('timing/train_mem_offload', 0)
-
-                    # compute values
-                    if self.use_critic:
-                        # load critic
-                        with Timer(name='train_mem_offload', logger=None) as timer:
-                            if self.config.trainer.offload_train_memory:
-                                self.critic_wg.to("cuda")
-                        metrics['timing/train_mem_offload'] += timer.last
-
-                        with Timer(name='values', logger=None) as timer:
-                            values = self.critic_wg.compute_values(batch)
-                            batch = batch.union(values)
-                        metrics['timing/values'] = timer.last
-
-                    print_dataproto_size(batch, head='After compute values')
-
-                    with Timer(name='adv', logger=None) as timer:
-                        # compute rewards. apply_kl_penalty if available
-                        batch, kl_metrics = apply_kl_penalty(batch,
-                                                             kl_ctrl=self.kl_ctrl,
-                                                             kl_penalty=self.config.algorithm.kl_penalty)
-                        metrics.update(kl_metrics)
-
-                        # compute advantages
-                        batch, adv_metrics = compute_advantage(
-                            batch,
-                            self.config.algorithm.gamma,
-                            self.config.algorithm.lam,
-                            adv_estimator=self.config.algorithm.adv_estimator,
-                            upgo_loss_version=self.config.actor_rollout_ref.actor.upgo_loss_version,
-                            num_bon=self.config.actor_rollout_ref.rollout.num_bon,
-                            adv_whiten=self.config.algorithm.adv_whiten,
-                            use_async_gen=use_async_gen)
-                        metrics.update(adv_metrics)
-                    metrics['timing/adv'] = timer.last
-
-                    print_dataproto_size(batch, head='After compute adv')
+                    # we should perform balance by keeping the best-of-n order
+                    batch = self._prepare_experience(batch, metrics=metrics)
 
                     if self.global_step == 1:
                         print('Debugging', batch.batch)
 
-                    # update critic
-                    phasic_critic_update = self.config.algorithm.phasic_critic_interval > 0 and self.global_step % self.config.algorithm.phasic_critic_interval == 0
-                    if self.use_critic:
-                        with Timer(name='update_critic', logger=None) as timer:
-                            critic_output = self.critic_wg.update_critic(batch)
-                        metrics['timing/update_critic'] = timer.last
-                        critic_output_metrics = reduce_metrics(critic_output.meta_info['metrics'])
-                        metrics.update(critic_output_metrics)
+                    # here, we can perform balancing without keeping the best-of-n order
+                    batch = self._balance_batch(batch, metrics=metrics, logging_prefix='global_seqlen_train')
 
-                        with Timer(name='train_mem_offload', logger=None) as timer:
-                            if self.config.trainer.offload_train_memory and not phasic_critic_update:
-                                self.critic_wg.to("cpu")
-                        metrics['timing/train_mem_offload'] += timer.last
-                    if self.config.algorithm.phasic_critic_interval > 0:
-                        select_keys = ['input_ids', 'responses', 'attention_mask', 'values', 'returns']
-                        buffer_batch = batch.select(batch_keys=select_keys)
-                        if self.phasic_critic_buffer is None:
-                            self.phasic_critic_buffer = buffer_batch
-                        else:
-                            self.phasic_critic_buffer = DataProto.concat([self.phasic_critic_buffer, buffer_batch])
-
-                    # implement critic warmup
-                    if self.config.trainer.critic_warmup <= self.global_step and self.global_step % self.config.trainer.actor_update_freq == 0:
-
-                        with Timer(name='train_mem_offload', logger=None) as timer:
-                            if self.config.trainer.offload_train_memory:
-                                self.actor_rollout_wg.to("cuda", model=False, optimizer=True)
-                        metrics['timing/train_mem_offload'] += timer.last
-
-                        # update actor
-                        with Timer(name='update_actor', logger=None) as timer:
-                            actor_output = self.actor_rollout_wg.update_actor(batch)
-                        metrics['timing/update_actor'] = timer.last
-                        actor_output_metrics = reduce_metrics(actor_output.meta_info['metrics'])
-                        metrics.update(actor_output_metrics)
-
-                        with Timer(name='train_mem_offload', logger=None) as timer:
-                            if self.config.trainer.offload_train_memory:
-                                self.actor_rollout_wg.to("cpu", model=False, optimizer=True)
-                        metrics['timing/train_mem_offload'] += timer.last
-
-                    # phasic critic update
-                    if phasic_critic_update:
-                        self.phasic_critic_buffer.meta_info['phasic_update'] = True
-                        with Timer(name='phasic_critic_update', logger=None) as timer:
-                            critic_output = self.critic_wg.update_critic(self.phasic_critic_buffer)
-                        metrics['timing/phasic_critic_update'] = timer.last
-                        critic_output_metrics = reduce_metrics(critic_output.meta_info['metrics'])
-                        metrics.update(critic_output_metrics)
-
-                        with Timer(name='train_mem_offload', logger=None) as timer:
-                            if self.config.trainer.offload_train_memory:
-                                self.critic_wg.to("cpu")
-                        metrics['timing/train_mem_offload'] += timer.last
-
-                        self.phasic_critic_buffer = None
-
-                    # update ref ema
-                    with Timer(name='update_ref_ema', logger=None) as timer:
-                        self.ref_policy_wg.update_ref_ema()
-                    metrics['timing/update_ref_ema'] = timer.last
+                    batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask'], dim=-1).tolist()
+                    self._train(batch, metrics=metrics)
 
                     # validate
                     if self.val_reward_fn is not None and self.global_step % self.config.trainer.test_freq == 0:
@@ -1338,6 +1361,7 @@ class RayPPOTrainer(object):
                         batch.meta_info['use_critic'] = self.use_critic
                         batch.meta_info['mean'] = self.config.reward_model.mean
                         batch.meta_info['std'] = self.config.reward_model.std
+                        batch.meta_info['response_length'] = self.config.data.max_response_length
                         data_metrics: DataProto = self.actor_rollout_wg.execute_with_func_generator(
                             compute_data_metrics, batch)
                         data_metrics = data_metrics.meta_info['metrics']

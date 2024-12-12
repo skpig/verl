@@ -76,6 +76,7 @@ python3 tasks/main_ppo.py \
     +actor_rollout_ref.rollout.use_vllm=False \
     +actor_rollout_ref.rollout.num_slots=256 \
     +actor_rollout_ref.rollout.slot_block_size=1024 \
+    +actor_rollout_ref.rollout.complete_ratio=0.5 \
     actor_rollout_ref.ref.log_prob_micro_batch_size=512 \
     actor_rollout_ref.ref.ema=0.99 \
     critic.optim.lr=${critic_lr} \
@@ -107,7 +108,7 @@ python3 tasks/main_ppo.py \
     trainer.logger=['console','tracking'] \
     trainer.project_name=${project_name} \
     trainer.experiment_name=${experiment_name} \
-    trainer.n_gpus_per_node=8 \
+    trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
     trainer.default_hdfs_dir=${default_hdfs_dir} \
     trainer.save_freq=${save_freq} \
@@ -121,7 +122,7 @@ python3 tasks/main_ppo.py \
     trainer.resume_steps=disable \
     trainer.set_fake_attention_mask=False \
     trainer.fake_seqlen_ratio=0.5 \
-    streaming_rollout.nnodes=0 \
+    streaming_rollout.nnodes=1 \
     streaming_rollout.n_gpus_per_node=4 \
     streaming_rollout.warmup_step=0 \
     streaming_rollout.force_eos=True
