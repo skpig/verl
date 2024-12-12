@@ -79,6 +79,29 @@ def last_boxed_only_string(string: str) -> Optional[str]:
     return retval
 
 
+def last_boxed_only_string_v2(string: str) -> Optional[str]:
+    idx = string.rfind("\\boxed")
+    i = idx
+    right_brace_idx = None
+    num_left_braces_open = 0
+    while i < len(string):
+        if string[i] == "{":
+            num_left_braces_open += 1
+        if string[i] == "}":
+            num_left_braces_open -= 1
+            if num_left_braces_open == 0:
+                right_brace_idx = i
+                break
+        i += 1
+
+    if right_brace_idx is None:
+        retval = None
+    else:
+        retval = string[idx:right_brace_idx + 1]
+
+    return retval
+
+
 def remove_boxed(s: str) -> str:
     if "\\boxed " in s:
         left = "\\boxed "
@@ -287,12 +310,10 @@ def is_correct_minerva(og_pred, gt, gt_need_extract=False):
 
 
 def is_correct_strict_box(pred, gt):
-    pattern = re.compile(STRICT_BOX_PATTERN)
-    match = pattern.search(pred)
-    if match:
-        extracted_answer = match.group(1)
-        return 1 if (extracted_answer == gt) else -1, extracted_answer
-    return -1, pred
+    pred = pred[-100:]
+    pred = last_boxed_only_string_v2(pred)
+    pred = remove_boxed(pred) if pred is not None else None
+    return 1 if (pred == gt) else -1, pred
 
 
 def verify(pred,
