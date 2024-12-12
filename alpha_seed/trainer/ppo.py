@@ -1134,23 +1134,6 @@ class RayPPOTrainer(object):
 
                     print_dataproto_size(batch, head='Before Sequence Balancing')
 
-                    # perform global sequence balancing here
-                    from alpha_seed.utils.seqlen_balance import get_seqlen_balanced_partitions, log_seqlen_unbalance
-                    global_seqlen_lst = batch.batch['attention_mask'].sum(-1).tolist()  # (train_batch_size,)
-                    world_size = self.actor_rollout_wg.world_size
-                    global_partition_lst = get_seqlen_balanced_partitions(global_seqlen_lst,
-                                                                          k_partitions=world_size,
-                                                                          equal_size=True)
-                    # reorder based on index. The data will be automatically equally partitioned by dispatch function
-                    global_idx = torch.tensor([j for partition in global_partition_lst for j in partition])
-                    batch.reorder(global_idx)
-                    global_balance_stats = log_seqlen_unbalance(seqlen_list=global_seqlen_lst,
-                                                                partitions=global_partition_lst,
-                                                                prefix='global_seqlen')
-                    metrics.update(global_balance_stats)
-
-                    print_dataproto_size(batch, head='After Sequence Balancing')
-
                     # training
                     with Timer(name='rm_score', logger=None) as timer:
                         # compute scores. Support both model and function-based.
@@ -1261,6 +1244,23 @@ class RayPPOTrainer(object):
 
                     if self.global_step == 1:
                         print('Debugging', batch.batch)
+
+                    # perform global sequence balancing here
+                    from alpha_seed.utils.seqlen_balance import get_seqlen_balanced_partitions, log_seqlen_unbalance
+                    global_seqlen_lst = batch.batch['attention_mask'].sum(-1).tolist()  # (train_batch_size,)
+                    world_size = self.actor_rollout_wg.world_size
+                    global_partition_lst = get_seqlen_balanced_partitions(global_seqlen_lst,
+                                                                          k_partitions=world_size,
+                                                                          equal_size=True)
+                    # reorder based on index. The data will be automatically equally partitioned by dispatch function
+                    global_idx = torch.tensor([j for partition in global_partition_lst for j in partition])
+                    batch.reorder(global_idx)
+                    global_balance_stats = log_seqlen_unbalance(seqlen_list=global_seqlen_lst,
+                                                                partitions=global_partition_lst,
+                                                                prefix='global_seqlen')
+                    metrics.update(global_balance_stats)
+
+                    print_dataproto_size(batch, head='After Sequence Balancing')
 
                     # update critic
                     phasic_critic_update = self.config.algorithm.phasic_critic_interval > 0 and self.global_step % self.config.algorithm.phasic_critic_interval == 0
