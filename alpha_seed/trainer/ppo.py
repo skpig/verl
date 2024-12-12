@@ -154,21 +154,23 @@ def compute_advantage(data: DataProto, gamma, lam, adv_estimator, upgo_loss_vers
                                                             eos_mask=response_mask,
                                                             upgo_loss_version=upgo_loss_version)
         data.batch['upgo_advantages'] = upgo_advantages
+        adv_metrics = {}
     elif adv_estimator == 'grpo':
         token_level_scores = data.batch['token_level_scores']
         index = data.non_tensor_batch['index']
-        advantages, returns = core_algos.compute_grpo_advantage_return(token_level_scores=token_level_scores,
-                                                                       eos_mask=response_mask,
-                                                                       index=index,
-                                                                       num_bon=num_bon,
-                                                                       use_async_gen=use_async_gen)
+        advantages, returns, adv_metrics = core_algos.compute_grpo_advantage_return(
+            token_level_scores=token_level_scores,
+            eos_mask=response_mask,
+            index=index,
+            num_bon=num_bon,
+            use_async_gen=use_async_gen)
         data.batch['advantages'] = advantages
         data.batch['origin_advantages'] = advantages
         data.batch['returns'] = returns
         data.batch['upgo_advantages'] = torch.zeros_like(advantages)
     else:
         raise NotImplementedError
-    return data
+    return data, adv_metrics
 
 
 def reduce_metrics(metrics: dict):
@@ -1243,7 +1245,7 @@ class RayPPOTrainer(object):
                         metrics.update(kl_metrics)
 
                         # compute advantages
-                        batch = compute_advantage(
+                        batch, adv_metrics = compute_advantage(
                             batch,
                             self.config.algorithm.gamma,
                             self.config.algorithm.lam,
@@ -1252,6 +1254,7 @@ class RayPPOTrainer(object):
                             num_bon=self.config.actor_rollout_ref.rollout.num_bon,
                             adv_whiten=self.config.algorithm.adv_whiten,
                             use_async_gen=use_async_gen)
+                        metrics.update(adv_metrics)
                     metrics['timing/adv'] = timer.last
 
                     print_dataproto_size(batch, head='After compute adv')

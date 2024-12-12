@@ -160,6 +160,7 @@ def compute_grpo_advantage_return(token_level_scores: torch.Tensor,
     """
     response_length = token_level_scores.shape[-1]
     scores = token_level_scores.sum(-1)
+    metrics = {}
     if not use_async_gen:
         scores = scores.reshape(-1, num_bon)
         with torch.no_grad():
@@ -175,13 +176,22 @@ def compute_grpo_advantage_return(token_level_scores: torch.Tensor,
             bsz = scores.shape[0]
             for i in range(bsz):
                 id2score[index[i]].append(scores[i])
+            lens = list(map(lambda x: len(x), id2score.values()))
             for idx in id2score:
                 id2mean[idx] = torch.mean(torch.stack(id2score[idx]))
-                id2std[idx] = torch.std(torch.stack(id2score[idx]))
+                if len(id2score[idx]) == 1:
+                    id2std[idx] = torch.tensor(1.0)
+                else:
+                    id2std[idx] = torch.std(torch.stack(id2score[idx]))
             for i in range(bsz):
                 scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
             scores = scores.unsqueeze(dim=1).tile([1, response_length]) * eos_mask
-    return scores, scores
+            metrics.update({
+                "GRPO_aysnc/max_response_num": max(lens),
+                "GRPO_aysnc/min_response_num": min(lens),
+                "GRPO_aysnc/mean_response_num": np.mean(lens),
+            })
+    return scores, scores, metrics
 
 
 def compute_rewards(token_level_scores, old_log_prob, ref_log_prob, kl_ratio):
