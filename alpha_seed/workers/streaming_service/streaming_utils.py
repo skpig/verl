@@ -33,7 +33,7 @@ def process_output(input_batch,
                 ready_batch_queue.put(item)
             else:
                 item.batch['off_policy_steps'] += 1
-                # item.pop(batch_keys=['responses'])
+                item.pop(batch_keys=['responses'])
                 pending_batch_queue.put(rmpad(item))
     else:
         if config.streaming_rollout.force_eos:

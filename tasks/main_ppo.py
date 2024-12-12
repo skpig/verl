@@ -98,9 +98,6 @@ class RewardManager():
             prompt_ids = data_item.batch['input_ids'][:self.config.data.max_prompt_length]
             response_ids = data_item.batch['input_ids'][self.config.data.max_prompt_length:]
 
-            data_item.batch['prompts'] = prompt_ids
-            data_item.batch['responses'] = response_ids
-
             prompt_length = prompt_ids.shape[-1]
             valid_prompt_length = data_item.batch['attention_mask'][:prompt_length].sum()
             valid_prompt_ids = prompt_ids[-valid_prompt_length:]
@@ -272,11 +269,6 @@ def validate_config(config):
 
     # rollout
     # assert real_train_batch_size % config.actor_rollout_ref.rollout.micro_batch_size == 0
-    complete_ratio = config.actor_rollout_ref.rollout.get("complete_ratio", 1.0)
-    if config.streaming_rollout.nnodes == 0:
-        assert complete_ratio == 1.0, f'When streaming rollout is not enabled, complete_ratio must be 1. Got {complete_ratio}'
-    else:
-        assert complete_ratio < 1.0, f'When streaming rollout is enabled, complete_ratio must be smaller than 1. Got {complete_ratio}.'
 
     # actor
     assert real_train_batch_size % config.actor_rollout_ref.actor.ppo_mini_batch_size == 0

@@ -307,7 +307,7 @@ class RewardModelWorker(Worker):
         # expand as token_level_reward
         attention_mask = data.batch['attention_mask'].to(torch.int64)
         position_ids = compute_position_id_with_mask(attention_mask)
-        response_length = data.meta_info['response_length']
+        response_length = data.batch['responses'].shape[-1]
         eos_mask_idx = torch.argmax(position_ids * attention_mask, dim=-1)  # (bsz,)
         token_level_scores = torch.zeros_like(attention_mask, dtype=scores.dtype)  # (bsz, seqlen)
         token_level_scores[torch.arange(batch_size), eos_mask_idx] = scores

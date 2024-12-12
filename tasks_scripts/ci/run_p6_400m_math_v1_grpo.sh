@@ -12,7 +12,7 @@ max_prompt_length=1024
 max_response_length=2048
 # batch size && 训练epoch
 train_batch_size=1024
-ppo_mini_batch_size=640
+ppo_mini_batch_size=1280
 val_batch_size=5000
 total_epochs=200
 test_freq=5
@@ -35,7 +35,6 @@ adv_estimator=grpo
 kl_loss_weight=0.005
 num_bon=5
 bon_strategy=all
-kl_penalty=low_var_kl
 # tracking实验名
 project_name='verl_example_math_ci'
 experiment_name='1129a10'
@@ -127,7 +126,6 @@ python3 tasks/main_ppo.py \
     algorithm.gamma=${gae_gamma} \
     algorithm.lam=${gae_lam} \
     algorithm.force_append_eos=${force_append_eos} \
-    algorithm.kl_penalty=${kl_penalty} \
     trainer.critic_warmup=0 \
     trainer.logger=['console','tracking'] \
     trainer.project_name=${project_name} \
@@ -144,7 +142,7 @@ python3 tasks/main_ppo.py \
     trainer.need_log=False \
     trainer.log_file=/opt/tiger/alpha-seed/log.jsonl \
     trainer.resume_steps="disable" \
-    +actor_rollout_ref.rollout.complete_ratio=1.0 \
+    +actor_rollout_ref.rollout.complete_ratio=0.5 \
     +actor_rollout_ref.rollout.max_off_policy_steps=5 \
     actor_rollout_ref.actor.fsdp_size=${fsdp_size} \
     actor_rollout_ref.ref.fsdp_size=${fsdp_size} \

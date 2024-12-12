@@ -79,9 +79,10 @@ class DataParallelPPOCritic(BasePPOCritic):
 
         self.value_loss = torch.compile(core_algos.compute_value_loss, disable=True)
 
-    def _forward_micro_batch(self, micro_batch: TensorDict, response_length):
+    def _forward_micro_batch(self, micro_batch: TensorDict):
         from flash_attn.bert_padding import pad_input, unpad_input, index_first_axis, rearrange
 
+        response_length = micro_batch['responses'].size(-1)
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
             if self.use_rmpad:
                 input_ids = micro_batch['input_ids'].to(torch.int64)
@@ -122,11 +123,10 @@ class DataParallelPPOCritic(BasePPOCritic):
                                             use_cache=False)  # prevent model thinks we are generating
                 values = output.logits
             values = values[:, -response_length - 1:-1]
-            values = values.float()
             return values
 
     def _make_minibatch_iterator(self, data: DataProto) -> Iterable[DataProto]:
-        select_keys = ['input_ids', 'attention_mask', 'values', 'returns']
+        select_keys = ['input_ids', 'responses', 'attention_mask', 'values', 'returns']
         data = data.select(batch_keys=select_keys)
         return data.make_iterator(mini_batch_size=self.config.ppo_mini_batch_size,
                                   epochs=self.config.ppo_epochs if not data.meta_info.get('phasic_update', False) else
@@ -144,8 +144,6 @@ class DataParallelPPOCritic(BasePPOCritic):
         return grad_norm
 
     def compute_values(self, data: DataProto) -> torch.Tensor:
-        response_length = data.meta_info['response_length']
-
         self.critic_module.eval()
 
         use_dynamic_bsz = data.meta_info['use_dynamic_bsz']
@@ -153,7 +151,7 @@ class DataParallelPPOCritic(BasePPOCritic):
             max_token_len = data.meta_info['max_token_len']
         else:
             micro_batch_size = data.meta_info['micro_batch_size']
-        select_keys = ['input_ids', 'attention_mask']
+        select_keys = ['responses', 'input_ids', 'attention_mask']
         batch = data.select(batch_keys=select_keys).batch
         if use_dynamic_bsz:
             (micro_batches, num_micro_batches) = rearrange_micro_batches(batch=data.batch, max_token_len=max_token_len)
@@ -166,15 +164,13 @@ class DataParallelPPOCritic(BasePPOCritic):
             assert micro_batch.device == torch.device('cpu')
             micro_batch = micro_batch.cuda()  # actor device is cpu when using offload
             with torch.no_grad():
-                values = self._forward_micro_batch(micro_batch, response_length=response_length)
+                values = self._forward_micro_batch(micro_batch)
             if i < num_micro_batches:
                 values_lst.append(values)
         values = torch.concat(values_lst, dim=0)
         return values
 
     def update_critic(self, data: DataProto):
-        response_length = data.meta_info['response_length']
-
         self.critic_module.train()
 
         metrics = {}
@@ -201,13 +197,16 @@ class DataParallelPPOCritic(BasePPOCritic):
                 for i, micro_data in enumerate(micro_batches):
                     assert micro_data.device == torch.device('cpu')
                     micro_data = micro_data.cuda()  # critic device is cpu when using offload
+                    input_ids = micro_data['input_ids']
+                    responses = micro_data['responses']
                     attention_mask = micro_data['attention_mask']
                     values = micro_data['values']
                     returns = micro_data['returns']
+                    response_length = responses.size(1)
 
                     eos_mask = attention_mask[:, -response_length - 1:-1]
 
-                    vpreds = self._forward_micro_batch(micro_data, response_length=response_length)
+                    vpreds = self._forward_micro_batch(micro_data)
 
                     # assert not torch.any(torch.isnan(vpreds)).item()
 

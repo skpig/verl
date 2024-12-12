@@ -15,7 +15,7 @@ max_response_length=2048 # 16384
 # batch size && 训练epoch
 train_batch_size=1024
 val_batch_size=5000
-ppo_mini_batch_size=128
+ppo_mini_batch_size=256
 ppo_micro_batch_size=64
 total_epochs=100
 test_freq=10
@@ -30,7 +30,6 @@ use_last_response=False
 use_ref_answer=True
 gae_gamma=1.0
 gae_lam=0.95
-kl_penalty=low_var_kl
 # 工程参数
 actor_sp_size=2
 critic_sp_size=2
@@ -102,7 +101,6 @@ python3 tasks/main_ppo.py \
     algorithm.kl_ctrl.kl_coef=${kl_coef} \
     algorithm.gamma=${gae_gamma} \
     algorithm.lam=${gae_lam} \
-    algorithm.kl_penalty=${kl_penalty} \
     trainer.critic_warmup=0 \
     trainer.logger=['console','tracking'] \
     trainer.project_name=${project_name} \

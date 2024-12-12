@@ -92,9 +92,10 @@ class DataParallelPPOActor(BasePPOActor):
         self.compute_entropy_loss = torch.compile(core_algos.compute_entropy_loss, dynamic=True)
         self.entropy_from_logits = torch.compile(verl_F.entropy_from_logits, dynamic=True)
 
-    def _forward_micro_batch(self, micro_batch: TensorDict, temperature, compute_entropy, response_length):
+    def _forward_micro_batch(self, micro_batch: TensorDict, temperature, compute_entropy):
         from flash_attn.bert_padding import index_first_axis, rearrange
 
+        response_length = micro_batch['responses'].size(-1)
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
             if not self.use_rmpad:
                 raise NotImplementedError('only support rmpad mode')
@@ -178,7 +179,9 @@ class DataParallelPPOActor(BasePPOActor):
             return entropy, log_probs
 
     def _make_minibatch_iterator(self, data: DataProto) -> Iterable[DataProto]:
-        select_keys = ['input_ids', 'attention_mask', 'old_log_probs', 'ref_log_prob', 'advantages', 'upgo_advantages']
+        select_keys = [
+            'responses', 'input_ids', 'attention_mask', 'old_log_probs', 'ref_log_prob', 'advantages', 'upgo_advantages'
+        ]
         data = data.select(batch_keys=select_keys)
         return data.make_iterator(mini_batch_size=self.config.ppo_mini_batch_size,
                                   epochs=self.config.ppo_epochs,
@@ -195,8 +198,6 @@ class DataParallelPPOActor(BasePPOActor):
         return grad_norm
 
     def compute_log_prob(self, data: DataProto) -> DataProto:
-        response_length = data.meta_info['response_length']
-
         # set to eval
         self.actor_module.eval()
 
@@ -208,10 +209,9 @@ class DataParallelPPOActor(BasePPOActor):
             micro_batch_size = 1
         temperature = data.meta_info['temperature']  # temperature must be in the data.meta_info to avoid slient error
 
-        select_keys = ['input_ids', 'attention_mask']
+        select_keys = ['responses', 'input_ids', 'attention_mask']
         batch = data.select(batch_keys=select_keys).batch
         if use_dynamic_bsz:
-            # note that this rearrange keeps the order. We can further improve this
             (micro_batches, num_micro_batches) = rearrange_micro_batches(batch=data.batch, max_token_len=max_token_len)
         else:
             # split batch into micro_batches
@@ -226,8 +226,7 @@ class DataParallelPPOActor(BasePPOActor):
                 micro_batch = micro_batch.cuda()  # actor device is cpu when using offload
                 entropy, log_probs = self._forward_micro_batch(micro_batch,
                                                                temperature=temperature,
-                                                               compute_entropy=True,
-                                                               response_length=response_length)
+                                                               compute_entropy=True)
             if i < num_micro_batches:
                 log_probs_lst.append(log_probs)
                 entropy_lst.append(entropy)
@@ -236,8 +235,6 @@ class DataParallelPPOActor(BasePPOActor):
         return entropy, log_probs
 
     def update_policy(self, data: DataProto):
-        response_length = data.meta_info['response_length']
-
         # make sure we are in training mode
         self.actor_module.train()
 
@@ -266,6 +263,8 @@ class DataParallelPPOActor(BasePPOActor):
                 for i, micro_data in enumerate(micro_batches):
                     assert micro_data.device == torch.device('cpu')
                     micro_data = micro_data.cuda()  # actor device is cpu when using offload
+                    responses = micro_data['responses']
+                    response_length = responses.size(1)
                     attention_mask = micro_data['attention_mask']
                     response_mask = attention_mask[:, -response_length:]
                     old_log_prob = micro_data['old_log_probs']
@@ -288,8 +287,7 @@ class DataParallelPPOActor(BasePPOActor):
 
                     full_entropy, log_prob = self._forward_micro_batch(micro_batch=micro_data,
                                                                        temperature=temperature,
-                                                                       compute_entropy=compute_entropy,
-                                                                       response_length=response_length)
+                                                                       compute_entropy=compute_entropy)
 
                     total_loss, pg_loss, upgo_loss, pg_clipfrac, pg_clipfrac2, ppo_kl, ppo_kl_sum = core_algos.compute_policy_loss(
                         old_log_prob=old_log_prob,
