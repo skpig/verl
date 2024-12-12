@@ -81,6 +81,9 @@ def last_boxed_only_string(string: str) -> Optional[str]:
 
 def last_boxed_only_string_v2(string: str) -> Optional[str]:
     idx = string.rfind("\\boxed")
+    if idx < 0:
+        return None
+
     i = idx
     right_brace_idx = None
     num_left_braces_open = 0
@@ -110,8 +113,8 @@ def remove_boxed(s: str) -> str:
 
     left = "\\boxed{"
 
-    assert s[:len(left)] == left
-    assert s[-1] == "}"
+    assert s[:len(left)] == left, s
+    assert s[-1] == "}", s
 
     return s[len(left):-1]
 
