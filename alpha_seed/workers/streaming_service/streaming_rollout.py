@@ -92,7 +92,7 @@ class AsyncXPerfGPTRollout(object):
                                                          wait=10)
         else:
             self.profiler_context = nullcontext(NullProfileEnter())
-
+        self.is_standalone = is_standalone
         # auto infer rollout running config
         # off-policy rollout should disable paged attention, for maintaining FIFO order
         use_vllm = self.config.get('enable_paged_attention', True) and not is_standalone
@@ -250,7 +250,7 @@ class AsyncXPerfGPTRollout(object):
                 try:
                     self.inference_engine.execute(query_pool,
                                                   complete_ratio=complete_ratio,
-                                                  stop_event=self.stop_event,
+                                                  stop_event=self.stop_event if self.is_standalone else None,
                                                   off_policy_steps=off_policy_steps)
                     p.step()
                 except Exception as e:
