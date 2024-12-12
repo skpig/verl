@@ -26,7 +26,7 @@ from datetime import datetime
 from multiprocessing import Process
 
 # rule-based reward score
-from alpha_seed.utils.reward_score import gsm8k, math, math_v2, model_score_fn, logic_puzzle, oj_utils, math_verifier, response_post_proc
+from alpha_seed.utils.reward_score import gsm8k, math, math_v2, model_score_fn, logic_puzzle, oj_utils, math_verifier, response_post_proc, gpqa_verifier
 from alpha_seed.utils.duplicate import para_dup
 from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRefWorker
 from alpha_seed.workers.actors.critic_worker import CriticWorker
@@ -54,6 +54,8 @@ def _select_rm_score_fn(reward_style):
         return math_v2.compute_score
     elif reward_style == "rule-math_verifier":
         return math_verifier.compute_score
+    elif reward_style == "rule-boxed_gpqa":
+        return gpqa_verifier.compute_score
     else:
         if reward_style.startswith("rule-logic_puzzle"):
             return logic_puzzle.compute_score
