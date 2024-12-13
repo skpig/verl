@@ -65,6 +65,9 @@ def select_training_samples(batch, strategy, config):
 
 
 def select_training_samples_v2(batch, strategy, config):
+    """
+    batch: [bsz * bon, ...]
+    """
     # strategy:
     #   - all: use all responses to train policy and value
     #   - best: use BoN to train policy and value
@@ -73,6 +76,7 @@ def select_training_samples_v2(batch, strategy, config):
 
     # step1, 处理成id2feat的格式
     id2feat = defaultdict(list)
+    id2acc = {}
     total_samples = []
     cur_bsz = batch.batch.batch_size[0]
     mini_bsz = config.actor_rollout_ref.actor.ppo_mini_batch_size
@@ -97,6 +101,10 @@ def select_training_samples_v2(batch, strategy, config):
     final_samples = []
     for key, val in id2feat.items():
         scores = list(map(lambda x: x["scores"], val))
+        id2acc[key] = (np.mean(scores).item() + 1) / 2
+        scores_noise = np.random.uniform(
+            -0.01, 0.01, size=len(scores))  # add noise to avoid always choosing the first one, avoiding potential bias
+        scores += scores_noise
         if strategy == "all":
             final_idx = list(range(len(val)))
             response_num_per_prompt = num_bon
@@ -104,7 +112,11 @@ def select_training_samples_v2(batch, strategy, config):
             final_idx = [np.argmax(scores)]
             response_num_per_prompt = 1
         elif strategy == "best_mix_random":
-            final_idx = [random.randint(0, len(val) - 1), np.argmax(scores)]
+            final_idx = [np.argmax(scores)]
+            while len(final_idx) < 2:
+                random_idx = np.random.randint(0, len(val))
+                if random_idx not in final_idx:
+                    final_idx.append(random_idx)
             response_num_per_prompt = 2
         elif strategy == "best_worst":
             final_idx = [np.argmin(scores), np.argmax(scores)]
@@ -126,19 +138,15 @@ def select_training_samples_v2(batch, strategy, config):
     final_samples = sorted(final_samples, key=lambda x: x["index"])
 
     # step4, 处理成DataProto格式
-    tensors = {}
-    final_non_tensor_batch = {}
+    tensors = defaultdict(list)
+    final_non_tensor_batch = defaultdict(list)
     for sample in final_samples:
         for key in sample:
             if key == "scores":
                 continue
             if key in tensor_keys:
-                if key not in tensors:
-                    tensors[key] = []
                 tensors[key].append(sample[key])
             elif key in non_tensor_keys:
-                if key not in final_non_tensor_batch:
-                    final_non_tensor_batch[key] = []
                 final_non_tensor_batch[key].append(sample[key])
     for key in tensor_keys:
         tensors[key] = torch.stack(tensors[key], dim=0)
@@ -166,4 +174,4 @@ def select_training_samples_v2(batch, strategy, config):
         batch=final_batch,
         non_tensor_batch=final_non_tensor_batch,
         meta_info=batch.meta_info,
-    ), metrics
+    ), metrics, id2acc

@@ -1214,7 +1214,7 @@ class RayPPOTrainer(object):
                     # bon策略，筛选prompt内部的response，有不同策略，all、best、best_mix_random、best_worst
                     if self.num_bon > 1:
                         with Timer(name='select_bon_samples', logger=None) as timer:
-                            batch, bon_metrics = select_training_samples_v2(
+                            batch, bon_metrics, id2acc = select_training_samples_v2(
                                 batch=batch,
                                 strategy=self.config.actor_rollout_ref.rollout.bon_strategy,
                                 config=self.config)
