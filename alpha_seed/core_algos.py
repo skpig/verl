@@ -161,36 +161,31 @@ def compute_grpo_advantage_return(token_level_scores: torch.Tensor,
     response_length = token_level_scores.shape[-1]
     scores = token_level_scores.sum(-1)
     metrics = {}
-    if not use_async_gen:
-        scores = scores.reshape(-1, num_bon)
-        with torch.no_grad():
-            score_mean = torch.mean(scores, dim=1, keepdim=True)
-            score_std = torch.std(scores, dim=1, keepdim=True)
-            scores = (scores - score_mean) / (score_std + epsilon)
-            scores = scores.reshape(-1).unsqueeze(dim=1).tile([1, response_length]) * eos_mask
-    else:
-        id2score = defaultdict(list)
-        id2mean = {}
-        id2std = {}
-        with torch.no_grad():
-            bsz = scores.shape[0]
-            for i in range(bsz):
-                id2score[index[i]].append(scores[i])
-            lens = list(map(lambda x: len(x), id2score.values()))
-            for idx in id2score:
-                id2mean[idx] = torch.mean(torch.stack(id2score[idx]))
-                if len(id2score[idx]) == 1:
-                    id2std[idx] = torch.tensor(1.0)
-                else:
-                    id2std[idx] = torch.std(torch.stack(id2score[idx]))
-            for i in range(bsz):
-                scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
-            scores = scores.unsqueeze(dim=1).tile([1, response_length]) * eos_mask
-            metrics.update({
-                "GRPO_aysnc/max_response_num": max(lens),
-                "GRPO_aysnc/min_response_num": min(lens),
-                "GRPO_aysnc/mean_response_num": np.mean(lens),
-            })
+    id2score = defaultdict(list)
+    id2mean = {}
+    id2std = {}
+    with torch.no_grad():
+        bsz = scores.shape[0]
+        for i in range(bsz):
+            id2score[index[i]].append(scores[i])
+        lens = list(map(lambda x: len(x), id2score.values()))
+        for idx in id2score:
+            if len(id2score[idx]) == 1:
+                id2mean[idx] = torch.tensor(0.0)
+                id2std[idx] = torch.tensor(1.0)
+            else:
+                id2mean[idx] = torch.mean(torch.tensor(id2score[idx]))
+                id2std[idx] = torch.std(torch.tensor(id2score[idx]))
+        for i in range(bsz):
+            scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
+        scores = scores.unsqueeze(dim=1).tile([1, response_length]) * eos_mask
+
+    if use_async_gen:
+        metrics.update({
+            "GRPO_aysnc/max_response_num": max(lens),
+            "GRPO_aysnc/min_response_num": min(lens),
+            "GRPO_aysnc/mean_response_num": np.mean(lens),
+        })
     return scores, scores, metrics
 
 
