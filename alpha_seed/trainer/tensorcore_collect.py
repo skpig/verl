@@ -21,7 +21,7 @@ def __update_config(trial_id, tensor_core_activity_first, dc):
     retries = 5
     for attempt in range(retries):
         try:
-            response = requests.post(url, headers=headers, json=data)
+            response = requests.patch(url, headers=headers, json=data)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
