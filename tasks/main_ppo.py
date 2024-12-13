@@ -248,7 +248,7 @@ def main(config):
         training_duration_metrics_collector = RLMetricsClientContextManager()
 
     metric_collection_context = training_duration_metrics_collector.collect_init_ray_cluster_duration() \
-        if training_duration_metrics_collector else contextlib.nullcontext
+        if training_duration_metrics_collector else contextlib.nullcontext()
 
     with metric_collection_context:
         init_ray()
@@ -342,6 +342,8 @@ class TaskRunner:
 
 
 def main_task(config):
+
+    training_duration_metrics_collector = None
 
     if RLMetricsClientContextManager:
         training_duration_metrics_collector = RLMetricsClientContextManager()
