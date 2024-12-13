@@ -285,6 +285,11 @@ def validate_config(config):
 
     # rollout
     # assert real_train_batch_size % config.actor_rollout_ref.rollout.micro_batch_size == 0
+    complete_ratio = config.actor_rollout_ref.rollout.get("complete_ratio", 1.0)
+    if config.streaming_rollout.nnodes == 0:
+        assert complete_ratio == 1.0, f'When streaming rollout is not enabled, complete_ratio must be 1. Got {complete_ratio}'
+    else:
+        assert complete_ratio < 1.0, f'When streaming rollout is enabled, complete_ratio must be smaller than 1. Got {complete_ratio}.'
 
     # actor
     assert real_train_batch_size % config.actor_rollout_ref.actor.ppo_mini_batch_size == 0
