@@ -14,6 +14,7 @@
 """
 Note that we don't combine the main with ray_trainer as ray_trainer is used by other main.
 """
+import contextlib
 
 from verl import DataProto
 import torch
@@ -32,6 +33,10 @@ from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRe
 from alpha_seed.workers.actors.critic_worker import CriticWorker
 from alpha_seed.utils.alarm.lark_util import send_message_to_employee
 from concurrent.futures import ThreadPoolExecutor, as_completed
+try:
+    from bytedance.trainingmetrics.rl_metrics_client_context_manager import RLMetricsClientContextManager
+except ImportError:
+    RLMetricsClientContextManager = None
 
 user_email = os.getenv('ARNOLD_LARK_RECEIVER', '')
 task_url = os.getenv('ARNOLD_ORIGIN_PLATFORM_URL', '')
@@ -238,6 +243,20 @@ from alpha_seed.trainer.ppo import RayPPOTrainer
 
 @hydra.main(config_path='config', config_name='ppo_trainer', version_base=None)
 def main(config):
+    training_duration_metrics_collector = None
+    if RLMetricsClientContextManager:
+        training_duration_metrics_collector = RLMetricsClientContextManager()
+
+    metric_collection_context = training_duration_metrics_collector.collect_init_ray_cluster_duration() \
+        if training_duration_metrics_collector else contextlib.nullcontext
+
+    with metric_collection_context:
+        init_ray()
+    runner = TaskRunner.remote()
+    ray.get(runner.main.remote(main_task, config=config))
+
+
+def init_ray():
     if not ray.is_initialized():
         # this is for local ray cluster
         remote_cache_env = {
@@ -255,9 +274,6 @@ def main(config):
             runtime_env['env_vars'].update(remote_cache_env)
 
         ray.init(runtime_env=runtime_env)
-
-    runner = TaskRunner.remote()
-    ray.get(runner.main.remote(main_task, config=config))
 
 
 def validate_config(config):
@@ -321,86 +337,98 @@ class TaskRunner:
 
 
 def main_task(config):
-    validate_config(config=config)
 
-    from verl.utils.fs import copy_local_path_from_hdfs
-    from transformers import AutoTokenizer
+    if RLMetricsClientContextManager:
+        training_duration_metrics_collector = RLMetricsClientContextManager()
 
-    # print initial config
-    from pprint import pprint
-    from omegaconf import OmegaConf
-    pprint(OmegaConf.to_container(config, resolve=True))  # resolve=True will eval symbol values
-    OmegaConf.resolve(config)
+    metric_collection_context = training_duration_metrics_collector.collect_setup_trainer_duration() \
+        if training_duration_metrics_collector else contextlib.nullcontext()
 
-    logger = Tracking(project_name=config.trainer.project_name,
-                      experiment_name=config.trainer.experiment_name,
-                      default_backend=config.trainer.logger,
-                      config=OmegaConf.to_container(config, resolve=True))
+    with metric_collection_context:
+        validate_config(config=config)
 
-    # download the checkpoint from hdfs
-    local_path = copy_local_path_from_hdfs(config.actor_rollout_ref.model.path)
+        from verl.utils.fs import copy_local_path_from_hdfs
+        from transformers import AutoTokenizer
 
-    # instantiate tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(local_path)
-    if config.data.get('chat_template', None) == 'seed':
-        from verl.utils.seed import CHAT_TEMPLATE
-        tokenizer.chat_template = CHAT_TEMPLATE
+        # print initial config
+        from pprint import pprint
+        from omegaconf import OmegaConf
+        pprint(OmegaConf.to_container(config, resolve=True))  # resolve=True will eval symbol values
+        OmegaConf.resolve(config)
 
-    # define worker classes
-    if config.actor_rollout_ref.actor.strategy == 'fsdp':
-        assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
-        from single_controller.ray import RayWorkerGroup
-        ray_worker_group_cls = RayWorkerGroup
-    else:
-        raise NotImplementedError
+        logger = Tracking(project_name=config.trainer.project_name,
+                          experiment_name=config.trainer.experiment_name,
+                          default_backend=config.trainer.logger,
+                          config=OmegaConf.to_container(config, resolve=True))
 
-    from alpha_seed.trainer.ppo import ResourcePoolManager, Role
+        # download the checkpoint from hdfs
+        local_path = copy_local_path_from_hdfs(config.actor_rollout_ref.model.path)
 
-    role_worker_mapping = {
-        Role.ActorRolloutRef: AsyncActorRolloutRefWorker,
-        Role.Critic: CriticWorker,
-        Role.Rollout: AsyncActorRolloutRefWorker,
-    }
+        # instantiate tokenizer
+        tokenizer = AutoTokenizer.from_pretrained(local_path)
+        if config.data.get('chat_template', None) == 'seed':
+            from verl.utils.seed import CHAT_TEMPLATE
+            tokenizer.chat_template = CHAT_TEMPLATE
 
-    global_pool_id = 'global_pool'
-    standalone_pool_id = 'standalone_pool'
-    resource_pool_spec = {
-        global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
-        standalone_pool_id: [config.streaming_rollout.n_gpus_per_node] * config.streaming_rollout.nnodes,
-    }
-    mapping = {
-        Role.ActorRolloutRef: global_pool_id,
-        Role.Critic: global_pool_id,
-        Role.Rollout: standalone_pool_id,
-    }
+        # define worker classes
+        if config.actor_rollout_ref.actor.strategy == 'fsdp':
+            assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
+            from single_controller.ray import RayWorkerGroup
+            ray_worker_group_cls = RayWorkerGroup
+        else:
+            raise NotImplementedError
 
-    # we should adopt a multi-source reward function here
-    # - for rule-based rm, we directly call a reward score
-    # - for model-based rm, we call a model
-    # - for code related prompt, we send to a sandbox if there are test cases
-    # - finally, we combine all the rewards together
-    # - The reward type depends on the tag of the data
-    if config.reward_model.enable:
-        from alpha_seed.workers.actors.reward_worker import RewardModelWorker
-        role_worker_mapping[Role.RewardModel] = RewardModelWorker
-        mapping[Role.RewardModel] = global_pool_id
+        from alpha_seed.trainer.ppo import ResourcePoolManager, Role
 
-    reward_fn = RewardManager(tokenizer=tokenizer, config=config, logger=logger, rm_name="train")
+        role_worker_mapping = {
+            Role.ActorRolloutRef: AsyncActorRolloutRefWorker,
+            Role.Critic: CriticWorker,
+            Role.Rollout: AsyncActorRolloutRefWorker,
+        }
 
-    # Note that we always use function-based RM for validation
-    val_reward_fn = RewardManager(tokenizer=tokenizer, config=config, logger=logger, rm_name="val")
+        global_pool_id = 'global_pool'
+        standalone_pool_id = 'standalone_pool'
+        resource_pool_spec = {
+            global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
+            standalone_pool_id: [config.streaming_rollout.n_gpus_per_node] * config.streaming_rollout.nnodes,
+        }
+        mapping = {
+            Role.ActorRolloutRef: global_pool_id,
+            Role.Critic: global_pool_id,
+            Role.Rollout: standalone_pool_id,
+        }
 
-    resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
+        # we should adopt a multi-source reward function here
+        # - for rule-based rm, we directly call a reward score
+        # - for model-based rm, we call a model
+        # - for code related prompt, we send to a sandbox if there are test cases
+        # - finally, we combine all the rewards together
+        # - The reward type depends on the tag of the data
+        if config.reward_model.enable:
+            from alpha_seed.workers.actors.reward_worker import RewardModelWorker
+            role_worker_mapping[Role.RewardModel] = RewardModelWorker
+            mapping[Role.RewardModel] = global_pool_id
 
-    trainer = RayPPOTrainer(config=config,
-                            tokenizer=tokenizer,
-                            role_worker_mapping=role_worker_mapping,
-                            resource_pool_manager=resource_pool_manager,
-                            ray_worker_group_cls=ray_worker_group_cls,
-                            reward_fn=reward_fn,
-                            val_reward_fn=val_reward_fn,
-                            logger=logger)
-    trainer.init_workers()
+        reward_fn = RewardManager(tokenizer=tokenizer, config=config, logger=logger, rm_name="train")
+
+        # Note that we always use function-based RM for validation
+        val_reward_fn = RewardManager(tokenizer=tokenizer, config=config, logger=logger, rm_name="val")
+
+        resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
+
+        trainer = RayPPOTrainer(config=config,
+                                tokenizer=tokenizer,
+                                role_worker_mapping=role_worker_mapping,
+                                resource_pool_manager=resource_pool_manager,
+                                ray_worker_group_cls=ray_worker_group_cls,
+                                reward_fn=reward_fn,
+                                val_reward_fn=val_reward_fn,
+                                logger=logger)
+
+    metric_collection_context = training_duration_metrics_collector.collect_init_worker_duration() \
+        if training_duration_metrics_collector else contextlib.nullcontext()
+    with metric_collection_context:
+        trainer.init_workers()
     send_message_to_employee("alpha seed任务开始训练", f"任务链接: {task_url}", user_email)
     if config.convert_ckpt_to_omnistore_task.enable:
         trainer.convert_ckpt_to_omnistore()

@@ -15,6 +15,7 @@
 FSDP PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
+import contextlib
 
 import ray
 import random
@@ -32,6 +33,7 @@ from omegaconf import OmegaConf, open_dict
 import numpy as np
 from codetiming import Timer
 
+from alpha_seed.trainer.tensorcore_collect import tensorcore_collection
 from alpha_seed.utils.select_strategy.bon_strategy import *
 from alpha_seed.utils.select_strategy.league_training_strategy import *
 from alpha_seed.workers.streaming_service.streaming_utils import pad, process_output
@@ -48,8 +50,16 @@ try:
 except ImportError:
     print('Cannot find pad_dataproto_to_divisor. Please use latest verl master')
     raise
-
 from alpha_seed import core_algos
+
+try:
+    from bytedance.trainingmetrics.rl_metrics_client_context_manager import RLMetricsClientContextManager
+except ImportError:
+    RLMetricsClientContextManager = None
+
+training_duration_metrics_collector = None
+if RLMetricsClientContextManager:
+    training_duration_metrics_collector = RLMetricsClientContextManager()
 
 WorkerType = Type[Worker]
 
@@ -944,8 +954,11 @@ class RayPPOTrainer(object):
     def fit(self):
         self.global_step = 0
 
-        # load checkpoint before doing anything
-        resume_step = self.load_checkpoint()
+        metric_collection_context = training_duration_metrics_collector.collect_resume_from_checkpoint_duration() \
+            if training_duration_metrics_collector else contextlib.nullcontext()
+        with metric_collection_context:
+            # load checkpoint before doing anything
+            resume_step = self.load_checkpoint()
 
         # perform validation before training
         if self.val_reward_fn is not None and self.config.trainer.eval_before_training:
@@ -999,14 +1012,15 @@ class RayPPOTrainer(object):
                     pprint(f'start hybrid rollout, input batches {len(gen_batch)}.')
 
                     with Timer(name='gen', logger=None) as timer:
-                        gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
-                        # TODO: The following two lines should be memory view. However it's not. Let's remove it by removing all its dependency
-                        gen_batch_output.batch['prompts'] = gen_batch_output.batch['input_ids'][:, :self.config.data.
-                                                                                                max_prompt_length]
-                        gen_batch_output.batch['responses'] = gen_batch_output.batch['input_ids'][:, self.config.data.
-                                                                                                  max_prompt_length:]
+                        with tensorcore_collection():
+                            gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+                            # TODO: The following two lines should be memory view. However it's not. Let's remove it by removing all its dependency
+                            gen_batch_output.batch['prompts'] = gen_batch_output.batch['input_ids'][:, :self.config.data
+                                                                                                    .max_prompt_length]
+                            gen_batch_output.batch['responses'] = gen_batch_output.batch[
+                                'input_ids'][:, self.config.data.max_prompt_length:]
 
-                    print_dataproto_size(gen_batch_output, head='After generation')
+                        print_dataproto_size(gen_batch_output, head='After generation')
 
                     metrics['timing/gen'] = timer.last
                     metrics['rollout/hybrid_input_batch'] = len(batch)
@@ -1332,34 +1346,40 @@ class RayPPOTrainer(object):
                         metrics['timing/testing'] = timer.last
                         metrics.update(val_metrics)
 
+                    metric_collection_context = training_duration_metrics_collector.collect_compute_metrics_duration() \
+                        if training_duration_metrics_collector else contextlib.nullcontext()
                     # collect metrics
-                    with Timer(name='compute_metrics', logger=None) as timer:
-                        # Note that we can use any worker groups here
-                        batch.meta_info['use_critic'] = self.use_critic
-                        batch.meta_info['mean'] = self.config.reward_model.mean
-                        batch.meta_info['std'] = self.config.reward_model.std
-                        data_metrics: DataProto = self.actor_rollout_wg.execute_with_func_generator(
-                            compute_data_metrics, batch)
-                        data_metrics = data_metrics.meta_info['metrics']
-                    metrics['timing/compute_metrics'] = timer.last
-                    metrics.update(data_metrics)
+                    with metric_collection_context:
+                        with Timer(name='compute_metrics', logger=None) as timer:
+                            # Note that we can use any worker groups here
+                            batch.meta_info['use_critic'] = self.use_critic
+                            batch.meta_info['mean'] = self.config.reward_model.mean
+                            batch.meta_info['std'] = self.config.reward_model.std
+                            data_metrics: DataProto = self.actor_rollout_wg.execute_with_func_generator(
+                                compute_data_metrics, batch)
+                            data_metrics = data_metrics.meta_info['metrics']
+                        metrics['timing/compute_metrics'] = timer.last
+                        metrics.update(data_metrics)
+
+                    metric_collection_context = training_duration_metrics_collector.collect_save_checkpoint_duration() \
+                        if training_duration_metrics_collector else contextlib.nullcontext()
 
                     with Timer(name='save_checkpoint', logger=None) as timer:
                         if self.config.trainer.save_freq > 0 and self.global_step % self.config.trainer.save_freq == 0:
+                            with metric_collection_context:
+                                if self.config.trainer.offload_train_memory:
+                                    self.actor_rollout_wg.to("cuda", model=False, optimizer=True)
+                                    if self.use_critic:
+                                        self.critic_wg.to("cuda")
 
-                            if self.config.trainer.offload_train_memory:
-                                self.actor_rollout_wg.to("cuda", model=False, optimizer=True)
-                                if self.use_critic:
-                                    self.critic_wg.to("cuda")
+                                self.save_checkpoint()
 
-                            self.save_checkpoint()
+                                if self.config.trainer.offload_train_memory:
+                                    self.actor_rollout_wg.to("cpu", model=False, optimizer=True)
+                                    if self.use_critic:
+                                        self.critic_wg.to("cpu")
 
-                            if self.config.trainer.offload_train_memory:
-                                self.actor_rollout_wg.to("cpu", model=False, optimizer=True)
-                                if self.use_critic:
-                                    self.critic_wg.to("cpu")
-
-                    metrics['timing/save_checkpoint'] = timer.last
+                        metrics['timing/save_checkpoint'] = timer.last
 
                 metrics['timing/step'] = step_timer.last
                 # TODO: make a canonical logger that supports various backend
