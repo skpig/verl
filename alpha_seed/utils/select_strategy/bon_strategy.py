@@ -113,10 +113,10 @@ def select_training_samples_v2(batch, strategy, config):
             response_num_per_prompt = 1
         elif strategy == "best_mix_random":
             final_idx = [np.argmax(scores)]
-            while len(final_idx) < 2:
+            random_idx = np.random.randint(0, len(val))
+            while random_idx in final_idx and len(val) != 1:
                 random_idx = np.random.randint(0, len(val))
-                if random_idx not in final_idx:
-                    final_idx.append(random_idx)
+            final_idx.append(random_idx)
             response_num_per_prompt = 2
         elif strategy == "best_worst":
             final_idx = [np.argmin(scores), np.argmax(scores)]
