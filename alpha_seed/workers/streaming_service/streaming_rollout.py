@@ -16,6 +16,7 @@ Create a XPerfGPT Rollout
 """
 
 from verl import DataProto
+import copy
 from contextlib import contextmanager, nullcontext
 
 from torch import nn
@@ -245,6 +246,7 @@ class AsyncXPerfGPTRollout(object):
         torch.cuda.set_device(int(os.getenv('LOCAL_RANK', '0')))
         while True:
             (query_pool, complete_ratio, generation_kwargs, off_policy_steps) = self.input_queue.get(block=True)
+            original_query_pool = copy.deepcopy(query_pool)
             self.inference_engine.set_generator_strategy(**generation_kwargs)
             with logging_set_level(self.config.get('logging_level', 'WARN')), self.profiler_context as p:
                 try:
@@ -285,8 +287,8 @@ class AsyncXPerfGPTRollout(object):
 
             response_outputs = []
             is_finished = []
-            for v in self.inference_engine.get_inorder_responses():
-                response_outputs.append(v.new_token_ids)
+            for prompt, v in zip(original_query_pool, self.inference_engine.get_inorder_responses()):
+                response_outputs.append((v.input_ids + v.new_token_ids)[len(prompt):])
                 is_finished.append(v.is_finished)
             is_finished = torch.Tensor(is_finished)
             metrics = {}
