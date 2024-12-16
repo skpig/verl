@@ -50,7 +50,7 @@ from codetiming import Timer
 
 from datetime import timedelta
 
-from .checkpoint import CheckpointManager
+from .checkpoint import CheckpointManagerWrapper
 
 logger = logging.getLogger(__file__)
 
@@ -264,11 +264,11 @@ class CriticWorker(Worker):
         if self.rank == 0:
             print(self.critic_model_config)
 
-        self.checkpoint_manager = CheckpointManager(model=self.critic_module,
-                                                    optimizer=self.critic_optimizer,
-                                                    lr_scheduler=self.critic_lr_scheduler,
-                                                    tokenizer=self.tokenizer,
-                                                    enable_flatten=self.config.model.fsdp_config.use_orig_params)
+        self.checkpoint_manager = CheckpointManagerWrapper(model=self.critic_module,
+                                                           optimizer=self.critic_optimizer,
+                                                           lr_scheduler=self.critic_lr_scheduler,
+                                                           tokenizer=self.tokenizer,
+                                                           enable_flatten=self.config.model.fsdp_config.use_orig_params)
 
         torch.cuda.empty_cache()
 
@@ -322,7 +322,7 @@ class CriticWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, hdfs_path=None, version='v1'):
-        self.checkpoint_manager.load_checkpoint(version,
+        self.checkpoint_manager.load_checkpoint(version=version,
                                                 hdfs_path=hdfs_path,
                                                 device_mesh=self.device_mesh,
                                                 role='critic')

@@ -61,7 +61,7 @@ from codetiming import Timer
 
 from datetime import timedelta
 
-from .checkpoint import CheckpointManager
+from .checkpoint import CheckpointManagerWrapper
 
 logger = logging.getLogger(__file__)
 
@@ -478,11 +478,12 @@ class AsyncActorRolloutRefWorker(Worker):
 
         if self._is_actor:
             self.flops_counter = FlopsCounter(self.actor_model_config)
-            self.checkpoint_manager = CheckpointManager(model=self.actor.actor_module,
-                                                        optimizer=self.actor.actor_optimizer,
-                                                        lr_scheduler=self.actor_lr_scheduler,
-                                                        tokenizer=self.tokenizer,
-                                                        enable_flatten=self.config.actor.fsdp_config.use_orig_params)
+            self.checkpoint_manager = CheckpointManagerWrapper(
+                model=self.actor.actor_module,
+                optimizer=self.actor.actor_optimizer,
+                lr_scheduler=self.actor_lr_scheduler,
+                tokenizer=self.tokenizer,
+                enable_flatten=self.config.actor.fsdp_config.use_orig_params)
 
         torch.cuda.empty_cache()
 
@@ -683,14 +684,22 @@ class AsyncActorRolloutRefWorker(Worker):
     def load_checkpoint(self, hdfs_path=None, version='v1'):
         assert self._is_actor
         # TODO: support omnistore
-        self.checkpoint_manager.load_checkpoint(version, hdfs_path, device_mesh=self.device_mesh, role='actor')
+        self.checkpoint_manager.load_checkpoint(version=version,
+                                                hdfs_path=hdfs_path,
+                                                device_mesh=self.device_mesh,
+                                                role='actor')
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def save_checkpoint(self, local_path, hdfs_path=None, version='v1', global_step=0, ckpt_global_uploader_ref=None):
         # TODO: support omnistore
         assert self._is_actor
-        self.checkpoint_manager.save_checkpoint(version, local_path, hdfs_path, self.device_mesh, 'actor', global_step,
-                                                ckpt_global_uploader_ref)
+        self.checkpoint_manager.save_checkpoint(version=version,
+                                                local_path=local_path,
+                                                hdfs_path=hdfs_path,
+                                                device_mesh=self.device_mesh,
+                                                role='actor',
+                                                global_step=global_step,
+                                                ckpt_global_uploader_ref=ckpt_global_uploader_ref)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def release_param_and_cache(self):

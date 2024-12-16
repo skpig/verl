@@ -35,7 +35,6 @@ class CkptGlobalUploader:
             self.upload_shard_future_map[global_step][role].append(upload_shard_future)
 
         if (self.use_critic and role != 'critic') or role == 'default':
-            self.wait_by_role(role, global_step)
             return
         self.write_tracker(global_step)
 
@@ -50,6 +49,7 @@ class CkptGlobalUploader:
             self.wait_by_role(role, global_step)
         if need_clear:
             self.clear_futures(global_step)
+            self.clear_tasks(global_step)
 
     def wait_by_role(self, role, global_step):
         if global_step not in self.upload_shard_future_map:
@@ -82,8 +82,6 @@ class CkptGlobalUploader:
         with open(local_ckpt_version, 'w') as f:
             f.write(self.ckpt_version)
         hdfs_io.hput(local_ckpt_version, self.remote_checkpoint_folder)
-
-        self.clear_tasks(global_step)
 
 
 @ray.remote

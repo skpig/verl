@@ -1,33 +1,22 @@
 import ray
 import os
 
-import shutil
-
-from filelock import FileLock
-
-import hdfs_io
-
-import tempfile
 import warnings
-import numpy as np
-import random
 
 import torch
 import torch.distributed
-from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, StateDictType
 from torch.distributed.fsdp import ShardedStateDictConfig, ShardedOptimStateDictConfig
-
-from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from verl.utils.fs import copy_local_path_from_hdfs
 
 from transformers import PreTrainedTokenizer
 
+from .checkpoint_manager import BaseCheckpointManager
 from .uploader import CkptGlobalUploader
 
 
-class CheckpointManagerV1:
+class CheckpointManagerV1(BaseCheckpointManager):
     """
     A checkpoint manager that saves and loads
     - model
@@ -43,19 +32,10 @@ class CheckpointManagerV1:
     """
 
     def __init__(self, model: FSDP, optimizer: torch.optim.Optimizer,
-                 lr_scheduler: torch.optim.lr_scheduler.LRScheduler, tokenizer: PreTrainedTokenizer):
-        self.upload_future = None
-        self.previous_save_local_path = None
+                 lr_scheduler: torch.optim.lr_scheduler.LRScheduler, tokenizer: PreTrainedTokenizer, *args, **kwargs):
+        super().__init__(model, optimizer, lr_scheduler, tokenizer)
 
-        self.model = model
-        self.optimizer = optimizer
-        self.lr_scheduler = lr_scheduler
-        self.tokenizer = tokenizer
-
-        assert isinstance(self.model, FSDP)
-        self.rank = torch.distributed.get_rank()
-
-    def load_checkpoint(self, hdfs_path=None, device_mesh: DeviceMesh = None, role: str = 'actor'):
+    def load_checkpoint(self, hdfs_path=None, *args, **kwargs):
         if hdfs_path is None:
             return
 
@@ -69,8 +49,6 @@ class CheckpointManagerV1:
         model_state_dict = state_dict['model']
         optimizer_state_dict = state_dict['optimizer']
         lr_scheduler_state_dict = state_dict['lr_scheduler']
-        # can be None for backward compatibility
-        rng = state_dict.get('rng', None)
 
         state_dict_cfg = ShardedStateDictConfig(offload_to_cpu=True)
         optim_cfg = ShardedOptimStateDictConfig(offload_to_cpu=True)
@@ -78,33 +56,21 @@ class CheckpointManagerV1:
             self.model.load_state_dict(model_state_dict)
             self.optimizer.load_state_dict(optimizer_state_dict)
         # recover random state
-        if rng is not None:
-            torch.cuda.random.set_rng_state(rng['cuda'])
-            torch.random.set_rng_state(rng['cpu'])
-            np.random.set_state(rng['numpy'])
-            random.setstate(rng['random'])
+        if 'rng' in state_dict:
+            # 'rng' may not exist for backward compatibility
+            self.load_rng_state(state_dict['rng'])
 
         self.lr_scheduler.load_state_dict(lr_scheduler_state_dict)
 
-    def save_checkpoint(self, local_path: str, hdfs_path: str, device_mesh: DeviceMesh, role: str, global_step: int,
-                        ckpt_global_uploader_ref: CkptGlobalUploader):
+    def save_checkpoint(self, local_path: str, hdfs_path: str, role: str, global_step: int,
+                        ckpt_global_uploader_ref: CkptGlobalUploader, *args, **kwargs):
         # wait for previous upload to hdfs
-        if self.upload_future is not None:
-            ray.get(self.upload_future)
-        torch.distributed.barrier()
+        self.wait_previous_upload(role, ckpt_global_uploader_ref)
+        self.previous_global_step = global_step
 
         # remove previous local_path
-        if self.previous_save_local_path is not None:
-            previous_save_local_path = os.path.join(self.previous_save_local_path, f'model_optim_rank_{self.rank}.pt')
-            if os.path.isfile(previous_save_local_path):
-                os.remove(previous_save_local_path)
-            else:
-                shutil.rmtree(previous_save_local_path, ignore_errors=True)
-
-        with FileLock(os.path.join(tempfile.gettempdir(), local_path + '.lock')):
-            # make a new dir
-            os.makedirs(local_path, exist_ok=True)
-
+        self.remove_previous_save_local_path()
+        self.local_mkdir(local_path)
         torch.distributed.barrier()
 
         state_dict_cfg = ShardedStateDictConfig(offload_to_cpu=True)
@@ -114,17 +80,11 @@ class CheckpointManagerV1:
             with FSDP.state_dict_type(self.model, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg):
                 model_state = self.model.state_dict()
                 optimizer_state_dict = self.optimizer.state_dict()
-                rng = {
-                    'cpu': torch.random.get_rng_state(),
-                    'cuda': torch.cuda.get_rng_state(),
-                    'numpy': np.random.get_state(),
-                    'random': random.getstate(),
-                }
                 state_dict = {
                     'model': model_state,
                     'optimizer': optimizer_state_dict,
                     'lr_scheduler': self.lr_scheduler.state_dict(),
-                    'rng': rng,
+                    'rng': self.get_rng_state(),
                 }
                 path = os.path.join(local_path, f'model_optim_rank_{self.rank}.pt')
 
@@ -151,7 +111,7 @@ class CheckpointManagerV1:
                                                                          ray.get_runtime_context().get_node_id(),
                                                                          hf_local_path, hdfs_path))
                 print(f'[rank-{self.rank}]: register upload ckpt task of path {hf_local_path} to hdfs {hdfs_path} done')
-                self.upload_future = ckpt_global_uploader_ref.start_uploading.remote(role, global_step)
+                ckpt_global_uploader_ref.start_uploading.remote(role, global_step)
 
         torch.distributed.barrier()
 

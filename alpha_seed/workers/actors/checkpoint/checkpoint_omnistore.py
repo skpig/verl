@@ -1,26 +1,18 @@
 import ray
 import os
 
-import shutil
-
-from filelock import FileLock
-
 import hdfs_io
 
-import tempfile
 import warnings
 
 import torch
 import torch.distributed
-from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, StateDictType
-import numpy as np
-import random
-
-from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from transformers import PreTrainedTokenizer
 import importlib.metadata
+
+from .checkpoint_manager import BaseCheckpointManager
 
 required_omnistore_version = '0.5.69'
 try:
@@ -31,7 +23,7 @@ try:
         f'{required_omnistore_version} or higher. Example command: pip3 install --upgrade byted-omnistore.'
 except importlib.metadata.PackageNotFoundError as e:
     print(f'byted-omnistore not installed. Please install it and upgrade to version {required_omnistore_version} '
-          'or higher. Example command: pip3 install --upgrade byted-omnistore')
+          'or higher. Example command: pip3 install --upgrade byted-omnistore.')
     raise e
 
 from omnistore import RLFSDPCheckpointer
@@ -46,24 +38,7 @@ def check_ckpt_is_omnistore(path):
     return hdfs_io.hexists(target_file_path)
 
 
-def get_rng_state():
-    rng_state = {
-        'cpu': torch.get_rng_state(),
-        'cuda': torch.cuda.get_rng_state(),
-        'numpy': np.random.get_state(),
-        'random': random.getstate(),
-    }
-    return rng_state
-
-
-def load_rng_state(rng_state):
-    torch.set_rng_state(rng_state['cpu'])
-    torch.cuda.set_rng_state(rng_state['cuda'])
-    np.random.set_state(rng_state['numpy'])
-    random.setstate(rng_state['random'])
-
-
-class CheckpointManagerOmniStore:
+class CheckpointManagerOmniStore(BaseCheckpointManager):
     """
     Diffs from V2: use OmniStore for saving ckpt
 
@@ -86,20 +61,10 @@ class CheckpointManagerOmniStore:
                  lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
                  tokenizer: PreTrainedTokenizer,
                  enable_flatten: bool = False):
-        self.upload_future = None
-        self.previous_save_local_path = None
-
-        self.model = model
-        self.optimizer = optimizer
-        self.lr_scheduler = lr_scheduler
-        self.tokenizer = tokenizer
-
+        super().__init__(model, optimizer, lr_scheduler, tokenizer)
         self.enable_flatten = enable_flatten
 
-        assert isinstance(self.model, FSDP)
-        self.rank = torch.distributed.get_rank()
-
-    def load_checkpoint(self, hdfs_path=None, device_mesh: DeviceMesh = None, role: str = 'actor'):
+    def load_checkpoint(self, hdfs_path=None, role: str = 'actor', *args, **kwargs):
         if hdfs_path is None:
             return
 
@@ -119,26 +84,20 @@ class CheckpointManagerOmniStore:
         else:
             print(f'[rank-{self.rank}]: lr_scheduler not found in extra_state, skip loading')
         if 'rng_state' in ckpt_state['extra_state']:
-            load_rng_state(ckpt_state['extra_state']['rng_state'])
+            self.load_rng_state(ckpt_state['extra_state']['rng_state'])
         print(f'[rank-{self.rank}]: finish loading checkpoint {hdfs_path}')
 
-    def save_checkpoint(self, local_path: str, hdfs_path: str, device_mesh: DeviceMesh, role: str, global_step: int,
-                        ckpt_global_uploader_ref: CkptGlobalUploader):
+    def save_checkpoint(self, local_path: str, hdfs_path: str, role: str, global_step: int,
+                        ckpt_global_uploader_ref: CkptGlobalUploader, *args, **kwargs):
         path = os.path.abspath(local_path)
         print(f'[rank-{self.rank}]: start saving checkpoint {path}')
         # wait for previous upload to hdfs
-        if self.upload_future is not None:
-            ray.get(self.upload_future)
-        torch.distributed.barrier()
+        self.wait_previous_upload(role, ckpt_global_uploader_ref)
+        self.previous_global_step = global_step
 
         # remove previous local_path
-        if self.previous_save_local_path is not None and self.rank == 0:
-            shutil.rmtree(self.previous_save_local_path, ignore_errors=True)
-
-        with FileLock(os.path.join(tempfile.gettempdir(), path + '.lock')):
-            # make a new dir
-            os.makedirs(path, exist_ok=True)
-
+        self.remove_previous_save_local_path()
+        self.local_mkdir(path)
         torch.distributed.barrier()
 
         file_path_list = [(f'global_step_{global_step}/model',
@@ -157,7 +116,7 @@ class CheckpointManagerOmniStore:
                     'lr_scheduler':
                         self.lr_scheduler if isinstance(self.lr_scheduler, dict) else self.lr_scheduler.state_dict(),
                     'rng_state':
-                        get_rng_state(),
+                        self.get_rng_state(),
                 }
             }
 
@@ -205,7 +164,7 @@ class CheckpointManagerOmniStore:
                                                                          ray.get_runtime_context().get_node_id(),
                                                                          hf_local_path, hdfs_path))
                 print(f'[rank-{self.rank}]: register upload ckpt task of path {hf_local_path} to hdfs {hdfs_path} done')
-                self.upload_future = ckpt_global_uploader_ref.start_uploading.remote(role, global_step)
+                ckpt_global_uploader_ref.start_uploading.remote(role, global_step)
                 print(f'[rank-{self.rank}]: start uploading ckpt')
 
         torch.distributed.barrier()
