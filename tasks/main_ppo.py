@@ -271,7 +271,7 @@ def get_total_gpus_in_ray_cluster():
 def wait_till_nodes_ready(total_required_gpus: int, try_time=100):
     while True:
         try:
-            available_gpus = ray.available_resources().get('GPU')
+            available_gpus = ray.available_resources().get('GPU', 0)
             print(f"Checking nodes ready, {available_gpus} GPUs available, {total_required_gpus} GPUs expected")
             if available_gpus >= total_required_gpus:
                 break
