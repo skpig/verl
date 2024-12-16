@@ -80,7 +80,7 @@ def last_boxed_only_string(string: str) -> Optional[str]:
 
 
 def last_boxed_only_string_v2(string: str) -> Optional[str]:
-    idx = string.rfind("\\boxed")
+    idx = string.rfind("\\boxed{")
     if idx < 0:
         return None
 
