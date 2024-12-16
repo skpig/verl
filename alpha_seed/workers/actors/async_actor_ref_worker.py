@@ -35,7 +35,8 @@ from verl import DataProto
 from verl.utils.model import compute_position_id_with_mask
 from verl.utils.fs import copy_local_path_from_hdfs
 from verl.utils.fsdp_utils import get_fsdp_wrap_policy, load_fsdp_grad, offload_fsdp_grad, init_fn, get_init_weight_context_manager
-from verl.utils.fsdp_utils import offload_fsdp_optimizer, offload_fsdp_param_and_grad, load_fsdp_optimizer, load_fsdp_param_and_grad
+from .offload import offload_fsdp_model_to_cpu, load_fsdp_model_to_gpu
+from verl.utils.fsdp_utils import offload_fsdp_optimizer, load_fsdp_optimizer
 from verl.utils.import_utils import import_external_libs
 from verl.utils.debug import log_gpu_memory_usage
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
@@ -390,21 +391,21 @@ class AsyncActorRolloutRefWorker(Worker):
             device = torch.cuda.current_device()
             if self._is_actor:
                 if model:
-                    load_fsdp_param_and_grad(self.actor_module_fsdp, device)
+                    load_fsdp_model_to_gpu(self.actor_module_fsdp)
                 if optimizer:
                     load_fsdp_optimizer(self.actor_optimizer, device)
             if self._is_ref:
                 if model:
-                    load_fsdp_param_and_grad(self.ref_module_fsdp, device)
+                    load_fsdp_model_to_gpu(self.ref_module_fsdp)
         elif device == "cpu":
             if self._is_actor:
                 if model:
-                    offload_fsdp_param_and_grad(self.actor_module_fsdp)
+                    offload_fsdp_model_to_cpu(self.actor_module_fsdp)
                 if optimizer:
                     offload_fsdp_optimizer(self.actor_optimizer)
             if self._is_ref:
                 if model:
-                    offload_fsdp_param_and_grad(self.ref_module_fsdp)
+                    offload_fsdp_model_to_cpu(self.ref_module_fsdp)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def init_model(self, hybrid_master_address=None, standalone_master_address=None):

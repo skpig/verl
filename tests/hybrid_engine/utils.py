@@ -32,6 +32,14 @@ def prepare_data():
     return input_ids_rmpad, input_ids_rmpad_rolled, full_response_mask_rmpad, position_ids_rmpad
 
 
+def to_random(input_ids, input_ids_rolled, mask, position_ids):
+    device = input_ids.device
+    random_input_ids = torch.randint(0, 1000, input_ids.size(), device=device)
+    random_input_ids_rolled = torch.roll(random_input_ids, shifts=-1, dims=1)
+    random_input_ids_rolled = random_input_ids_rolled.squeeze(0)
+    return random_input_ids, random_input_ids_rolled, mask, position_ids
+
+
 def ref_loss_fn(output, input_ids_rmpad_rolled, full_response_mask_rmpad):
     # input_ids_rmpad_rolled: (total_nnz,)
     logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)

@@ -34,6 +34,8 @@ from verl.utils.fsdp_utils import get_fsdp_wrap_policy
 from .initialize import parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init
 from .checkpoint.extensions import register_dtensor_save_hook
 from verl.utils.fsdp_utils import offload_fsdp_optimizer, offload_fsdp_param_and_grad, load_fsdp_optimizer, load_fsdp_param_and_grad
+from .offload import offload_fsdp_model_to_cpu, load_fsdp_model_to_gpu
+from verl.utils.fsdp_utils import offload_fsdp_optimizer, load_fsdp_optimizer
 from verl.utils.import_utils import import_external_libs
 from verl.utils.debug import log_gpu_memory_usage
 from torch.distributed.device_mesh import init_device_mesh
@@ -240,10 +242,10 @@ class CriticWorker(Worker):
             return
         if device == "cuda":
             device = torch.cuda.current_device()
-            load_fsdp_param_and_grad(self.critic_module, device)
+            load_fsdp_model_to_gpu(self.critic_module)
             load_fsdp_optimizer(self.critic_optimizer, device)
         elif device == "cpu":
-            offload_fsdp_param_and_grad(self.critic_module)
+            offload_fsdp_model_to_cpu(self.critic_module)
             offload_fsdp_optimizer(self.critic_optimizer)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
