@@ -14,6 +14,9 @@
 """
 Note that we don't combine the main with ray_trainer as ray_trainer is used by other main.
 """
+
+import time
+import warnings
 import contextlib
 
 from verl import DataProto
@@ -252,8 +255,55 @@ def main(config):
 
     with metric_collection_context:
         init_ray()
+        check_arnold_resources(config=config)
     runner = TaskRunner.remote()
     ray.get(runner.main.remote(main_task, config=config))
+
+
+def get_total_gpus_in_ray_cluster():
+    total_gpus = 0
+    for node in ray.nodes():
+        gpus = node['Resources'].get('GPU', 0)
+        total_gpus += gpus
+    return total_gpus
+
+
+def wait_till_nodes_ready(total_required_gpus: int, try_time=100):
+    while True:
+        try:
+            available_gpus = ray.available_resources().get('GPU')
+            print(f"Checking nodes ready, {available_gpus} GPUs available, {total_required_gpus} GPUs expected")
+            if available_gpus >= total_required_gpus:
+                break
+            time.sleep(15)
+            try_time -= 1
+        except Exception as e:
+            print(f"ray nodes not ready yet, {e}")
+            continue
+
+
+def check_arnold_resources(config):
+    """Check the arnold resources before running"""
+    num_gpu_nodes = int(os.getenv('ARNOLD_WORKER_NUM', '0'))
+    num_gpus_per_node = int(os.getenv('ARNOLD_WORKER_GPU', '0'))
+
+    total_gpus = num_gpu_nodes * num_gpus_per_node
+    if total_gpus <= 0:
+        # maybe not on arnold environment? skip the check
+        return
+
+    total_required_gpus = config.trainer.nnodes * config.trainer.n_gpus_per_node + \
+        config.streaming_rollout.nnodes * config.streaming_rollout.n_gpus_per_node
+
+    assert total_required_gpus <= total_gpus, f'Require {total_required_gpus} GPUs, but only have {total_gpus} GPUs'
+
+    if total_required_gpus < total_gpus:
+        warnings.warn(
+            f'The total gpus {total_gpus} is larger than total required GPUs {total_required_gpus}. There might be a waste.'
+        )
+
+    # wait for all the GPUs to be ready before training
+    wait_till_nodes_ready(total_required_gpus)
 
 
 def init_ray():
