@@ -1366,8 +1366,58 @@ class RayPPOTrainer(object):
                             data_metrics: DataProto = self.actor_rollout_wg.execute_with_func_generator(
                                 compute_data_metrics, batch)
                             data_metrics = data_metrics.meta_info['metrics']
+                            metrics.update(data_metrics)
+                            sequence_score = batch.batch['token_level_scores'].sum(-1)
+                            score_metrics = {}
+                            data_sources = batch.non_tensor_batch.get('data_source',
+                                                                      ['unknown'] * sequence_score.shape[0])
+                            # evaluate test_score based on data source
+                            data_source_reward_2nd = defaultdict(list)
+                            data_source_reward_1st = defaultdict(list)
+                            for i in range(sequence_score.shape[0]):
+                                data_source = data_sources[i]
+                                data_source_reward_2nd[data_source].append(sequence_score[i])
+                                # 一级分类
+                                data_source = data_source.split('##')[0]
+                                data_source_reward_1st[data_source].append(sequence_score[i])
+                            for data_source, rewards in data_source_reward_2nd.items():
+                                rewards_tensor_data_source = torch.stack(rewards, dim=0)
+                                score_mean = torch.mean(rewards_tensor_data_source)
+                                score_max = torch.max(rewards_tensor_data_source)
+                                score_min = torch.min(rewards_tensor_data_source)
+                                score_std = torch.std(rewards_tensor_data_source)
+                                score_metrics.update({
+                                    f'critic/score_per_source_mean_2nd/{data_source}':
+                                        score_mean.detach().item(),
+                                    f'critic/score_per_source_max_2nd/{data_source}':
+                                        score_max.detach().item(),
+                                    f'critic/score_per_source_min_2nd/{data_source}':
+                                        score_min.detach().item(),
+                                    f'critic/score_per_source_std_2nd/{data_source}':
+                                        score_std.detach().item(),
+                                    f'critic/score_per_source_num_2nd/{data_source}':
+                                        rewards_tensor_data_source.shape[0],
+                                })
+                            for data_source, rewards in data_source_reward_1st.items():
+                                rewards_tensor_data_source = torch.stack(rewards, dim=0)
+                                score_mean = torch.mean(rewards_tensor_data_source)
+                                score_max = torch.max(rewards_tensor_data_source)
+                                score_min = torch.min(rewards_tensor_data_source)
+                                score_std = torch.std(rewards_tensor_data_source)
+                                score_metrics.update({
+                                    f'critic/score_per_source_mean_1st/{data_source}':
+                                        score_mean.detach().item(),
+                                    f'critic/score_per_source_max_1st/{data_source}':
+                                        score_max.detach().item(),
+                                    f'critic/score_per_source_min_1st/{data_source}':
+                                        score_min.detach().item(),
+                                    f'critic/score_per_source_std_1st/{data_source}':
+                                        score_std.detach().item(),
+                                    f'critic/score_per_source_num_1st/{data_source}':
+                                        rewards_tensor_data_source.shape[0],
+                                })
+                            metrics.update(score_metrics)
                         metrics['timing/compute_metrics'] = timer.last
-                        metrics.update(data_metrics)
 
                     metric_collection_context = training_duration_metrics_collector.collect_save_checkpoint_duration() \
                         if training_duration_metrics_collector else contextlib.nullcontext()
