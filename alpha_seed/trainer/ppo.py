@@ -1222,14 +1222,10 @@ class RayPPOTrainer(object):
                                 metrics.update(bon_metrics)
                         metrics['timing/select_bon_samples'] = timer.last
 
-                    # perform sequence balancing
-                    # unfold the dataproto
-                    batch = fold_batch_dim(
-                        batch, new_batch_size=self.config.data.train_batch_size)  # (train_batch_size, bon, seqlen, xxx)
-                    # balance in batch dim
-                    self._balance_batch(batch, metrics=metrics, logging_prefix='global_seqlen_infer')
-                    # fold the dataproto
-                    batch = unfold_batch_dim(batch, batch_dims=2)  # (train_batch_size * bon, seqlen, xxx)
+                    # perform sequence balancing.
+                    # Very important: Note that this reorders data globally.
+                    # So anything that requires ordering below this line will cause incorrect results
+                    self._balance_batch(batch=batch, metrics=metrics, logging_prefix='global_seqlen')
 
                     with Timer(name='old_log_probs', logger=None) as timer:
                         batch = self.actor_rollout_wg.old_log_probs(batch)
@@ -1287,9 +1283,6 @@ class RayPPOTrainer(object):
 
                     if self.global_step == 1:
                         print('Debugging', batch.batch)
-
-                    # perform global sequence balancing here
-                    self._balance_batch(batch=batch, metrics=metrics, logging_prefix='global_seqlen_train')
 
                     # update critic
                     phasic_critic_update = self.config.algorithm.phasic_critic_interval > 0 and self.global_step % self.config.algorithm.phasic_critic_interval == 0
