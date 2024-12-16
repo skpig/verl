@@ -42,8 +42,9 @@ from single_controller.base import Worker
 from single_controller.ray import RayResourcePool, RayWorkerGroup, RayClassWithInitArgs
 from single_controller.ray.base import create_colocated_worker_cls
 from verl import DataProto
+from verl.utils.fs import copy_local_path_from_hdfs
 
-from hdfs_io import makedirs, hput, hcopy
+from hdfs_io import makedirs, hput, hcopy, hexists
 
 try:
     from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
@@ -386,6 +387,29 @@ def print_dataproto_size(data: DataProto, head):
     print(f'{head}, Size of tensordict: {size_of_tensordict} GB, size of non_tensor_batch: {size_of_numpy_array} GB')
 
 
+def save_dataproto(data: DataProto, path, prefix=''):
+    torch.save(data.batch, f"{prefix}.batch.pt")
+    torch.save(data.non_tensor_batch, f"{prefix}.non_tensor_batch.pt")
+    torch.save(data.meta_info, f"{prefix}.meta_info.pt")
+    hcopy(f"{prefix}.batch.pt", path)
+    hcopy(f"{prefix}.non_tensor_batch.pt", path)
+    hcopy(f"{prefix}.meta_info.pt", path)
+
+
+def load_dataproto(path, prefix=''):
+    batch = f"{path}/{prefix}.batch.pt"
+    non_tensor_batch = f"{path}/{prefix}.non_tensor_batch.pt"
+    meta_info = f"{path}/{prefix}.meta_info.pt"
+
+    batch = copy_local_path_from_hdfs(batch)
+    batch = torch.load(batch)
+    non_tensor_batch = copy_local_path_from_hdfs(non_tensor_batch)
+    non_tensor_batch = torch.load(non_tensor_batch)
+    meta_info = copy_local_path_from_hdfs(meta_info)
+    meta_info = torch.load(meta_info)
+    return DataProto(batch=batch, non_tensor_batch=non_tensor_batch, meta_info=meta_info)
+
+
 @ray.remote
 class StandaloneValidator(object):
     """
@@ -472,6 +496,9 @@ class RayPPOTrainer(object):
         self._create_dataloader()
 
         self.phasic_critic_buffer = None
+
+        self.standalone_gen_batch_output_resume = None
+        self.standalone_batch_resume = None
 
     def _create_dataloader(self):
         from torch.utils.data import DataLoader
@@ -909,7 +936,6 @@ class RayPPOTrainer(object):
         if self.config.trainer.resume_steps == 'disable':
             return 0
 
-        from verl.utils.fs import copy_local_path_from_hdfs
         # find the latest global step
         if self.config.trainer.resume_steps == 'auto':
             try:
@@ -950,6 +976,14 @@ class RayPPOTrainer(object):
         dataloader_remote_path = os.path.join(remote_global_step_folder, 'data.pt')
         dataloader_local_path = copy_local_path_from_hdfs(dataloader_remote_path)
         self.train_dataloader = torch.load(dataloader_local_path)
+
+        # async resume
+        if hexists(f"{remote_global_step_folder}/standalone_gen_batch_output.batch.pt"):
+            pprint('resume standalone rollout.')
+            self.standalone_gen_batch_output_resume = load_dataproto(path=remote_global_step_folder,
+                                                                     prefix='standalone_gen_batch_output')
+            self.standalone_batch_resume = load_dataproto(path=remote_global_step_folder, prefix='standalone_batch')
+
         return self.global_step
 
     def _balance_batch(self, batch, metrics, logging_prefix='global_seqlen'):
@@ -1095,9 +1129,24 @@ class RayPPOTrainer(object):
                     metrics['rollout/hybrid_incompleted_batch'] = len(batch) - finished_num
 
                     # stop standalone rollout to update model
+                    if self.standalone_batch_resume is not None:
+                        standalone_batch = self.standalone_batch_resume
+                        self.standalone_batch_resume = None
+
                     finished_num = 0
                     if len(standalone_batch) > 0:
-                        gen_batch_output = self.standalone_rollout_wg.generate_sequences_get(standalone_gen_batch)
+                        if not self.standalone_gen_batch_output_resume:
+                            gen_batch_output = self.standalone_rollout_wg.generate_sequences_get(standalone_gen_batch)
+                        else:
+                            gen_batch_output = self.standalone_gen_batch_output_resume
+                            self.standalone_gen_batch_output_resume = None
+                        if self.config.trainer.save_freq > 0 and (
+                                self.global_step - 1) % self.config.trainer.save_freq == 0 and self.global_step != 1:
+                            print(f"step {self.global_step}, saving... standalone_gen_batch")
+                            # save standalone_batch and gen_batch_output
+                            save_path = f"{self.config.trainer.default_hdfs_dir}/checkpoints/global_step_{self.global_step - 1}/"
+                            save_dataproto(gen_batch_output, path=save_path, prefix='standalone_gen_batch_output')
+                            save_dataproto(standalone_batch, path=save_path, prefix='standalone_batch')
                         # only report metrics from one generation replica
                         if 'xperf_metrics' in gen_batch_output.meta_info:
                             for name, x_metric in gen_batch_output.meta_info['xperf_metrics'].items():
