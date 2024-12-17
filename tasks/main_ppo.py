@@ -191,7 +191,8 @@ class RewardManager():
                     [global_step, prompt_str, solution_str, ground_truth, score, solution_str_post_proc])
             save_to_hdfs.append([
                 idx, global_step, prompt_str, solution_str, ground_truth, score, solution_str_post_proc, is_para_dup,
-                is_trunc.item()
+                is_trunc.item(),
+                valid_response_length.item()
             ])
 
         prefix = "" if not is_validation else "val/"
@@ -226,7 +227,7 @@ class RewardManager():
 
             def async_hput(save_to_hdfs, dir_name, file_name):
                 df = pd.DataFrame(columns=[
-                    "idx", "step", "prompt", "gen", "groundtruth", "score", "gen_postproc", "is_dup", "is_trunc"
+                    "idx", "step", "prompt", "gen", "groundtruth", "score", "gen_postproc", "is_dup", "is_trunc", 'len'
                 ],
                                   data=save_to_hdfs)
                 df.to_parquet(f"{dir_name}{file_name}")
