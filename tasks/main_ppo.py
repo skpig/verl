@@ -145,7 +145,7 @@ class RewardManager():
                 score_fn_inputs["code_sandbox_psm"] = self.config.trainer.code_sandbox_psm
             score = compute_score_fn(**score_fn_inputs)
             is_para_dup = para_dup.find_single_turn_duplicate(solution_str)[0]
-            is_trunc = response_length == valid_response_length
+            is_trunc = (response_length == valid_response_length) and score == -1
             return prompt_str, solution_str, ground_truth, reward_style, valid_response_length, score, is_para_dup, is_trunc, idx, solution_str_post_proc
 
         for i in range(len(data)):
