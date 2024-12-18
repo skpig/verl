@@ -101,12 +101,16 @@ class AsyncActorRolloutRefWorker(Worker):
         self.device_mesh = create_device_mesh(config.actor.fsdp_size, role)
 
         self.role = role
-        assert self.role in ['actor', 'rollout', 'ref', 'actor_rollout', 'actor_rollout_ref', 'standalone_rollout']
+        assert self.role in [
+            'actor', 'rollout', 'ref', 'actor_rollout', 'actor_rollout_ref', 'standalone_rollout',
+            'standalone_validator'
+        ]
 
         self._is_actor = self.role in ['actor', 'actor_rollout', 'actor_rollout_ref']
         self._is_rollout = self.role in ['rollout', 'actor_rollout', 'actor_rollout_ref']
         self._is_standalone_rollout = self.role in ['standalone_rollout']
         self._is_ref = self.role in ['ref', 'actor_rollout_ref']
+        self._is_standalone_validator = self.role in ['standalone_validator']
 
         profile_fname = f"trace_{self.role}_rank{self.rank}.json"
         self.profiler_context = get_profiler_context(filename=profile_fname,
@@ -362,7 +366,7 @@ class AsyncActorRolloutRefWorker(Worker):
 
         return actor_module_fsdp, actor_optimizer, actor_lr_scheduler, actor_model_config
 
-    def _build_rollout(self, hybrid_master_address=None, standalone_master_address=None):
+    def _build_rollout(self):
         assert self.config.rollout.name == 'xperf_gpt'
 
         import xperf_gpt
@@ -381,14 +385,10 @@ class AsyncActorRolloutRefWorker(Worker):
                                                        model_config=self.actor_model_config,
                                                        inference_engine=rollout.inference_engine,
                                                        device_mesh=rollout.device_mesh,
-                                                       standalone=self._is_standalone_rollout)
-        if hybrid_master_address is not None and standalone_master_address is not None:
-            sharding_manager.setup_standalone_rollout_comm(hybrid_master_address, standalone_master_address)
-        else:
-            # not support for the case that contains standalone rollout
-            sharding_manager.release_param_and_cache()
-            log_gpu_memory_usage('After AsyncXPerfGPTRollout release parameter and kv cache', logger=logger)
-        log_gpu_memory_usage('After FSDPXPerfGPTShardingManager init', logger=logger)
+                                                       standalone=self._is_standalone_rollout or
+                                                       self._is_standalone_validator)
+        sharding_manager.release_param_and_cache()
+        log_gpu_memory_usage('After AsyncXPerfGPTRollout release parameter and kv cache', logger=logger)
         return rollout, sharding_manager
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
@@ -419,11 +419,15 @@ class AsyncActorRolloutRefWorker(Worker):
                     offload_fsdp_model_to_cpu(self.ref_module_fsdp)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    def init_model(self, hybrid_master_address=None, standalone_master_address=None):
+    def init_model(self):
         with self.profiler_context:
-            self._init_model(hybrid_master_address, standalone_master_address)
+            self._init_model()
 
-    def _init_model(self, hybrid_master_address=None, standalone_master_address=None):
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def setup_standalone_worker_comm(self, hybrid_master_address, standalone_master_address, port, role):
+        self.sharding_manager.setup_standalone_worker_comm(hybrid_master_address, standalone_master_address, port, role)
+
+    def _init_model(self):
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get('external_lib', None))
 
@@ -433,7 +437,7 @@ class AsyncActorRolloutRefWorker(Worker):
         use_rmpad = self.config.model.get('use_rmpad', False)
         use_ce_loss_fusion = self.config.model.get('use_ce_loss_fusion', False)
 
-        if self._is_actor or self._is_rollout or self._is_standalone_rollout:
+        if self._is_actor or self._is_rollout or self._is_standalone_rollout or self._is_standalone_validator:
             # we need the model for actor and rollout
             if self._is_actor:
                 optim_config = self.config.actor.optim
@@ -483,8 +487,8 @@ class AsyncActorRolloutRefWorker(Worker):
                 self.config.ref.use_ce_loss_fusion = use_ce_loss_fusion
             self.ref_policy = DataParallelPPOActor(config=self.config.ref, actor_module=self.ref_module_fsdp)
 
-        if self._is_rollout or self._is_standalone_rollout:
-            self.rollout, self.sharding_manager = self._build_rollout(hybrid_master_address, standalone_master_address)
+        if self._is_rollout or self._is_standalone_rollout or self._is_standalone_validator:
+            self.rollout, self.sharding_manager = self._build_rollout()
             self.rollout_async = None
 
         if self._is_actor:
@@ -499,9 +503,9 @@ class AsyncActorRolloutRefWorker(Worker):
         torch.cuda.empty_cache()
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    def update_standalone_rollout(self):
-        assert self._is_rollout or self._is_standalone_rollout
-        self.sharding_manager.update_standalone_rollout()
+    def update_standalone_worker(self, role):
+        assert self._is_rollout or self._is_standalone_rollout or self._is_standalone_validator
+        self.sharding_manager.update_standalone_worker(role)
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def update_actor(self, data: DataProto):
@@ -604,7 +608,7 @@ class AsyncActorRolloutRefWorker(Worker):
     def generate_sequences(self, prompts: DataProto):
         prompts = prompts.to('cuda')
 
-        assert self._is_rollout
+        assert self._is_rollout or self._is_standalone_validator
 
         prompts.batch = prompts.batch.cuda()
         meta_info = {'eos_token_id': self.tokenizer.eos_token_id, 'pad_token_id': self.tokenizer.pad_token_id}

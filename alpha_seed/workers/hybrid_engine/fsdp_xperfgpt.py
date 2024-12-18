@@ -58,8 +58,6 @@ class FSDPXPerfGPTShardingManager(BaseShardingManager):
         self.device_mesh = device_mesh
         self.model_config = model_config
         self.standalone = standalone
-        self.world_size_offset = 0
-        self.world_size = torch.distributed.get_world_size()
 
         self.bind_fn = get_xperf_gpt_weight_bind_fn(model_config, self.inference_engine.engine.module.quant_mode)
         # will be set when calling to `setup_standalone_rollout_comm`
@@ -77,32 +75,41 @@ class FSDPXPerfGPTShardingManager(BaseShardingManager):
             self.gen_random_states = None
         # broadcast random states across tp group
 
-    def setup_standalone_rollout_comm(self, hybrid_master_address, standalone_master_address):
+    def setup_standalone_worker_comm(self, hybrid_master_address, standalone_master_address, port, role):
+        assert role in ["standalone_rollout", "standalone_validator"]
         assert (hybrid_master_address is not None)
         assert (standalone_master_address is not None)
         self.has_standalone_workers = True
-        self.world_size_offset = len(hybrid_master_address)
-        master_address = hybrid_master_address[0].meta_info["hybrid_master_addr"]
-        # breakpoint()
-        # hack for standalone
-        self.rank = torch.distributed.get_rank() + (0 if not self.standalone else self.world_size_offset)
-        self.hybrid_world_size = len(hybrid_master_address)
-        self.standalone_world_size = len(standalone_master_address)
-        self.world_size = self.hybrid_world_size + self.standalone_world_size
 
-        print("world_size ", self.world_size, " rank ", self.rank, " master_addr ", master_address)
+        master_address = hybrid_master_address[0].meta_info["hybrid_master_addr"]
+        hybrid_world_size = len(hybrid_master_address)
+        standalone_world_size = len(standalone_master_address)
+        rank = torch.distributed.get_rank() + (0 if not self.standalone else hybrid_world_size)
+        world_size = hybrid_world_size + standalone_world_size
+        comm_info = {
+            "hybrid_world_size": hybrid_world_size,
+            "standalone_world_size": standalone_world_size,
+            "rank": rank,
+            "world_size": world_size,
+            "master_address": master_address,
+            "master_port": port
+        }
+        print(comm_info)
+
         with patch.dict(
                 os.environ,
             {
-                'RANK': str(self.rank),
-                'WORLD_SIZE': str(self.world_size),
-                'LOCAL_RANK': str(self.rank % 8),
-                'LOCAL_WORLD_SIZE': str(min(8, self.world_size)),
-                'MASTER_ADDR': master_address,
-                'MASTER_PORT': "12333",  # find a free port
+                'RANK': str(comm_info["rank"]),
+                'WORLD_SIZE': str(comm_info["world_size"]),
+                'LOCAL_RANK': str(comm_info["rank"] % 8),
+                'LOCAL_WORLD_SIZE': str(min(8, comm_info["world_size"])),
+                'MASTER_ADDR': str(comm_info["master_address"]),
+                'MASTER_PORT': str(comm_info["master_port"]),  # find a free port
             }):
-            self.nccl_layer = torch.classes.XGPT.NCCLPrimitive()
-            self.nccl_layer.init("standalone", self.world_size, self.rank, "tcp", 0)
+            comm_info["nccl_layer"] = torch.classes.XGPT.NCCLPrimitive()
+            comm_info["nccl_layer"].init(f"standalone_{int(port)}", comm_info["world_size"], comm_info["rank"], "tcp",
+                                         0)
+        setattr(self, f"{role}_comm_info", comm_info)
 
     def release_param_and_cache(self):
         """Release the GPU memory occupied by xperf parameter and cache"""
@@ -111,6 +118,9 @@ class FSDPXPerfGPTShardingManager(BaseShardingManager):
         log_gpu_memory_usage('After release_param_and_cache', logger=logger)
 
     def __enter__(self):
+        # standalone worker does not need to do this
+        if self.standalone:
+            return
         # gather full state_dict in CPU
         from torch.distributed.fsdp import ShardedStateDictConfig, StateDictType
 
@@ -175,7 +185,7 @@ class FSDPXPerfGPTShardingManager(BaseShardingManager):
             data = local_prompts[dp_rank % tp_size]
         return data
 
-    def update_standalone_rollout(self):
+    def update_standalone_worker(self, role):
 
         def _update_xperf_model(comm_fn, comm_rank):
             layernorm_weight = self.inference_engine.engine.module.layernorm_weight.cuda()
@@ -202,14 +212,21 @@ class FSDPXPerfGPTShardingManager(BaseShardingManager):
                         self.inference_engine.engine.module.layers_weight[layer][i] = weight.to(origin_dtype)
             self.inference_engine.current_steps = 0
 
+        comm_info = getattr(self, f"{role}_comm_info")
+        hybrid_world_size = comm_info["hybrid_world_size"]
+        standalone_world_size = comm_info["standalone_world_size"]
+        rank = comm_info["rank"]
+        world_size = comm_info["world_size"]
+        nccl_layer = comm_info["nccl_layer"]
+
         if self.standalone:
-            from_rank = self.rank % self.hybrid_world_size
-            _update_xperf_model(self.nccl_layer.recv, from_rank)
+            from_rank = rank % hybrid_world_size
+            _update_xperf_model(nccl_layer.recv, from_rank)
         else:
-            for i in range((self.world_size - 1) // self.hybrid_world_size):
-                to_rank = self.rank + self.hybrid_world_size + i * self.hybrid_world_size
-                if to_rank < self.world_size:
-                    _update_xperf_model(self.nccl_layer.send, to_rank)
+            for i in range((world_size - 1) // hybrid_world_size):
+                to_rank = rank + hybrid_world_size + i * hybrid_world_size
+                if to_rank < world_size:
+                    _update_xperf_model(nccl_layer.send, to_rank)
 
         if not self.standalone:
             # offload to CPU
@@ -221,4 +238,4 @@ class FSDPXPerfGPTShardingManager(BaseShardingManager):
             if self.device_mesh is not None:
                 torch.cuda.set_rng_state(self.gen_random_states)
 
-        log_gpu_memory_usage('After standalone update', logger=logger)
+        log_gpu_memory_usage(f'After {role} update', logger=logger)

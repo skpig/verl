@@ -259,5 +259,9 @@ streaming_rollout:
   warmup_step: 0
   force_eos: False
 
+streaming_validator:
+  n_gpus_per_node: 0
+  nnodes: 0
+
 convert_ckpt_to_omnistore_task:
   enable: False

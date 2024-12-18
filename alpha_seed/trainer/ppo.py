@@ -36,6 +36,7 @@ from codetiming import Timer
 from alpha_seed.trainer.tensorcore_collect import tensorcore_collection
 from alpha_seed.utils.select_strategy.bon_strategy import *
 from alpha_seed.utils.select_strategy.league_training_strategy import *
+from alpha_seed.utils.validator.validation_manager import *
 from alpha_seed.workers.streaming_service.streaming_utils import pad, process_output
 from alpha_seed.workers.actors.checkpoint import CkptGlobalUploader
 from alpha_seed.utils.observility.pretty_print import pprint
@@ -79,6 +80,7 @@ class Role(Enum):
     RefPolicy = 4
     RewardModel = 5
     ActorRolloutRef = 6
+    Validator = 7
 
 
 @dataclass
@@ -412,30 +414,6 @@ def load_dataproto(path, prefix=''):
     return DataProto(batch=batch, non_tensor_batch=non_tensor_batch, meta_info=meta_info)
 
 
-@ray.remote
-class StandaloneValidator(object):
-    """
-    This is a standalone validator that runs in a single process. It controls a SPMD workergroup that performs generation.
-    The workergroup fetches latest weights from main task when it finishes the last iteration of validation
-    """
-
-    def __init__(self, config) -> None:
-        from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRefWorker
-
-        self._is_running = False
-        ray_cls = RayClassWithInitArgs(cls=AsyncActorRolloutRefWorker, config=config)
-
-    def init_workers(self):
-        """Initialize a standalone rollout"""
-
-    def is_running(self):
-        pass
-
-    def main(self):
-        """This is a long running process that runs in a sub-thread"""
-        pass
-
-
 class RayPPOTrainer(object):
     """
     Note that this trainer runs on the driver on a single GPU
@@ -474,10 +452,11 @@ class RayPPOTrainer(object):
 
         self.use_standalone_reference_policy = Role.RefPolicy in role_worker_mapping
         self.use_colocate_reference_policy = Role.ActorRolloutRef in role_worker_mapping
-
+        self.use_standalone_rollout = self.config.streaming_rollout.nnodes > 0
+        self.use_standalone_validator = self.config.streaming_validator.nnodes > 0
         self.use_reference_policy = self.use_standalone_reference_policy or self.use_colocate_reference_policy
-
         self.use_rm = Role.RewardModel in role_worker_mapping
+
         self.ray_worker_group_cls = ray_worker_group_cls
         self.num_bon = self.config.actor_rollout_ref.rollout.get("num_bon", 1)
 
@@ -496,6 +475,8 @@ class RayPPOTrainer(object):
             self.kl_ctrl = core_algos.FixedKLController(kl_coef=0.)
 
         self._create_dataloader()
+        self.validation_manager = ValidateManager(self.config, self.logger, self.val_dataloader, self.tokenizer,
+                                                  self.use_rm, self.val_reward_fn)
 
         self.phasic_critic_buffer = None
 
@@ -579,180 +560,6 @@ class RayPPOTrainer(object):
             self.config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
             self.config.critic.optim.total_training_steps = total_training_steps
 
-    def _validate(self, val_epoch=1, need_log=False, log_file="/opt/tiger/alpha-seed/log.jsonl"):
-        metric_dict = {}
-        reward_tensor_lst = []
-        data_source_lst = []
-        prompt_name_lst = []
-        bopxn_lst = []
-        if need_log:
-            f = open(log_file, "w")
-        for val_epoch_idx in range(val_epoch):
-            for val_idx, test_data in enumerate(self.val_dataloader):
-                test_batch = DataProto.from_single_dict(test_data)
-
-                prompt_names = test_batch.non_tensor_batch['prompt_names'][0]
-                num_prompts_per_data = len(prompt_names)
-
-                if num_prompts_per_data > 1:
-                    test_batch = test_batch.unfold_column_chunks(
-                        num_prompts_per_data, split_keys=['input_ids', 'attention_mask', 'prompt_names'])
-
-                eval_bon = self.config.actor_rollout_ref.rollout.get("eval_bon", 1)
-                test_batch = test_batch.repeat(eval_bon)
-                test_gen_batch = test_batch.pop(['input_ids', 'attention_mask', 'off_policy_steps'])
-                test_gen_batch.meta_info = {
-                    'eos_token_id': self.tokenizer.eos_token_id,
-                    'pad_token_id': self.tokenizer.pad_token_id,
-                    'validate': True,
-                    'complete_ratio': 1,  # validation does not need timeout
-                }
-                test_gen_batch.meta_info[
-                    'generation_kwargs'] = self.config.actor_rollout_ref.rollout.val_generate_kwargs
-
-                # pad test_gen_batch to divisible by world_size. TODO(zhangchi.usc1992): shall we move this logic to dispatch?
-                test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch,
-                                                                           self.actor_rollout_wg.world_size)
-
-                test_output_gen_batch = self.actor_rollout_wg.generate_sequences(test_gen_batch_padded)
-                test_output_gen_batch.batch['prompts'] = test_output_gen_batch.batch['input_ids'][:, :self.config.data.
-                                                                                                  max_prompt_length]
-                test_output_gen_batch.batch['responses'] = test_output_gen_batch.batch['input_ids'][:, self.config.data.
-                                                                                                    max_prompt_length:]
-
-                test_output_gen_batch = unpad_dataproto(test_output_gen_batch, pad_size=pad_size)
-
-                print(
-                    f'{val_epoch_idx + 1}-th/{val_epoch} {val_idx + 1}-th/{len(self.val_dataloader)} validation generation end'
-                )
-
-                test_batch = test_batch.union(test_output_gen_batch)
-
-                if self.use_rm:
-                    # we first compute reward model score
-                    test_batch_padded, pad_size = pad_dataproto_to_divisor(test_batch,
-                                                                           size_divisor=self.rm_wg.world_size)
-                    reward_tensor = self.rm_wg.compute_rm_score(test_batch_padded)
-                    reward_tensor = unpad_dataproto(reward_tensor, pad_size=pad_size)
-
-                    test_batch = test_batch.union(reward_tensor)
-
-                # evaluate using reward_function
-                # for certain reward function (e.g. sandbox), the generation can overlap with reward
-                reward_tensor = self.val_reward_fn(test_batch,
-                                                   global_step=self.global_step,
-                                                   need_norm=False,
-                                                   is_validation=True)
-
-                reward_tensor_before_select = reward_tensor.clone()  # (B x bon, seqlen)
-                if eval_bon > 1 and self.global_step % self.config.actor_rollout_ref.rollout.get("eval_bon_every",
-                                                                                                 20) == 0:
-                    print("begin compute bon")
-                    from alpha_seed.utils.reward_score.bootstrap_bon import bootstrap_bon_metric
-                    nxm_mat = reward_tensor_before_select.sum(-1).reshape(-1, eval_bon)
-                    bopxn_mat = reward_tensor_before_select.sum(-1).reshape(-1, num_prompts_per_data * eval_bon)
-
-                    bon_matrix, bon_metric = bootstrap_bon_metric(nxm_mat)  #  nxm
-                    bopxn, _ = bootstrap_bon_metric(bopxn_mat)
-                    bopxn_lst.append(bopxn)
-                    # metric_dict.update({f"diversity/eval_bo{k}": v for k, v in bon_metric.items()})
-                    # metric_dict['diversity/eval_bon_hist'] = wandb.Histogram(np_histogram=np.histogram(
-                    #     np.arange(0, eval_bon) + 0.5, bins=eval_bon, weights=bon_matrix.mean(0)))
-                    reward_tensor = bon_matrix  #[:, 0]  # bo1 as reward
-                else:
-                    reward_tensor = reward_tensor.sum(-1).unsqueeze(-1)  # sum over seqlen
-
-                reward_tensor_lst.append(reward_tensor)
-                data_source_lst.append(
-                    test_batch.non_tensor_batch.get('data_source',
-                                                    ['unknown'] * reward_tensor.shape[0]).reshape(-1, eval_bon)[:, 0])
-                prompt_name_lst.append(
-                    test_batch.non_tensor_batch.get('prompt_names',
-                                                    ['unknown'] * reward_tensor.shape[0]).reshape(-1, eval_bon)[:, 0])
-                if need_log:
-                    input_ids = test_output_gen_batch.batch['input_ids'].cpu().numpy()
-                    prompt_ids = input_ids[:, :self.config.data.max_prompt_length]
-                    response_ids = input_ids[:, self.config.data.max_prompt_length:]
-                    prompts = self.tokenizer.batch_decode(prompt_ids, skip_special_tokens=True)
-                    responses = self.tokenizer.batch_decode(response_ids, skip_special_tokens=True)
-                    reward_tensor_before_select = reward_tensor_before_select.sum(-1).cpu()
-                    for reward, prompt, response in zip(reward_tensor_before_select, prompts, responses):
-                        data = {"reward": reward.item(), "prompt": prompt, "response": response}
-                        f.write(json.dumps(data, ensure_ascii=False) + "\n")
-                        f.flush()
-
-        # validation release memory
-        self.actor_rollout_wg.release_param_and_cache()
-
-        reward_tensor = torch.cat(reward_tensor_lst, dim=0).cpu()  # (valsize*num_prompt_per_data, eval_bon)
-        bopxn = torch.cat(bopxn_lst, dim=0).cpu(
-        ) if eval_bon > 1 and num_prompts_per_data > 0 else None  # (valsize, num_prompt_per_data*eval_bon)
-
-        def compute_metric(reward_tensor, bopxn, metric_dict, data_source="all"):
-            '''reward_tensor : (datasize*num_prompt_per_data, eval_bon)
-               bobon_reward: (datasize, num_prompt_per_data*eval_bon)
-            '''
-            logN = int(np.log(eval_bon) / np.log(2))
-            power_index = torch.LongTensor([2**i for i in range(logN)] + [eval_bon]) - 1
-            format_fn = lambda lst: ",\t".join("{:.3f}".format(x) for x in lst)
-            if num_prompts_per_data > 0:
-                reward_tensor_per_prompt = [
-                    row for row in reward_tensor.reshape(-1, num_prompts_per_data, eval_bon).transpose(0, 1).mean(1)
-                ]
-            avgp_bon = reward_tensor.mean(0)
-            print("{}, avgpbon\t\t {}".format(data_source, format_fn(avgp_bon[power_index])))
-            if bopxn is not None:
-                # bopboN = reward_tensor.reshape(-1, num_prompts_per_data, eval_bon).max(dim=1).values.mean(0)
-                bopxn = bopxn.mean(0)[(num_prompts_per_data - 1)::num_prompts_per_data]
-                # print("{}, bopboN\t\t {}".format(data_source, format_fn(bopboN[power_index])))
-                print("{}, bopxn\t\t {}".format(data_source, format_fn(bopxn[power_index])))
-
-            if num_prompts_per_data > 0:
-                for pid in range(num_prompts_per_data):
-                    print("{} BoN (prompt {}):\t {}".format(data_source, prompt_names[pid],
-                                                            format_fn(reward_tensor_per_prompt[pid][power_index])))
-
-            for N in power_index:
-                metric_dict[f'test_score/{data_source}_avgpbo{N}'] = avgp_bon[N]
-                if bopxn is not None:
-                    # metric_dict[f'test_score/{data_source}_bopbo{N}'] = bopboN[N]
-                    metric_dict[f'test_score/{data_source}_bopxn{N}'] = bopxn[N]
-                if num_prompts_per_data > 0:
-                    for pid in range(num_prompts_per_data):
-                        metric_dict[f'test_score/all_{prompt_names[pid]}_bo{N}'] = reward_tensor_per_prompt[pid][N]
-            metric_dict[f'test_cnt/{data_source}'] = len(
-                reward_tensor) // num_prompts_per_data if num_prompts_per_data > 0 else len(reward_tensor)
-
-        compute_metric(reward_tensor, bopxn, metric_dict, data_source="all")
-
-        # group by data source metrics
-        data_sources = np.concatenate(data_source_lst, axis=0)
-        prompt_names_per_sample = np.concatenate(prompt_name_lst, axis=0)  # not useful for now
-
-        # evaluate test_score based on data source
-        data_source_reward = {}
-        for i in range(reward_tensor.shape[0]):
-            data_source = data_sources[i]
-            if data_source not in data_source_reward:
-                data_source_reward[data_source] = []
-            data_source_reward[data_source].append(reward_tensor[i])
-
-        if bopxn is not None:
-            data_source_bopxn = {}
-            for i in range(bopxn.shape[0]):
-                data_source = data_sources[i]
-                if data_source not in data_source_bopxn:
-                    data_source_bopxn[data_source] = []
-                data_source_bopxn[data_source].append(bopxn[i])
-
-        for data_source, rewards in data_source_reward.items():
-            rewards_tensor_data_source = torch.vstack(rewards)
-            bopxn_data_source = torch.vstack(data_source_bopxn[data_source]) if bopxn is not None else None
-            compute_metric(rewards_tensor_data_source, bopxn_data_source, metric_dict, data_source=data_source)
-        if need_log:
-            f.close()
-        return metric_dict
-
     def init_workers(self):
         """Init resource pool and worker group"""
         self.resource_pool_manager.create_resource_pool()
@@ -781,6 +588,12 @@ class RayPPOTrainer(object):
                                                config=self.config.actor_rollout_ref,
                                                role='standalone_rollout')
             self.resource_pool_to_cls[resource_pool]['standalone_rollout'] = rollout_cls
+
+            resource_pool = self.resource_pool_manager.get_resource_pool(Role.Validator)
+            validator_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Validator],
+                                                 config=self.config.actor_rollout_ref,
+                                                 role='standalone_validator')
+            self.resource_pool_to_cls[resource_pool]['standalone_validator'] = validator_cls
         else:
             raise NotImplementedError
 
@@ -824,24 +637,35 @@ class RayPPOTrainer(object):
             spawn_wg = wg_dict.spawn(prefix_set=class_dict.keys())
             all_wg.update(spawn_wg)
 
-        if self.config.streaming_rollout.nnodes > 0:
-            # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
-            if self.use_standalone_reference_policy or not self.use_reference_policy:
-                self.actor_rollout_wg = all_wg['actor_rollout']
-            elif self.use_colocate_reference_policy:
-                self.actor_rollout_wg = all_wg['actor_rollout_ref']
-            self.standalone_rollout_wg = all_wg['standalone_rollout']
-            hybrid_master_address = self.actor_rollout_wg.get_master_addr()
-            standalone_master_address = self.standalone_rollout_wg.get_master_addr()
+        # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
+        if self.use_standalone_reference_policy or not self.use_reference_policy:
+            self.actor_rollout_wg = all_wg['actor_rollout']
+        elif self.use_colocate_reference_policy:
+            self.actor_rollout_wg = all_wg['actor_rollout_ref']
 
-            self.actor_rollout_wg.init_model(hybrid_master_address, standalone_master_address)
-            self.standalone_rollout_wg.init_model(hybrid_master_address, standalone_master_address)
-        else:
-            if self.use_standalone_reference_policy or not self.use_reference_policy:
-                self.actor_rollout_wg = all_wg['actor_rollout']
-            elif self.use_colocate_reference_policy:
-                self.actor_rollout_wg = all_wg['actor_rollout_ref']
-            self.actor_rollout_wg.init_model()
+        self.actor_rollout_wg.init_model()
+        hybrid_master_address = self.actor_rollout_wg.get_master_addr()
+        self.validation_manager.actor_rollout_wg = self.actor_rollout_wg
+
+        if self.use_standalone_rollout:
+            self.standalone_rollout_wg = all_wg['standalone_rollout']
+            self.standalone_rollout_wg.init_model()
+            standalone_rollout_address = self.standalone_rollout_wg.get_master_addr()
+            self.actor_rollout_wg.setup_standalone_worker_comm(hybrid_master_address, standalone_rollout_address,
+                                                               "12345", "standalone_rollout")
+            self.standalone_rollout_wg.setup_standalone_worker_comm(hybrid_master_address, standalone_rollout_address,
+                                                                    "12345", "standalone_rollout")
+
+        if self.use_standalone_validator:
+            self.standalone_validator_wg = all_wg['standalone_validator']
+            self.standalone_validator_wg.init_model()
+            standalone_validator_address = self.standalone_validator_wg.get_master_addr()
+            self.actor_rollout_wg.setup_standalone_worker_comm(hybrid_master_address, standalone_validator_address,
+                                                               "14567", "standalone_validator")
+            self.standalone_validator_wg.setup_standalone_worker_comm(hybrid_master_address,
+                                                                      standalone_validator_address, "14567",
+                                                                      "standalone_validator")
+            self.validation_manager.standalone_validator_wg = self.standalone_validator_wg
 
         if self.config.actor_rollout_ref.actor.kl_loss_weight >= 1e-10:
             # 两种情况下使用kl loss，一种是grpo，另一种是在rewards里不加kl惩罚
@@ -1023,12 +847,11 @@ class RayPPOTrainer(object):
 
         # perform validation before training
         if self.val_reward_fn is not None and self.config.trainer.eval_before_training:
-            val_metrics = self._validate(val_epoch=self.config.trainer.val_epoch,
-                                         need_log=self.config.trainer.need_log,
-                                         log_file=self.config.trainer.log_file)
-            pprint(f'Initial validation metrics: {val_metrics}')
-            val_metrics = {f'val/{key}': val for key, val in val_metrics.items()}
-            self.logger.log(data=val_metrics, step=self.global_step)
+            self.validation_manager.validate(val_epoch=self.config.trainer.val_epoch,
+                                             need_log=self.config.trainer.need_log,
+                                             log_file=self.config.trainer.log_file,
+                                             is_async=False,
+                                             global_step=self.global_step)
         if self.config.trainer.val_only:
             return
 
@@ -1126,7 +949,7 @@ class RayPPOTrainer(object):
                     finished_num, ready_batch_queue, pending_batch_queue = process_output(
                         batch, gen_batch_output, self.tokenizer, ready_batch_queue, pending_batch_queue, self.config)
                     pprint(
-                        f'stop hybrid rollout, completed_batch {finished_num}, incompleted_batch {len(batch) - finished_num}'
+                        f'stop hybrid rollout, completed_batch {finished_num}, incompleted_batch {len(batch) - finished_num} '
                         + f'ready_queue {ready_batch_queue.qsize()}, pending_queue {pending_batch_queue.qsize()}.')
                     metrics['rollout/hybrid_completed_batch'] = finished_num
                     metrics['rollout/hybrid_incompleted_batch'] = len(batch) - finished_num
@@ -1173,8 +996,8 @@ class RayPPOTrainer(object):
                     # update standalone rollout weights
                     with Timer(name='update_standalone', logger=None) as timer:
                         if hasattr(self, "standalone_rollout_wg"):
-                            self.actor_rollout_wg.update_standalone_rollout()
-                            self.standalone_rollout_wg.update_standalone_rollout()
+                            self.actor_rollout_wg.update_standalone_worker("standalone_rollout")
+                            self.standalone_rollout_wg.update_standalone_worker("standalone_rollout")
                     metrics['timing/update_standalone'] = timer.last
 
                     # standalone generate (off policy)
@@ -1401,10 +1224,9 @@ class RayPPOTrainer(object):
                     # validate
                     if self.val_reward_fn is not None and self.global_step % self.config.trainer.test_freq == 0:
                         with Timer(name='testing', logger=None) as timer:
-                            val_metrics: dict = self._validate()
-                            val_metrics = {f'val/{key}': val for key, val in val_metrics.items()}
+                            self.validation_manager.validate(is_async=self.use_standalone_validator,
+                                                             global_step=self.global_step)
                         metrics['timing/testing'] = timer.last
-                        metrics.update(val_metrics)
 
                     metric_collection_context = training_duration_metrics_collector.collect_compute_metrics_duration() \
                         if training_duration_metrics_collector else contextlib.nullcontext()
@@ -1506,7 +1328,7 @@ class RayPPOTrainer(object):
 
                     # perform validation after training
                     if self.val_reward_fn is not None:
-                        val_metrics = self._validate()
+                        val_metrics = self.validation_manager.validate(is_async=False, global_step=self.global_step)
                         pprint(f'Final validation metrics: {val_metrics}')
 
                     return

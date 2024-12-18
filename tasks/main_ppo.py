@@ -442,18 +442,22 @@ def main_task(config):
             Role.ActorRolloutRef: AsyncActorRolloutRefWorker,
             Role.Critic: CriticWorker,
             Role.Rollout: AsyncActorRolloutRefWorker,
+            Role.Validator: AsyncActorRolloutRefWorker,
         }
 
         global_pool_id = 'global_pool'
         standalone_pool_id = 'standalone_pool'
+        validation_pool_id = 'validation_pool'
         resource_pool_spec = {
             global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
             standalone_pool_id: [config.streaming_rollout.n_gpus_per_node] * config.streaming_rollout.nnodes,
+            validation_pool_id: [config.streaming_validator.n_gpus_per_node] * config.streaming_validator.nnodes,
         }
         mapping = {
             Role.ActorRolloutRef: global_pool_id,
             Role.Critic: global_pool_id,
             Role.Rollout: standalone_pool_id,
+            Role.Validator: validation_pool_id,
         }
 
         # we should adopt a multi-source reward function here
