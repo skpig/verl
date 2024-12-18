@@ -278,7 +278,11 @@ class AsyncXPerfGPTRollout(object):
                         torch.save(self.inference_engine.get_inorder_responses(), f"{save_model_name}_output.pt")
 
                         from hdfs_io.hdfs_io import hcopy, hmkdir
-                        assert (self.config.get("dump_nan", None) is not None)
+                        dump_nan_dir = self.config.get("dump_nan", None)
+                        if dump_nan_dir is None:
+                            print("dump_nan config is not set, skip")
+                            raise (e)
+                        print(f"dump weights/tensors to {dump_nan_dir}")
                         hmkdir(self.config.get("dump_nan", None))
                         hcopy(f"{save_model_name}_model_engine_layers_weight.pt", self.config.get("dump_nan", None))
                         hcopy(f"{save_model_name}_model_engine_wte_weight.pt", self.config.get("dump_nan", None))
