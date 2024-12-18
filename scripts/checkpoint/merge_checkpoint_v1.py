@@ -14,6 +14,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--load-dir', required=True)
     parser.add_argument('--save-path', required=False)
+    # for compatibility with merlin auto eval
     parser.add_argument('--cruise-config', required=False)
     parser.add_argument('--dtype', required=False)
     args = parser.parse_args()
