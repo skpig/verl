@@ -101,7 +101,10 @@ def select_training_samples_v2(batch, strategy, config):
     final_samples = []
     for key, val in id2feat.items():
         scores = list(map(lambda x: x["scores"], val))
-        id2acc[key] = (np.mean(scores).item() + 1) / 2
+        acc = (np.mean(scores).item() + 1) / 2
+        id2acc[key] = acc
+        if config.algorithm.bon_filter_high_acc_data and acc > 0.8:
+            continue
         scores_noise = np.random.uniform(
             -0.01, 0.01, size=len(scores))  # add noise to avoid always choosing the first one, avoiding potential bias
         scores += scores_noise
@@ -128,13 +131,31 @@ def select_training_samples_v2(batch, strategy, config):
 
     # step3, 不够的补，多的随机挑
     final_bsz = cur_bsz // num_bon * response_num_per_prompt // mini_bsz * mini_bsz
-    if len(final_samples) < final_bsz:
-        random.shuffle(total_samples)
-        remain_len = final_bsz - len(final_samples)
-        final_samples = final_samples + total_samples[:remain_len]
-    elif len(final_samples) > final_bsz:
-        random.shuffle(final_samples)
-        final_samples = final_samples[:final_bsz]
+    if config.algorithm.bon_filter_high_acc_data:
+        if len(final_samples) < final_bsz:
+            # rank: acc低的里面的正确的 -> acc低的里面的错误的
+            correct_pool_under80 = []
+            false_pool_under80 = []
+            # 按正确率排序，筛掉正确率大于0.8的
+            id2acc_rank = [item for item in sorted(id2acc.items(), key=lambda x: x[1]) if item[1] < 0.8]
+            for idx, acc in id2acc_rank:
+                correct_pool_under80 += [item for item in id2feat[idx] if item["scores"] == 1]
+                false_pool_under80 += [item for item in id2feat[idx] if item["scores"] == -1]
+            selection_pool = correct_pool_under80 + false_pool_under80
+            weights = [i for i in range(len(selection_pool), 0, -1)]
+            # weights = [i / sum(weights) for i in weights]
+            final_samples += random.choices(selection_pool, weights=weights, k=final_bsz - len(final_samples))
+        elif len(final_samples) > final_bsz:
+            random.shuffle(final_samples)
+            final_samples = final_samples[:final_bsz]
+    else:
+        if len(final_samples) < final_bsz:
+            random.shuffle(total_samples)
+            remain_len = final_bsz - len(final_samples)
+            final_samples = final_samples + total_samples[:remain_len]
+        elif len(final_samples) > final_bsz:
+            random.shuffle(final_samples)
+            final_samples = final_samples[:final_bsz]
     final_samples = sorted(final_samples, key=lambda x: x["index"])
 
     # step4, 处理成DataProto格式
@@ -168,6 +189,11 @@ def select_training_samples_v2(batch, strategy, config):
         "bon/response_num_min": min(response_num_per_prompt),
         "bon/response_num_std": np.std(response_num_per_prompt),
         "bon/final_bsz": final_bsz,
+        "bon/acc_80+": len(list(filter(lambda x: x > 0.8, id2acc.values()))) / len(id2acc),
+        "bon/acc_50+": len(list(filter(lambda x: x > 0.5, id2acc.values()))) / len(id2acc),
+        "bon/acc_20+": len(list(filter(lambda x: x > 0.2, id2acc.values()))) / len(id2acc),
+        "bon/acc_10+": len(list(filter(lambda x: x > 0.1, id2acc.values()))) / len(id2acc),
+        "bon/acc_0": len(list(filter(lambda x: x == 0, id2acc.values()))) / len(id2acc),
     }
 
     return DataProto(

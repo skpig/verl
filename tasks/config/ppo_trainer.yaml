@@ -214,6 +214,7 @@ algorithm:
   kl_ctrl:
     type: fixed
     kl_coef: 0.001
+  bon_filter_high_acc_data: False
 
 trainer:
   total_epochs: 30
