@@ -9,7 +9,7 @@ from omnistore.utilities.ckpt_format.merge_tool import omnistore_ckpt_to_pytorch
 from seed_models.commands.convert_to_megatron import convert_seed_models_to_megatron
 
 if __name__ == '__main__':
-    print("Step1: prepare args and folders")
+    print('Step1: prepare args and folders')
     parser = argparse.ArgumentParser()
     parser.add_argument('--load-dir', required=True)
     parser.add_argument('--save-path', required=False)
@@ -27,7 +27,7 @@ if __name__ == '__main__':
 
     if not args.save_path:
         args.save_path = args.load_dir
-    print("Complete save dir path for merge checkpoint: ", args.save_path)
+    print(f'Complete save dir path for merge checkpoint: {args.save_path}')
 
     local_dir = '/opt/tiger/.cache/src_model'
     os.makedirs(local_dir, exist_ok=True)
@@ -38,29 +38,29 @@ if __name__ == '__main__':
     match = re.search(r'global_step_(\d+)', args.load_dir)
     if match:
         global_step = match.group(0)
-        print("Extracted global step: ", global_step)
+        print(f'Extracted global step: {global_step}')
         args.load_dir = os.path.join(args.load_dir, global_step)
-    print("Complete load dir path for merge checkpoint: ", args.load_dir)
+    print(f'Complete load dir path for merge checkpoint: {args.load_dir}')
 
-    print("Step2: merge omnistore ckpt to get state_dict")
+    print('Step2: merge omnistore ckpt to get state_dict')
     time_begin = time.time()
     state_dict = omnistore_ckpt_to_pytorch_ckpt(
         args.load_dir,
         local_dir,
-        "fsdp",
+        'fsdp',
         model_only=True,
         fsdp_save_flatten_model=args.flatten_ckpt,
         safetensors_format=True,
         return_dict=True,
     )
-    print("Merge omnistore checkpoint successfully! cost time: ", time.time() - time_begin, "s")
+    print(f'Merge omnistore checkpoint successfully! cost time: {time.time() - time_begin}s')
     config = AutoConfig.from_pretrained(hf_path)
 
     with torch.device('meta'):
         model = AutoModelForCausalLM.from_config(config, torch_dtype=torch.bfloat16)
     model.to_empty(device='cpu')
 
-    print(f"Step3: saving merged model to local {hf_path}")
+    print(f'Step3: saving merged model to local {hf_path}')
     model.save_pretrained(hf_path, state_dict=state_dict['model'])
 
     del state_dict
