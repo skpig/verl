@@ -19,6 +19,7 @@ import time
 import warnings
 import contextlib
 
+import ray
 from verl import DataProto
 import torch
 from verl.utils.tracking import Tracking
@@ -53,7 +54,7 @@ def _select_rm_score_fn(reward_style):
     elif reward_style == "model-raw_score_reflection_penalty":
         return model_score_fn.raw_score_reflection_penalty
     elif reward_style == "code-sandbox":
-        return oj_utils.compute_score
+        return oj_utils.compute_score_client
     elif reward_style == 'rule-openai/gsm8k':
         return gsm8k.compute_score
     elif reward_style == 'rule-lighteval/MATH':
@@ -68,6 +69,62 @@ def _select_rm_score_fn(reward_style):
         if reward_style.startswith("rule-logic_puzzle"):
             return logic_puzzle.compute_score
         raise NotImplementedError
+
+
+def post_process_solution_str(config, solution_str):
+    if config.reward_model.use_last_response == 'summarize':
+        solution_str_post_proc = response_post_proc.summary_postprocess(
+            solution_str,
+            last_response_sep=config.reward_model.last_response_sep,
+            last_response_strict=config.reward_model.last_response_strict)
+    elif config.reward_model.use_last_response == 'lastcodeblock':
+        solution_str_post_proc = response_post_proc.last_codeblock_postprocess(
+            solution_str,
+            codeblock_seps=config.reward_model.last_response_sep,
+            last_response_strict=config.reward_model.last_response_strict)
+    else:
+        solution_str_post_proc = solution_str
+    return solution_str_post_proc
+
+
+@ray.remote(num_cpus=1)
+def call_oj(solution_str, ground_truth, code_sandbox_psm):
+    result = oj_utils.compute_score(solution_str=solution_str,
+                                    ground_truth=ground_truth,
+                                    code_sandbox_psm=code_sandbox_psm)
+    return result
+
+
+@ray.remote(num_cpus=1)
+class SandboxClient:
+
+    def __init__(self, config, tokenizer) -> None:
+        self.config = config
+        self.tokenizer = tokenizer
+        self.results = {}
+
+    def clear(self):
+        # for some cases, the results won't be claimed. So we need to clear the results.
+        self.results = {}
+
+    def get_num_pending_outputs(self):
+        """Return the number of outputs, whose result is not claimed"""
+        return len(self.results)
+
+    def add_requests(self, req_id, input_ids, ground_truth):
+        solution_str = self.tokenizer.decode(input_ids, skip_special_tokens=True)
+        solution_str_post_proc = post_process_solution_str(self.config, solution_str)
+        result_future = call_oj.remote(solution_str_post_proc, ground_truth, self.config.trainer.code_sandbox_psm)
+        assert req_id not in self.results, f"{req_id} already exists"
+        self.results[req_id] = result_future
+
+    def get_results(self, req_id):
+        if req_id not in self.results:
+            return None
+
+        assert req_id in self.results, f"{req_id} not found"
+        result_future = self.results.pop(req_id)
+        return ray.get(result_future)
 
 
 class RewardManager():
@@ -117,18 +174,10 @@ class RewardManager():
             prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
             solution_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
 
-            if self.config.reward_model.use_last_response == 'summarize':
-                solution_str_post_proc = response_post_proc.summary_postprocess(
-                    solution_str,
-                    last_response_sep=self.config.reward_model.last_response_sep,
-                    last_response_strict=self.config.reward_model.last_response_strict)
-            elif self.config.reward_model.use_last_response == 'lastcodeblock':
-                solution_str_post_proc = response_post_proc.last_codeblock_postprocess(
-                    solution_str,
-                    codeblock_seps=self.config.reward_model.last_response_sep,
-                    last_response_strict=self.config.reward_model.last_response_strict)
-            else:
-                solution_str_post_proc = solution_str
+            solution_str_post_proc = post_process_solution_str(config=self.config, solution_str=solution_str)
+
+            # get prompt uuid
+            data_uid = data_item.non_tensor_batch['uid']
 
             # select rm_score
             reward_style = data_item.non_tensor_batch['reward_model']['style']
@@ -139,7 +188,8 @@ class RewardManager():
                 "tokenizer": self.tokenizer,
                 "solution_str": solution_str_post_proc,
                 "ground_truth": ground_truth,
-                "config": self.config
+                "config": self.config,
+                'data_uid': data_uid
             }
             if reward_style == "code-sandbox":
                 score_fn_inputs["code_sandbox_psm"] = self.config.trainer.code_sandbox_psm
@@ -294,7 +344,8 @@ def check_arnold_resources(config):
         return
 
     total_required_gpus = config.trainer.nnodes * config.trainer.n_gpus_per_node + \
-        config.streaming_rollout.nnodes * config.streaming_rollout.n_gpus_per_node
+        config.streaming_rollout.nnodes * config.streaming_rollout.n_gpus_per_node + \
+        config.streaming_validator.nnodes * config.streaming_validator.n_gpus_per_node
 
     assert total_required_gpus <= total_gpus, f'Require {total_required_gpus} GPUs, but only have {total_gpus} GPUs'
 
@@ -478,6 +529,11 @@ def main_task(config):
 
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
+        if config.trainer.use_remote_sandbox:
+            sandbox_client = SandboxClient.options(name='sandbox_client').remote(config=config, tokenizer=tokenizer)
+        else:
+            sandbox_client = None
+
         trainer = RayPPOTrainer(config=config,
                                 tokenizer=tokenizer,
                                 role_worker_mapping=role_worker_mapping,
@@ -485,7 +541,8 @@ def main_task(config):
                                 ray_worker_group_cls=ray_worker_group_cls,
                                 reward_fn=reward_fn,
                                 val_reward_fn=val_reward_fn,
-                                logger=logger)
+                                logger=logger,
+                                sandbox_client=sandbox_client)
 
     metric_collection_context = training_duration_metrics_collector.collect_init_worker_duration() \
         if training_duration_metrics_collector else contextlib.nullcontext()

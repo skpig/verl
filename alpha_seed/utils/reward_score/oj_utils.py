@@ -1,3 +1,4 @@
+import ray
 import json
 import requests
 import time
@@ -19,6 +20,25 @@ def get_sandbox_endpoint(code_sandbox_psm):
     assert rsp.status_code == 200
     assert rsp.text == '"pong"'
     return endpoint
+
+
+def compute_score_client(solution_str, ground_truth, code_sandbox_psm, data_uid, config, **argv) -> float:
+    """Directly retrieve the scores from SandboxClient"""
+    score = None
+    if config.trainer.use_remote_sandbox:
+        # get the sandbox client endpoint
+        handler = ray.get_actor('sandbox_client')
+        # retrieve the score directly
+        score = ray.get(handler.get_results.remote(data_uid))
+
+    if score is None:
+        score = compute_score(solution_str, ground_truth, code_sandbox_psm, **argv)
+
+    # optionally, compute the score with original code to compare the results
+    # score_original = compute_score(solution_str, ground_truth, code_sandbox_psm, **argv)
+    # assert score == score_original
+
+    return score
 
 
 def compute_score(solution_str, ground_truth, code_sandbox_psm, **argv) -> float:

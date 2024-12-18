@@ -242,10 +242,14 @@ class AsyncXPerfGPTRollout(object):
         self.process_thread = threading.Thread(target=self.generate, args=())
         self.process_thread.start()
 
+    def set_rollout_callback_function(self, eos_callback_fn):
+        self.inference_engine.set_callback_function(eos_callback_fn=eos_callback_fn)
+
     def generate(self):
         torch.cuda.set_device(int(os.getenv('LOCAL_RANK', '0')))
         while True:
-            (query_pool, complete_ratio, generation_kwargs, off_policy_steps) = self.input_queue.get(block=True)
+            (query_pool, complete_ratio, generation_kwargs, off_policy_steps,
+             prompt_meta_info) = self.input_queue.get(block=True)
             original_query_pool = copy.deepcopy(query_pool)
             self.inference_engine.set_generator_strategy(**generation_kwargs)
             with logging_set_level(self.config.get('logging_level', 'WARN')), self.profiler_context as p:
@@ -253,35 +257,37 @@ class AsyncXPerfGPTRollout(object):
                     self.inference_engine.execute(query_pool,
                                                   complete_ratio=complete_ratio,
                                                   stop_event=self.stop_event if self.is_standalone else None,
-                                                  off_policy_steps=off_policy_steps)
+                                                  off_policy_steps=off_policy_steps,
+                                                  prompt_meta_info=prompt_meta_info)
                     p.step()
                 except Exception as e:
-                    global_rank = 0 if not dist.is_initialized() else dist.get_rank()
-                    tp_rank = 0 if self.device_mesh is None else self.device_mesh['tp'].get_local_rank()
-                    tp_size = 1 if self.device_mesh is None else self.device_mesh['tp'].size()
+                    if os.getenv('XPERF_DUMP_NAN', '1') == '1':
+                        global_rank = 0 if not dist.is_initialized() else dist.get_rank()
+                        tp_rank = 0 if self.device_mesh is None else self.device_mesh['tp'].get_local_rank()
+                        tp_size = 1 if self.device_mesh is None else self.device_mesh['tp'].size()
 
-                    save_model_name = f"{global_rank}_{tp_rank}_{tp_size}"
-                    print("saving... inference engine ... ", f"{save_model_name}_model_engine")
-                    torch.save(self.inference_engine.engine.module.layers_weight,
-                               f"{save_model_name}_model_engine_layers_weight.pt")
-                    torch.save(self.inference_engine.engine.module.wte_weight,
-                               f"{save_model_name}_model_engine_wte_weight.pt")
-                    torch.save(self.inference_engine.engine.module.lm_head_weight,
-                               f"{save_model_name}_model_engine_lm_head_weight.pt")
-                    torch.save(self.inference_engine.engine.module.layernorm_weight,
-                               f"{save_model_name}_model_engine_layernorm_weight.pt")
-                    torch.save(query_pool, f"{save_model_name}_query_pool.pt")
-                    torch.save(self.inference_engine.get_inorder_responses(), f"{save_model_name}_output.pt")
+                        save_model_name = f"{global_rank}_{tp_rank}_{tp_size}"
+                        print("saving... inference engine ... ", f"{save_model_name}_model_engine")
+                        torch.save(self.inference_engine.engine.module.layers_weight,
+                                   f"{save_model_name}_model_engine_layers_weight.pt")
+                        torch.save(self.inference_engine.engine.module.wte_weight,
+                                   f"{save_model_name}_model_engine_wte_weight.pt")
+                        torch.save(self.inference_engine.engine.module.lm_head_weight,
+                                   f"{save_model_name}_model_engine_lm_head_weight.pt")
+                        torch.save(self.inference_engine.engine.module.layernorm_weight,
+                                   f"{save_model_name}_model_engine_layernorm_weight.pt")
+                        torch.save(query_pool, f"{save_model_name}_query_pool.pt")
+                        torch.save(self.inference_engine.get_inorder_responses(), f"{save_model_name}_output.pt")
 
-                    from hdfs_io.hdfs_io import hcopy, hmkdir
-                    assert (self.config.get("dump_nan", None) is not None)
-                    hmkdir(self.config.get("dump_nan", None))
-                    hcopy(f"{save_model_name}_model_engine_layers_weight.pt", self.config.get("dump_nan", None))
-                    hcopy(f"{save_model_name}_model_engine_wte_weight.pt", self.config.get("dump_nan", None))
-                    hcopy(f"{save_model_name}_model_engine_layernorm_weight.pt", self.config.get("dump_nan", None))
-                    hcopy(f"{save_model_name}_model_engine_lm_head_weight.pt", self.config.get("dump_nan", None))
-                    hcopy(f"{save_model_name}_query_pool.pt", self.config.get("dump_nan", None))
-                    hcopy(f"{save_model_name}_output.pt", self.config.get("dump_nan", None))
+                        from hdfs_io.hdfs_io import hcopy, hmkdir
+                        assert (self.config.get("dump_nan", None) is not None)
+                        hmkdir(self.config.get("dump_nan", None))
+                        hcopy(f"{save_model_name}_model_engine_layers_weight.pt", self.config.get("dump_nan", None))
+                        hcopy(f"{save_model_name}_model_engine_wte_weight.pt", self.config.get("dump_nan", None))
+                        hcopy(f"{save_model_name}_model_engine_layernorm_weight.pt", self.config.get("dump_nan", None))
+                        hcopy(f"{save_model_name}_model_engine_lm_head_weight.pt", self.config.get("dump_nan", None))
+                        hcopy(f"{save_model_name}_query_pool.pt", self.config.get("dump_nan", None))
+                        hcopy(f"{save_model_name}_output.pt", self.config.get("dump_nan", None))
 
                     raise (e)
 
@@ -304,13 +310,22 @@ class AsyncXPerfGPTRollout(object):
         complete_ratio = prompts.meta_info.get('complete_ratio', 1)
 
         prompt_ids = prompts.batch['input_ids']  # (bs, prompt_length)
+        batch_size = prompt_ids.shape[0]
         # left-padded attention_mask
         attention_mask = prompts.batch['attention_mask']
         off_policy_steps = prompts.batch["off_policy_steps"]
         first_non_one_indices = (prompt_ids != self.tokenizer.pad_token_id).int().argmax(dim=1)
         rmv_padding_prompt_ids = [row[index:].tolist() for row, index in zip(prompt_ids, first_non_one_indices)]
+
+        # (zhangchi.usc1992) note, here we pass all the non_tensor_batch and meta_info to the inference engine as prompt_meta_info.
+        prompt_meta_info = [{} for _ in range(batch_size)]
+
+        for key, value in prompts.non_tensor_batch.items():
+            for i in range(batch_size):
+                prompt_meta_info[i][key] = value[i]
+
         self.input_queue.put((rmv_padding_prompt_ids, complete_ratio, prompts.meta_info['generation_kwargs'],
-                              off_policy_steps.reshape(-1).tolist()))
+                              off_policy_steps.reshape(-1).tolist(), prompt_meta_info))
 
         if is_async:
             yield

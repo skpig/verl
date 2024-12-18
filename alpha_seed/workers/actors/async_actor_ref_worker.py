@@ -197,6 +197,10 @@ class AsyncActorRolloutRefWorker(Worker):
         return uuid
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def set_rollout_callback_function(self, eos_callback_fn):
+        self.rollout.set_rollout_callback_function(eos_callback_fn=eos_callback_fn)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def get_master_addr(self):
         key = "standalone_master_addr" if self._is_standalone_rollout else "hybrid_master_addr"
         out = DataProto.from_dict(tensors={'mock': torch.tensor([[0]])}, meta_info={key: self.master_address})
@@ -502,6 +506,27 @@ class AsyncActorRolloutRefWorker(Worker):
 
         torch.cuda.empty_cache()
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def set_eos_callback_fn(self, eos_callback_fn):
+        self.eos_callback_fn = eos_callback_fn
+
+        def make_eos_call_back_fn(device_mesh):
+            from xperf_gpt.inference.session import Query
+
+            def eos_callback_fn(query: Query):
+                if device_mesh is None:
+                    tp_rank = 0
+                else:
+                    tp_rank = device_mesh['tp'].get_local_rank()
+
+                if tp_rank == 0:
+                    # only happens on tp rank zero
+                    self.eos_callback_fn(query)
+
+            return eos_callback_fn
+
+        self.rollout.set_rollout_callback_function(eos_callback_fn=make_eos_call_back_fn(self.rollout.device_mesh))
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def update_standalone_worker(self, role):
         assert self._is_rollout or self._is_standalone_rollout or self._is_standalone_validator
@@ -651,8 +676,8 @@ class AsyncActorRolloutRefWorker(Worker):
         next(self.rollout_async)
         return prompts
 
-    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    def generate_sequences_get(self, prompts: DataProto):
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def generate_sequences_get(self):
         assert self._is_standalone_rollout
         output = next(self.rollout_async)
         log_gpu_memory_usage('After rollout generation standalone get', logger=logger)

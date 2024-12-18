@@ -1,3 +1,4 @@
+import uuid
 import json
 import torch
 import wandb
@@ -92,7 +93,17 @@ class ValidateManager(object):
 
                 eval_bon = self.config.actor_rollout_ref.rollout.get("eval_bon", 1)
                 test_batch = test_batch.repeat(eval_bon)
+
+                # create a uid for each data inside the batch
+                test_batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(test_batch))],
+                                                              dtype=object)
+
                 test_gen_batch = test_batch.pop(['input_ids', 'attention_mask', 'off_policy_steps'])
+                # copy relevant non-tensor info
+                non_tensor_infos = ['uid', 'reward_model']
+                for key in non_tensor_infos:
+                    test_gen_batch.non_tensor_batch[key] = test_batch.non_tensor_batch[key]
+
                 test_gen_batch.meta_info = {
                     'eos_token_id': self.tokenizer.eos_token_id,
                     'pad_token_id': self.tokenizer.pad_token_id,
@@ -104,6 +115,10 @@ class ValidateManager(object):
 
                 # pad test_gen_batch to divisible by world_size. TODO(zhangchi.usc1992): shall we move this logic to dispatch?
                 test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, validator_wg.world_size)
+
+                # mark the paddig data uid to None
+                for i in range(pad_size):
+                    test_gen_batch_padded.non_tensor_batch['uid'][i] = None
 
                 test_output_gen_batch = validator_wg.generate_sequences(test_gen_batch_padded)
                 test_output_gen_batch.batch['prompts'] = test_output_gen_batch.batch['input_ids'][:, :self.config.data.

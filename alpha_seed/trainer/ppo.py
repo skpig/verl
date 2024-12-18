@@ -15,7 +15,9 @@
 FSDP PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
+
 import time
+import uuid
 import contextlib
 
 import ray
@@ -428,9 +430,11 @@ class RayPPOTrainer(object):
                  ray_worker_group_cls: RayWorkerGroup = RayWorkerGroup,
                  reward_fn=None,
                  val_reward_fn=None,
-                 logger=None):
+                 logger=None,
+                 sandbox_client=None):
         # assert torch.cuda.is_available(), 'cuda must be available on driver'
 
+        self.sandbox_client = sandbox_client
         self.tokenizer = tokenizer
         self.config = config
         self.reward_fn = reward_fn
@@ -647,6 +651,8 @@ class RayPPOTrainer(object):
             self.actor_rollout_wg = all_wg['actor_rollout']
         elif self.use_colocate_reference_policy:
             self.actor_rollout_wg = all_wg['actor_rollout_ref']
+        else:
+            raise NotImplementedError
 
         self.actor_rollout_wg.init_model()
         hybrid_master_address = self.actor_rollout_wg.get_master_addr()
@@ -660,6 +666,8 @@ class RayPPOTrainer(object):
                                                                "12345", "standalone_rollout")
             self.standalone_rollout_wg.setup_standalone_worker_comm(hybrid_master_address, standalone_rollout_address,
                                                                     "12345", "standalone_rollout")
+        else:
+            self.standalone_rollout_wg = None
 
         if self.use_standalone_validator:
             self.standalone_validator_wg = all_wg['standalone_validator']
@@ -695,6 +703,30 @@ class RayPPOTrainer(object):
                                                               ckpt_version=self.config.trainer.ckpt_version,
                                                               default_local_dir=self.config.trainer.default_local_dir,
                                                               default_remote_dir=self.config.trainer.default_hdfs_dir)
+
+        if self.config.trainer.use_remote_sandbox:
+            # set the eos_callback_fn of actor_rollout
+            from xperf_gpt.inference.session import Query
+
+            def sandbox_callback_fn(query: Query):
+                input_ids = query.input_ids + query.new_token_ids
+                req_id = query.meta_info['uid']
+                reward_model = query.meta_info['reward_model']
+                reward_style = reward_model['style']
+                ground_truth = reward_model['ground_truth']
+
+                # note that the uid of padding dataproto should be None
+                if reward_style == 'code-sandbox' and req_id is not None:
+                    # get the sandbox ray handler
+                    handler = ray.get_actor('sandbox_client')
+                    # this is non-blocking
+                    handler.add_requests.remote(req_id=req_id, input_ids=input_ids, ground_truth=ground_truth)
+
+            self.actor_rollout_wg.set_eos_callback_fn(sandbox_callback_fn)
+            if self.standalone_rollout_wg is not None:
+                self.standalone_rollout_wg.set_eos_callback_fn(sandbox_callback_fn)
+            if self.use_standalone_validator:
+                self.standalone_validator_wg.set_eos_callback_fn(sandbox_callback_fn)
 
     def save_checkpoint(self, specified_ckpt_version=None):
         """Save checkpoint to hdfs.
@@ -891,7 +923,17 @@ class RayPPOTrainer(object):
 
                     # hybrid rollout
                     batch = batch.repeat(self.num_bon)
+                    # create a uid for each data inside the batch
+                    batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(batch))],
+                                                             dtype=object)
+                    batch.check_consistency()
+
                     gen_batch = batch.pop(batch_keys=['input_ids', 'attention_mask', 'off_policy_steps'])
+                    # assign the non_tensor_batch uid to the generator as well.
+                    non_tensor_infos = ['uid', 'reward_model']
+                    for key in non_tensor_infos:
+                        gen_batch.non_tensor_batch[key] = batch.non_tensor_batch[key]
+
                     gen_batch.meta_info.update({
                         'generation_kwargs':
                             self.config.actor_rollout_ref.rollout.train_generate_kwargs,
@@ -967,7 +1009,7 @@ class RayPPOTrainer(object):
                     finished_num = 0
                     if len(standalone_batch) > 0:
                         if not self.standalone_gen_batch_output_resume:
-                            gen_batch_output = self.standalone_rollout_wg.generate_sequences_get(standalone_gen_batch)
+                            gen_batch_output = self.standalone_rollout_wg.generate_sequences_get()
                         else:
                             gen_batch_output = self.standalone_gen_batch_output_resume
                             self.standalone_gen_batch_output_resume = None
@@ -1000,7 +1042,7 @@ class RayPPOTrainer(object):
 
                     # update standalone rollout weights
                     with Timer(name='update_standalone', logger=None) as timer:
-                        if hasattr(self, "standalone_rollout_wg"):
+                        if self.standalone_rollout_wg is not None:
                             self.actor_rollout_wg.update_standalone_worker("standalone_rollout")
                             self.standalone_rollout_wg.update_standalone_worker("standalone_rollout")
                     metrics['timing/update_standalone'] = timer.last
@@ -1008,7 +1050,7 @@ class RayPPOTrainer(object):
                     # standalone generate (off policy)
                     standalone_batch = []
                     max_standalone_len = 0
-                    while hasattr(self, "standalone_rollout_wg") and pending_batch_queue.qsize(
+                    while self.standalone_rollout_wg is not None and pending_batch_queue.qsize(
                     ) >= self.standalone_rollout_wg.world_size:
                         for _ in range(self.standalone_rollout_wg.world_size):
                             standalone_batch.append(pending_batch_queue.get())
@@ -1020,6 +1062,10 @@ class RayPPOTrainer(object):
                         standalone_batch = DataProto.concat(standalone_batch)
                         standalone_gen_batch = standalone_batch.pop(
                             batch_keys=['input_ids', 'attention_mask', 'off_policy_steps'])
+                        non_tensor_infos = ['uid', 'reward_model']
+                        for key in non_tensor_infos:
+                            standalone_gen_batch.non_tensor_batch[key] = standalone_batch.non_tensor_batch[key]
+
                         standalone_gen_batch.meta_info[
                             'generation_kwargs'] = self.config.actor_rollout_ref.rollout.train_generate_kwargs
                         standalone_gen_batch.meta_info['complete_ratio'] = 1
@@ -1317,6 +1363,12 @@ class RayPPOTrainer(object):
                                         self.critic_wg.to("cpu")
 
                         metrics['timing/save_checkpoint'] = timer.last
+
+                    # collect sandbox client remaining results
+                    if self.config.trainer.use_remote_sandbox:
+                        sandbox_client = ray.get_actor('sandbox_client')
+                        num_remaining_results = ray.get(sandbox_client.get_num_pending_outputs.remote())
+                        metrics['sandbox/remaining_results'] = num_remaining_results
 
                 metrics['timing/step'] = step_timer.last
                 # TODO: make a canonical logger that supports various backend

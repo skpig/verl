@@ -17,6 +17,7 @@ Contains a resharding manager that binds weights from FSDP zero3 to XPerfGPT
 
 from .base import BaseShardingManager
 
+import numpy as np
 import os
 from unittest.mock import patch
 import warnings
@@ -166,6 +167,14 @@ class FSDPXPerfGPTShardingManager(BaseShardingManager):
             data.batch = allgather_dict_tensors(data.batch.contiguous(), size=tp_size, group=group, dim=0)
             data.batch = data.batch.to(prev_device)
 
+            # all gather non_tensor_batch
+            all_non_tensor_batch = [None for _ in range(tp_size)]
+            torch.distributed.all_gather_object(all_non_tensor_batch, data.non_tensor_batch, group=group)
+            data.non_tensor_batch = {
+                k: np.concatenate([d[k] for d in all_non_tensor_batch]) for k in data.non_tensor_batch
+            }
+
+        data.check_consistency()
         return data
 
     def postprocess_data(self, data: DataProto) -> DataProto:
@@ -183,6 +192,8 @@ class FSDPXPerfGPTShardingManager(BaseShardingManager):
             # TODO: shall we build a micro_dp group for vllm when integrating with vLLM?
             local_prompts = data.chunk(chunks=tp_size)
             data = local_prompts[dp_rank % tp_size]
+
+        data.check_consistency()
         return data
 
     def update_standalone_worker(self, role):

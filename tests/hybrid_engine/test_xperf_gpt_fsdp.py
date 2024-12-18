@@ -4,6 +4,7 @@ using TP
 """
 
 import os
+import numpy as np
 
 os.environ['NCCL_DEBUG'] = 'WARN'
 os.environ['USE_SESSION_CACHE'] = '0'
@@ -91,11 +92,31 @@ import xperf_gpt
 
 xperf_gpt.load_xperf_gpt()
 
+from xperf_gpt.inference.session import Query
+
+
+def make_eos_call_back_fn(device_mesh):
+
+    def eos_callback_fn(query: Query):
+        if device_mesh is None:
+            tp_rank = 0
+        else:
+            tp_rank = device_mesh['tp'].get_local_rank()
+
+        if tp_rank == 0:
+            print(f'Rank: {torch.distributed.get_rank()}, {query.meta_info}')
+
+    return eos_callback_fn
+
+
 rollout = AsyncXPerfGPTRollout(config=rollout_config, tokenizer=tokenizer, model_hf_config=config)
 sharding_manager = FSDPXPerfGPTShardingManager(module=actor_module_fsdp,
                                                model_config=config,
                                                inference_engine=rollout.inference_engine,
                                                device_mesh=rollout.device_mesh)
+
+eos_callback_fn = make_eos_call_back_fn(rollout.device_mesh)
+rollout.set_rollout_callback_function(eos_callback_fn=eos_callback_fn)
 
 from verl import DataProto
 
@@ -113,7 +134,13 @@ off_policy_steps = torch.tensor([0]).to('cuda')
 
 data = {'input_ids': input_ids, 'attention_mask': attention_mask, 'off_policy_steps': off_policy_steps}
 
-data = DataProto.from_dict(data, meta_info={'generation_kwargs': rollout_config.train_generate_kwargs})
+non_tensors = {
+    'oj_feature': np.array([f'rank_{torch.distributed.get_rank()}' for i in range(input_ids.shape[0])], dtype=object)
+}
+
+data = DataProto.from_dict(data,
+                           non_tensors=non_tensors,
+                           meta_info={'generation_kwargs': rollout_config.train_generate_kwargs})
 
 with sharding_manager:
     data = sharding_manager.preprocess_data(data)
