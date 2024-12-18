@@ -15,6 +15,7 @@
 FSDP PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
+import time
 import contextlib
 
 import ray
@@ -26,7 +27,6 @@ import wandb
 import queue
 from dataclasses import dataclass, field
 from enum import Enum
-from pprint import pprint
 from typing import Callable, Type, Tuple, Union
 
 from omegaconf import OmegaConf, open_dict
@@ -38,6 +38,8 @@ from alpha_seed.utils.select_strategy.bon_strategy import *
 from alpha_seed.utils.select_strategy.league_training_strategy import *
 from alpha_seed.workers.streaming_service.streaming_utils import pad, process_output
 from alpha_seed.workers.actors.checkpoint import CkptGlobalUploader
+from alpha_seed.utils.observility.pretty_print import pprint
+
 from single_controller.base import Worker
 from single_controller.ray import RayResourcePool, RayWorkerGroup, RayClassWithInitArgs
 from single_controller.ray.base import create_colocated_worker_cls
@@ -1032,6 +1034,7 @@ class RayPPOTrainer(object):
 
         # Note that we start from step 1. After resume, we increment step by 1 to start next step
         self.global_step += 1
+        start_step = self.global_step
 
         # before training, move out the training resource as rollout begins first
         if self.config.trainer.offload_train_memory:
@@ -1491,8 +1494,12 @@ class RayPPOTrainer(object):
                 metrics['timing/step'] = step_timer.last
                 # TODO: make a canonical logger that supports various backend
                 self.logger.log(data=metrics, step=self.global_step)
-
                 self.global_step += 1
+                if start_step + 1 == self.global_step:
+                    now = int(time.time())
+                    self.ref_policy_wg.upload_process_group(now)
+                    self.standalone_rollout_wg.upload_process_group(now)
+                    pprint(f'start upload process group at {now}')
 
                 if self.global_step >= self.total_training_steps:
 

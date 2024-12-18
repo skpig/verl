@@ -63,6 +63,12 @@ from datetime import timedelta
 
 from .checkpoint import CheckpointManagerWrapper
 
+try:
+    from bytedance.ndtimeline import EmergencyServer, FlightRecorderDumper
+    import bytedance.ndtimeline.flight_recorder as fr
+except ImportError:
+    EmergencyServer, FlightRecorderDumper = None, None
+
 logger = logging.getLogger(__file__)
 
 
@@ -162,6 +168,11 @@ class AsyncActorRolloutRefWorker(Worker):
             self.config.ref.log_prob_micro_batch_size //= world_size // sp_size
         self.save_sequences = self.config.rollout.get('save_sequences', None)
         self.load_sequences = self.config.rollout.get('load_sequences', None)
+
+        local_rank = int(os.getenv("RAY_LOCAL_RANK", "0"))
+        if FlightRecorderDumper and EmergencyServer:
+            fr_dumper = FlightRecorderDumper(actor_name=ray.get_runtime_context().get_actor_name())
+            EmergencyServer.init(local_rank=local_rank, fr_dumper=fr_dumper)
 
     def _sequence_uuid(self):
         """Encode model ckpt, seqlen info for sequence generation, used for performance profiling
@@ -726,6 +737,16 @@ class AsyncActorRolloutRefWorker(Worker):
                 # Note that the param here is sharded
                 # Note (zhangchi.usc1992) this may be running on CPU and potentially slow
                 param_ema.copy_(param.to(param_ema.device) * (1 - beta) + beta * param_ema)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def upload_process_group(self, trigger_timestamp):
+        if FlightRecorderDumper and EmergencyServer:
+            dumper = EmergencyServer.fr_dumper
+            dump_type = 'initial'
+            dumper.dump(trigger_timestamp=trigger_timestamp, dump_type=dump_type)
+            logging.info(f'dump {dump_type} upload process group')
+        else:
+            logging.warning(f'flight recorder dumper not available, please use the latest ndtimeline version')
 
 
 def summerize_data(data: Union[dict, tuple, list], name: str = 'summary', level: int = 0, show_value=False) -> str:
