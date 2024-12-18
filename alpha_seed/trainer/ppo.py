@@ -583,17 +583,19 @@ class RayPPOTrainer(object):
             else:
                 raise NotImplementedError('Must instantiate actor and rollout')
 
-            resource_pool = self.resource_pool_manager.get_resource_pool(Role.Rollout)
-            rollout_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Rollout],
-                                               config=self.config.actor_rollout_ref,
-                                               role='standalone_rollout')
-            self.resource_pool_to_cls[resource_pool]['standalone_rollout'] = rollout_cls
+            if self.use_standalone_rollout:
+                resource_pool = self.resource_pool_manager.get_resource_pool(Role.Rollout)
+                rollout_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Rollout],
+                                                   config=self.config.actor_rollout_ref,
+                                                   role='standalone_rollout')
+                self.resource_pool_to_cls[resource_pool]['standalone_rollout'] = rollout_cls
 
-            resource_pool = self.resource_pool_manager.get_resource_pool(Role.Validator)
-            validator_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Validator],
-                                                 config=self.config.actor_rollout_ref,
-                                                 role='standalone_validator')
-            self.resource_pool_to_cls[resource_pool]['standalone_validator'] = validator_cls
+            if self.use_standalone_validator:
+                resource_pool = self.resource_pool_manager.get_resource_pool(Role.Validator)
+                validator_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Validator],
+                                                     config=self.config.actor_rollout_ref,
+                                                     role='standalone_validator')
+                self.resource_pool_to_cls[resource_pool]['standalone_validator'] = validator_cls
         else:
             raise NotImplementedError
 
@@ -632,6 +634,9 @@ class RayPPOTrainer(object):
         # initialize WorkerGroup
         all_wg = {}
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
+            # no role allocated to this resource pool
+            if len(class_dict) == 0:
+                continue
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
             wg_dict = self.ray_worker_group_cls(resource_pool=resource_pool, ray_cls_with_init=worker_dict_cls)
             spawn_wg = wg_dict.spawn(prefix_set=class_dict.keys())
