@@ -94,7 +94,6 @@ class RewardManager():
         response_ids = data.batch['input_ids'][:, self.config.data.max_prompt_length:]
 
         reward_tensor = torch.zeros_like(response_ids, dtype=torch.float32)
-        raw_scores = torch.zeros_like(response_ids, dtype=torch.float32)
         already_print_data_sources = {}
         save_to_hdfs = []
         rm_res_future_list = []
@@ -170,7 +169,6 @@ class RewardManager():
             # eval的时候不做这个norm
             if need_norm:
                 score = (score - self.mean) / self.std
-            raw_score = score
             if is_para_dup:
                 dup_cnt += 1
                 dup_lens.append(valid_response_length)
@@ -181,7 +179,6 @@ class RewardManager():
             if self.need_punish_trunc and is_trunc and not is_validation:
                 score = self.trunc_punish_score
             reward_tensor[idx, valid_response_length - 1] = score
-            raw_scores[idx, valid_response_length - 1] = raw_score
 
             if reward_style not in already_print_data_sources:
                 already_print_data_sources[reward_style] = 0
@@ -239,7 +236,7 @@ class RewardManager():
             p.start()
             print(f"reward_fn end hput: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-        return reward_tensor, raw_scores
+        return reward_tensor
 
 
 import ray

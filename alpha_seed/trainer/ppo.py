@@ -210,7 +210,6 @@ def compute_data_metrics(self, batch: DataProto):
     batch = batch.to('cuda')
 
     sequence_score = batch.batch['token_level_scores'].sum(-1)
-    raw_score = batch.batch['raw_scores'].sum(-1) * std + mean
     origin_sequence_score = sequence_score * std + mean  # 打原始的分数
     sequence_reward = batch.batch['token_level_rewards'].sum(-1)
 
@@ -248,7 +247,6 @@ def compute_data_metrics(self, batch: DataProto):
                                                 compute_std=False)[0]
 
     score_mean, score_max, score_min, score_std = distributed_mean_max_min_std(sequence_score)
-    raw_score_mean, raw_score_max, raw_score_min, raw_score_std = distributed_mean_max_min_std(raw_score)
     original_score_mean, original_score_max, original_score_min, original_score_std = distributed_mean_max_min_std(
         origin_sequence_score)
     sequence_reward_mean, sequence_reward_max, sequence_reward_min, sequence_reward_std = distributed_mean_max_min_std(
@@ -286,11 +284,6 @@ def compute_data_metrics(self, batch: DataProto):
         'critic/score/max': score_max.detach().item(),
         'critic/score/min': score_min.detach().item(),
         'critic/score/std': score_std.detach().item(),
-        # raw_score
-        'critic/raw_score/mean': raw_score_mean.detach().item(),
-        'critic/raw_score/max': raw_score_max.detach().item(),
-        'critic/raw_score/min': raw_score_min.detach().item(),
-        'critic/raw_score/std': raw_score_std.detach().item(),
         # original score
         'critic/original_score/mean': original_score_mean.detach().item(),
         'critic/original_score/max': original_score_max.detach().item(),
@@ -1070,9 +1063,8 @@ class RayPPOTrainer(object):
 
                     with Timer(name='reward_fn', logger=None) as timer:
                         # we combine with rule-based rm
-                        reward_tensor, raw_scores = self.reward_fn(batch, global_step=self.global_step)
+                        reward_tensor = self.reward_fn(batch, global_step=self.global_step)
                         batch.batch['token_level_scores'] = reward_tensor
-                        batch.batch['raw_scores'] = raw_scores
                     metrics['timing/reward_fn'] = timer.last
 
                     print_dataproto_size(batch, head='After Reward function')
