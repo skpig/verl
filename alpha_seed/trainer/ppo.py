@@ -1498,7 +1498,8 @@ class RayPPOTrainer(object):
                 if start_step + 1 == self.global_step:
                     now = int(time.time())
                     self.ref_policy_wg.upload_process_group(now)
-                    self.standalone_rollout_wg.upload_process_group(now)
+                    if self.config.streaming_rollout.nnodes > 0:
+                        self.standalone_rollout_wg.upload_process_group(now)
                     pprint(f'start upload process group at {now}')
 
                 if self.global_step >= self.total_training_steps:
