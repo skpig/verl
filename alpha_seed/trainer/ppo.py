@@ -1054,6 +1054,7 @@ class RayPPOTrainer(object):
                         if self.standalone_rollout_wg is not None:
                             self.actor_rollout_wg.update_standalone_worker("standalone_rollout")
                             self.standalone_rollout_wg.update_standalone_worker("standalone_rollout")
+                    self.actor_rollout_wg.release_param_and_cache()
                     metrics['timing/update_standalone'] = timer.last
 
                     # standalone generate (off policy)
