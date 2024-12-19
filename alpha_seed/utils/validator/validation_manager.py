@@ -68,8 +68,15 @@ class ValidateManager(object):
             return
         else:
             self.val_thread.join()
+
+            while True:
+                try:
+                    val_results = self.val_result_queue.get(timeout=1)
+                    break
+                except Exception:
+                    assert self.val_thread.is_alive()
+
             self.val_thread = None
-            val_results = self.val_result_queue.get()
             for metric in val_results[0].keys():
                 wandb.define_metric(metric, step_metric="val_step")
             val_results[0]["val_step"] = val_results[1]

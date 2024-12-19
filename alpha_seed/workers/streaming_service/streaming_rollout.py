@@ -306,6 +306,13 @@ class AsyncXPerfGPTRollout(object):
             self.inference_engine.empty_cache()
             self.output_queue.put((response_outputs, is_finished, metrics))
 
+    def _get_output_from_queue(self):
+        while True:
+            try:
+                return self.output_queue.get(timeout=1)
+            except Exception:
+                assert self.process_thread.is_alive()
+
     @torch.no_grad()
     def generate_sequences(self, prompts: DataProto, is_async=False):
 
@@ -334,11 +341,11 @@ class AsyncXPerfGPTRollout(object):
             yield
             # stop event
             self.stop_event.set()
-            (response_outputs, is_finished, metrics) = self.output_queue.get()
+            (response_outputs, is_finished, metrics) = self._get_output_from_queue()
             self.stop_event.clear()
         else:
             # complete_ratio or all prompts are finished
-            (response_outputs, is_finished, metrics) = self.output_queue.get()
+            (response_outputs, is_finished, metrics) = self._get_output_from_queue()
 
         # Note that the tokenizer may change at runtime
         tokenizer = self.tokenizer
