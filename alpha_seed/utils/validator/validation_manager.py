@@ -29,6 +29,7 @@ class ValidateManager(object):
         self.use_rm = use_rm
         self.val_reward_fn = val_reward_fn
         self.actor_rollout_wg = None
+        self.rm_wg = None
         self.standalone_validator_wg = None
         self.val_thread = None
         self.val_result_queue = queue.Queue()
@@ -39,6 +40,9 @@ class ValidateManager(object):
                  log_file="/opt/tiger/alpha-seed/log.jsonl",
                  is_async=False,
                  global_step=0):
+
+        if is_async:
+            assert not self.use_rm, "Async validation is not supported with RM yet."
 
         if self.val_thread is not None:
             self.val_thread.join()

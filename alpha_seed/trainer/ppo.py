@@ -705,6 +705,8 @@ class RayPPOTrainer(object):
             self.rm_wg = all_wg['rm']
             self.rm_wg.init_model()
 
+            self.validation_manager.rm_wg = self.rm_wg
+
         # init ckpt global uploader
         self.ckpt_global_uploader = CkptGlobalUploader.remote(use_critic=self.use_critic,
                                                               ckpt_version=self.config.trainer.ckpt_version,

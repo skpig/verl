@@ -676,7 +676,7 @@ class AsyncActorRolloutRefWorker(Worker):
         next(self.rollout_async)
         return prompts
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def generate_sequences_get(self):
         assert self._is_standalone_rollout
         output = next(self.rollout_async)
