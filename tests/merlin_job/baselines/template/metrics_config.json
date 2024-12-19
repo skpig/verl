@@ -1,0 +1,13 @@
+{
+    "actor/entropy": {
+        "align_mode": "step_by_step",
+        "align_level": "tolerance",
+        "statistics_function": [
+            {
+                "name": "max_val_diff",
+                "tolerance_lower_bound": "-inf",
+                "tolerance_upper_bound": 3
+            }
+        ]
+    }
+}

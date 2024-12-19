@@ -1,0 +1,114 @@
+{
+    "mlxlabRepoId": 13831,
+    "namespace": "/topic/89cf6d38b5e781c0",
+    "jobDefVersion": {
+        "name": "[Repo]seed/alphaseed_ci_task",
+        "entrypointMode": "FULL_SCRIPT",
+        "gitRepo": {
+            "repoName": "seed/alpha-seed",
+            "branchName": "$ALPHASEED_BRNACH_NAME",
+            "mnt": "/opt/tiger/alpha-seed",
+            "commitSha": "$ALPHASEED_COMMIT_SHA"
+        },
+        "imageMeta": {
+            "imageUrl": "$ALPHASEED_BASE_IMAGE"
+        },
+        "entrypointFullScript": "echo 'hello world'", 
+        "subRepos": [
+            {
+                "repoName": "seed/verifiable_tasks",
+                "branchName": "master",
+                "commitSha": "",
+                "tag": "",
+                "mnt": "/opt/tiger/verifiable_tasks",
+                "useLatestCommit": true
+              },
+              {
+                "repoName": "data/verl",
+                "branchName": "master",
+                "commitSha": "",
+                "tag": "",
+                "mnt": "/opt/tiger/verl",
+                "useLatestCommit": true
+              },
+              {
+                "repoName": "seed/seed_models",
+                "branchName": "ljc/m8_fix",
+                "commitSha": "e9f7ea085d53f602a0128d80d9356addcc67f6bf",
+                "tag": "",
+                "mnt": "/opt/tiger/seed_models",
+                "useLatestCommit": false
+              }
+
+        ],
+        "env": {
+            "ARNOLD_BYTEDRAY_ray_io_param_head_no_cpu": "true",
+            "ARNOLD_BYTEDRAY_ray_io_start_command_with_tini": "true",
+            "ARNOLD_BYTEDRAY_start_param_all_ray_debugger_external": "true",
+            "ARNOLD_RAY_POD_SETUP": "1",
+            "BYTED_RAY_JOB_RUNTIME_PATH": "tasks/runtime_env/runtime_env.yaml",
+            "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+            "RAY_JOB_ALLOW_DRIVER_ON_WORKER_NODES": "1",
+            "XPERF_CHECK_NAN": "1"
+        },
+        "apt": [],
+        "pip3": [
+            "byted-omnistore==0.5.62",
+            "bytedredis"
+        ],
+        "pip": [],
+        "lazyDownloadCode": true
+    },
+    "jobDefVersionNum": 0,
+    "caption": "[Repo]seed/alpha-seed",
+    "jobRunParams": {
+        "entrypointFullScript": "echo 'hello world'",
+        "resource": {
+            "backend": "ARNOLD",
+            "arnoldConfig": {
+                "roles": [
+                    {
+                        "name": "worker",
+                        "num": 4,
+                        "ports": 10,
+                        "gpuv": "NVIDIA_H20",
+                        "gpu": 8,
+                        "cpu": 100,
+                        "memory": 1843200
+                    },
+                    {
+                        "name": "launcher",
+                        "num": 1,
+                        "ports": 10,
+                        "gpuv": "CPU_ONLY",
+                        "gpu": 0,
+                        "cpu": 1,
+                        "memory": 4096
+                      },
+                      {
+                        "name": "head",
+                        "num": 1,
+                        "ports": 10,
+                        "gpuv": "CPU_ONLY",
+                        "gpu": 0,
+                        "cpu": 8,
+                        "memory": 32768
+                      }
+                ],
+                "queuePriority": 50,
+                "enableRayOnArnold": true,
+                "rayOnArnoldConfig": {
+                    "enableGitClone": true,
+                    "runtimeEnv": "{}"
+                },
+                "bytedriveVolumes": [],
+                "bytenasVolumes": [],
+                "groupIds": [
+                    925
+                ],
+                "clusterId": 20,
+                "quotaPool": "default"
+            }
+        }
+    }
+}

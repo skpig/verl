@@ -1,0 +1,88 @@
+name: Nightly p7_2b5_grpo_bo4_async
+trigger:
+  manual:
+  cron:
+inputs:
+  alphaseed_branch_name:
+    required: true
+    description: "master will be default"
+    default: "master"
+    type: string
+  alphaseed_commit_sha:
+    description: "latest will be default"
+    type: string
+  group:
+    type: string
+    enums: ["verl_mlsys", "alphaseed"]
+    default: "alphaseed"
+  mute_send_message_to_lark:
+    type: string
+    enums: ['yes', 'no']
+    default: 'no'
+  experiment_name:
+    type: string
+    description: "will use the orginal experiment name + current date"
+  base_image_version:
+    required: true
+    type: string
+    description: "will use v85 by default"
+    enums: ['v72', 'v78', 'v85', 'other']
+    default: "v85"
+  base_image_url:
+    type: string
+    description: "if base_image_version is other, please provide the image url"
+  baselines:
+    required: true
+    type: string
+    default: "p7_2b5_grpo_bo4_async"
+  exp_owner_name:
+    type: string
+    default: ''
+
+
+jobs:
+  merline_ci:
+    name: Merlin ci
+    manual: false
+    # v72
+    image: hub.byted.org/reckon/data.reckon.mlx.image_5940:71d942a7b58da1bf52ee434a235764d2
+    runs-on:
+      cluster: gpu-l20
+    envs:
+      MERLIN_CN_TOKEN_LIUJUNCAI: ${{MERLIN_CN_TOKEN_LIUJUNCAI}}
+      MERLIN_EXPERIMENT_ARNOLD_API_TOKEN_LIUJUNCAI: ${{MERLIN_EXPERIMENT_ARNOLD_API_TOKEN_LIUJUNCAI}}
+      ALPHASEED_BRNACH_NAME: ${{ Event.Inputs.alphaseed_branch_name }}
+      ALPHASEED_COMMIT_SHA: ${{ Event.Inputs.alphaseed_commit_sha }}
+      ALPHASEED_BASE_IMAGE_URL: ${{ Event.Inputs.base_image_url}}
+      ALPHASEED_BASE_IMAGE_VERSION: ${{ Event.Inputs.base_image_version}}
+      EXPERIMENT_NAME: ${{ Event.Inputs.experiment_name }}
+      ALPHASEED_GROUP: ${{ Event.Inputs.group }}
+      ALPHASEED_NIGHTLY_CI_MUTE_SEND_MESSAGE_TO_LARK: ${{ Event.Inputs.mute_send_message_to_lark }}
+      BASELINE: ${{ Event.Inputs.baselines }}
+      ALPHASEED_NIGHTLY_CI_EXP_OWNER_NAME: ${{ Event.Inputs.exp_owner_name }}
+
+    timeout: 1080
+    steps:
+      - name: setup doas
+        id: doas
+        uses: actions/doas
+        inputs:
+          psm: data.merlin.seed_project_cn
+      - uses: actions/setup-bvc
+      - name: setup tools
+        commands:
+          - pip3 install bytedrh2 bytedds --upgrade -i https://bytedpypi.byted.org/simple/
+      - name: run merlin trial
+        commands:
+          - export ALPHASEED_BRNACH_NAME="${ALPHASEED_BRNACH_NAME:=master}"
+          - export ALPHASEED_BASE_IMAGE_VERSION="${ALPHASEED_BASE_IMAGE_VERSION:=v78}"
+          - export ALPHASEED_GROUP="${ALPHASEED_GROUP:=alphaseed}"
+          - export ALPHASEED_NIGHTLY_CI_MUTE_SEND_MESSAGE_TO_LARK="${ALPHASEED_NIGHTLY_CI_MUTE_SEND_MESSAGE_TO_LARK:=no}"
+          - export BASELINE="${BASELINE:=p7_2b5_grpo_bo4_async}"
+          - echo $ALPHASEED_BRNACH_NAME
+          - echo $ALPHASEED_COMMIT_SHA
+          - echo $ALPHASEED_BASE_IMAGE_URL
+          - echo $EXPERIMENT_NAME
+          - cd /home/code/tests/merlin_job
+          - echo $BASELINE
+          - python3 create_merlin_trial.py --config_folder baselines/$BASELINE --meta_info_config_name "meta_info_nightly_ci.json" --metrics_config_name "metrics_config.json" --wait_result True --start_trial True

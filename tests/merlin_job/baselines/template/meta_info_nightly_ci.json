@@ -1,0 +1,15 @@
+{
+    "baseline_trial_url": "https://ml.bytedance.net/development/instance/jobs/d39b36ad3264b9c2",
+    "baseline_run_id": "run_20241210_e6ca67d8",
+
+    "max_run_time (hours)": 2.5,
+    "running_steps": 10,
+
+    "pip_requirements": ["byted-omnistore", "bytedredis"],
+    "scm_requirements": [],
+
+    "project_id": "project_20241210_1a774318",
+    "project": "Nightly_CI_AlphaSeed",
+    "default_experiment_name": "alpha_seed_nightly_ci_v1",
+    "target_worker": "0-1"
+}

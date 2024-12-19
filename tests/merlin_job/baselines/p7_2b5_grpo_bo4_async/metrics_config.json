@@ -1,0 +1,54 @@
+{
+    "actor/grad_norm": {
+        "align_mode": "step_by_step",
+        "align_level": "tolerance",
+        "statistics_function": [
+            {
+                "name": "absolute_upper_bound",
+                "constant": 10.0
+            }
+        ]
+    },
+    "actor/pg_clipfrac": {
+        "align_mode": "interval",
+        "align_level": "tolerance",
+        "statistics_function": [
+            {
+                "name": "max_val_upper_bound",
+                "constant": 1e-2
+            }
+        ]
+    },
+    "actor/pg_clipfrac2": {
+        "align_mode": "interval",
+        "align_level": "tolerance",
+        "statistics_function": [
+            {
+                "name": "max_val_upper_bound",
+                "constant": 1e-3
+            }
+        ]
+    },
+    "critic/score/mean": {
+        "align_mode": "step_by_step",
+        "align_level": "tolerance",
+        "statistics_function": [
+            {
+                "name": "absolute_diff",
+                "tolerance_lower_bound": -0.3,
+                "tolerance_upper_bound": 0.3
+            }
+        ]
+    },
+    "val/test_score/AIME_avgpbo0": {
+        "align_mode": "step_by_step",
+        "align_level": "tolerance",
+        "statistics_function": [
+            {
+                "name": "absolute_diff",
+                "tolerance_lower_bound":  -0.2,
+                "tolerance_upper_bound": 0.2
+            }
+        ]
+    }
+}

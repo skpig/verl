@@ -1,0 +1,15 @@
+{
+    "baseline_trial_url": "https://ml.bytedance.net/development/instance/jobs/a7f945caba1c5feb",
+    "baseline_run_id": "run_20241212_d47bfae5",
+
+    "max_run_time (hours)": 5,
+    "running_steps": 60,
+
+    "pip_requirements": ["byted-omnistore", "bytedredis"],
+    "scm_requirements": [],
+
+    "project_id": "project_20241023_e511c01c",
+    "project": "verl_example_math",
+    "default_experiment_name": "1212ci2",
+    "target_worker": "0-1"
+}
