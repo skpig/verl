@@ -248,8 +248,7 @@ class AsyncXPerfGPTRollout(object):
     def generate(self):
         torch.cuda.set_device(int(os.getenv('LOCAL_RANK', '0')))
         while True:
-            (query_pool, complete_ratio, generation_kwargs, off_policy_steps,
-             prompt_meta_info) = self.input_queue.get(block=True)
+            (query_pool, complete_ratio, generation_kwargs, prompt_meta_info) = self.input_queue.get(block=True)
             original_query_pool = copy.deepcopy(query_pool)
             self.inference_engine.set_generator_strategy(**generation_kwargs)
             with logging_set_level(self.config.get('logging_level', 'WARN')), self.profiler_context as p:
@@ -257,7 +256,6 @@ class AsyncXPerfGPTRollout(object):
                     self.inference_engine.execute(query_pool,
                                                   complete_ratio=complete_ratio,
                                                   stop_event=self.stop_event if self.is_standalone else None,
-                                                  off_policy_steps=off_policy_steps,
                                                   prompt_meta_info=prompt_meta_info)
                     p.step()
                 except Exception as e:
@@ -318,14 +316,15 @@ class AsyncXPerfGPTRollout(object):
         rmv_padding_prompt_ids = [row[index:].tolist() for row, index in zip(prompt_ids, first_non_one_indices)]
 
         # (zhangchi.usc1992) note, here we pass all the non_tensor_batch and meta_info to the inference engine as prompt_meta_info.
-        prompt_meta_info = [{} for _ in range(batch_size)]
-
+        prompt_meta_info = [{
+            "off_policy_steps": off_policy_step
+        } for off_policy_step in off_policy_steps.reshape(-1).tolist()]
         for key, value in prompts.non_tensor_batch.items():
             for i in range(batch_size):
                 prompt_meta_info[i][key] = value[i]
 
-        self.input_queue.put((rmv_padding_prompt_ids, complete_ratio, prompts.meta_info['generation_kwargs'],
-                              off_policy_steps.reshape(-1).tolist(), prompt_meta_info))
+        self.input_queue.put(
+            (rmv_padding_prompt_ids, complete_ratio, prompts.meta_info['generation_kwargs'], prompt_meta_info))
 
         if is_async:
             yield
