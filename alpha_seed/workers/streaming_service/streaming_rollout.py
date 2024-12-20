@@ -166,7 +166,7 @@ class AsyncXPerfGPTRollout(object):
                                           max_length=config.prompt_length + config.response_length,
                                           slot_block_size=slot_block_size,
                                           use_vllm=use_vllm,
-                                          vocab_tp=False,
+                                          vocab_tp=config.get('vocab_tp', False),
                                           context_limit_bs=max_ctx_batch_size,
                                           enable_cuda_graph=enable_cuda_graph)
         inference_sess.max_off_policy_steps = self.config.get('max_off_policy_steps', 5)
