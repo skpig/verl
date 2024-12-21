@@ -673,6 +673,8 @@ class RayPPOTrainer(object):
                                                                "12345", "standalone_rollout")
             self.standalone_rollout_wg.setup_standalone_worker_comm(hybrid_master_address, standalone_rollout_address,
                                                                     "12345", "standalone_rollout")
+            # offload standalone_rollout_wg FSDP GPU memory
+            self.standalone_rollout_wg.to('cpu')
         else:
             self.standalone_rollout_wg = None
 
@@ -686,6 +688,8 @@ class RayPPOTrainer(object):
                                                                       standalone_validator_address, "14567",
                                                                       "standalone_validator")
             self.validation_manager.standalone_validator_wg = self.standalone_validator_wg
+            # offload standalone_validator_wg FSDP GPU memory
+            self.standalone_validator_wg.to('cpu')
 
         if self.config.actor_rollout_ref.actor.kl_loss_weight >= 1e-10:
             # 两种情况下使用kl loss，一种是grpo，另一种是在rewards里不加kl惩罚
