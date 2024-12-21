@@ -75,7 +75,7 @@ jobs:
       - name: run merlin trial
         commands:
           - export ALPHASEED_BRNACH_NAME="${ALPHASEED_BRNACH_NAME:=master}"
-          - export ALPHASEED_BASE_IMAGE_VERSION="${ALPHASEED_BASE_IMAGE_VERSION:=v78}"
+          - export ALPHASEED_BASE_IMAGE_VERSION="${ALPHASEED_BASE_IMAGE_VERSION:=v85}"
           - export ALPHASEED_GROUP="${ALPHASEED_GROUP:=alphaseed}"
           - export ALPHASEED_NIGHTLY_CI_MUTE_SEND_MESSAGE_TO_LARK="${ALPHASEED_NIGHTLY_CI_MUTE_SEND_MESSAGE_TO_LARK:=no}"
           - export BASELINE="${BASELINE:=p7_2b5_grpo_bo4_async}"
