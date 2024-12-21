@@ -1,5 +1,8 @@
 set -x
 
+NUM_STEPS="${NUM_STEPS:-240}"
+echo $NUM_STEPS
+
 # ckpt和路径
 SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/p6_400m_moe_4T_sft_v27_bs128_lr4e-4_master_dyn_epoch4_hf
 RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/rm_p6_moe_400m_0716_sftv27_stage2_hf
@@ -124,4 +127,5 @@ python3 tasks/main_ppo.py \
     streaming_rollout.nnodes=0 \
     streaming_rollout.n_gpus_per_node=4 \
     streaming_rollout.warmup_step=0 \
-    streaming_rollout.force_eos=True
+    streaming_rollout.force_eos=True \
+    trainer.total_steps=${NUM_STEPS}

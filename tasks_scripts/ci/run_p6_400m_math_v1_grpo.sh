@@ -1,5 +1,10 @@
 set -x
 
+NUM_STEPS="${NUM_STEPS:-120}"
+echo $NUM_STEPS
+
+N_GPUS_PER_NODE="${N_GPUS_PER_NODE:-8}"
+
 # ckpt和路径
 SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/p6_400m_moe_4T_sft_v27_bs128_lr4e-4_master_dyn_epoch4_hf
 RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/rm_p6_moe_400m_0716_sftv27_stage2_hf
@@ -132,7 +137,7 @@ python3 tasks/main_ppo.py \
     trainer.logger=['console','tracking'] \
     trainer.project_name=${project_name} \
     trainer.experiment_name=${experiment_name} \
-    trainer.n_gpus_per_node=8 \
+    trainer.n_gpus_per_node=${N_GPUS_PER_NODE} \
     trainer.nnodes=1 \
     trainer.default_hdfs_dir=${default_hdfs_dir} \
     trainer.save_freq=${save_freq} \
@@ -172,4 +177,5 @@ python3 tasks/main_ppo.py \
     critic.profile.filename=actor.tp${xperf_tp_size}.fsdp${fsdp_size} \
     actor_rollout_ref.actor.profile.enable=True \
     actor_rollout_ref.actor.profile.upload_to_mlx=True \
-    actor_rollout_ref.actor.profile.filename=actor.tp${xperf_tp_size}.fsdp${fsdp_size}
+    actor_rollout_ref.actor.profile.filename=actor.tp${xperf_tp_size}.fsdp${fsdp_size} \
+    trainer.total_steps=${NUM_STEPS}

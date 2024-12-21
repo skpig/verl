@@ -1,5 +1,10 @@
 set -x
 
+NUM_STEPS="${NUM_STEPS:-240}"
+echo $NUM_STEPS
+
+N_GPUS_PER_NODE="${N_GPUS_PER_NODE:-4}"
+
 # ckpt和路径
 SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/p6_400m_moe_4T_sft_v27_bs128_lr4e-4_master_dyn_epoch4_hf
 RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/rm_p6_moe_400m_0716_sftv27_stage2_hf
@@ -108,7 +113,7 @@ python3 tasks/main_ppo.py \
     trainer.logger=['console','tracking'] \
     trainer.project_name=${project_name} \
     trainer.experiment_name=${experiment_name} \
-    trainer.n_gpus_per_node=4 \
+    trainer.n_gpus_per_node=${N_GPUS_PER_NODE} \
     trainer.nnodes=1 \
     trainer.default_hdfs_dir=${default_hdfs_dir} \
     trainer.save_freq=${save_freq} \
@@ -123,6 +128,7 @@ python3 tasks/main_ppo.py \
     trainer.set_fake_attention_mask=False \
     trainer.fake_seqlen_ratio=0.5 \
     streaming_rollout.nnodes=1 \
-    streaming_rollout.n_gpus_per_node=4 \
+    streaming_rollout.n_gpus_per_node=${N_GPUS_PER_NODE} \
     streaming_rollout.warmup_step=0 \
-    streaming_rollout.force_eos=True
+    streaming_rollout.force_eos=True \
+    trainer.total_steps=${NUM_STEPS}
