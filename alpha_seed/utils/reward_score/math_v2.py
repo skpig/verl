@@ -49,37 +49,41 @@ def list_fewshot_samples() -> list[dict]:
     ]
 
 
-def last_boxed_only_string(string: str) -> Optional[str]:
-    idx = string.rfind("\\boxed")
-    if "\\boxed " in string:
-        return "\\boxed " + string.split("\\boxed ")[-1].split("$")[0]
-    if idx < 0:
-        idx = string.rfind("\\fbox")
-        if idx < 0:
-            return None
+# # DO NOT USE, just left for reference
+# def last_boxed_only_string(string: str) -> Optional[str]:
+#     idx = string.rfind("\\boxed")
+#     if "\\boxed " in string:
+#         return "\\boxed " + string.split("\\boxed ")[-1].split("$")[0]
+#     if idx < 0:
+#         idx = string.rfind("\\fbox")
+#         if idx < 0:
+#             return None
 
-    i = idx
-    right_brace_idx = None
-    num_left_braces_open = 0
-    while i < len(string):
-        if string[i] == "{":
-            num_left_braces_open += 1
-        if string[i] == "}":
-            num_left_braces_open -= 1
-            if num_left_braces_open == 0:
-                right_brace_idx = i
-                break
-        i += 1
+#     i = idx
+#     right_brace_idx = None
+#     num_left_braces_open = 0
+#     while i < len(string):
+#         if string[i] == "{":
+#             num_left_braces_open += 1
+#         if string[i] == "}":
+#             num_left_braces_open -= 1
+#             if num_left_braces_open == 0:
+#                 right_brace_idx = i
+#                 break
+#         i += 1
 
-    if right_brace_idx is None:
-        retval = None
-    else:
-        retval = string[idx:right_brace_idx + 1]
+#     if right_brace_idx is None:
+#         retval = None
+#     else:
+#         retval = string[idx:right_brace_idx + 1]
 
-    return retval
+#     return retval
 
 
 def last_boxed_only_string_v2(string: str) -> Optional[str]:
+    """
+    find last \\boxed{...}
+    """
     idx = string.rfind("\\boxed{")
     if idx < 0:
         return None
@@ -106,15 +110,10 @@ def last_boxed_only_string_v2(string: str) -> Optional[str]:
 
 
 def remove_boxed(s: str) -> str:
-    if "\\boxed " in s:
-        left = "\\boxed "
-        assert s[:len(left)] == left
-        return s[len(left):]
-
     left = "\\boxed{"
 
-    assert s[:len(left)] == left, s
-    assert s[-1] == "}", s
+    assert s[:len(left)] == left, f"box error: {s}"
+    assert s[-1] == "}", f"box error: {s}"
 
     return s[len(left):-1]
 
@@ -305,7 +304,7 @@ def is_correct_minerva(og_pred, gt, gt_need_extract=False):
     extracted_answer = match[-1] if match else "[INVALID]"
     pred = normalize_final_answer(extracted_answer)
     if gt_need_extract:
-        gt = normalize_final_answer(remove_boxed(last_boxed_only_string(gt)))
+        gt = normalize_final_answer(remove_boxed(last_boxed_only_string_v2(gt)))
     else:
         gt = normalize_final_answer(gt)
     # return (pred == gt or is_equiv(pred, gt)), pred
