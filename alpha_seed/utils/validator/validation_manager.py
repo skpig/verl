@@ -51,11 +51,14 @@ class ValidateManager(object):
         if self.val_thread is not None:
             self.val_thread.join()
             if self.val_result_queue.qsize() > 0:
-                val_results = self.val_result_queue.get()
-                for metric in val_results[0].keys():
+                val_metrics, val_log_lst, val_step = self.val_result_queue.get()
+                for metric in val_metrics.keys():
                     wandb.define_metric(metric, step_metric="val_step")
-                val_results[0]["val_step"] = val_results[1]
-                self.logger.log(data=val_results[0], step=global_step)
+                val_metrics["val_step"] = val_step
+                self.logger.log(data=val_metrics, step=global_step)
+                for val_log in val_log_lst:
+                    if val_log is not None:
+                        self.logger.log(data=val_log, step=global_step, backend="tracking")
 
         if is_async:
             self.actor_rollout_wg.update_standalone_worker("standalone_validator")
@@ -75,16 +78,19 @@ class ValidateManager(object):
 
             while True:
                 try:
-                    val_results = self.val_result_queue.get(timeout=1)
+                    val_metrics, val_log_lst, val_step = self.val_result_queue.get(timeout=1)
                     break
                 except Exception:
                     assert self.val_thread.is_alive()
 
             self.val_thread = None
-            for metric in val_results[0].keys():
+            for metric in val_metrics.keys():
                 wandb.define_metric(metric, step_metric="val_step")
-            val_results[0]["val_step"] = val_results[1]
-            self.logger.log(data=val_results[0], step=global_step)
+            val_metrics["val_step"] = val_step
+            self.logger.log(data=val_metrics, step=global_step)
+            for val_log in val_log_lst:
+                if val_log is not None:
+                    self.logger.log(data=val_log, step=global_step, backend="tracking")
         return
 
     def _validate(self, val_epoch, need_log, log_file, is_async, global_step, validator_wg):
@@ -93,6 +99,7 @@ class ValidateManager(object):
         data_source_lst = []
         prompt_name_lst = []
         bopxn_lst = []
+        val_log_lst = []
         if need_log:
             f = open(log_file, "w")
         for val_epoch_idx in range(val_epoch):
@@ -160,10 +167,11 @@ class ValidateManager(object):
 
                 # evaluate using reward_function
                 # for certain reward function (e.g. sandbox), the generation can overlap with reward
-                reward_tensor = self.val_reward_fn(test_batch,
-                                                   global_step=global_step,
-                                                   need_norm=False,
-                                                   is_validation=True)
+                reward_tensor, val_log = self.val_reward_fn(test_batch,
+                                                            global_step=global_step,
+                                                            need_norm=False,
+                                                            is_validation=True)
+                val_log_lst.append(val_log)
 
                 reward_tensor_before_select = reward_tensor.clone()  # (B x bon, seqlen)
                 if eval_bon > 1 and global_step % self.config.actor_rollout_ref.rollout.get("eval_bon_every", 20) == 0:
@@ -300,4 +308,4 @@ class ValidateManager(object):
         }
         if global_step == 0:
             pprint(f'Initial validation metrics: {val_metrics}')
-        self.val_result_queue.put((val_metrics, global_step))
+        self.val_result_queue.put((val_metrics, val_log_lst, global_step))

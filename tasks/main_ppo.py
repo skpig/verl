@@ -300,17 +300,17 @@ class RewardManager():
             send_message_to_employee("alpha seed任务oj失败率过高", f"任务链接: {task_url}, 失败率: {round(fail_cnt/total_cnt, 2)}",
                                      user_email)
 
+        log_table = None
         if self.config.trainer.num_cases_to_wandb > 0:
             logger_step = global_step - global_step % self.config.trainer.logger_step_interval
-            self.logger.log(
-                {
-                    f"gen&score_{self.rm_name}_{logger_step}":
-                        wandb.Table(
-                            columns=["Step", "Prompt", "Gen Sequence", "GroundTruth", "Score", "Gen Sequence PostProc"],
-                            data=self.log_table)
-                },
-                step=global_step,
-                backend='tracking')
+            log_table = {
+                f"gen&score_{self.rm_name}_{logger_step}":
+                    wandb.Table(
+                        columns=["Step", "Prompt", "Gen Sequence", "GroundTruth", "Score", "Gen Sequence PostProc"],
+                        data=self.log_table)
+            }
+            if not is_validation:
+                self.logger.log(log_table, step=global_step, backend='tracking')
 
         if self.config.trainer.save_cases_to_hdfs:
             print(f"reward_fn begin hput: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -331,7 +331,7 @@ class RewardManager():
         if not is_validation:
             return reward_tensor, raw_scores
         else:
-            return reward_tensor
+            return reward_tensor, log_table
 
 
 import ray
