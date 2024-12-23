@@ -60,7 +60,7 @@
         "lazyDownloadCode": true
     },
     "jobDefVersionNum": 0,
-    "caption": "[Repo]seed/alpha-seed",
+    "caption": "[scheduled_ci]seed/alpha-seed_ci_p7_2b5_grpo_async",
     "jobRunParams": {
         "entrypointFullScript": "echo 'hello world'",
         "resource": {
