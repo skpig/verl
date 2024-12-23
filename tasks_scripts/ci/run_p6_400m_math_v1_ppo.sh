@@ -81,6 +81,7 @@ python3 tasks/main_ppo.py \
     +actor_rollout_ref.rollout.slot_block_size=1024 \
     actor_rollout_ref.ref.log_prob_micro_batch_size=512 \
     actor_rollout_ref.ref.ema=0.99 \
+    +actor_rollout_ref.actor.sm_margin=4 \
     critic.optim.lr=${critic_lr} \
     critic.optim.lr_warmup_steps_ratio=${lr_warmup_steps_ratio} \
     critic.model.path=${RM_MODEL_PATH} \

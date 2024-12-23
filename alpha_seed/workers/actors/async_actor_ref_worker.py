@@ -54,7 +54,7 @@ from dist_attn.ulysses.parallel_states import set_ulysses_sequence_parallel_grou
 from dist_attn.ulysses.ops import slice_input_tensor, gather_outputs
 from alpha_seed.workers.ppo_actor import DataParallelPPOActor
 from alpha_seed.workers.ppo_critic import DataParallelPPOCritic
-
+from alpha_seed.utils.kernels.persist_gemm import deploy_persist_gemm, undelopy_persist_gemm
 from seed_models.utils.count_flops import FlopsCounter
 
 from codetiming import Timer
@@ -121,6 +121,8 @@ class AsyncActorRolloutRefWorker(Worker):
                                                      wait=0,
                                                      warmup=0,
                                                      active=1)
+        if config.actor.get("sm_margin", 0) > 0:
+            deploy_persist_gemm(int(config.actor.get("sm_margin", 0)))
         # build device mesh for ulysses parallel. Note that we need to split the naming for actor and ref
         # to handle the case that actor and ref can colocate or not colocate
         # for actor
