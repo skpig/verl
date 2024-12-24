@@ -60,13 +60,9 @@ except ImportError:
 from alpha_seed import core_algos
 
 try:
-    from bytedance.trainingmetrics.rl_metrics_client_context_manager import RLMetricsClientContextManager
+    from bytedance.trainingmetrics.rl_metrics_client_context_manager import RLMetricsClientContextManager as MegavisionMetricsCtx
 except ImportError:
-    RLMetricsClientContextManager = None
-
-training_duration_metrics_collector = None
-if RLMetricsClientContextManager:
-    training_duration_metrics_collector = RLMetricsClientContextManager()
+    MegavisionMetricsCtx = None
 
 WorkerType = Type[Worker]
 
@@ -493,6 +489,7 @@ class RayPPOTrainer(object):
 
         self.standalone_gen_batch_output_resume = None
         self.standalone_batch_resume = None
+        self.megavision_metrics_collector = MegavisionMetricsCtx() if MegavisionMetricsCtx else None
 
     def _create_dataloader(self):
         from torch.utils.data import DataLoader
@@ -889,8 +886,8 @@ class RayPPOTrainer(object):
     def fit(self):
         self.global_step = 0
 
-        metric_collection_context = training_duration_metrics_collector.collect_resume_from_checkpoint_duration() \
-            if training_duration_metrics_collector else contextlib.nullcontext()
+        metric_collection_context = self.megavision_metrics_collector.collect_resume_from_checkpoint_duration() \
+            if MegavisionMetricsCtx else contextlib.nullcontext()
         with metric_collection_context:
             # load checkpoint before doing anything
             resume_step = self.load_checkpoint()
@@ -1294,8 +1291,8 @@ class RayPPOTrainer(object):
                                                              global_step=self.global_step)
                         metrics['timing/testing'] = timer.last
 
-                    metric_collection_context = training_duration_metrics_collector.collect_compute_metrics_duration() \
-                        if training_duration_metrics_collector else contextlib.nullcontext()
+                    metric_collection_context = self.megavision_metrics_collector.collect_compute_metrics_duration() \
+                        if MegavisionMetricsCtx else contextlib.nullcontext()
                     # collect metrics
                     with metric_collection_context:
                         with Timer(name='compute_metrics', logger=None) as timer:
@@ -1359,8 +1356,8 @@ class RayPPOTrainer(object):
                             metrics.update(score_metrics)
                         metrics['timing/compute_metrics'] = timer.last
 
-                    metric_collection_context = training_duration_metrics_collector.collect_save_checkpoint_duration() \
-                        if training_duration_metrics_collector else contextlib.nullcontext()
+                    metric_collection_context = self.megavision_metrics_collector.collect_save_checkpoint_duration() \
+                        if MegavisionMetricsCtx else contextlib.nullcontext()
 
                     with Timer(name='save_checkpoint', logger=None) as timer:
                         if self.config.trainer.save_freq > 0 and self.global_step % self.config.trainer.save_freq == 0:
