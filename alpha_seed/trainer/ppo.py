@@ -537,14 +537,14 @@ class RayPPOTrainer(object):
                                        use_ref_answer=self.config.data.use_ref_answer,
                                        max_prompt_length=self.config.data.max_prompt_length,
                                        filter_prompts=True,
-                                       return_raw_chat=self.config.data.get('return_raw_chat', False),
+                                       return_raw_chat=True,
                                        truncation=self.config.data.get('truncation', 'error'),
                                        multi_prompts=self.config.data.get("multi_prompts", "none"),
                                        num_prompts_per_data=1,
                                        is_eval=True)
 
         self.val_dataloader = DataLoader(dataset=self.val_dataset,
-                                         batch_size=min(self.config.data.val_batch_size, len(self.val_dataset)),
+                                         batch_size=len(self.val_dataset),
                                          shuffle=self.config.data.shuffle,
                                          drop_last=True,
                                          collate_fn=collate_fn)

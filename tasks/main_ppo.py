@@ -127,6 +127,13 @@ class SandboxClient:
         return ray.get(result_future)
 
 
+try:
+    from nltk.util import ngrams
+except ImportError:
+    ngrams = None
+    print('nltk not installed, please install nltk. Disable diversity metrics.')
+
+
 class RewardManager():
 
     def __init__(self, tokenizer, config, logger: Tracking, rm_name="train") -> None:
@@ -197,7 +204,24 @@ class RewardManager():
             score = compute_score_fn(**score_fn_inputs)
             is_para_dup = para_dup.find_single_turn_duplicate(solution_str)[0]
             is_trunc = (response_length == valid_response_length).item() and score == -1
-            return prompt_str, solution_str, ground_truth, reward_style, valid_response_length, score, is_para_dup, is_trunc, idx, solution_str_post_proc
+
+            ngram = list(ngrams(valid_response_ids.tolist(), 2)) if ngrams is not None else []
+
+            return_dict = {
+                "prompt_str": prompt_str,
+                "solution_str": solution_str,
+                "ground_truth": ground_truth,
+                "reward_style": reward_style,
+                "valid_response_length": valid_response_length,
+                "score": score,
+                "is_para_dup": is_para_dup,
+                "is_trunc": is_trunc,
+                "idx": idx,
+                "solution_str_post_proc": solution_str_post_proc,
+                "ngram": ngram
+            }
+
+            return return_dict
 
         for i in range(len(data)):
             rm_res_future_list.append(self.rm_req_executor.submit(get_rm_score, i))
@@ -207,9 +231,22 @@ class RewardManager():
         dup_lens = []
         not_dup_lens = []
         from tqdm import tqdm
+        all_ngram = []
         for res in tqdm(as_completed(rm_res_future_list), total=len(data), desc="get_rm_score"):
-            prompt_str, solution_str, ground_truth, reward_style, valid_response_length, score, is_para_dup, is_trunc, idx, solution_str_post_proc = res.result(
-            )
+            output_dict = res.result()
+            prompt_str = output_dict["prompt_str"]
+            solution_str = output_dict["solution_str"]
+            ground_truth = output_dict["ground_truth"]
+            reward_style = output_dict['reward_style']
+            valid_response_length = output_dict['valid_response_length']
+            score = output_dict['score']
+            is_para_dup = output_dict['is_para_dup']
+            is_trunc = output_dict['is_trunc']
+            idx = output_dict['idx']
+            solution_str_post_proc = output_dict['solution_str_post_proc']
+            ngram = output_dict['ngram']
+
+            all_ngram.extend(ngram)
             if reward_style == "code-sandbox":
                 total_cnt += 1
                 # 访问失败的score现在设置成-2，用来计数，但是训练的时候还是当做没做对来处理
@@ -254,6 +291,7 @@ class RewardManager():
             prefix + "dup/para_dup": dup_cnt / len(data),
             prefix + "dup/dup_response_len": sum(dup_lens) / max(1, len(dup_lens)),
             prefix + "dup/not_dup_response_len": sum(not_dup_lens) / max(1, len(not_dup_lens)),
+            prefix + 'unique_2gram': len(set(all_ngram)) / (len(all_ngram) + 1)
         },
                         step=global_step)
 

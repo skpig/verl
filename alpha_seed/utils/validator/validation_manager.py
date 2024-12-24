@@ -1,3 +1,4 @@
+from collections import defaultdict
 import uuid
 import json
 import torch
@@ -7,6 +8,7 @@ import threading
 import numpy as np
 from pprint import pprint
 from verl import DataProto
+import random
 
 try:
     from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
@@ -33,6 +35,8 @@ class ValidateManager(object):
         self.standalone_validator_wg = None
         self.val_thread = None
         self.val_result_queue = queue.Queue()
+
+        assert len(self.val_dataloader) == 1, "for bon metrics computation"
 
     def validate(self,
                  val_epoch=1,
@@ -261,6 +265,27 @@ class ValidateManager(object):
                 if data_source not in data_source_bopxn:
                     data_source_bopxn[data_source] = []
                 data_source_bopxn[data_source].append(bopxn[i])
+
+        prompt2rwd = defaultdict(list)
+        prompt2source = {}
+        source2rwd = defaultdict(list)
+        for i, item in enumerate(test_batch.non_tensor_batch['raw_prompt']):
+            prompt2rwd[item[0]['content']].append(reward_tensor[i].item())
+            prompt2source[item[0]['content']] = data_sources[i]
+        for prompt, rwd in prompt2rwd.items():
+            source2rwd[prompt2source[prompt]].append(rwd)
+        for source, rwds in source2rwd.items():
+            if len(rwds[0]) == 32:
+                for n in [4, 8, 16, 32]:
+                    total = len(rwds) * 5
+                    correct = 0
+                    for rwd in rwds:
+                        for _ in range(5):
+                            sample_n = random.sample(rwd, k=n)
+                            if max(sample_n) == 1:
+                                correct += 1
+                    acc = correct / total
+                    metric_dict[f'test_score/{source}_bo{n}'] = acc
 
         for data_source, rewards in data_source_reward.items():
             rewards_tensor_data_source = torch.vstack(rewards)
