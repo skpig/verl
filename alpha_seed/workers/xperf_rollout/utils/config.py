@@ -129,6 +129,10 @@ def _get_p6dense_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
     from seed_models import P6DenseConfig
     assert isinstance(model_config, P6DenseConfig)
     config = model_config
+
+    if config.rope_scaling is None:
+        config.rope_scaling = {'rope_type': 'default', 'factor': 1}
+
     xperf_config = {
         "model_name": "SeedLLaMAForCausalLM",
         "vocab_size": config.vocab_size,

@@ -15,6 +15,7 @@
 Create a XPerfGPT Rollout
 """
 
+from transformers import PreTrainedTokenizer
 from verl import DataProto
 import copy
 from contextlib import contextmanager, nullcontext
@@ -348,7 +349,9 @@ class AsyncXPerfGPTRollout(object):
             (response_outputs, is_finished, metrics) = self._get_output_from_queue()
 
         # Note that the tokenizer may change at runtime
-        tokenizer = self.tokenizer
+        tokenizer: PreTrainedTokenizer = self.tokenizer
+        # remove warning
+        tokenizer.deprecation_warnings['Asking-to-pad-a-fast-tokenizer'] = True
         with patch.object(tokenizer, "padding_side", "right"):
             response_outputs = tokenizer.pad(dict(input_ids=response_outputs),
                                              padding="max_length",

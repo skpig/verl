@@ -10,8 +10,8 @@ N_GPUS_PER_NODE_STREAMING=$((N_GPUS_PER_NODE/2))
 echo $N_GPUS_PER_NODE_STREAMING
 
 # ckpt和路径
-SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/p6_400m_moe_4T_sft_v27_bs128_lr4e-4_master_dyn_epoch4_hf
-RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/rm_p6_moe_400m_0716_sftv27_stage2_hf
+SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/models/p6dense-0.5B-Instruct
+RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/models/p6dense-0.5B-Instruct_rm
 TRAIN_FILE0=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/train_with_ref_ans.parquet
 TRAIN_FILE1=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/train_with_ref_ans.parquet
 TRAIN_FILE="[$TRAIN_FILE0,$TRAIN_FILE1]"
@@ -36,7 +36,7 @@ lr_warmup_steps_ratio=0.0003 # 10 / (train_size * total_epochs / train_batch_siz
 kl_coef=0.001
 entropy_coeff=0.0001
 use_last_response=False
-use_ref_answer=True
+use_ref_answer=False
 gae_gamma=1.0
 gae_lam=0.95
 kl_penalty=low_var_kl
@@ -61,7 +61,6 @@ python3 tasks/main_ppo.py \
     data.train_batch_size=${train_batch_size} \
     data.val_batch_size=${val_batch_size} \
     data.truncation='left' \
-    +data.chat_template=seed \
     actor_rollout_ref.model.path=${SFT_MODEL_PATH} \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=${actor_sp_size} \
     actor_rollout_ref.ref.ulysses_sequence_parallel_size=${ref_sp_size} \
@@ -81,6 +80,7 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.rollout.micro_batch_size=1024 \
     actor_rollout_ref.rollout.log_prob_micro_batch_size=512 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.2 \
     actor_rollout_ref.rollout.name=xperf_gpt \
     +actor_rollout_ref.rollout.use_vllm=False \
     +actor_rollout_ref.rollout.num_slots=256 \
@@ -88,7 +88,7 @@ python3 tasks/main_ppo.py \
     +actor_rollout_ref.rollout.complete_ratio=0.5 \
     actor_rollout_ref.ref.log_prob_micro_batch_size=512 \
     actor_rollout_ref.ref.ema=0.99 \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.2 \
     critic.optim.lr=${critic_lr} \
     critic.optim.lr_warmup_steps_ratio=${lr_warmup_steps_ratio} \
     critic.model.path=${RM_MODEL_PATH} \
@@ -100,7 +100,7 @@ python3 tasks/main_ppo.py \
     +critic.model.override_config.resid_pdrop=0. \
     +critic.use_rmpad=True \
     critic.model.external_lib=seed_models \
-    reward_model.enable=True \
+    reward_model.enable=False \
     reward_model.model.input_tokenizer=null \
     reward_model.model.path=${RM_MODEL_PATH} \
     reward_model.micro_batch_size=512 \

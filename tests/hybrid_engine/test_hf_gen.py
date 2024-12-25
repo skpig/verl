@@ -8,21 +8,25 @@ from seed_models.integrations.liger_kernel.liger_utils import apply_liger_kernel
 
 import seed_models
 
-p6_path = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/alphaseed/20241107/ct128kv2_baseline_sft32k_v27_lr2e5_epoch4_rope1000_hf'
+# p6_path = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/alphaseed/20241107/ct128kv2_baseline_sft32k_v27_lr2e5_epoch4_rope1000_hf'
+p6_path = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/models/p6dense-0.5B-Instruct'
 p7_path = 'hdfs://haruna/home/byte_data_seed/ssd_lq/public/seed_models/Seed-2B5-P7_32k_sft29_32gpu'
 m8_path = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/25B_MoE_SFT29_32k_bsz6_lr2e5_tp4_hf'
 
-model_path = copy_local_path_from_hdfs(m8_path)
+model_path = copy_local_path_from_hdfs(p6_path)
+print(model_path)
 tokenizer = AutoTokenizer.from_pretrained(model_path)
 tokenizer.padding_side = "left"
 
 apply_liger_kernel_to_p6()
 
 with torch.device('cpu'):
-    model = AutoModelForCausalLM.from_pretrained(model_path,
-                                                 torch_dtype=torch.bfloat16,
-                                                 attn_implementation="flash_attention_2",
-                                                 _moe_implementation='fused')
+    model = AutoModelForCausalLM.from_pretrained(
+        model_path,
+        torch_dtype=torch.bfloat16,
+        attn_implementation="flash_attention_2",
+        #  _moe_implementation='fused'
+    )
 
     config = model.config
 

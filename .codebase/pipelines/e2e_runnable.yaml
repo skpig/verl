@@ -5,14 +5,14 @@ jobs:
   e2e_runnable_tests:
     # Merlin - data.aml.verl:v85
     image: hub.byted.org/reckon/data.reckon.mlx.image_5940:5d8d8b56cf680f0c733e63b516035223
-    # if: ${{ !contains(Event.Change.Title, "WIP") }}
+    if: ${{ !contains(Event.Change.Title, "WIP") }}
     runs-on:
       cluster: gpu-l20-16
       docker:
         shared-memory: 1024
     envs:
       LIBHDFS_OPTS: -Dhadoop.root.logger=warn,console
-    timeout: 10  # timeout 10min
+    timeout: 30  # timeout 10min
     retry: 3
     steps:
       - name: check env
@@ -44,12 +44,15 @@ jobs:
           - cd verl
           - pip3 install -e . --user
           - pip3 install bytedance.ndtimeline==2.2.5
-      - name: math v1 ppo async
+      - name: math v1 ppo async and grpo
         commands:
           - cd -
           - export NUM_STEPS=2
           - export N_GPUS_PER_NODE=8
+          - export NCCL_SHM_DISABLE=1
           - wandb offline
+          - ray stop --force
           - ray start --num-cpus=100 --head
-          # - bash tasks_scripts/ci/run_p6_400m_math_v1_ppo_async.sh
-          - bash tasks_scripts/ci/run_p6_400m_math_v1_grpo.sh
+          - bash tasks_scripts/ci/run_p6d_0b5_math_v1_ppo_async.sh
+          - bash tasks_scripts/ci/run_p6d_0b5_math_v1_grpo.sh
+          - ray stop --force
