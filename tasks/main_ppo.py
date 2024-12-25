@@ -447,6 +447,15 @@ def validate_config(config):
         assert config.critic.ppo_mini_batch_size % config.critic.ppo_micro_batch_size == 0
         assert config.critic.ppo_micro_batch_size * ulysses >= n_gpus
 
+    assert (config.critic.use_cuda_timer and config.actor_rollout_ref.use_cuda_timer) or (
+            not config.actor_rollout_ref.use_cuda_timer and not config.critic.use_cuda_timer), \
+    "Error: config.critic.use_cuda_timer and config.actor_rollout_ref.use_cuda_timer must be the same"
+
+    if config.actor_rollout_ref.use_cuda_timer or config.reward_model.use_cuda_timer:
+        from alpha_seed.utils.ndtimeline import version_checker, set_cuda_timer_option
+        version_checker()
+        set_cuda_timer_option(True)
+
     min_required_seq_len = config.data.max_prompt_length + config.data.max_response_length
     if config.actor_rollout_ref.actor.use_dynamic_bsz:
         if min_required_seq_len > config.actor_rollout_ref.actor.ppo_max_token_len:

@@ -42,7 +42,7 @@ from alpha_seed.utils.validator.validation_manager import *
 from alpha_seed.workers.streaming_service.streaming_utils import pad, process_output
 from alpha_seed.workers.actors.checkpoint import CkptGlobalUploader
 from alpha_seed.utils.observility.pretty_print import pprint
-
+from alpha_seed.utils import ndtimeline
 from single_controller.base import Worker
 from single_controller.ray import RayResourcePool, RayWorkerGroup, RayClassWithInitArgs
 from single_controller.ray.base import create_colocated_worker_cls
@@ -641,14 +641,28 @@ class RayPPOTrainer(object):
 
         # initialize WorkerGroup
         all_wg = {}
+        internal_wgs = []
+        internal_wg_roles = []
+        all_meta = {}
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
             # no role allocated to this resource pool
             if len(class_dict) == 0:
                 continue
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
+            # this wg_dict is not dict, but RayWorkerGroup
             wg_dict = self.ray_worker_group_cls(resource_pool=resource_pool, ray_cls_with_init=worker_dict_cls)
             spawn_wg = wg_dict.spawn(prefix_set=class_dict.keys())
             all_wg.update(spawn_wg)
+            internal_wgs.append(wg_dict)
+            internal_wg_roles.append(list(class_dict.keys()))
+
+        self.internal_wgs = internal_wgs
+        self.internal_wg_roles = internal_wg_roles
+        self.all_wg = all_wg
+
+        for wg_name in all_wg:
+            all_meta[wg_name] = all_wg[wg_name].get_meta()
+        ndtimeline.report_topo(all_meta)
 
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         if self.use_standalone_reference_policy or not self.use_reference_policy:
@@ -905,6 +919,9 @@ class RayPPOTrainer(object):
         # Note that we start from step 1. After resume, we increment step by 1 to start next step
         self.global_step += 1
         start_step = self.global_step
+
+        if ndtimeline.use_cuda_timer():
+            self.call_once_on_each_ray_actor("do_ndtimeline_action", "set_global_step", global_step=self.global_step)
 
         # before training, move out the training resource as rollout begins first
         if self.config.trainer.offload_train_memory:
@@ -1385,6 +1402,12 @@ class RayPPOTrainer(object):
                 metrics['timing/step'] = step_timer.last
                 # TODO: make a canonical logger that supports various backend
                 self.logger.log(data=metrics, step=self.global_step)
+
+                if ndtimeline.use_cuda_timer():
+                    # Always be the last op before increasing global_step by 1
+                    print(f"flush ndtimeline at {self.global_step}")
+                    self.call_once_on_each_ray_actor("do_ndtimeline_action", "flush_and_inc")
+
                 self.global_step += 1
                 if start_step + 1 == self.global_step:
                     now = int(time.time())
@@ -1401,6 +1424,20 @@ class RayPPOTrainer(object):
                         pprint(f'Final validation metrics: {val_metrics}')
 
                     return
+
+    def call_once_on_each_ray_actor(self, func_name: str, *args, **kwargs):
+        """Call a function on each actor.
+        Args:
+            func_name (str): func_name must be registered as each WorkGroup's user_defined_cls's method
+            *args: arguments
+            **kwargs: keyword arguments
+        """
+        assert len(self.internal_wgs) == len(self.internal_wg_roles)
+        assert len(self.internal_wgs) > 0
+        for i, wg in enumerate(self.internal_wgs):
+            prefix = self.internal_wg_roles[i][0]  # first role name
+            f = getattr(wg, f"{prefix}_{func_name}")
+            f(*args, **kwargs)
 
     def convert_ckpt_to_omnistore(self):
         self.global_step = 0

@@ -123,6 +123,7 @@ actor_rollout_ref:
       default_hdfs_dir: null
       upload_to_mlx: False
       enable: False
+  use_cuda_timer: False
 
 critic:
   load_score_head: True
@@ -169,6 +170,7 @@ critic:
     default_hdfs_dir: null
     upload_to_mlx: False
     enable: False
+  use_cuda_timer: False
 
 reward_model:
   enable: False
@@ -202,6 +204,7 @@ reward_model:
   need_punish_trunc: False
   trunc_punish_score: -5
   strict_box_verify: False
+  use_cuda_timer: False
 
 algorithm:
   force_append_eos: False

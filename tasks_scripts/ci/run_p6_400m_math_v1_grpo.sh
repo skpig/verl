@@ -101,6 +101,7 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.actor.upgo_loss_weight=${upgo_loss_weight} \
     actor_rollout_ref.actor.upgo_loss_version=${upgo_loss_version} \
     actor_rollout_ref.actor.optim.weight_decay=${weight_decay} \
+    actor_rollout_ref.use_cuda_timer=True \
     critic.use_dynamic_bsz=${use_dynamic_bsz} \
     critic.ppo_max_token_len=${critic_ppo_max_token_len} \
     critic.optim.lr=${critic_lr} \
@@ -114,6 +115,7 @@ python3 tasks/main_ppo.py \
     +critic.model.override_config.resid_pdrop=0. \
     +critic.use_rmpad=True \
     critic.model.external_lib=seed_models \
+    critic.use_cuda_timer=True \
     reward_model.enable=False \
     reward_model.model.input_tokenizer=null \
     reward_model.model.path=${RM_MODEL_PATH} \
@@ -127,6 +129,7 @@ python3 tasks/main_ppo.py \
     reward_model.use_dynamic_bsz=${use_dynamic_bsz} \
     reward_model.max_token_len=${infer_ppo_max_token_len} \
     reward_model.add_int_verify=False \
+    reward_model.use_cuda_timer=True \
     algorithm.adv_estimator=${adv_estimator} \
     algorithm.kl_ctrl.kl_coef=${kl_coef} \
     algorithm.gamma=${gae_gamma} \

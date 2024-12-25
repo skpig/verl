@@ -36,9 +36,10 @@ from torch.distributed.device_mesh import init_device_mesh
 from verl.utils.model import compute_position_id_with_mask
 import numpy as np
 
-from alpha_seed.workers.hybrid_engine.hsdp import create_device_mesh
+from alpha_seed.workers.hybrid_engine.hsdp import create_device_mesh, calculate_device_mesh_shape
 from alpha_seed.workers.hybrid_engine.fsdp_ulysses import (FSDPUlyssesShardingManager, ulysses_pad_and_slice_inputs)
 from alpha_seed.workers.utils import rearrange_micro_batches
+from alpha_seed.utils import ndtimeline
 from .initialize import parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init
 from dist_attn.ulysses.ops import slice_input_tensor, gather_outputs
 from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
@@ -66,6 +67,13 @@ class RewardModelWorker(Worker):
         if not torch.distributed.is_initialized():
             timeout = timedelta(minutes=int(os.getenv('NCCL_TIMEOUT', 60)))
             torch.distributed.init_process_group(backend="nccl", timeout=timeout)
+
+        ndtimeline.set_cuda_timer_option(config["use_cuda_timer"])
+        mesh_shape = calculate_device_mesh_shape(config.fsdp_size)
+        if len(mesh_shape) == 2:  # align with ndtimeline internal settings
+            mesh_shape = (mesh_shape[1], mesh_shape[0])
+        ndtimeline.init_ndtimers(mesh_shape=mesh_shape, ray_class_instance=self)
+
         self.config = config
 
         world_size = torch.distributed.get_world_size()
@@ -422,3 +430,7 @@ class RewardModelWorker(Worker):
         self.reward_module._handle.reshard(True)
         torch.cuda.empty_cache()
         return output
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def do_ndtimeline_action(self, action, *args, **kwargs):
+        ndtimeline.do_ndtimeline_action(action, *args, **kwargs)

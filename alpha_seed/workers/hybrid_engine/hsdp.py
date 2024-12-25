@@ -16,14 +16,23 @@ import torch.distributed
 from torch.distributed.device_mesh import init_device_mesh
 
 
-def create_device_mesh(fsdp_size, role):
+def calculate_device_mesh_shape(fsdp_size):
     world_size = torch.distributed.get_world_size()
-
     if fsdp_size > 0 and (world_size // fsdp_size) > 1:
         # if dp_size > 1, use HSDP
         assert world_size % fsdp_size == 0, "world_size must be divisible by fsdp_size"
         dp_size = world_size // fsdp_size
-        device_mesh = init_device_mesh('cuda', mesh_shape=(dp_size, fsdp_size), mesh_dim_names=['dp', 'fsdp'])
+        return (dp_size, fsdp_size)
+    else:
+        return (world_size,)
+
+
+def create_device_mesh(fsdp_size, role):
+    world_size = torch.distributed.get_world_size()
+    mesh_shape = calculate_device_mesh_shape(fsdp_size)
+    if len(mesh_shape) == 2:
+        dp_size = mesh_shape[0]
+        device_mesh = init_device_mesh('cuda', mesh_shape=mesh_shape, mesh_dim_names=['dp', 'fsdp'])
         print(f"Using HSDP {dp_size} {device_mesh} for {role}")
     else:
         device_mesh = init_device_mesh('cuda', mesh_shape=(world_size,), mesh_dim_names=['fsdp'])

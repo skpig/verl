@@ -45,8 +45,9 @@ from verl.utils.model import compute_position_id_with_mask
 from verl.utils.debug import get_profiler_context
 import numpy as np
 
-from alpha_seed.workers.hybrid_engine.hsdp import create_device_mesh
+from alpha_seed.workers.hybrid_engine.hsdp import create_device_mesh, calculate_device_mesh_shape
 from alpha_seed.workers.hybrid_engine.fsdp_ulysses import FSDPUlyssesShardingManager
+from alpha_seed.utils import ndtimeline
 from .initialize import parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init
 from .checkpoint.extensions import register_dtensor_save_hook
 from alpha_seed.workers.utils import rearrange_micro_batches
@@ -89,6 +90,12 @@ class AsyncActorRolloutRefWorker(Worker):
         if not torch.distributed.is_initialized():
             timeout = timedelta(minutes=int(os.getenv('NCCL_TIMEOUT', 60)))
             torch.distributed.init_process_group(backend="nccl", timeout=timeout)
+
+        ndtimeline.set_cuda_timer_option(config["use_cuda_timer"])
+        mesh_shape = calculate_device_mesh_shape(config.actor.fsdp_size)
+        if len(mesh_shape) == 2:  # align with ndtimeline internal settings
+            mesh_shape = (mesh_shape[1], mesh_shape[0])
+        ndtimeline.init_ndtimers(mesh_shape=mesh_shape, ray_class_instance=self)
 
         # build device mesh
         self.master_address = os.getenv('MASTER_ADDR', 'localhost')
@@ -777,6 +784,10 @@ class AsyncActorRolloutRefWorker(Worker):
             logging.info(f'dump {dump_type} upload process group')
         else:
             logging.warning(f'flight recorder dumper not available, please use the latest ndtimeline version')
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def do_ndtimeline_action(self, action, *args, **kwargs):
+        ndtimeline.do_ndtimeline_action(action, *args, **kwargs)
 
 
 def summerize_data(data: Union[dict, tuple, list], name: str = 'summary', level: int = 0, show_value=False) -> str:

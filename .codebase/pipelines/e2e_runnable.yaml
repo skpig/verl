@@ -43,6 +43,7 @@ jobs:
           - git clone git@code.byted.org:data/verl
           - cd verl
           - pip3 install -e . --user
+          - pip3 install bytedance.ndtimeline==2.2.5
       - name: math v1 ppo async
         commands:
           - cd -

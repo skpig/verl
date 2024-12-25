@@ -5,7 +5,7 @@ SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/see
 RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/alphaseed/20241107/400m_p60905_137k_revisedonly_scalingexp_5xsample_bsz400_lr5e6_tp4pp2_hf
 TRAIN_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/hard60_format_repeat10.parquet
 TEST_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/math_500.parquet
-default_hdfs_dir=hdfs://haruna/home/byte_data_seed/ssd_hldy/evals_pipeline/user/liulingjun.godzilla/20241109
+default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/wangchenyuan.99/alphaseed_test20
 
 # 训练长度
 max_prompt_length=2048 # 16384
@@ -78,6 +78,7 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.actor.scale_pg_by_kl=True \
     actor_rollout_ref.actor.upgo_loss_weight=${upgo_loss_weight} \
     actor_rollout_ref.actor.upgo_loss_version=${upgo_loss_version} \
+    actor_rollout_ref.use_cuda_timer=True \
     critic.optim.lr=${critic_lr} \
     critic.optim.lr_warmup_steps=${lr_warmup_steps} \
     critic.model.path=${RM_MODEL_PATH} \
@@ -85,6 +86,7 @@ python3 tasks/main_ppo.py \
     critic.ppo_micro_batch_size=${train_micro_batch_size} \
     critic.infer_micro_batch_size=${infer_micro_batch_size} \
     critic.model.fsdp_config.param_offload=False \
+    critic.use_cuda_timer=True \
     +critic.model.override_config.attention_dropout=0. \
     +critic.model.override_config.embd_pdrop=0. \
     +critic.model.override_config.resid_pdrop=0. \
