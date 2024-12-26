@@ -110,6 +110,8 @@ actor_rollout_ref:
       top_p: 1.0
       temperature: 1.0
       do_sample: True
+      min_p: -1 # 0.01 to open
+      eta_epsilon: -1 # 1e-6 to open
     val_generate_kwargs:
       # for validation
       top_k: -1 # 0 for hf rollout, -1 for vllm rollout

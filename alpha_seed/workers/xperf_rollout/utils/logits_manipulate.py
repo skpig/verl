@@ -13,3 +13,32 @@ def logits_manipulate_fn_core(logits, history_ids, manipulate_args):
     soft_rate = torch.relu((total_token - (eot_thres - soft_interval)) / soft_interval)
     logits[:, eot] += LARGE * soft_rate * no_eot
     return logits
+
+
+def logits_manipulate_fn_minp(logits, history_ids, manipulate_args):
+    """
+    logits: [batch_size, vocab_size]
+
+    reference: https://github.com/huggingface/transformers/issues/27670
+    """
+    filter_value = -float("Inf")
+    probs = torch.nn.functional.softmax(logits, dim=-1)
+    min_p = manipulate_args['min_p']
+    probs_max = torch.max(probs, dim=-1, keepdim=True)[0]
+    probs_clip = probs_max * min_p
+    min_p_mask = probs < probs_clip
+    logits[min_p_mask] = filter_value
+    return logits
+
+
+def logits_manipulate_fn_eta(logits, history_ids, manipulate_args):
+    """
+    logits: [batch_size, vocab_size]
+
+    paper: https://arxiv.org/abs/2210.15191
+    """
+    filter_value = -float("Inf")
+    probs = torch.nn.functional.softmax(logits, dim=-1)
+    min_p_mask = probs < manipulate_args['eta_epsilon']
+    logits[min_p_mask] = filter_value
+    return logits

@@ -44,7 +44,7 @@ import logging
 from alpha_seed.workers.xperf_rollout.utils import get_xperf_gpt_config
 from alpha_seed.workers.xperf_rollout.utils.layout_convert_helper import init_meta
 from alpha_seed.workers.streaming_service.xperf_model_prophet import XperfModelProphet
-from alpha_seed.workers.xperf_rollout.utils.logits_manipulate import logits_manipulate_fn_core
+from alpha_seed.workers.xperf_rollout.utils.logits_manipulate import logits_manipulate_fn_core, logits_manipulate_fn_eta, logits_manipulate_fn_minp
 from functools import partial
 
 try:
@@ -153,6 +153,16 @@ class AsyncXPerfGPTRollout(object):
                                                'response_length': config.response_length,
                                                'soft_interval': config.get('soft_interval', 512),
                                                'summary_min_space': config.get('summary_min_space', 1024)
+                                           })
+        elif config.train_generate_kwargs['min_p'] != -1:
+            logits_manipulate_fn = partial(logits_manipulate_fn_minp,
+                                           manipulate_args={
+                                               'min_p': config.train_generate_kwargs.min_p,
+                                           })
+        elif config.train_generate_kwargs['eta_epsilon'] != -1:
+            logits_manipulate_fn = partial(logits_manipulate_fn_eta,
+                                           manipulate_args={
+                                               'eta_epsilon': config.train_generate_kwargs.eta_epsilon,
                                            })
         else:
             logits_manipulate_fn = None
