@@ -334,14 +334,24 @@ def compute_data_metrics(self, batch: DataProto):
     for threshold in [1e-6, 1e-5, 1e-4, 1e-3]:
         small_prob_mask = torch.logical_and(response_mask_bool, old_log_probs.exp() < threshold)
         small_prob_mask_sum = small_prob_mask.float().sum()
+        local_small_prob_mask_sum = small_prob_mask_sum.clone()
         response_mask_bool_sum = response_mask_bool.float().sum()
         dist.all_reduce(small_prob_mask_sum, op=dist.ReduceOp.SUM, group=None, async_op=False)
         dist.all_reduce(response_mask_bool_sum, op=dist.ReduceOp.SUM, group=None, async_op=False)
         small_prob_ratio = small_prob_mask_sum / response_mask_bool_sum
-        small_prob_adv = torch.masked_select(advantages, small_prob_mask)
+
+        if local_small_prob_mask_sum == 0:
+            small_prob_adv = torch.tensor(0, device=advantages.device)
+        else:
+            small_prob_adv = torch.masked_select(advantages, small_prob_mask)
+            small_prob_adv = torch.sum(small_prob_adv)
+
+        dist.all_reduce(small_prob_adv, op=dist.ReduceOp.SUM, group=None, async_op=False)
+        small_prob_adv = small_prob_adv / small_prob_mask_sum
+
         metrics.update({
             f'prob/prob_lt_{threshold}_ratio': small_prob_ratio.detach().item(),
-            f'prob/prob_lt_{threshold}_adv': torch.mean(small_prob_adv).detach().item()
+            f'prob/prob_lt_{threshold}_adv': small_prob_adv.detach().item()
         })
     if use_critic:
         values = batch.batch['values']

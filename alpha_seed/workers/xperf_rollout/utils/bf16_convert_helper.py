@@ -37,7 +37,7 @@ def assert_not_nan(tensor: torch.Tensor):
     else:
         rank = 0
 
-    if os.getenv('XPERF_CHECK_NAN', '0') == '1':
+    if os.getenv('XPERF_CHECK_NAN', '1') == '1':
         assert not torch.any(torch.isnan(tensor)).item(), f'Got nan in parameter {tensor} on rank {rank}'
 
 
@@ -1089,6 +1089,16 @@ def _reshard_fsdp_state_dict_to_xperf_p7(tp_model, state_dict, device_mesh: Devi
         assert fc2_weight_merge.shape == fc2_w.shape, f'{fc2_weight_merge.shape=}, {fc2_w.shape=}'
         fc2_w.data = fc2_weight_merge.contiguous()
 
+    # enforce check nan
+    assert_not_nan(tp_model.layernorm_weight.data)
+    assert_not_nan(tp_model.wte_weight.data)
+    assert_not_nan(tp_model.lm_head_weight.data)
+
+    for layer_index, weights in enumerate(tp_model.layers_weight):
+        for weight in weights:
+            if isinstance(weight, torch.Tensor):
+                assert_not_nan(weight)
+
     load_to_cuda(tp_model=tp_model)
     torch.cuda.empty_cache()
 
@@ -1310,6 +1320,16 @@ def _reshard_fsdp_state_dict_to_xperf_m8(tp_model, state_dict, device_mesh: Devi
         # (num_experts, intermediate_size // tp, hidden_size)
         assert fc2_weight_merge.shape == fc2_w.shape, f'{fc2_weight_merge.shape=}, {fc2_w.shape=}'
         fc2_w.data = fc2_weight_merge.contiguous()
+
+    # enforce check nan
+    assert_not_nan(tp_model.layernorm_weight.data)
+    assert_not_nan(tp_model.wte_weight.data)
+    assert_not_nan(tp_model.lm_head_weight.data)
+
+    for layer_index, weights in enumerate(tp_model.layers_weight):
+        for weight in weights:
+            if isinstance(weight, torch.Tensor):
+                assert_not_nan(weight)
 
     load_to_cuda(tp_model=tp_model)
     torch.cuda.empty_cache()
