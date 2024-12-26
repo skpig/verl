@@ -1,9 +1,10 @@
-import seed_models
+import shutil
+import seed_models  # noqa
 import os
 import torch
 import argparse
 import seed_models
-from transformers import AutoConfig, AutoModelForCausalLM
+from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForTokenClassification
 from concurrent.futures import ThreadPoolExecutor
 import hdfs_io
 from tqdm.auto import trange
@@ -17,20 +18,23 @@ if __name__ == '__main__':
     # for compatibility with merlin auto eval
     parser.add_argument('--cruise-config', required=False)
     parser.add_argument('--dtype', required=False)
+    parser.add_argument('--save_hf', action='store_true')
     args = parser.parse_args()
 
     print('Downloading model shards')
     local_dir = '/opt/tiger/.cache/src_model'
+    shutil.rmtree(local_dir, ignore_errors=True)
     os.makedirs(local_dir, exist_ok=True)
 
-    if not args.load_dir.endswith('actor'):
-        args.load_dir = os.path.join(args.load_dir, 'actor')
+    # if not args.load_dir.endswith('actor'):
+    #     args.load_dir = os.path.join(args.load_dir, 'actor')
 
     if not args.save_path:
         args.save_path = os.path.join(args.load_dir, 'megatron_merge_states.pt')
 
+    hdfs_hf_path = os.path.join(args.load_dir, 'huggingface')
     # hdfs_io.copy(args.load_dir, local_dir)
-    hdfs_io.copy(os.path.join(args.load_dir, 'huggingface'), os.path.join(local_dir, 'huggingface'))
+    hdfs_io.copy(hdfs_hf_path, os.path.join(local_dir, 'huggingface'))
 
     # copy rank zero to find the shape of (dp, fsdp)
     rank = 0
@@ -108,8 +112,15 @@ if __name__ == '__main__':
     hf_path = os.path.join(local_dir, 'huggingface')
     config = AutoConfig.from_pretrained(hf_path)
 
+    if 'ForTokenClassification' in config.architectures[0]:
+        auto_model = AutoModelForTokenClassification
+    elif 'ForCausalLM' in config.architectures[0]:
+        auto_model = AutoModelForCausalLM
+    else:
+        raise NotImplementedError(f'Unknown architecture {config["architectures"]}')
+
     with torch.device('meta'):
-        model = AutoModelForCausalLM.from_config(config, torch_dtype=torch.bfloat16)
+        model = auto_model.from_config(config, torch_dtype=torch.bfloat16)
     model.to_empty(device='cpu')
 
     print(f'Saving model to {hf_path}')
@@ -120,10 +131,15 @@ if __name__ == '__main__':
 
     # print(f'Upload merged huggingface model from {hf_path} to {args.hdfs_path}')
     # upload back to hdfs
-    # hdfs_io.copy(hf_path, args.hdfs_path)
-    print(f'Upload merged megatron model from {hf_path} to {args.save_path}')
+    if args.save_hf:
+        print(f'Upload huggingface model from {hf_path} to {args.load_dir}')
+        hdfs_io.copy(hf_path, args.load_dir)
+
     # convert to megatron for autoeval
-    convert_seed_models_to_megatron(hf_path=hf_path,
-                                    local_path=local_dir,
-                                    output_path=os.path.dirname(args.save_path),
-                                    validate=False)
+    if 'ForCausalLM' in config.architectures[0]:
+        # only save ForCausalLM
+        print(f'Upload merged megatron model from {hf_path} to {args.save_path}')
+        convert_seed_models_to_megatron(hf_path=hf_path,
+                                        local_path=local_dir,
+                                        output_path=os.path.dirname(args.save_path),
+                                        validate=False)
