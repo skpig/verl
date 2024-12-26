@@ -663,6 +663,7 @@ class AsyncActorRolloutRefWorker(Worker):
             output = self.sharding_manager.postprocess_data(output)
 
         output = output.to('cpu')
+        # torch.distributed.barrier()
         torch.cuda.empty_cache()
 
         log_gpu_memory_usage('After rollout generation', logger=logger)

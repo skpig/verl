@@ -246,6 +246,15 @@ class AsyncXPerfGPTRollout(object):
     def set_rollout_callback_function(self, eos_callback_fn):
         self.inference_engine.set_callback_function(eos_callback_fn=eos_callback_fn)
 
+    def reset_kv_cache(self):
+        model = self.inference_engine.engine.module
+        for i in range(model.num_layers):
+            if (hasattr(model, "kv_mirror_layers")):
+                if i + 1 in model.kv_mirror_layers:
+                    mirror_layer = model.kv_mirror_imitated_layers[model.kv_mirror_layers.index(i + 1)] - 1
+                    model.layers_impl[i].set_kv_cache(model.layers_impl[mirror_layer].get_kv_cache_2HBSD(
+                        torch.bfloat16))
+
     def generate(self):
         torch.cuda.set_device(int(os.getenv('LOCAL_RANK', '0')))
         while True:
@@ -254,6 +263,7 @@ class AsyncXPerfGPTRollout(object):
             self.inference_engine.set_generator_strategy(**generation_kwargs)
             with logging_set_level(self.config.get('logging_level', 'WARN')), self.profiler_context as p:
                 try:
+                    self.reset_kv_cache()
                     self.inference_engine.execute(query_pool,
                                                   complete_ratio=complete_ratio,
                                                   stop_event=self.stop_event if self.is_standalone else None,

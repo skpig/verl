@@ -50,10 +50,20 @@ def apply_monkey_patch_to_p7():
     apply_liger_kernel_to_p7()
 
 
+def apply_monkey_patch_to_m8():
+    from seed_models.models.m8.modeling_m8 import M8FlashAttention2
+    from alpha_seed.models.transformers.modeling_m8 import flash_attn2_rmpad_forward
+
+    M8FlashAttention2.forward = flash_attn2_rmpad_forward
+    from seed_models.integrations import apply_liger_kernel_to_m8
+    apply_liger_kernel_to_m8()
+
+
 _PATCH_NAME_TO_FUNC = {
     'seed_p6': apply_monkey_patch_to_p6,
     'seed_p6dense': apply_monkey_patch_to_p6_dense,
-    'seed_p7': apply_monkey_patch_to_p7
+    'seed_p7': apply_monkey_patch_to_p7,
+    'seed_m8': apply_monkey_patch_to_m8
 }
 
 from transformers import PretrainedConfig
