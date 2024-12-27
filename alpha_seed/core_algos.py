@@ -194,20 +194,6 @@ def compute_rewards(token_level_scores, old_log_prob, ref_log_prob, kl_ratio):
     return token_level_scores - kl * kl_ratio
 
 
-def get_kl_logprobs(logprobs: torch.Tensor, ref_logprobs: torch.Tensor, reward_low_variance_kl: int = 1):
-    kl = logprobs - ref_logprobs
-    if reward_low_variance_kl == 1:
-        kl = kl
-    elif reward_low_variance_kl == 2:
-        kl = 1 / 2 * (-kl)**2  # k2
-    elif reward_low_variance_kl == 3:
-        kl = -kl
-        kl = kl.exp() - 1 - kl  # k3
-    else:
-        raise ValueError(f"Need `reward_low_variance_kl` be in [1,2,3], got {reward_low_variance_kl}")
-    return kl
-
-
 def compute_policy_loss(old_log_prob, ref_log_prob, log_prob, advantages, upgo_advantages, eos_mask, cliprange,
                         cliprange2, scale_pg_by_kl, upgo_loss_weight, use_ewma_loss):
     """Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py#L1122
@@ -251,8 +237,7 @@ def compute_policy_loss(old_log_prob, ref_log_prob, log_prob, advantages, upgo_a
 
     if scale_pg_by_kl:
         sqrt_kl = torch.sqrt(
-            torch.clamp(torch.sum(get_kl_logprobs(old_log_prob, ref_log_prob, reward_low_variance_kl=3) * eos_mask,
-                                  dim=1),
+            torch.clamp(torch.sum(kl_penalty(old_log_prob, ref_log_prob, kl_penalty='low_var_kl') * eos_mask, dim=1),
                         min=1.0))
         normed_sqrt_kl = (1 / sqrt_kl) / (torch.sum(1 / sqrt_kl)) * torch.clamp(torch.sum(eos_mask[:, 0]), min=1.0)
         pg_loss = pg_loss * normed_sqrt_kl
@@ -319,9 +304,9 @@ def compute_value_loss(vpreds, returns, values, eos_mask, cliprange_value):
 
 
 def compute_kl_loss(log_prob, ref_log_prob, eos_mask, kl_penalty_):
-    if kl_penalty_ in ("abs", "mse"):
+    if kl_penalty_ in ("abs", "mse", "low_var_kl"):
         kl = kl_penalty(log_prob, ref_log_prob, kl_penalty_)
-    elif kl_penalty_ in ("kl", "low_var_kl"):
+    elif kl_penalty_ in ("kl"):
         kl = kl_penalty(log_prob, ref_log_prob, kl_penalty_).square()
     else:
         raise NotImplementedError
