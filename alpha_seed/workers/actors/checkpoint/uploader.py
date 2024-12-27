@@ -7,6 +7,8 @@ import hdfs_io
 @ray.remote(num_gpus=0, num_cpus=1)
 class CkptGlobalUploader:
 
+    name = "checkpoint_global_uploader"
+
     def __init__(self, use_critic, ckpt_version, default_local_dir, default_remote_dir):
         self.upload_shard_future_map = {}
         self.upload_shard_task_map = {}

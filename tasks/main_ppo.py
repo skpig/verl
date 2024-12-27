@@ -25,6 +25,7 @@ import torch
 from verl.utils.tracking import Tracking
 import wandb
 import os
+import time
 import pandas as pd
 import hdfs_io
 from datetime import datetime
@@ -415,7 +416,7 @@ def init_ray():
         if ENABLE_REDIS_TRITON_CACHE:
             runtime_env['env_vars'].update(remote_cache_env)
 
-        ray.init(runtime_env=runtime_env)
+        ray.init(namespace="alphaseed", runtime_env=runtime_env)
 
 
 def validate_config(config):
@@ -485,6 +486,124 @@ def validate_config(config):
             print(f"Warning: config.reward_model.max_token_len is set to {config.reward_model.max_token_len}")
 
 
+def config_to_trainer_kwargs(config):
+    from verl.utils.fs import copy_local_path_from_hdfs
+    from transformers import AutoTokenizer
+
+    # print initial config
+    from pprint import pprint
+    from omegaconf import OmegaConf
+    pprint(OmegaConf.to_container(config, resolve=True))  # resolve=True will eval symbol values
+    OmegaConf.resolve(config)
+
+    logger = Tracking(project_name=config.trainer.project_name,
+                      experiment_name=config.trainer.experiment_name,
+                      default_backend=config.trainer.logger,
+                      config=OmegaConf.to_container(config, resolve=True))
+
+    # download the checkpoint from hdfs
+    local_path = copy_local_path_from_hdfs(config.actor_rollout_ref.model.path)
+
+    # instantiate tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(local_path)
+    if config.data.get('chat_template', None) == 'seed':
+        from verl.utils.seed import CHAT_TEMPLATE
+        tokenizer.chat_template = CHAT_TEMPLATE
+
+    # define worker classes
+    if config.actor_rollout_ref.actor.strategy == 'fsdp':
+        assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
+        from single_controller.ray import RayWorkerGroup
+        ray_worker_group_cls = RayWorkerGroup
+    else:
+        raise NotImplementedError
+
+    from alpha_seed.trainer.ppo import ResourcePoolManager, Role
+
+    role_worker_mapping = {
+        Role.ActorRolloutRef: AsyncActorRolloutRefWorker,
+        Role.Critic: CriticWorker,
+        Role.Rollout: AsyncActorRolloutRefWorker,
+        Role.Validator: AsyncActorRolloutRefWorker,
+    }
+
+    global_pool_id = 'global_pool'
+    standalone_pool_id = 'standalone_pool'
+    validation_pool_id = 'validation_pool'
+    resource_pool_spec = {
+        global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
+        standalone_pool_id: [config.streaming_rollout.n_gpus_per_node] * config.streaming_rollout.nnodes,
+        validation_pool_id: [config.streaming_validator.n_gpus_per_node] * config.streaming_validator.nnodes,
+    }
+    mapping = {
+        Role.ActorRolloutRef: global_pool_id,
+        Role.Critic: global_pool_id,
+        Role.Rollout: standalone_pool_id,
+        Role.Validator: validation_pool_id,
+    }
+
+    # we should adopt a multi-source reward function here
+    # - for rule-based rm, we directly call a reward score
+    # - for model-based rm, we call a model
+    # - for code related prompt, we send to a sandbox if there are test cases
+    # - finally, we combine all the rewards together
+    # - The reward type depends on the tag of the data
+    if config.reward_model.enable:
+        from alpha_seed.workers.actors.reward_worker import RewardModelWorker
+        role_worker_mapping[Role.RewardModel] = RewardModelWorker
+        mapping[Role.RewardModel] = global_pool_id
+
+    reward_fn = RewardManager(tokenizer=tokenizer, config=config, logger=logger, rm_name="train")
+
+    # Note that we always use function-based RM for validation
+    val_reward_fn = RewardManager(tokenizer=tokenizer, config=config, logger=logger, rm_name="val")
+
+    resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
+
+    if config.trainer.use_remote_sandbox:
+        sandbox_client = SandboxClient.options(name='sandbox_client').remote(config=config, tokenizer=tokenizer)
+    else:
+        sandbox_client = None
+
+    kwargs = {
+        "config": config,
+        "tokenizer": tokenizer,
+        "role_worker_mapping": role_worker_mapping,
+        "resource_pool_manager": resource_pool_manager,
+        "ray_worker_group_cls": ray_worker_group_cls,
+        "sandbox_client": sandbox_client,
+    }
+
+    class KVStore:
+
+        def __init__(self):
+            self.kwargs = dict()
+
+        def set_key_val(self, k, v):
+            self.kwargs[k] = v
+
+        def get_by_key(self, k):
+            return self.kwargs.get(k, None)
+
+    try:
+        trainer_config_actor = ray.get_actor(name="kv_store")
+    except Exception as e:
+        trainer_config_actor = ray.remote(KVStore).options(name="kv_store", lifetime="detached").remote()
+
+    if config.trainer.get("server_only", False):
+        trainer_config_actor.set_key_val.remote("server_only", True)
+        for k, v in kwargs.items():
+            print(f"setting {k}")
+            trainer_config_actor.set_key_val.remote(k, v)
+    else:
+        # the following parameters are only used in fit() and _validate() so skip them in server_only mode
+        kwargs['logger'] = logger
+        kwargs['reward_fn'] = val_reward_fn
+        kwargs['val_reward_fn'] = val_reward_fn
+
+    return kwargs
+
+
 @ray.remote
 class TaskRunner:
 
@@ -499,101 +618,18 @@ def main_task(config):
 
     with metric_collection_context:
         validate_config(config=config)
-
-        from verl.utils.fs import copy_local_path_from_hdfs
-        from transformers import AutoTokenizer
-
-        # print initial config
-        from pprint import pprint
-        from omegaconf import OmegaConf
-        pprint(OmegaConf.to_container(config, resolve=True))  # resolve=True will eval symbol values
-        OmegaConf.resolve(config)
-
-        logger = Tracking(project_name=config.trainer.project_name,
-                          experiment_name=config.trainer.experiment_name,
-                          default_backend=config.trainer.logger,
-                          config=OmegaConf.to_container(config, resolve=True))
-
-        # download the checkpoint from hdfs
-        local_path = copy_local_path_from_hdfs(config.actor_rollout_ref.model.path)
-
-        # instantiate tokenizer
-        tokenizer = AutoTokenizer.from_pretrained(local_path)
-        if config.data.get('chat_template', None) == 'seed':
-            from verl.utils.seed import CHAT_TEMPLATE
-            tokenizer.chat_template = CHAT_TEMPLATE
-
-        # define worker classes
-        if config.actor_rollout_ref.actor.strategy == 'fsdp':
-            assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
-            from single_controller.ray import RayWorkerGroup
-            ray_worker_group_cls = RayWorkerGroup
-        else:
-            raise NotImplementedError
-
-        from alpha_seed.trainer.ppo import ResourcePoolManager, Role
-
-        role_worker_mapping = {
-            Role.ActorRolloutRef: AsyncActorRolloutRefWorker,
-            Role.Critic: CriticWorker,
-            Role.Rollout: AsyncActorRolloutRefWorker,
-            Role.Validator: AsyncActorRolloutRefWorker,
-        }
-
-        global_pool_id = 'global_pool'
-        standalone_pool_id = 'standalone_pool'
-        validation_pool_id = 'validation_pool'
-        resource_pool_spec = {
-            global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
-            standalone_pool_id: [config.streaming_rollout.n_gpus_per_node] * config.streaming_rollout.nnodes,
-            validation_pool_id: [config.streaming_validator.n_gpus_per_node] * config.streaming_validator.nnodes,
-        }
-        mapping = {
-            Role.ActorRolloutRef: global_pool_id,
-            Role.Critic: global_pool_id,
-            Role.Rollout: standalone_pool_id,
-            Role.Validator: validation_pool_id,
-        }
-
-        # we should adopt a multi-source reward function here
-        # - for rule-based rm, we directly call a reward score
-        # - for model-based rm, we call a model
-        # - for code related prompt, we send to a sandbox if there are test cases
-        # - finally, we combine all the rewards together
-        # - The reward type depends on the tag of the data
-        if config.reward_model.enable:
-            from alpha_seed.workers.actors.reward_worker import RewardModelWorker
-            role_worker_mapping[Role.RewardModel] = RewardModelWorker
-            mapping[Role.RewardModel] = global_pool_id
-
-        reward_fn = RewardManager(tokenizer=tokenizer, config=config, logger=logger, rm_name="train")
-
-        # Note that we always use function-based RM for validation
-        val_reward_fn = RewardManager(tokenizer=tokenizer, config=config, logger=logger, rm_name="val")
-
-        resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
-
-        if config.trainer.use_remote_sandbox:
-            sandbox_client = SandboxClient.options(name='sandbox_client').remote(config=config, tokenizer=tokenizer)
-        else:
-            sandbox_client = None
-
-        trainer = RayPPOTrainer(config=config,
-                                tokenizer=tokenizer,
-                                role_worker_mapping=role_worker_mapping,
-                                resource_pool_manager=resource_pool_manager,
-                                ray_worker_group_cls=ray_worker_group_cls,
-                                reward_fn=reward_fn,
-                                val_reward_fn=val_reward_fn,
-                                logger=logger,
-                                sandbox_client=sandbox_client)
+        trainer = RayPPOTrainer(**config_to_trainer_kwargs(config))
 
     metric_collection_context = MegavisionMetricsCtx().collect_init_worker_duration() \
         if MegavisionMetricsCtx else contextlib.nullcontext()
     with metric_collection_context:
         trainer.init_workers()
     send_message_to_employee("alpha seed任务开始训练", f"任务链接: {task_url}", user_email)
-    if config.convert_ckpt_to_omnistore_task.enable:
+
+    if config.trainer.get("server_only"):
+        print("============== server started ==============")
+        time.sleep(3600 * 24 * 100)
+    elif config.convert_ckpt_to_omnistore_task.enable:
         trainer.convert_ckpt_to_omnistore()
         send_message_to_employee("alpha seed任务转换ckpt到omnistore完成，任务结束", f"任务链接: {task_url}", user_email)
     else:

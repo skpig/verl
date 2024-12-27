@@ -88,6 +88,8 @@ class RewardModelWorker(Worker):
         self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_sp_device_mesh)
         self.config.micro_batch_size //= world_size // sp_size
 
+        self._model_initialized = True
+
     def _build_model(self, config):
         # the following line is necessary
         from transformers import AutoModelForTokenClassification, AutoTokenizer, AutoConfig
@@ -173,11 +175,14 @@ class RewardModelWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
+        if self._model_initialized:
+            return
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get('external_lib', None))
         self.reward_module = self._build_model(config=self.config)
         self.reward_module.eval()
         torch.cuda.empty_cache()
+        self._model_initialized = True
 
     def _forward_micro_batch(self, micro_batch):
         from flash_attn.bert_padding import pad_input, unpad_input, index_first_axis, rearrange

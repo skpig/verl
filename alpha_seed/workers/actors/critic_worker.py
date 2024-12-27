@@ -97,6 +97,8 @@ class CriticWorker(Worker):
         self.config.ppo_mini_batch_size //= world_size // sp_size
         self.config.ppo_micro_batch_size //= world_size // sp_size
 
+        self._model_initialized = False
+
     def _build_critic_model_optimizer(self, config):
         # the following line is necessary
         from verl.utils.model import LambdaLayer, print_model_size, squeeze
@@ -258,6 +260,8 @@ class CriticWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
+        if self._model_initialized:
+            return
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get('external_lib', None))
 
@@ -279,6 +283,8 @@ class CriticWorker(Worker):
                                                            enable_flatten=self.config.model.fsdp_config.use_orig_params)
 
         torch.cuda.empty_cache()
+
+        self._model_initialized = True
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_values(self, data: DataProto):

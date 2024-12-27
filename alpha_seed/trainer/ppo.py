@@ -447,6 +447,10 @@ class RayPPOTrainer(object):
                  sandbox_client=None):
         # assert torch.cuda.is_available(), 'cuda must be available on driver'
 
+        self.all_wg = {}
+        self.internal_wgs = []
+        self.internal_wg_roles = []
+        self.all_meta = {}
         self.sandbox_client = sandbox_client
         self.tokenizer = tokenizer
         self.config = config
@@ -578,8 +582,9 @@ class RayPPOTrainer(object):
             self.config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
             self.config.critic.optim.total_training_steps = total_training_steps
 
-    def init_workers(self):
+    def init_workers(self, kv_store_name="kv_store", ckpt_global_uploader=None):
         """Init resource pool and worker group"""
+
         self.resource_pool_manager.create_resource_pool()
 
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
@@ -649,36 +654,42 @@ class RayPPOTrainer(object):
             rm_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RewardModel], config=self.config.reward_model)
             self.resource_pool_to_cls[resource_pool]['rm'] = rm_cls
 
+        kv_store = ray.get_actor(name=kv_store_name)
+        server_only = ray.get(kv_store.get_by_key.remote("server_only"))
         # initialize WorkerGroup
-        all_wg = {}
-        internal_wgs = []
-        internal_wg_roles = []
-        all_meta = {}
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
             # no role allocated to this resource pool
             if len(class_dict) == 0:
                 continue
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
-            # this wg_dict is not dict, but RayWorkerGroup
-            wg_dict = self.ray_worker_group_cls(resource_pool=resource_pool, ray_cls_with_init=worker_dict_cls)
+            worker_names = ray.get(kv_store.get_by_key.remote(resource_pool.name_prefix)) if server_only else None
+            wg_dict = self.ray_worker_group_cls(
+                ray_cls_with_init=worker_dict_cls, worker_names=worker_names) if isinstance(
+                    worker_names, list) and len(worker_names) > 0 else self.ray_worker_group_cls(
+                        resource_pool=resource_pool, ray_cls_with_init=worker_dict_cls)
+            if worker_names is None:
+                kv_store.set_key_val.remote(resource_pool.name_prefix, wg_dict.worker_names)
             spawn_wg = wg_dict.spawn(prefix_set=class_dict.keys())
-            all_wg.update(spawn_wg)
-            internal_wgs.append(wg_dict)
-            internal_wg_roles.append(list(class_dict.keys()))
+            self.all_wg.update(spawn_wg)
+            self.internal_wgs.append(wg_dict)
+            self.internal_wg_roles.append(list(class_dict.keys()))
 
-        self.internal_wgs = internal_wgs
-        self.internal_wg_roles = internal_wg_roles
-        self.all_wg = all_wg
+        # init ckpt global uploader
+        self.ckpt_global_uploader = CkptGlobalUploader.options(
+            name=CkptGlobalUploader.name).remote(use_critic=self.use_critic,
+                                                 ckpt_version=self.config.trainer.ckpt_version,
+                                                 default_local_dir=self.config.trainer.default_local_dir,
+                                                 default_remote_dir=self.config.trainer.default_hdfs_dir
+                                                ) if ckpt_global_uploader is None else ckpt_global_uploader
 
-        for wg_name in all_wg:
-            all_meta[wg_name] = all_wg[wg_name].get_meta()
-        ndtimeline.report_topo(all_meta)
-
+        for wg_name in self.all_wg:
+            self.all_meta[wg_name] = self.all_wg[wg_name].get_meta()
+        ndtimeline.report_topo(self.all_meta)
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         if self.use_standalone_reference_policy or not self.use_reference_policy:
-            self.actor_rollout_wg = all_wg['actor_rollout']
+            self.actor_rollout_wg = self.all_wg['actor_rollout']
         elif self.use_colocate_reference_policy:
-            self.actor_rollout_wg = all_wg['actor_rollout_ref']
+            self.actor_rollout_wg = self.all_wg['actor_rollout_ref']
         else:
             raise NotImplementedError
 
@@ -687,7 +698,7 @@ class RayPPOTrainer(object):
         self.validation_manager.actor_rollout_wg = self.actor_rollout_wg
 
         if self.use_standalone_rollout:
-            self.standalone_rollout_wg = all_wg['standalone_rollout']
+            self.standalone_rollout_wg = self.all_wg['standalone_rollout']
             self.standalone_rollout_wg.init_model()
             standalone_rollout_address = self.standalone_rollout_wg.get_master_addr()
             self.actor_rollout_wg.setup_standalone_worker_comm(hybrid_master_address, standalone_rollout_address,
@@ -700,7 +711,7 @@ class RayPPOTrainer(object):
             self.standalone_rollout_wg = None
 
         if self.use_standalone_validator:
-            self.standalone_validator_wg = all_wg['standalone_validator']
+            self.standalone_validator_wg = self.all_wg['standalone_validator']
             self.standalone_validator_wg.init_model()
             standalone_validator_address = self.standalone_validator_wg.get_master_addr()
             self.actor_rollout_wg.setup_standalone_worker_comm(hybrid_master_address, standalone_validator_address,
@@ -717,26 +728,18 @@ class RayPPOTrainer(object):
             assert self.config.algorithm.adv_estimator == 'grpo' or self.config.algorithm.kl_ctrl.kl_coef <= 1e-10
 
         if self.use_critic:
-            self.critic_wg = all_wg['critic']
+            self.critic_wg = self.all_wg['critic']
             self.critic_wg.init_model()
 
         if self.use_standalone_reference_policy:
-            self.ref_policy_wg = all_wg['ref']
+            self.ref_policy_wg = self.all_wg['ref']
             self.ref_policy_wg.init_model()
         elif self.use_colocate_reference_policy:
-            self.ref_policy_wg = all_wg['actor_rollout_ref']
+            self.ref_policy_wg = self.all_wg['actor_rollout_ref']
 
         if self.use_rm:
-            self.rm_wg = all_wg['rm']
+            self.rm_wg = self.all_wg['rm']
             self.rm_wg.init_model()
-
-            self.validation_manager.rm_wg = self.rm_wg
-
-        # init ckpt global uploader
-        self.ckpt_global_uploader = CkptGlobalUploader.remote(use_critic=self.use_critic,
-                                                              ckpt_version=self.config.trainer.ckpt_version,
-                                                              default_local_dir=self.config.trainer.default_local_dir,
-                                                              default_remote_dir=self.config.trainer.default_hdfs_dir)
 
         if self.config.trainer.use_remote_sandbox:
             # set the eos_callback_fn of actor_rollout

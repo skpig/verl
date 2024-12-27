@@ -187,6 +187,8 @@ class AsyncActorRolloutRefWorker(Worker):
             fr_dumper = FlightRecorderDumper(actor_name=ray.get_runtime_context().get_actor_name())
             EmergencyServer.init(local_rank=local_rank, fr_dumper=fr_dumper)
 
+        self._model_initialized = False
+
     def _sequence_uuid(self):
         """Encode model ckpt, seqlen info for sequence generation, used for performance profiling
 
@@ -433,8 +435,11 @@ class AsyncActorRolloutRefWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def init_model(self):
+        if self._model_initialized:
+            return
         with self.profiler_context:
             self._init_model()
+        self._model_initialized = True
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def setup_standalone_worker_comm(self, hybrid_master_address, standalone_master_address, port, role):
