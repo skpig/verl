@@ -598,7 +598,7 @@ def config_to_trainer_kwargs(config):
     else:
         # the following parameters are only used in fit() and _validate() so skip them in server_only mode
         kwargs['logger'] = logger
-        kwargs['reward_fn'] = val_reward_fn
+        kwargs['reward_fn'] = reward_fn
         kwargs['val_reward_fn'] = val_reward_fn
 
     return kwargs
