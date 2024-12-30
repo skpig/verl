@@ -40,3 +40,7 @@ jobs:
           - cd -
           - pytest -s tests/models/transformers/test_ce_loss_op.py
           # - /opt/tiger/arnold/hdfs_client/hdfs
+      - name: parallelize tests
+        commands:
+          - export PYTHONPATH=/opt/tiger/alpha-seed/:/opt/tiger/seed_models:/opt/tiger/verl/:$PYTHONPATH
+          - pytest -s tests/parallelize/test_group_gemm_ep.py
