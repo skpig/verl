@@ -164,14 +164,20 @@ def do_ndtimeline_action(action: Literal["flush", "inc_step", "set_global_step",
 
 def report_topo(all_meta):
     import os
-    if os.getenv("ARNOLD_REGION") != "CN":
-        print("skip megavision report for non-cn region")
+    if os.getenv("ARNOLD_REGION") is None:
+        print("ARNOLD_REGION not set, skipped report topo meta to megavision")
         return
+    if os.getenv("ARNOLD_REGION") == "CN":
+        base_url = "https://arnold-x-keeper.byted.org"
+    else:
+        base_url = "https://arnold-x-keeper-sg.byted.org"
+    url = base_url + "/xray-perf/api/v1/topology/topology"
     import ray
     ray_job_id = str(ray.get_runtime_context().get_job_id())
     run_id = int(os.getenv("ROBUST_RUN_ID", 0))
     trial_id = int(os.getenv("ARNOLD_TRIAL_ID", 0))
     merlin_id = os.getenv("MERLIN_JOB_ID", "unknown_merlin_job")
+    headers = {"Content-Type": "application/json"}
     body = {
         "trial_id": trial_id,
         "run_id": run_id,
@@ -184,9 +190,6 @@ def report_topo(all_meta):
             "data": all_meta,
         }
     }
-    # currently, we only support cn
-    host = "https://arnold-x-keeper.byted.org/xray-perf"
-    url = host + "/api/v1/topology/topology"
     params = {
         "run_id": run_id,
         "trial_id": trial_id,
@@ -194,9 +197,10 @@ def report_topo(all_meta):
         "ray_job_id": ray_job_id,
         "parse": 1,
     }
-    print(f"uploading meta info to megavision: {body}")
-    try:
-        resp = requests.post(url, json=body, params=params)
-        resp.raise_for_status()
-    except Exception as e:
-        print(f"fail to upload meta info to megavision with {body}: {e}")
+    for _ in range(2):
+        try:
+            resp = requests.post(url, headers=headers, json=body, params=params)
+            resp.raise_for_status()
+            return
+        except Exception as e:
+            print(f"fail to upload meta info to megavision with {body}: {e}")
