@@ -1,5 +1,6 @@
 import ray
 import os
+import re
 
 import hdfs_io
 
@@ -68,7 +69,11 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
         if hdfs_path is None:
             return
 
-        global_step = int(hdfs_path.split('global_step_')[-1].split('/')[0])
+        match = re.search(r'global_step_(\d+)', hdfs_path)
+        if match:
+            global_step = int(match.group(1))
+        else:
+            raise ValueError(f'[rank-{self.rank}] Invalid hdfs path: {hdfs_path}, no global step section found.')
         hdfs_path = os.path.join(hdfs_path, f'global_step_{global_step}')
         assert check_ckpt_is_omnistore(hdfs_path), f'{hdfs_path} is not in omnistore checkpoint format, resume failed'
         ckpt_state = {'model': self.model, 'optimizer': self.optimizer, 'extra_state': {}}
