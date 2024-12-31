@@ -105,7 +105,7 @@ if __name__ == '__main__':
         optimizer_only=True if args.optimizer and not args.model else False,
         fsdp_save_flatten_model=args.flatten_ckpt2,
         return_dict=True,
-        untie_embeddings=args.untie_embeddings1,
+        untie_embeddings=args.untie_embeddings2,
     )
 
     if args.model:
