@@ -1111,8 +1111,8 @@ def _reshard_fsdp_state_dict_to_xperf_m8(tp_model, state_dict, device_mesh: Devi
     if device_mesh is not None:
         tp_size = device_mesh['tp'].size()
         tp_rank = device_mesh['tp'].get_local_rank()
-        assert tp_size <= model_config.num_key_value_heads
-        assert model_config.num_key_value_heads % tp_size == 0
+        # assert tp_size <= model_config.num_key_value_heads
+        assert model_config.num_key_value_heads % tp_size == 0 or tp_size % model_config.num_key_value_heads == 0
     else:
         tp_size = 1
         tp_rank = 0
@@ -1180,6 +1180,13 @@ def _reshard_fsdp_state_dict_to_xperf_m8(tp_model, state_dict, device_mesh: Devi
             torch.bfloat16)
         v_proj_weight = v_proj_weight.view(1, num_kv_heads, head_dim, hidden_size)
 
+        kv_replicate = tp_size // model_config.num_key_value_heads
+        # duplicate kv
+        if kv_replicate > 1:
+            q_proj_weight = q_proj_weight.view(-1, tp_size, head_dim, hidden_size).contiguous()
+            k_proj_weight = torch.tile(k_proj_weight, (1, kv_replicate, 1, 1))
+            v_proj_weight = torch.tile(v_proj_weight, (1, kv_replicate, 1, 1))
+
         # shard qkv and concat
         if device_mesh is not None:
             q_proj_weight = DTensor.from_local(q_proj_weight,
@@ -1209,8 +1216,11 @@ def _reshard_fsdp_state_dict_to_xperf_m8(tp_model, state_dict, device_mesh: Devi
             torch.bfloat16)
 
         # the XPerfGPT has different ordering
-        o_proj_weight = o_proj_weight.view(hidden_size, num_kv_heads, -1,
-                                           head_dim).transpose(1, 2)  # (hidden_size, -1, num_kv_heads, head_dim)
+        o_proj_weight = o_proj_weight.view(hidden_size, num_kv_heads, -1, head_dim).transpose(
+            1, 2).contiguous()  # (hidden_size, -1, num_kv_heads, head_dim)
+
+        if kv_replicate > 1:
+            o_proj_weight = o_proj_weight.view(hidden_size, -1, tp_size, head_dim)
 
         if device_mesh is not None:
             o_proj_weight = DTensor.from_local(o_proj_weight,

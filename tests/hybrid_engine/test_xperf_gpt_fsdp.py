@@ -37,7 +37,7 @@ p6_path_qwen = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/se
 
 from verl.utils.seed import CHAT_TEMPLATE
 
-model_path = copy_local_path_from_hdfs(p6dense_path)
+model_path = copy_local_path_from_hdfs(m8_path)
 tokenizer = AutoTokenizer.from_pretrained(model_path)
 tokenizer.padding_side = "left"
 
@@ -53,6 +53,7 @@ with torch.device('cpu'):
                                                  config=config)
 
     config = model.config
+    print(config)
 
 mixed_precision = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.float32, buffer_dtype=torch.float32)
 
@@ -79,12 +80,14 @@ rollout_config = OmegaConf.create({
     'prompt_length': 256,
     'response_length': 2048,
     'micro_batch_size': 128,
-    'tensor_model_parallel_size': 2,
+    'tensor_model_parallel_size': 8,
     'train_generate_kwargs': {
         'do_sample': False,
         'top_k': 0,
         'top_p': 1.,
         'temperature': 1.,
+        'min_p': -1,
+        'eta_epsilon': 0
     },
     'enable_paged_attention': False
 })
