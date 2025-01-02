@@ -336,14 +336,38 @@ class RewardManager():
 
 import ray
 import hydra
+import omegaconf
+from omegaconf import DictConfig
 
 from alpha_seed.trainer.ppo import RayPPOTrainer
+
+
+def override(config: DictConfig, overrides: DictConfig):
+    """
+    Override config with overrides.
+    """
+    for name, value in overrides.items():
+        if name not in config:
+            config[name] = value
+            continue
+        if isinstance(value, DictConfig):
+            assert isinstance(config[name], DictConfig)
+            override(config[name], value)
+            continue
+        else:
+            assert name in config, f"{config}"
+            config[name] = value
 
 
 @hydra.main(config_path='config', config_name='ppo_trainer', version_base=None)
 def main(config):
     metric_collection_context = MegavisionMetricsCtx().collect_init_ray_cluster_duration() \
         if MegavisionMetricsCtx else contextlib.nullcontext()
+
+    if config.recipe:
+        recipe = omegaconf.OmegaConf.load(config.recipe)
+        print(f"recipe found: {config.recipe}, overriding with config: {recipe}")
+        override(config, recipe)
 
     with metric_collection_context:
         init_ray()

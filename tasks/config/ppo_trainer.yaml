@@ -26,6 +26,7 @@ actor_rollout_ref:
     external_lib: null
     override_config: {}
     enable_gradient_checkpointing: False
+    use_ce_loss_fusion: False
   actor:
     strategy: fsdp  # This is for backward-compatibility
     ppo_mini_batch_size: 512
@@ -72,6 +73,7 @@ actor_rollout_ref:
   ref:
     fsdp_config:
       param_offload: True
+      use_orig_params: ${trainer.ckpt_enable_flatten}
       wrap_policy:
         # transformer_layer_cls_to_wrap: None
         min_num_params: 0
@@ -271,3 +273,5 @@ streaming_validator:
 
 convert_ckpt_to_omnistore_task:
   enable: False
+
+recipe: null
