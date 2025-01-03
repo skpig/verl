@@ -1212,11 +1212,14 @@ class RayPPOTrainer(object):
                     print_dataproto_size(batch, head='After old log probs')
 
                     if self.use_reference_policy:
-                        # compute reference log_prob
-                        with Timer(name='ref', logger=None) as timer:
-                            ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
-                            batch = batch.union(ref_log_prob)
-                        metrics['timing/ref'] = timer.last
+                        if not (self.config.actor_rollout_ref.actor.kl_loss_weight == 0 and
+                                self.config.algorithm.kl_ctrl.kl_coef == 0):
+                            # skip ref log prob if no kl loss
+                            # compute reference log_prob
+                            with Timer(name='ref', logger=None) as timer:
+                                ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
+                                batch = batch.union(ref_log_prob)
+                            metrics['timing/ref'] = timer.last
 
                     print_dataproto_size(batch, head='After reference policy')
 

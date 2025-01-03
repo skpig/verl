@@ -177,9 +177,9 @@ class DataParallelPPOActor(BasePPOActor):
             return entropy, log_probs
 
     def _make_minibatch_iterator(self, data: DataProto) -> Iterable[DataProto]:
-        select_keys = [
-            'responses', 'input_ids', 'attention_mask', 'old_log_probs', 'ref_log_prob', 'advantages', 'upgo_advantages'
-        ]
+        select_keys = ['responses', 'input_ids', 'attention_mask', 'old_log_probs', 'advantages', 'upgo_advantages']
+        if 'ref_log_prob' in data.batch.keys():
+            select_keys.append('ref_log_prob')
         data = data.select(batch_keys=select_keys)
         return data.make_iterator(mini_batch_size=self.config.ppo_mini_batch_size,
                                   epochs=self.config.ppo_epochs,
@@ -291,7 +291,7 @@ class DataParallelPPOActor(BasePPOActor):
                     attention_mask = micro_data['attention_mask']
                     response_mask = attention_mask[:, -response_length:]
                     old_log_prob = micro_data['old_log_probs']
-                    ref_log_prob = micro_data['ref_log_prob']
+                    ref_log_prob = micro_data.get('ref_log_prob', None)
                     advantages = micro_data['advantages']
                     upgo_advantages = micro_data['upgo_advantages']
 
