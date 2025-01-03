@@ -38,7 +38,7 @@ import numpy as np
 
 from alpha_seed.workers.hybrid_engine.hsdp import create_device_mesh, calculate_device_mesh_shape
 from alpha_seed.workers.hybrid_engine.fsdp_ulysses import (FSDPUlyssesShardingManager, ulysses_pad_and_slice_inputs)
-from alpha_seed.workers.utils import rearrange_micro_batches
+from verl.utils.seqlen_balancing import rearrange_micro_batches
 from alpha_seed.utils import ndtimeline
 from .initialize import parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init
 from dist_attn.ulysses.ops import slice_input_tensor, gather_outputs
@@ -51,7 +51,6 @@ from codetiming import Timer
 from datetime import timedelta
 
 from .initialize import get_device_init_context, create_init_fn, parallel_init_fsdp_fn, parallel_load_safetensors
-from ..utils import rearrange_micro_batches
 
 logger = logging.getLogger(__file__)
 
@@ -406,8 +405,8 @@ class RewardModelWorker(Worker):
             rm_data = self.ulysses_sharding_manager.preprocess_data(rm_data)
 
             if self.config.use_dynamic_bsz:
-                (micro_batches, num_micro_batches) = rearrange_micro_batches(batch=rm_data.batch,
-                                                                             max_token_len=self.config.max_token_len)
+                micro_batches, num_micro_batches, _ = rearrange_micro_batches(batch=rm_data.batch,
+                                                                              max_token_len=self.config.max_token_len)
             else:
                 # split batch into micro_batches
                 micro_batches = rm_data.batch.split(self.config.micro_batch_size)
@@ -417,10 +416,8 @@ class RewardModelWorker(Worker):
             total_reflection_nums = []
             for i, micro_batch in enumerate(micro_batches):
                 rm_score, reflection_nums = self._forward_micro_batch(micro_batch)
-                # 归一化
-                if i < num_micro_batches:
-                    output.append(rm_score)
-                    total_reflection_nums.append(reflection_nums)
+                output.append(rm_score)
+                total_reflection_nums.append(reflection_nums)
             scores = torch.cat(output, dim=0)  # (batch_size)
             reflection_nums = torch.cat(total_reflection_nums, dim=0)
             token_level_scores = self._expand_to_token_level(data, scores)

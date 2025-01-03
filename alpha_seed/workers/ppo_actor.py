@@ -15,6 +15,7 @@
 Single Process Actor
 """
 from typing import Iterable
+import itertools
 
 import torch
 from tensordict import TensorDict
@@ -38,10 +39,7 @@ from alpha_seed.workers.hybrid_engine.fsdp_ulysses import ulysses_pad_and_slice_
 
 from alpha_seed import core_algos
 
-# Note that this one doesn't change the original order
-from .utils import rearrange_micro_batches
-# Note that this one should only used for training because it changes the original order
-from alpha_seed.utils.seqlen_balance import rearrange_micro_batches as rearrange_micro_batches_train
+from verl.utils.seqlen_balancing import rearrange_micro_batches, get_reverse_idx
 
 from contextlib import nullcontext
 
@@ -211,26 +209,45 @@ class DataParallelPPOActor(BasePPOActor):
 
         select_keys = ['responses', 'input_ids', 'attention_mask']
         batch = data.select(batch_keys=select_keys).batch
-        if use_dynamic_bsz:
-            (micro_batches, num_micro_batches) = rearrange_micro_batches(batch=data.batch, max_token_len=max_token_len)
-        else:
-            # split batch into micro_batches
-            micro_batches = batch.split(micro_batch_size)
-            num_micro_batches = len(micro_batches)
-
         entropy_lst = []
-        log_probs_lst = []
-        for i, micro_batch in enumerate(micro_batches):
+        log_prob_lst = []
+        # Note: mismatched data order (here vs. upldate policy) can lead to
+        # mismatched log probs. In order to match them, we need to split
+        # batch into mini batches (same with training).
+        for mini_batch in batch.split(self.config.ppo_mini_batch_size):
+            if use_dynamic_bsz:
+                micro_batches, num_micro_batches, indices = rearrange_micro_batches(batch=mini_batch,
+                                                                                    max_token_len=max_token_len)
+            else:
+                micro_batches = batch.split(micro_batch_size)
+                num_micro_batches = len(micro_batches)
+
+            mini_batch_entropy = []
+            mini_batch_log_prob = []
             with torch.inference_mode():
-                assert micro_batch.device == torch.device('cpu')
-                micro_batch = micro_batch.cuda()  # actor device is cpu when using offload
-                entropy, log_probs = self._forward_micro_batch(micro_batch,
-                                                               temperature=temperature,
-                                                               compute_entropy=True)
-            if i < num_micro_batches:
-                log_probs_lst.append(log_probs)
-                entropy_lst.append(entropy)
-        log_probs = torch.concat(log_probs_lst, dim=0)
+                for i, micro_batch in enumerate(micro_batches):
+                    assert micro_batch.device == torch.device('cpu')
+                    micro_batch = micro_batch.cuda()
+                    entropy, log_probs = self._forward_micro_batch(micro_batch=micro_batch,
+                                                                   temperature=temperature,
+                                                                   compute_entropy=True)
+                    mini_batch_log_prob.append(log_probs)
+                    mini_batch_entropy.append(entropy)
+
+            mini_log_prob = torch.cat(mini_batch_log_prob, dim=0)
+            mini_entropy = torch.cat(mini_batch_entropy, dim=0)
+            if use_dynamic_bsz:
+                indices = list(itertools.chain.from_iterable(indices))
+                assert len(indices) == mini_entropy.size(
+                    0), f"{len(indices)} vs. {mini_entropy.size()} vs. {mini_log_prob.size()}"
+                revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
+                mini_log_prob = mini_log_prob[revert_indices]
+                mini_entropy = mini_entropy[revert_indices]
+
+            log_prob_lst.append(mini_log_prob)
+            entropy_lst.append(mini_entropy)
+
+        log_probs = torch.concat(log_prob_lst, dim=0)
         entropy = torch.concat(entropy_lst, dim=0)
         return entropy, log_probs
 
@@ -246,18 +263,24 @@ class DataParallelPPOActor(BasePPOActor):
                     f'Number of {self.gradient_accumulation=} is too large when turn on profile. Try to turn off profile or reduce ppo_mini_batch_size.'
                 )
         temperature = data.meta_info['temperature']  # temperature must be in the data.meta_info to avoid slient error
-        dataloader = self._make_minibatch_iterator(data=data)
+
+        # make minibatch iterator
+        # dataloader = self._make_minibatch_iterator(data=data)
+        select_keys = [
+            'responses', 'input_ids', 'attention_mask', 'old_log_probs', 'ref_log_prob', 'advantages', 'upgo_advantages'
+        ]
+        batch = data.select(batch_keys=select_keys).batch
+        dataloader = batch.split(self.config.ppo_mini_batch_size)
 
         metrics = {}
-        for batch_idx, data in enumerate(dataloader):
+        for batch_idx, mini_batch in enumerate(dataloader):
             with self.profiler_context as p:
                 if self.config.use_dynamic_bsz:
-                    (micro_batches,
-                     num_micro_batches) = rearrange_micro_batches_train(batch=data.batch,
-                                                                        max_token_len=self.config.ppo_max_token_len)
+                    micro_batches, _, _ = rearrange_micro_batches(batch=mini_batch,
+                                                                  max_token_len=self.config.ppo_max_token_len)
                 else:
                     # split batch into micro_batches
-                    micro_batches = data.batch.split(self.config.ppo_micro_batch_size)
+                    micro_batches = mini_batch.split(self.config.ppo_micro_batch_size)
                 self.actor_optimizer.zero_grad()
 
                 for i, micro_data in enumerate(micro_batches):
@@ -315,11 +338,7 @@ class DataParallelPPOActor(BasePPOActor):
                     policy_loss = total_loss - entropy_loss * entropy_coeff + kl_loss_weight * kl_loss
 
                     if self.config.use_dynamic_bsz:
-                        if i >= num_micro_batches:
-                            # fake data
-                            loss = policy_loss * 0.0
-                        else:
-                            loss = policy_loss * (len(micro_data) / self.config.ppo_mini_batch_size)
+                        loss = policy_loss * (len(micro_data) / self.config.ppo_mini_batch_size)
                     else:
                         loss = policy_loss / self.gradient_accumulation
                     loss.backward()
@@ -335,6 +354,14 @@ class DataParallelPPOActor(BasePPOActor):
                         'actor/ppo_kl_sum': ppo_kl_sum.detach().item(),
                         'actor/tokens_per_micro_batch_update': attention_mask.sum().detach().item(),
                     }
+                    # debug
+                    # if batch_idx == 0:
+                    #     if ppo_kl_sum.detach().item() == 0:
+                    #         print(f"rank [{torch.distributed.get_rank()}]: match logprob and old logprob {i}")
+                    #     else:
+                    #         print(
+                    #             f"rank [{torch.distributed.get_rank()}]: mismatch logprob and old logprob {i}: {ppo_kl_sum.detach().item()}"
+                    #         )
                     append_to_dict(metrics, micro_data_metric)
 
                 grad_norm = self._optimizer_step()

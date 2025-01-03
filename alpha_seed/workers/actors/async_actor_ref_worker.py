@@ -50,7 +50,6 @@ from alpha_seed.workers.hybrid_engine.fsdp_ulysses import FSDPUlyssesShardingMan
 from alpha_seed.utils import ndtimeline
 from .initialize import parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init
 from .checkpoint.extensions import register_dtensor_save_hook
-from alpha_seed.workers.utils import rearrange_micro_batches
 from dist_attn.ulysses.parallel_states import set_ulysses_sequence_parallel_group, get_ulysses_sequence_parallel_world_size
 from dist_attn.ulysses.ops import slice_input_tensor, gather_outputs
 from alpha_seed.workers.ppo_actor import DataParallelPPOActor

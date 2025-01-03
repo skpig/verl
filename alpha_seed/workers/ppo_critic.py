@@ -16,6 +16,7 @@ Implement a multiprocess PPOCritic
 """
 
 from typing import Iterable
+import itertools
 
 import torch
 import torch.distributed
@@ -36,10 +37,7 @@ from alpha_seed import core_algos
 
 from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
 from dist_attn.ulysses.ops import gather_outputs
-# Note that this one doesn't change the original order
-from .utils import rearrange_micro_batches
-# Note that this one should only used for training because it changes the original order
-from alpha_seed.utils.seqlen_balance import rearrange_micro_batches as rearrange_micro_batches_train
+from verl.utils.seqlen_balancing import rearrange_micro_batches, get_reverse_idx
 from contextlib import nullcontext
 
 __all__ = ['DataParallelPPOCritic']
@@ -151,22 +149,36 @@ class DataParallelPPOCritic(BasePPOCritic):
             max_token_len = data.meta_info['max_token_len']
         else:
             micro_batch_size = data.meta_info['micro_batch_size']
+
         select_keys = ['responses', 'input_ids', 'attention_mask']
         batch = data.select(batch_keys=select_keys).batch
-        if use_dynamic_bsz:
-            (micro_batches, num_micro_batches) = rearrange_micro_batches(batch=data.batch, max_token_len=max_token_len)
-        else:
-            # split batch into micro_batches
-            micro_batches = batch.split(micro_batch_size)
-            num_micro_batches = len(micro_batches)
         values_lst = []
-        for i, micro_batch in enumerate(micro_batches):
-            assert micro_batch.device == torch.device('cpu')
-            micro_batch = micro_batch.cuda()  # actor device is cpu when using offload
+        # Note: mismatched data order (here vs. upldate critic) can lead to
+        # mismatched values. In order to match them, we need to split
+        # batch into mini batches (same with training).
+        for mini_batch in batch.split(self.config.ppo_mini_batch_size):
+            if use_dynamic_bsz:
+                micro_batches, num_micro_batches, indices = rearrange_micro_batches(batch=mini_batch,
+                                                                                    max_token_len=max_token_len)
+            else:
+                micro_batches = batch.split(micro_batch_size)
+                num_micro_batches = len(micro_batches)
+
+            mini_batch_values = []
             with torch.no_grad():
-                values = self._forward_micro_batch(micro_batch)
-            if i < num_micro_batches:
-                values_lst.append(values)
+                for micro_batch in micro_batches:
+                    assert micro_batch.device == torch.device('cpu')
+                    micro_batch = micro_batch.cuda()  # actor device is cpu when using offload
+                    values = self._forward_micro_batch(micro_batch)
+                    mini_batch_values.append(values)
+
+            mini_values = torch.cat(mini_batch_values, dim=0)
+            if use_dynamic_bsz:
+                indices = list(itertools.chain.from_iterable(indices))
+                assert len(indices) == mini_values.size(0)
+                revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
+                mini_values = mini_values[revert_indices]
+            values_lst.append(mini_values)
         values = torch.concat(values_lst, dim=0)
         return values
 
@@ -175,7 +187,12 @@ class DataParallelPPOCritic(BasePPOCritic):
 
         metrics = {}
 
-        dataloader = self._make_minibatch_iterator(data)
+        if self.config.shuffle:
+            dataloader = self._make_minibatch_iterator(data)
+        else:
+            select_keys = ['input_ids', 'responses', 'attention_mask', 'values', 'returns']
+            batch = data.select(batch_keys=select_keys).batch
+            dataloader = batch.split(self.config.ppo_mini_batch_size)
 
         if not self.config.use_dynamic_bsz:
             if self.gradient_accumulation > 2 and not isinstance(self.profiler_context, nullcontext):
@@ -186,9 +203,8 @@ class DataParallelPPOCritic(BasePPOCritic):
         for batch_idx, data in enumerate(dataloader):
             with self.profiler_context as p:
                 if self.config.use_dynamic_bsz:
-                    (micro_batches,
-                     num_micro_batches) = rearrange_micro_batches_train(batch=data.batch,
-                                                                        max_token_len=self.config.ppo_max_token_len)
+                    micro_batches, _, _ = rearrange_micro_batches(batch=data.batch,
+                                                                  max_token_len=self.config.ppo_max_token_len)
                 else:
                     # split batch into micro_batches
                     micro_batches = data.batch.split(self.config.ppo_micro_batch_size)
@@ -216,11 +232,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                                                            eos_mask=eos_mask,
                                                            cliprange_value=self.config.cliprange_value)
                     if self.config.use_dynamic_bsz:
-                        if i >= num_micro_batches:
-                            # fake data
-                            loss = vf_loss * 0.0
-                        else:
-                            loss = vf_loss * (len(micro_data) / self.config.ppo_mini_batch_size)
+                        loss = vf_loss * (len(micro_data) / self.config.ppo_mini_batch_size)
                     else:
                         loss = vf_loss / self.gradient_accumulation
                     loss.backward()

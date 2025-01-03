@@ -48,6 +48,7 @@ from single_controller.ray import RayResourcePool, RayWorkerGroup, RayClassWithI
 from single_controller.ray.base import create_colocated_worker_cls
 from verl import DataProto
 from verl.utils.fs import copy_local_path_from_hdfs
+from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 
 from hdfs_io import makedirs, hput, hcopy, hexists
 
@@ -889,7 +890,6 @@ class RayPPOTrainer(object):
     def _balance_batch(self, batch, metrics, logging_prefix='global_seqlen'):
         # Note that the reorder is in place
         # perform global sequence balancing here
-        from alpha_seed.utils.seqlen_balance import get_seqlen_balanced_partitions, log_seqlen_unbalance
         # attention_mask can be [bsz * bon, seqlen] or [bsz, bon, seqlen]
         attention_mask = batch.batch['attention_mask']
         assert len(attention_mask.shape) == 2 or len(attention_mask.shape) == 3
