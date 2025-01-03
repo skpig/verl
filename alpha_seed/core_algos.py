@@ -257,13 +257,8 @@ def compute_policy_loss(old_log_prob, ref_log_prob, log_prob, advantages, upgo_a
 
     if total_loss.isnan().any():
         print("find nan in total_loss, tracing...")
-        loss_variables = {"pg_losses1": pg_losses1, "pg_losses2": pg_losses2, "pg_losses3": pg_losses3}
-        variables = loss_variables.update({
-            "log_prob": log_prob,
-            "old_log_prob": old_log_prob,
-            "advantages": advantages,
-            "ratio": ratio
-        })
+        variables = {"pg_losses1": pg_losses1, "pg_losses2": pg_losses2, "pg_losses3": pg_losses3}
+        variables.update({"log_prob": log_prob, "old_log_prob": old_log_prob, "advantages": advantages, "ratio": ratio})
         for k, v in variables.items():
             if v.isnan().any():
                 print("find nan in ", k, v)
