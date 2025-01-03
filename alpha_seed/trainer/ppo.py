@@ -910,6 +910,186 @@ class RayPPOTrainer(object):
         metrics.update(global_balance_stats)
         print_dataproto_size(batch, head='After Sequence Balancing')
 
+    def _generate(self, batch, resume_step, metrics, standalone_batch, pending_batch_queue, ready_batch_queue):
+        # print the size of each data proto before training
+        print_dataproto_size(batch, head='Before generation')
+
+        if self.config.data.num_prompts_per_data > 1:
+            batch = batch.unfold_column_chunks(self.config.data.num_prompts_per_data,
+                                               split_keys=['input_ids', 'attention_mask', 'off_policy_steps'])
+
+        # hybrid rollout
+        batch = batch.repeat(self.num_bon)
+        # create a uid for each data inside the batch
+        batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(batch))], dtype=object)
+        batch.check_consistency()
+
+        gen_batch = batch.pop(batch_keys=['input_ids', 'attention_mask', 'off_policy_steps'])
+        # assign the non_tensor_batch uid to the generator as well.
+        non_tensor_infos = ['uid', 'reward_model']
+        for key in non_tensor_infos:
+            gen_batch.non_tensor_batch[key] = batch.non_tensor_batch[key]
+
+        gen_batch.meta_info.update({
+            'generation_kwargs':
+                self.config.actor_rollout_ref.rollout.train_generate_kwargs,
+            'complete_ratio':
+                1.0 if self.global_step < resume_step + self.config.streaming_rollout.warmup_step else
+                self.config.actor_rollout_ref.rollout.get("complete_ratio", 1.0)
+        })
+        pprint(f'start hybrid rollout, input batches {len(gen_batch)}.')
+
+        with Timer(name='gen', logger=None) as timer:
+            with tensorcore_collection():
+                gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+                # TODO: The following two lines should be memory view. However it's not. Let's remove it by removing all its dependency
+                gen_batch_output.batch['prompts'] = gen_batch_output.batch['input_ids'][:, :self.config.data.
+                                                                                        max_prompt_length]
+                gen_batch_output.batch['responses'] = gen_batch_output.batch['input_ids'][:, self.config.data.
+                                                                                          max_prompt_length:]
+
+            print_dataproto_size(gen_batch_output, head='After generation')
+
+        metrics['timing/gen'] = timer.last
+        metrics['rollout/hybrid_input_batch'] = len(batch)
+
+        # for debugging purpose only. we manually set all the attention_mask to 1 to
+        # test the training performance under maximum workload.
+        if self.config.trainer.set_fake_attention_mask:
+            with Timer(name='fake_mask', logger=None) as timer:
+                from verl.utils.model import create_random_mask
+                total_length = self.config.data.max_prompt_length + self.config.data.max_response_length
+
+                min_ratio_of_valid_token = self.config.trainer.fake_seqlen_ratio
+                max_ratio_of_valid_token = self.config.trainer.fake_seqlen_ratio
+
+                assert self.config.trainer.fake_seqlen_ratio > (self.config.data.max_prompt_length + 1) / total_length
+
+                max_ratio_of_left_padding = 0
+                attention_mask = create_random_mask(gen_batch_output.batch['input_ids'],
+                                                    max_ratio_of_valid_token=max_ratio_of_valid_token,
+                                                    max_ratio_of_left_padding=max_ratio_of_left_padding,
+                                                    min_ratio_of_valid_token=min_ratio_of_valid_token)
+
+                gen_batch_output.batch['attention_mask'] = attention_mask
+
+                # force actor and critic stop updating weights because the data is fake
+                self.config.actor_rollout_ref.actor.optim.lr = 0
+                self.config.critic.optim.lr = 0
+
+            metrics['timing/fake_mask'] = timer.last
+            pprint(f'set fake attention mask')
+
+        # only report metrics from one generation replica
+        if 'xperf_metrics' in gen_batch_output.meta_info:
+            for name, x_metric in gen_batch_output.meta_info['xperf_metrics'].items():
+                self.logger.log(data={"rollout/gen/hybrid_{}".format(name): wandb.Histogram(x_metric)},
+                                step=self.global_step)
+            gen_batch_output.meta_info.pop('xperf_metrics')
+
+        # stop hybrid rollout
+        finished_num, ready_batch_queue, pending_batch_queue = process_output(batch, gen_batch_output, self.tokenizer,
+                                                                              ready_batch_queue, pending_batch_queue,
+                                                                              self.config)
+        pprint(f'stop hybrid rollout, completed_batch {finished_num}, incompleted_batch {len(batch) - finished_num} ' +
+               f'ready_queue {ready_batch_queue.qsize()}, pending_queue {pending_batch_queue.qsize()}.')
+        metrics['rollout/hybrid_completed_batch'] = finished_num
+        metrics['rollout/hybrid_incompleted_batch'] = len(batch) - finished_num
+
+        # stop standalone rollout to update model
+        if self.standalone_batch_resume is not None:
+            standalone_batch = self.standalone_batch_resume
+            self.standalone_batch_resume = None
+
+        finished_num = 0
+        if len(standalone_batch) > 0:
+            if not self.standalone_gen_batch_output_resume:
+                gen_batch_output = self.standalone_rollout_wg.generate_sequences_get()
+            else:
+                gen_batch_output = self.standalone_gen_batch_output_resume
+                self.standalone_gen_batch_output_resume = None
+            if self.config.trainer.save_freq > 0 and (self.global_step -
+                                                      1) % self.config.trainer.save_freq == 0 and self.global_step != 1:
+                print(f"step {self.global_step}, saving... standalone_gen_batch")
+                # save standalone_batch and gen_batch_output
+                save_path = f"{self.config.trainer.default_hdfs_dir}/checkpoints/global_step_{self.global_step - 1}/"
+                save_dataproto(gen_batch_output, path=save_path, prefix='standalone_gen_batch_output')
+                save_dataproto(standalone_batch, path=save_path, prefix='standalone_batch')
+            # only report metrics from one generation replica
+            if 'xperf_metrics' in gen_batch_output.meta_info:
+                for name, x_metric in gen_batch_output.meta_info['xperf_metrics'].items():
+                    self.logger.log(data={"rollout/gen/standalone_{}".format(name): wandb.Histogram(x_metric)},
+                                    step=self.global_step)
+                gen_batch_output.meta_info.pop('xperf_metrics')
+            finished_num, ready_batch_queue, pending_batch_queue = process_output(standalone_batch,
+                                                                                  gen_batch_output,
+                                                                                  self.tokenizer,
+                                                                                  ready_batch_queue,
+                                                                                  pending_batch_queue,
+                                                                                  self.config,
+                                                                                  standalone=True)
+            pprint(
+                f'stop standalone rollout, completed_batch {finished_num}, incompleted_batch {len(standalone_batch) - finished_num}'
+                + f'ready_queue {ready_batch_queue.qsize()}, pending_queue {pending_batch_queue.qsize()}.')
+        metrics['rollout/standalone_completed_batch'] = finished_num
+        metrics['rollout/standalone_incompleted_batch'] = len(standalone_batch) - finished_num
+
+        # update standalone rollout weights
+        with Timer(name='update_standalone', logger=None) as timer:
+            if self.standalone_rollout_wg is not None:
+                self.actor_rollout_wg.update_standalone_worker("standalone_rollout")
+                self.standalone_rollout_wg.update_standalone_worker("standalone_rollout")
+        self.actor_rollout_wg.release_param_and_cache()
+        metrics['timing/update_standalone'] = timer.last
+
+        # standalone generate (off policy)
+        standalone_batch = []
+        max_standalone_len = 0
+        while self.standalone_rollout_wg is not None and pending_batch_queue.qsize(
+        ) >= self.standalone_rollout_wg.world_size:
+            for _ in range(self.standalone_rollout_wg.world_size):
+                standalone_batch.append(pending_batch_queue.get())
+                max_standalone_len = max(max_standalone_len, standalone_batch[-1].batch['attention_mask'].sum(-1))
+        for i in range(len(standalone_batch)):
+            standalone_batch[i] = pad(standalone_batch[i], max_standalone_len, self.tokenizer)
+        if len(standalone_batch) > 0:
+            standalone_batch = DataProto.concat(standalone_batch)
+            standalone_gen_batch = standalone_batch.pop(batch_keys=['input_ids', 'attention_mask', 'off_policy_steps'])
+            non_tensor_infos = ['uid', 'reward_model']
+            for key in non_tensor_infos:
+                standalone_gen_batch.non_tensor_batch[key] = standalone_batch.non_tensor_batch[key]
+
+            standalone_gen_batch.meta_info[
+                'generation_kwargs'] = self.config.actor_rollout_ref.rollout.train_generate_kwargs
+            standalone_gen_batch.meta_info['complete_ratio'] = 1
+            self.standalone_rollout_wg.generate_sequences_put(standalone_gen_batch)
+            pprint(f'start standalone rollout, input batches {len(standalone_gen_batch)}.')
+        metrics['rollout/standalone_input_batch'] = len(standalone_batch)
+        # get training batch from ready queue, make it stable by random pick
+        return_batch_size = self.config.data.train_batch_size * \
+            self.config.trainer.league_training_config.buffer_size * \
+            self.num_bon
+        ready_batch = [ready_batch_queue.get() for _ in range(min(return_batch_size, ready_batch_queue.qsize()))]
+        real_bsz = len(ready_batch)
+        random_choise_batch = []
+        if len(ready_batch) < return_batch_size:
+            random_choise_batch.extend(
+                [random.choice(ready_batch) for _ in range(return_batch_size - len(ready_batch))])
+        fake_bsz = len(random_choise_batch)
+        ready_batch.extend(random_choise_batch)
+        metrics.update({"rollout/real_bsz": real_bsz, "rollout/fake_bsz": fake_bsz})
+
+        batch = DataProto.concat(ready_batch)
+        if self.config.algorithm.force_append_eos:
+            batch.batch["input_ids"][:, -1] = self.tokenizer.eos_token_id
+            batch.batch["responses"][:, -1] = self.tokenizer.eos_token_id
+        batch.meta_info['generation_kwargs'] = self.config.actor_rollout_ref.rollout.train_generate_kwargs
+        batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask'], dim=-1).tolist()
+        metrics['rollout/training_batch'] = len(batch)
+        pprint(f'training batches {len(batch)}.')
+
+        return batch
+
     def fit(self):
         self.global_step = 0
 
@@ -951,194 +1131,24 @@ class RayPPOTrainer(object):
                 metrics = {}
                 with Timer(name='step', logger=None) as step_timer:
                     # hybrid generate (on policy)
-                    batch: DataProto = DataProto.from_single_dict(batch_dict)
-
-                    # print the size of each data proto before training
-                    print_dataproto_size(batch, head='Before generation')
-
-                    if self.config.data.num_prompts_per_data > 1:
-                        batch = batch.unfold_column_chunks(
-                            self.config.data.num_prompts_per_data,
-                            split_keys=['input_ids', 'attention_mask', 'off_policy_steps'])
-
-                    # hybrid rollout
-                    batch = batch.repeat(self.num_bon)
-                    # create a uid for each data inside the batch
-                    batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(batch))],
-                                                             dtype=object)
-                    batch.check_consistency()
-
-                    gen_batch = batch.pop(batch_keys=['input_ids', 'attention_mask', 'off_policy_steps'])
-                    # assign the non_tensor_batch uid to the generator as well.
-                    non_tensor_infos = ['uid', 'reward_model']
-                    for key in non_tensor_infos:
-                        gen_batch.non_tensor_batch[key] = batch.non_tensor_batch[key]
-
-                    gen_batch.meta_info.update({
-                        'generation_kwargs':
-                            self.config.actor_rollout_ref.rollout.train_generate_kwargs,
-                        'complete_ratio':
-                            1.0 if self.global_step < resume_step + self.config.streaming_rollout.warmup_step else
-                            self.config.actor_rollout_ref.rollout.get("complete_ratio", 1.0)
-                    })
-                    pprint(f'start hybrid rollout, input batches {len(gen_batch)}.')
-
-                    with Timer(name='gen', logger=None) as timer:
-                        with tensorcore_collection():
-                            gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
-                            # TODO: The following two lines should be memory view. However it's not. Let's remove it by removing all its dependency
-                            gen_batch_output.batch['prompts'] = gen_batch_output.batch['input_ids'][:, :self.config.data
-                                                                                                    .max_prompt_length]
-                            gen_batch_output.batch['responses'] = gen_batch_output.batch[
-                                'input_ids'][:, self.config.data.max_prompt_length:]
-
-                        print_dataproto_size(gen_batch_output, head='After generation')
-
-                    metrics['timing/gen'] = timer.last
-                    metrics['rollout/hybrid_input_batch'] = len(batch)
-
-                    # for debugging purpose only. we manually set all the attention_mask to 1 to
-                    # test the training performance under maximum workload.
-                    if self.config.trainer.set_fake_attention_mask:
-                        with Timer(name='fake_mask', logger=None) as timer:
-                            from verl.utils.model import create_random_mask
-                            total_length = self.config.data.max_prompt_length + self.config.data.max_response_length
-
-                            min_ratio_of_valid_token = self.config.trainer.fake_seqlen_ratio
-                            max_ratio_of_valid_token = self.config.trainer.fake_seqlen_ratio
-
-                            assert self.config.trainer.fake_seqlen_ratio > (self.config.data.max_prompt_length +
-                                                                            1) / total_length
-
-                            max_ratio_of_left_padding = 0
-                            attention_mask = create_random_mask(gen_batch_output.batch['input_ids'],
-                                                                max_ratio_of_valid_token=max_ratio_of_valid_token,
-                                                                max_ratio_of_left_padding=max_ratio_of_left_padding,
-                                                                min_ratio_of_valid_token=min_ratio_of_valid_token)
-
-                            gen_batch_output.batch['attention_mask'] = attention_mask
-
-                            # force actor and critic stop updating weights because the data is fake
-                            self.config.actor_rollout_ref.actor.optim.lr = 0
-                            self.config.critic.optim.lr = 0
-
-                        metrics['timing/fake_mask'] = timer.last
-                        pprint(f'set fake attention mask')
-
-                    # only report metrics from one generation replica
-                    if 'xperf_metrics' in gen_batch_output.meta_info:
-                        for name, x_metric in gen_batch_output.meta_info['xperf_metrics'].items():
-                            self.logger.log(data={"rollout/gen/hybrid_{}".format(name): wandb.Histogram(x_metric)},
-                                            step=self.global_step)
-                        gen_batch_output.meta_info.pop('xperf_metrics')
-
-                    # stop hybrid rollout
-                    finished_num, ready_batch_queue, pending_batch_queue = process_output(
-                        batch, gen_batch_output, self.tokenizer, ready_batch_queue, pending_batch_queue, self.config)
-                    pprint(
-                        f'stop hybrid rollout, completed_batch {finished_num}, incompleted_batch {len(batch) - finished_num} '
-                        + f'ready_queue {ready_batch_queue.qsize()}, pending_queue {pending_batch_queue.qsize()}.')
-                    metrics['rollout/hybrid_completed_batch'] = finished_num
-                    metrics['rollout/hybrid_incompleted_batch'] = len(batch) - finished_num
-
-                    # stop standalone rollout to update model
-                    if self.standalone_batch_resume is not None:
-                        standalone_batch = self.standalone_batch_resume
-                        self.standalone_batch_resume = None
-
-                    finished_num = 0
-                    if len(standalone_batch) > 0:
-                        if not self.standalone_gen_batch_output_resume:
-                            gen_batch_output = self.standalone_rollout_wg.generate_sequences_get()
-                        else:
-                            gen_batch_output = self.standalone_gen_batch_output_resume
-                            self.standalone_gen_batch_output_resume = None
-                        if self.config.trainer.save_freq > 0 and (
-                                self.global_step - 1) % self.config.trainer.save_freq == 0 and self.global_step != 1:
-                            print(f"step {self.global_step}, saving... standalone_gen_batch")
-                            # save standalone_batch and gen_batch_output
-                            save_path = f"{self.config.trainer.default_hdfs_dir}/checkpoints/global_step_{self.global_step - 1}/"
-                            save_dataproto(gen_batch_output, path=save_path, prefix='standalone_gen_batch_output')
-                            save_dataproto(standalone_batch, path=save_path, prefix='standalone_batch')
-                        # only report metrics from one generation replica
-                        if 'xperf_metrics' in gen_batch_output.meta_info:
-                            for name, x_metric in gen_batch_output.meta_info['xperf_metrics'].items():
-                                self.logger.log(
-                                    data={"rollout/gen/standalone_{}".format(name): wandb.Histogram(x_metric)},
-                                    step=self.global_step)
-                            gen_batch_output.meta_info.pop('xperf_metrics')
-                        finished_num, ready_batch_queue, pending_batch_queue = process_output(standalone_batch,
-                                                                                              gen_batch_output,
-                                                                                              self.tokenizer,
-                                                                                              ready_batch_queue,
-                                                                                              pending_batch_queue,
-                                                                                              self.config,
-                                                                                              standalone=True)
-                        pprint(
-                            f'stop standalone rollout, completed_batch {finished_num}, incompleted_batch {len(standalone_batch) - finished_num}'
-                            + f'ready_queue {ready_batch_queue.qsize()}, pending_queue {pending_batch_queue.qsize()}.')
-                    metrics['rollout/standalone_completed_batch'] = finished_num
-                    metrics['rollout/standalone_incompleted_batch'] = len(standalone_batch) - finished_num
-
-                    # update standalone rollout weights
-                    with Timer(name='update_standalone', logger=None) as timer:
-                        if self.standalone_rollout_wg is not None:
-                            self.actor_rollout_wg.update_standalone_worker("standalone_rollout")
-                            self.standalone_rollout_wg.update_standalone_worker("standalone_rollout")
-                    self.actor_rollout_wg.release_param_and_cache()
-                    metrics['timing/update_standalone'] = timer.last
-
-                    # standalone generate (off policy)
-                    standalone_batch = []
-                    max_standalone_len = 0
-                    while self.standalone_rollout_wg is not None and pending_batch_queue.qsize(
-                    ) >= self.standalone_rollout_wg.world_size:
-                        for _ in range(self.standalone_rollout_wg.world_size):
-                            standalone_batch.append(pending_batch_queue.get())
-                            max_standalone_len = max(max_standalone_len,
-                                                     standalone_batch[-1].batch['attention_mask'].sum(-1))
-                    for i in range(len(standalone_batch)):
-                        standalone_batch[i] = pad(standalone_batch[i], max_standalone_len, self.tokenizer)
-                    if len(standalone_batch) > 0:
-                        standalone_batch = DataProto.concat(standalone_batch)
-                        standalone_gen_batch = standalone_batch.pop(
-                            batch_keys=['input_ids', 'attention_mask', 'off_policy_steps'])
-                        non_tensor_infos = ['uid', 'reward_model']
-                        for key in non_tensor_infos:
-                            standalone_gen_batch.non_tensor_batch[key] = standalone_batch.non_tensor_batch[key]
-
-                        standalone_gen_batch.meta_info[
-                            'generation_kwargs'] = self.config.actor_rollout_ref.rollout.train_generate_kwargs
-                        standalone_gen_batch.meta_info['complete_ratio'] = 1
-                        self.standalone_rollout_wg.generate_sequences_put(standalone_gen_batch)
-                        pprint(f'start standalone rollout, input batches {len(standalone_gen_batch)}.')
-                    metrics['rollout/standalone_input_batch'] = len(standalone_batch)
-                    # get training batch from ready queue, make it stable by random pick
-                    return_batch_size = self.config.data.train_batch_size * \
-                        self.config.trainer.league_training_config.buffer_size * \
-                        self.num_bon
-                    ready_batch = [
-                        ready_batch_queue.get() for _ in range(min(return_batch_size, ready_batch_queue.qsize()))
-                    ]
-                    real_bsz = len(ready_batch)
-                    random_choise_batch = []
-                    if len(ready_batch) < return_batch_size:
-                        random_choise_batch.extend(
-                            [random.choice(ready_batch) for _ in range(return_batch_size - len(ready_batch))])
-                    fake_bsz = len(random_choise_batch)
-                    ready_batch.extend(random_choise_batch)
-                    metrics.update({"rollout/real_bsz": real_bsz, "rollout/fake_bsz": fake_bsz})
-
-                    batch = DataProto.concat(ready_batch)
-                    if self.config.algorithm.force_append_eos:
-                        batch.batch["input_ids"][:, -1] = self.tokenizer.eos_token_id
-                        batch.batch["responses"][:, -1] = self.tokenizer.eos_token_id
-                    batch.meta_info['generation_kwargs'] = self.config.actor_rollout_ref.rollout.train_generate_kwargs
-                    batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask'], dim=-1).tolist()
-                    metrics['rollout/training_batch'] = len(batch)
-                    pprint(f'training batches {len(batch)}.')
-
-                    print_dataproto_size(batch, head='Before Sequence Balancing')
+                    if self.config.trainer.load_train_batch_path is None:
+                        batch: DataProto = DataProto.from_single_dict(batch_dict)
+                        batch = self._generate(batch=batch,
+                                               resume_step=resume_step,
+                                               metrics=metrics,
+                                               standalone_batch=standalone_batch,
+                                               pending_batch_queue=pending_batch_queue,
+                                               ready_batch_queue=ready_batch_queue)
+                        if self.config.trainer.save_train_batch_dir is not None:
+                            makedirs(self.config.trainer.save_train_batch_dir, exist_ok=True)
+                            local_path = f'train_batch_{self.global_step}.pt'
+                            batch.save_to_disk(local_path)
+                            hput(local_path, self.config.trainer.save_train_batch_dir)
+                            print(f'Saving train batch from {local_path} to {self.config.trainer.save_train_batch_dir}')
+                    else:
+                        print(f'Using loaded train batch {self.config.trainer.load_train_batch_path} for training')
+                        batch_local_filepath = copy_local_path_from_hdfs(self.config.trainer.load_train_batch_path)
+                        batch = DataProto.load_from_disk(batch_local_filepath)
 
                     # training
                     with Timer(name='rm_score', logger=None) as timer:

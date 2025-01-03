@@ -260,6 +260,8 @@ trainer:
     min_score: -1.0
     max_score: 1.0
   offload_train_memory: False
+  load_train_batch_path: null
+  save_train_batch_dir: null
 
 streaming_rollout:
   n_gpus_per_node: 0

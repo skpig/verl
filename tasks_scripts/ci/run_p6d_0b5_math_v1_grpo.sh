@@ -172,4 +172,6 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.rollout.micro_batch_size=${gen_micro_batch_size} \
     actor_rollout_ref.rollout.log_prob_micro_batch_size=${infer_micro_batch_size} \
     trainer.offload_train_memory=${offload_train_memory} \
-    trainer.total_steps=${NUM_STEPS}
+    trainer.total_steps=${NUM_STEPS} \
+    # trainer.save_train_batch_dir=${default_hdfs_dir}/train_batch \
+    # trainer.load_train_batch_path=${default_hdfs_dir}/train_batch/train_batch_1.pt
