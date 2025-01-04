@@ -131,7 +131,7 @@ class DataParallelPPOActor(BasePPOActor):
                 output = self.actor_module(
                     **kwargs,
                     use_cache=False,
-                    output_hidden_states=True,
+                    output_hidden_states=False,
                 )
                 full_log_probs_rmpad = output.loss * (-1.0)
             else:
