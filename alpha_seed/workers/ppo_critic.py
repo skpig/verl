@@ -200,14 +200,16 @@ class DataParallelPPOCritic(BasePPOCritic):
                     f'Number of {self.gradient_accumulation=} is too large when turn on profile. Try to turn off profile or reduce ppo_mini_batch_size.'
                 )
 
-        for batch_idx, data in enumerate(dataloader):
+        for batch_idx, mini_batch in enumerate(dataloader):
+            if self.config.shuffle:
+                mini_batch = mini_batch.batch
             with self.profiler_context as p:
                 if self.config.use_dynamic_bsz:
-                    micro_batches, _, _ = rearrange_micro_batches(batch=data.batch,
+                    micro_batches, _, _ = rearrange_micro_batches(batch=mini_batch,
                                                                   max_token_len=self.config.ppo_max_token_len)
                 else:
                     # split batch into micro_batches
-                    micro_batches = data.batch.split(self.config.ppo_micro_batch_size)
+                    micro_batches = mini_batch.split(self.config.ppo_micro_batch_size)
                 self.critic_optimizer.zero_grad()
 
                 for i, micro_data in enumerate(micro_batches):

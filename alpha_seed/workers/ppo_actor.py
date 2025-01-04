@@ -266,9 +266,9 @@ class DataParallelPPOActor(BasePPOActor):
 
         # make minibatch iterator
         # dataloader = self._make_minibatch_iterator(data=data)
-        select_keys = [
-            'responses', 'input_ids', 'attention_mask', 'old_log_probs', 'ref_log_prob', 'advantages', 'upgo_advantages'
-        ]
+        select_keys = ['responses', 'input_ids', 'attention_mask', 'old_log_probs', 'advantages', 'upgo_advantages']
+        if 'ref_log_prob' in data.batch.keys():
+            select_keys.append('ref_log_prob')
         batch = data.select(batch_keys=select_keys).batch
         dataloader = batch.split(self.config.ppo_mini_batch_size)
 
