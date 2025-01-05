@@ -279,8 +279,7 @@ class CriticWorker(Worker):
         self.checkpoint_manager = CheckpointManagerWrapper(model=self.critic_module,
                                                            optimizer=self.critic_optimizer,
                                                            lr_scheduler=self.critic_lr_scheduler,
-                                                           tokenizer=self.tokenizer,
-                                                           enable_flatten=self.config.model.fsdp_config.use_orig_params)
+                                                           tokenizer=self.tokenizer)
 
         torch.cuda.empty_cache()
 
@@ -342,14 +341,21 @@ class CriticWorker(Worker):
                                                 role='critic')
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    def save_checkpoint(self, local_path, hdfs_path=None, version='v1', global_step=0, ckpt_global_uploader_ref=None):
+    def save_checkpoint(self,
+                        local_path,
+                        hdfs_path=None,
+                        version='v1',
+                        global_step=0,
+                        ckpt_global_uploader_ref=None,
+                        enable_flatten=False):
         self.checkpoint_manager.save_checkpoint(version=version,
                                                 local_path=local_path,
                                                 hdfs_path=hdfs_path,
                                                 device_mesh=self.device_mesh,
                                                 role='critic',
                                                 global_step=global_step,
-                                                ckpt_global_uploader_ref=ckpt_global_uploader_ref)
+                                                ckpt_global_uploader_ref=ckpt_global_uploader_ref,
+                                                enable_flatten=enable_flatten)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def do_ndtimeline_action(self, action, *args, **kwargs):

@@ -510,12 +510,10 @@ class AsyncActorRolloutRefWorker(Worker):
 
         if self._is_actor:
             self.flops_counter = FlopsCounter(self.actor_model_config)
-            self.checkpoint_manager = CheckpointManagerWrapper(
-                model=self.actor.actor_module,
-                optimizer=self.actor.actor_optimizer,
-                lr_scheduler=self.actor_lr_scheduler,
-                tokenizer=self.tokenizer,
-                enable_flatten=self.config.actor.fsdp_config.use_orig_params)
+            self.checkpoint_manager = CheckpointManagerWrapper(model=self.actor.actor_module,
+                                                               optimizer=self.actor.actor_optimizer,
+                                                               lr_scheduler=self.actor_lr_scheduler,
+                                                               tokenizer=self.tokenizer)
 
         torch.cuda.empty_cache()
 
@@ -743,7 +741,13 @@ class AsyncActorRolloutRefWorker(Worker):
                                                 role='actor')
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    def save_checkpoint(self, local_path, hdfs_path=None, version='v1', global_step=0, ckpt_global_uploader_ref=None):
+    def save_checkpoint(self,
+                        local_path,
+                        hdfs_path=None,
+                        version='v1',
+                        global_step=0,
+                        ckpt_global_uploader_ref=None,
+                        enable_flatten=False):
         # TODO: support omnistore
         assert self._is_actor
         self.checkpoint_manager.save_checkpoint(version=version,
@@ -752,7 +756,8 @@ class AsyncActorRolloutRefWorker(Worker):
                                                 device_mesh=self.device_mesh,
                                                 role='actor',
                                                 global_step=global_step,
-                                                ckpt_global_uploader_ref=ckpt_global_uploader_ref)
+                                                ckpt_global_uploader_ref=ckpt_global_uploader_ref,
+                                                enable_flatten=enable_flatten)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def release_param_and_cache(self):

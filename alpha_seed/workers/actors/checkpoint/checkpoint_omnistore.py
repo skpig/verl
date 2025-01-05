@@ -56,16 +56,11 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
     - huggingface tokenizer and config for ckpt merge
     """
 
-    def __init__(self,
-                 model: FSDP,
-                 optimizer: torch.optim.Optimizer,
-                 lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
-                 tokenizer: PreTrainedTokenizer,
-                 enable_flatten: bool = False):
+    def __init__(self, model: FSDP, optimizer: torch.optim.Optimizer,
+                 lr_scheduler: torch.optim.lr_scheduler.LRScheduler, tokenizer: PreTrainedTokenizer):
         super().__init__(model, optimizer, lr_scheduler, tokenizer)
-        self.enable_flatten = enable_flatten
 
-    def load_checkpoint(self, hdfs_path=None, role: str = 'actor', *args, **kwargs):
+    def load_checkpoint(self, hdfs_path=None, role: str = 'actor', enable_flatten: bool = 'False', *args, **kwargs):
         if hdfs_path is None:
             return
 
@@ -82,7 +77,7 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
                                 enable_shm_download_ckpt_tmp=True,
                                 allow_extra_states=True,
                                 rl_role=role,
-                                load_flatten_model_optimizer=self.enable_flatten)
+                                load_flatten_model_optimizer=enable_flatten)
         # try loading lr scheduler state
         if 'lr_scheduler' in ckpt_state['extra_state']:
             self.lr_scheduler.load_state_dict(ckpt_state['extra_state']['lr_scheduler'])
@@ -93,7 +88,7 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
         print(f'[rank-{self.rank}]: finish loading checkpoint {hdfs_path}')
 
     def save_checkpoint(self, local_path: str, hdfs_path: str, role: str, global_step: int,
-                        ckpt_global_uploader_ref: CkptGlobalUploader, *args, **kwargs):
+                        ckpt_global_uploader_ref: CkptGlobalUploader, enable_flatten: bool, *args, **kwargs):
         path = os.path.abspath(local_path)
         print(f'[rank-{self.rank}]: start saving checkpoint {path}')
         # wait for previous upload to hdfs
@@ -133,7 +128,7 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
                 enable_tree_topo=True,
                 global_steps=global_step,
                 rl_role=role,
-                save_flatten_model_optimizer=self.enable_flatten,
+                save_flatten_model_optimizer=enable_flatten,
             )
 
         if hdfs_path is not None:

@@ -818,13 +818,13 @@ class RayPPOTrainer(object):
         actor_upload_future = self.actor_rollout_wg.save_checkpoint(
             actor_local_path, actor_remote_path,
             specified_ckpt_version if specified_ckpt_version is not None else self.config.trainer.ckpt_version,
-            self.global_step, self.ckpt_global_uploader)
+            self.global_step, self.ckpt_global_uploader, self.config.trainer.ckpt_enable_flatten)
 
         if self.use_critic:
             critic_upload_future = self.critic_wg.save_checkpoint(
                 critic_local_path, critic_remote_path,
                 specified_ckpt_version if specified_ckpt_version is not None else self.config.trainer.ckpt_version,
-                self.global_step, self.ckpt_global_uploader)
+                self.global_step, self.ckpt_global_uploader, self.config.trainer.ckpt_enable_flatten)
         else:
             critic_upload_future = None
 
