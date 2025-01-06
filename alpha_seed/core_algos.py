@@ -233,7 +233,7 @@ def compute_policy_loss(old_log_prob, ref_log_prob, log_prob, advantages, upgo_a
 
     negative_approx_kl = log_prob - old_log_prob
     ppo_kl = verl_F.masked_mean(-negative_approx_kl, eos_mask)
-    ppo_kl_sum = torch.mean(torch.sum(negative_approx_kl * eos_mask, dim=1))
+    ppo_kl_sum = torch.mean(torch.sum(-negative_approx_kl * eos_mask, dim=1))
 
     if scale_pg_by_kl:
         sqrt_kl = torch.sqrt(
