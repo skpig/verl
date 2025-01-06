@@ -143,18 +143,6 @@ class AsyncActorRolloutRefWorker(Worker):
 
             self.actor_ulysses_sharding_manager = FSDPUlyssesShardingManager(self.actor_ulysses_sp_device_mesh)
 
-            inference_sp_size = config.ref.ulysses_sequence_parallel_size
-            if inference_sp_size > 1:
-                self.actor_inference_ulysses_sp_device_mesh = init_device_mesh(
-                    'cuda',
-                    mesh_shape=(world_size // inference_sp_size, inference_sp_size),
-                    mesh_dim_names=['dp', 'sp'])
-            else:
-                self.actor_inference_ulysses_sp_device_mesh = None
-
-            self.actor_inference_ulysses_sharding_manager = FSDPUlyssesShardingManager(
-                self.actor_inference_ulysses_sp_device_mesh)
-
         if self._is_ref:
             sp_size = config.ref.ulysses_sequence_parallel_size
             if sp_size > 1:
@@ -592,17 +580,18 @@ class AsyncActorRolloutRefWorker(Worker):
         if self._is_actor and recompute_log_prob:
             # we should always recompute old_log_probs when it is HybridEngine
             output.meta_info['temperature'] = prompts.meta_info['generation_kwargs']['temperature']
-            output.meta_info['use_dynamic_bsz'] = self.config.rollout.use_dynamic_bsz
-            if self.config.rollout.use_dynamic_bsz:
-                output.meta_info['max_token_len'] = self.config.rollout.max_token_len
+            # align with the training config
+            output.meta_info['use_dynamic_bsz'] = self.config.actor.use_dynamic_bsz
+            if self.config.actor.use_dynamic_bsz:
+                output.meta_info['max_token_len'] = self.config.actor.ppo_max_token_len
             else:
-                output.meta_info['micro_batch_size'] = self.config.rollout.log_prob_micro_batch_size
-            with self.actor_inference_ulysses_sharding_manager:
-                output = self.actor_inference_ulysses_sharding_manager.preprocess_data(output)
+                output.meta_info['micro_batch_size'] = self.config.actor.ppo_micro_batch_size
+            with self.actor_ulysses_sharding_manager:
+                output = self.actor_ulysses_sharding_manager.preprocess_data(output)
                 old_entropy, old_log_probs = self.actor.compute_log_prob(data=output)
                 output.batch['old_log_probs'] = old_log_probs
                 output.batch['old_entropy'] = old_entropy
-                output = self.actor_inference_ulysses_sharding_manager.postprocess_data(output)
+                output = self.actor_ulysses_sharding_manager.postprocess_data(output)
 
         output = output.to('cpu')
 

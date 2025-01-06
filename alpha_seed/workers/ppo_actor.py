@@ -224,7 +224,7 @@ class DataParallelPPOActor(BasePPOActor):
 
             mini_batch_entropy = []
             mini_batch_log_prob = []
-            with torch.inference_mode():
+            with torch.no_grad():
                 for i, micro_batch in enumerate(micro_batches):
                     assert micro_batch.device == torch.device('cpu')
                     micro_batch = micro_batch.cuda()
@@ -354,14 +354,6 @@ class DataParallelPPOActor(BasePPOActor):
                         'actor/ppo_kl_sum': ppo_kl_sum.detach().item(),
                         'actor/tokens_per_micro_batch_update': attention_mask.sum().detach().item(),
                     }
-                    # debug
-                    # if batch_idx == 0:
-                    #     if ppo_kl_sum.detach().item() == 0:
-                    #         print(f"rank [{torch.distributed.get_rank()}]: match logprob and old logprob {i}")
-                    #     else:
-                    #         print(
-                    #             f"rank [{torch.distributed.get_rank()}]: mismatch logprob and old logprob {i}: {ppo_kl_sum.detach().item()}"
-                    #         )
                     append_to_dict(metrics, micro_data_metric)
 
                 grad_norm = self._optimizer_step()
