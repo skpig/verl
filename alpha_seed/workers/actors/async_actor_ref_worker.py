@@ -724,13 +724,14 @@ class AsyncActorRolloutRefWorker(Worker):
         return output
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def load_checkpoint(self, hdfs_path=None, version='v1'):
+    def load_checkpoint(self, hdfs_path=None, version='v1', enable_flatten=False):
         assert self._is_actor
         # TODO: support omnistore
         self.checkpoint_manager.load_checkpoint(version=version,
                                                 hdfs_path=hdfs_path,
                                                 device_mesh=self.device_mesh,
-                                                role='actor')
+                                                role='actor',
+                                                enable_flatten=enable_flatten)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def save_checkpoint(self,

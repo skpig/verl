@@ -60,7 +60,7 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
                  lr_scheduler: torch.optim.lr_scheduler.LRScheduler, tokenizer: PreTrainedTokenizer):
         super().__init__(model, optimizer, lr_scheduler, tokenizer)
 
-    def load_checkpoint(self, hdfs_path=None, role: str = 'actor', enable_flatten: bool = 'False', *args, **kwargs):
+    def load_checkpoint(self, hdfs_path=None, role: str = 'actor', enable_flatten: bool = False, *args, **kwargs):
         if hdfs_path is None:
             return
 

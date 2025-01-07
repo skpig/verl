@@ -869,10 +869,12 @@ class RayPPOTrainer(object):
         actor_remote_path = os.path.join(remote_global_step_folder, 'actor')
         critic_remote_path = os.path.join(remote_global_step_folder, 'critic')
         # load actor
-        self.actor_rollout_wg.load_checkpoint(actor_remote_path, self.config.trainer.ckpt_version)
+        self.actor_rollout_wg.load_checkpoint(actor_remote_path, self.config.trainer.ckpt_version,
+                                              self.config.trainer.ckpt_enable_flatten)
         # load critic
         if self.use_critic:
-            self.critic_wg.load_checkpoint(critic_remote_path, self.config.trainer.ckpt_version)
+            self.critic_wg.load_checkpoint(critic_remote_path, self.config.trainer.ckpt_version,
+                                           self.config.trainer.ckpt_enable_flatten)
         # load dataloader
         dataloader_remote_path = os.path.join(remote_global_step_folder, 'data.pt')
         dataloader_local_path = copy_local_path_from_hdfs(dataloader_remote_path)
