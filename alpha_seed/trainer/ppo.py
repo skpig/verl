@@ -49,7 +49,7 @@ from single_controller.ray.base import create_colocated_worker_cls
 from verl import DataProto
 from verl.utils.fs import copy_local_path_from_hdfs
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
-
+from alpha_seed.workers.streaming_service.streaming_utils import record_xperf_metrics
 from hdfs_io import makedirs, hput, hcopy, hexists
 
 try:
@@ -981,11 +981,7 @@ class RayPPOTrainer(object):
             pprint(f'set fake attention mask')
 
         # only report metrics from one generation replica
-        if 'xperf_metrics' in gen_batch_output.meta_info:
-            for name, x_metric in gen_batch_output.meta_info['xperf_metrics'].items():
-                self.logger.log(data={"rollout/gen/hybrid_{}".format(name): wandb.Histogram(x_metric)},
-                                step=self.global_step)
-            gen_batch_output.meta_info.pop('xperf_metrics')
+        record_xperf_metrics(gen_batch_output, metrics, self.logger, self.global_step, prefix='hybrid')
 
         # stop hybrid rollout
         finished_num, ready_batch_queue, pending_batch_queue = process_output(batch, gen_batch_output, self.tokenizer,
@@ -1016,11 +1012,7 @@ class RayPPOTrainer(object):
                 save_dataproto(gen_batch_output, path=save_path, prefix='standalone_gen_batch_output')
                 save_dataproto(standalone_batch, path=save_path, prefix='standalone_batch')
             # only report metrics from one generation replica
-            if 'xperf_metrics' in gen_batch_output.meta_info:
-                for name, x_metric in gen_batch_output.meta_info['xperf_metrics'].items():
-                    self.logger.log(data={"rollout/gen/standalone_{}".format(name): wandb.Histogram(x_metric)},
-                                    step=self.global_step)
-                gen_batch_output.meta_info.pop('xperf_metrics')
+            record_xperf_metrics(gen_batch_output, metrics, self.logger, self.global_step, prefix='standalone')
             finished_num, ready_batch_queue, pending_batch_queue = process_output(standalone_batch,
                                                                                   gen_batch_output,
                                                                                   self.tokenizer,

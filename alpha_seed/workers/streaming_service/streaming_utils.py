@@ -72,3 +72,32 @@ def process_output(input_batch,
                 item.batch['off_policy_steps'] += 1
                 pending_batch_queue.put(rmpad(item))
     return finished_num, ready_batch_queue, pending_batch_queue
+
+
+def record_xperf_metrics(batch_info, metrics, logger, global_step, prefix=''):
+    import wandb
+    if 'xperf_metrics' in batch_info.meta_info:
+        for name, x_metric in batch_info.meta_info['xperf_metrics'].items():
+            if isinstance(x_metric, list):
+                logger.log(data={"rollout/gen/hybrid_{}".format(name): wandb.Histogram(x_metric)}, step=global_step)
+        try:
+            sample_token_num = batch_info.meta_info['xperf_metrics']['sample_token_num']
+            metrics[f'rollout/gen/{prefix}_prob_mean'] = batch_info.meta_info['xperf_metrics'][
+                'prob_mean'] / sample_token_num
+            metrics[f'rollout/gen/{prefix}_prob_lt_0.0001_ratio'] = batch_info.meta_info['xperf_metrics'][
+                'prob_lt_0.0001'] / sample_token_num
+            metrics[f'rollout/gen/{prefix}_prob_lt_1e-5_ratio'] = batch_info.meta_info['xperf_metrics'][
+                'prob_lt_1e-5'] / sample_token_num
+            metrics[f'rollout/gen/{prefix}_prob_lt_1e-6_ratio'] = batch_info.meta_info['xperf_metrics'][
+                'prob_lt_1e-6'] / sample_token_num
+            metrics[f'rollout/gen/{prefix}_prob_lt_1e-6_ratio'] = batch_info.meta_info['xperf_metrics'][
+                'prob_lt_1e-6'] / sample_token_num
+            metrics[f'rollout/gen/{prefix}_page_swap_out_bs'] = batch_info.meta_info['xperf_metrics'][
+                'page_swap_out_bs']
+            metrics[f'rollout/gen/{prefix}_page_swap_out_token'] = batch_info.meta_info['xperf_metrics'][
+                'page_swap_out_token']
+        except Exception as e:
+            # some xperf metrics is not ready on lower version
+            pass
+        batch_info.meta_info.pop('xperf_metrics')
+    return
