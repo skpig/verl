@@ -198,7 +198,10 @@ class CriticWorker(Worker):
 
         cpu_offload = None
         if self.config.model.fsdp_config.param_offload:
-            cpu_offload = CPUOffload(offload_params=True)
+            # NOTE: CPUOffload needs to cooperate with FSDP.no_sync() in gradient accumulation,
+            # which will lead to more memory consumption as gradients keep unshard in between micro-batches.
+            # temporarily disbale this for more investigation
+            cpu_offload = CPUOffload(offload_params=False)
 
         # we only support ZeRO3 of hybrid DP+FSDP or full FSDP
         if self.device_mesh is None or self.device_mesh.ndim == 1:
