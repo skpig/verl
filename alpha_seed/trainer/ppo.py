@@ -1080,7 +1080,7 @@ class RayPPOTrainer(object):
         metrics['rollout/training_batch'] = len(batch)
         pprint(f'training batches {len(batch)}.')
 
-        return batch
+        return batch, standalone_batch
 
     def fit(self):
         self.global_step = 0
@@ -1125,12 +1125,12 @@ class RayPPOTrainer(object):
                     # hybrid generate (on policy)
                     if self.config.trainer.load_train_batch_path is None:
                         batch: DataProto = DataProto.from_single_dict(batch_dict)
-                        batch = self._generate(batch=batch,
-                                               resume_step=resume_step,
-                                               metrics=metrics,
-                                               standalone_batch=standalone_batch,
-                                               pending_batch_queue=pending_batch_queue,
-                                               ready_batch_queue=ready_batch_queue)
+                        batch, standalone_batch = self._generate(batch=batch,
+                                                                 resume_step=resume_step,
+                                                                 metrics=metrics,
+                                                                 standalone_batch=standalone_batch,
+                                                                 pending_batch_queue=pending_batch_queue,
+                                                                 ready_batch_queue=ready_batch_queue)
                         if self.config.trainer.save_train_batch_dir is not None:
                             makedirs(self.config.trainer.save_train_batch_dir, exist_ok=True)
                             local_path = f'train_batch_{self.global_step}.pt'
