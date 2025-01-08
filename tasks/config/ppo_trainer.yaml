@@ -29,6 +29,8 @@ actor_rollout_ref:
     enable_gradient_checkpointing: False
     use_ce_loss_fusion: False
   actor:
+    early_stop_by_kl: 0.0
+    logits_clamp: 0.0
     strategy: fsdp  # This is for backward-compatibility
     ppo_mini_batch_size: 512
     ulysses_sequence_parallel_size: 1
@@ -40,6 +42,7 @@ actor_rollout_ref:
     clip_ratio: 0.2
     clip_ratio2: 10.0
     scale_pg_by_kl: False
+    scale_pg_by_local_kl: False
     upgo_loss_weight: 0.0
     upgo_loss_version: 1
     kl_loss_weight: 0.0
@@ -86,6 +89,7 @@ actor_rollout_ref:
     max_token_len: -1
     ema: 1.0
   rollout:
+    ban_eos: v0
     name: xperf_gpt
     prompt_length: ${data.max_prompt_length}  # for xperf_gpt
     response_length: ${data.max_response_length}
@@ -116,6 +120,7 @@ actor_rollout_ref:
       do_sample: True
       min_p: -1 # 0.01 to open
       eta_epsilon: -1 # 1e-6 to open
+      logits_clamp: ${actor_rollout_ref.actor.logits_clamp}
     val_generate_kwargs:
       # for validation
       top_k: -1 # 0 for hf rollout, -1 for vllm rollout
@@ -211,16 +216,19 @@ reward_model:
   need_punish_trunc: False
   trunc_punish_score: -5
   strict_box_verify: False
+  punish_format: False
+  format_punish_score: -5
   use_cuda_timer: False
 
 algorithm:
+  inference_scaling: v0
   force_append_eos: False
   phasic_critic_interval: 0
   gamma: 1.0
   lam: 0.95
   adv_estimator: gae
   adv_whiten: True
-  kl_penalty: kl  # how to estimate kl divergence
+  kl_penalty: low_var_kl  # how to estimate kl divergence
   kl_ctrl:
     type: fixed
     kl_coef: 0.001

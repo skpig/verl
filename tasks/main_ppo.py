@@ -20,6 +20,7 @@ import warnings
 import contextlib
 
 import ray
+from alpha_seed.utils.reward_score.extra_reward import add_length_reward, punish_format
 from verl import DataProto
 import torch
 from verl.utils.tracking import Tracking
@@ -160,6 +161,7 @@ class RewardManager():
 
         reward_tensor = torch.zeros_like(response_ids, dtype=torch.float32)
         raw_scores = torch.zeros_like(response_ids, dtype=torch.float32)
+        len_scores = torch.zeros_like(response_ids, dtype=torch.float32)
         already_print_data_sources = {}
         save_to_hdfs = []
         rm_res_future_list = []
@@ -167,16 +169,19 @@ class RewardManager():
             self.log_table = []  # 清空self.log_table
 
         def get_rm_score(idx):
+            """
+            只判断correctness的score，其他的score放到外面，方便logging
+            """
             data_item = data[idx]  # DataProtoItem
 
             prompt_ids = data_item.batch['input_ids'][:self.config.data.max_prompt_length]
             response_ids = data_item.batch['input_ids'][self.config.data.max_prompt_length:]
 
             prompt_length = prompt_ids.shape[-1]
-            valid_prompt_length = data_item.batch['attention_mask'][:prompt_length].sum()
+            valid_prompt_length = data_item.batch['attention_mask'][:prompt_length].sum().item()
             valid_prompt_ids = prompt_ids[-valid_prompt_length:]
             response_length = response_ids.shape[-1]
-            valid_response_length = data_item.batch['attention_mask'][prompt_length:].sum()
+            valid_response_length = data_item.batch['attention_mask'][prompt_length:].sum().item()
             valid_response_ids = response_ids[:valid_response_length]
 
             # decode
@@ -184,6 +189,17 @@ class RewardManager():
             solution_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
 
             solution_str_post_proc = post_process_solution_str(config=self.config, solution_str=solution_str)
+
+            format_reward = 0  # 默认是0
+            pause_tokens_index = None
+            thinking_len = 0
+            if self.rm_name == 'train':
+                if self.config.reward_model.punish_format:
+                    format_reward, pause_tokens_index = punish_format(solution_str_post_proc, self.config)
+                    if pause_tokens_index is not None:
+                        thinking_len = len(
+                            self.tokenizer(
+                                solution_str_post_proc[pause_tokens_index[0]:pause_tokens_index[1]]).input_ids)
 
             # get prompt uuid
             data_uid = data_item.non_tensor_batch['uid']
@@ -198,13 +214,17 @@ class RewardManager():
                 "solution_str": solution_str_post_proc,
                 "ground_truth": ground_truth,
                 "config": self.config,
-                'data_uid': data_uid
+                'data_uid': data_uid,
+                "solution_len": valid_response_length,
+                "solution_ids": valid_response_ids,
+                'rm_name': self.rm_name,
+                'pause_tokens_index': pause_tokens_index
             }
             if reward_style == "code-sandbox":
                 score_fn_inputs["code_sandbox_psm"] = self.config.trainer.code_sandbox_psm
             score = compute_score_fn(**score_fn_inputs)
             is_para_dup = para_dup.find_single_turn_duplicate(solution_str)[0]
-            is_trunc = (response_length == valid_response_length).item() and score == -1
+            is_trunc = (response_length == valid_response_length) and score == -1
 
             ngram = list(ngrams(valid_response_ids.tolist(), 2)) if ngrams is not None else []
 
@@ -219,7 +239,10 @@ class RewardManager():
                 "is_trunc": is_trunc,
                 "idx": idx,
                 "solution_str_post_proc": solution_str_post_proc,
-                "ngram": ngram
+                "ngram": ngram,
+                "format_reward": format_reward,
+                "pause_tokens_index": pause_tokens_index,
+                "thinking_len": thinking_len
             }
 
             return return_dict
@@ -246,6 +269,9 @@ class RewardManager():
             idx = output_dict['idx']
             solution_str_post_proc = output_dict['solution_str_post_proc']
             ngram = output_dict['ngram']
+            thinking_len = output_dict['thinking_len']
+            pause_tokens_index = output_dict['pause_tokens_index']
+            format_reward = output_dict['format_reward']
 
             all_ngram.extend(ngram)
             if reward_style == "code-sandbox":
@@ -258,7 +284,15 @@ class RewardManager():
             # eval的时候不做这个norm
             if need_norm:
                 score = (score - self.mean) / self.std
-            raw_score = score
+            raw_scores[idx, valid_response_length - 1] = score
+
+            # 对score做额外的条件处理，例如length、dup、trunc、format等
+            if self.rm_name == 'train':
+                # length reward有不同版本，by default不加length reward
+                thinking_len = valid_response_length if thinking_len == 0 else thinking_len
+                score = add_length_reward(thinking_len, score, self.config)
+                len_scores[idx, valid_response_length - 1] = score
+
             if is_para_dup:
                 dup_cnt += 1
                 dup_lens.append(valid_response_length)
@@ -268,8 +302,9 @@ class RewardManager():
                 not_dup_lens.append(valid_response_length)
             if self.need_punish_trunc and is_trunc and not is_validation:
                 score = self.trunc_punish_score
+            if format_reward != 0:
+                score = format_reward
             reward_tensor[idx, valid_response_length - 1] = score
-            raw_scores[idx, valid_response_length - 1] = raw_score
 
             if reward_style not in already_print_data_sources:
                 already_print_data_sources[reward_style] = 0
@@ -278,12 +313,13 @@ class RewardManager():
                 already_print_data_sources[reward_style] += 1
                 if reward_style == "code-sandbox":
                     ground_truth = ''  # 对于OJ问题，ground_truth会比较大，扛不住
-                self.log_table.append(
-                    [global_step, prompt_str, solution_str, ground_truth, score, solution_str_post_proc])
+                self.log_table.append([
+                    global_step, prompt_str, solution_str, ground_truth, score, solution_str_post_proc, is_para_dup,
+                    is_trunc, valid_response_length
+                ])
             save_to_hdfs.append([
                 idx, global_step, prompt_str, solution_str, ground_truth, score, solution_str_post_proc, is_para_dup,
-                is_trunc,
-                valid_response_length.item()
+                is_trunc, valid_response_length
             ])
 
         prefix = "" if not is_validation else "val/"
@@ -302,15 +338,19 @@ class RewardManager():
 
         log_table = None
         if self.config.trainer.num_cases_to_wandb > 0:
-            logger_step = global_step - global_step % self.config.trainer.logger_step_interval
-            log_table = {
-                f"gen&score_{self.rm_name}_{logger_step}":
-                    wandb.Table(
-                        columns=["Step", "Prompt", "Gen Sequence", "GroundTruth", "Score", "Gen Sequence PostProc"],
-                        data=self.log_table)
-            }
-            if not is_validation:
-                self.logger.log(log_table, step=global_step, backend='tracking')
+            if not is_validation and global_step % self.config.trainer.logger_step_interval == 0:
+                # logger_step = global_step - global_step % self.config.trainer.logger_step_interval
+                self.logger.log(
+                    {
+                        f"gen&score_{self.rm_name}_{global_step}":
+                            wandb.Table(columns=[
+                                "Step", "Prompt", "Gen Sequence", "GroundTruth", "Score", "Gen Sequence PostProc",
+                                "Is_Dup", "Is_Trunc", "Len"
+                            ],
+                                        data=self.log_table)
+                    },
+                    step=global_step,
+                    backend='tracking')
 
         if self.config.trainer.save_cases_to_hdfs:
             print(f"reward_fn begin hput: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -329,7 +369,7 @@ class RewardManager():
             print(f"reward_fn end hput: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
         if not is_validation:
-            return reward_tensor, raw_scores
+            return reward_tensor, raw_scores, len_scores
         else:
             return reward_tensor, log_table
 
@@ -464,6 +504,7 @@ def validate_config(config):
         ulysses = config.actor_rollout_ref.actor.ulysses_sequence_parallel_size
         assert config.actor_rollout_ref.actor.ppo_mini_batch_size % config.actor_rollout_ref.actor.ppo_micro_batch_size == 0
         assert config.actor_rollout_ref.actor.ppo_micro_batch_size * ulysses >= n_gpus
+    assert not (config.actor_rollout_ref.actor.scale_pg_by_kl and config.actor_rollout_ref.actor.scale_pg_by_local_kl)
 
     if config.actor_rollout_ref.actor.kl_loss_weight == 0 and config.algorithm.kl_ctrl.kl_coef == 0:
         assert not config.actor_rollout_ref.actor.scale_pg_by_kl

@@ -121,7 +121,7 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
     # compute kl between ref_policy and current policy
     if 'ref_log_prob' in data.batch.keys():
         kld = core_algos.kl_penalty(data.batch['old_log_probs'], data.batch['ref_log_prob'],
-                                    kl_penalty=kl_penalty)  # (batch_size, response_length)
+                                    kl_penalty_type=kl_penalty)  # (batch_size, response_length)
         kld = kld * response_mask
         beta = kl_ctrl.value
     else:
@@ -1159,9 +1159,16 @@ class RayPPOTrainer(object):
 
                     with Timer(name='reward_fn', logger=None) as timer:
                         # we combine with rule-based rm
-                        reward_tensor, raw_scores = self.reward_fn(batch, global_step=self.global_step)
+                        reward_tensor, raw_scores, length_scores = self.reward_fn(batch, global_step=self.global_step)
                         batch.batch['token_level_scores'] = reward_tensor
                         batch.batch['raw_scores'] = raw_scores
+                        raw_scores_log = raw_scores.sum(-1)
+                        self.logger.log(data={"score/raw_score": wandb.Histogram(raw_scores_log)},
+                                        step=self.global_step)
+                        if self.config.algorithm.inference_scaling != 'v0':
+                            length_scores = length_scores.sum(-1)
+                            self.logger.log(data={"score/length_score": wandb.Histogram(length_scores)},
+                                            step=self.global_step)
                     metrics['timing/reward_fn'] = timer.last
 
                     print_dataproto_size(batch, head='After Reward function')

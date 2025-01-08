@@ -44,7 +44,7 @@ import logging
 from alpha_seed.workers.xperf_rollout.utils import get_xperf_gpt_config
 from alpha_seed.workers.xperf_rollout.utils.layout_convert_helper import init_meta
 from alpha_seed.workers.streaming_service.xperf_model_prophet import XperfModelProphet
-from alpha_seed.workers.xperf_rollout.utils.logits_manipulate import logits_manipulate_fn_core, logits_manipulate_fn_eta, logits_manipulate_fn_minp
+from alpha_seed.workers.xperf_rollout.utils.logits_manipulate import logits_manipulate_fn_core, logits_manipulate_fn_eta, logits_manipulate_fn_minp, logits_manipulate_fn_clip
 from functools import partial
 
 try:
@@ -154,6 +154,42 @@ class AsyncXPerfGPTRollout(object):
                                                'soft_interval': config.get('soft_interval', 512),
                                                'summary_min_space': config.get('summary_min_space', 1024)
                                            })
+        elif config.get("ban_eos", 'v0') != 'v0':
+            if config['ban_eos'] == 'v1':
+                eos_id = tokenizer.eos_token_id
+            elif config['ban_eos'] == 'v2':
+                eos_id = tokenizer.convert_tokens_to_ids('</')
+            else:
+                raise NotImplementedError(f'ban_eos {config["ban_eos"]} not supported')
+            gen_start_ids = tokenizer.encode(f"{tokenizer.bos_token}assistant\n")
+
+            def find_gen_start_ids(history_id, gen_start_ids):
+                for i in range(len(history_id)):
+                    if gen_start_ids == history_id[i:i + len(gen_start_ids)]:
+                        return i + len(gen_start_ids)
+                return None
+
+            def logits_manipulate_fn_core(logits, history_ids, manipulate_args):
+                eos_id = manipulate_args['eos_id']
+                max_len = manipulate_args['max_len']
+                gen_start_ids = manipulate_args['gen_start_ids']
+                LARGE = max(1000.0, torch.max(logits) - torch.min(logits))
+                ban_eos_list = []
+                for history_id in history_ids:
+                    gen_start_idx = find_gen_start_ids(history_id, gen_start_ids)
+                    assert gen_start_idx is not None, history_id
+                    ban_eos = (len(history_id) - gen_start_idx) < (0.5 * max_len)
+                    ban_eos_list.append(ban_eos)
+                ban_eos = torch.tensor(ban_eos_list, device=logits.device).float()
+                logits[:, eos_id] -= LARGE * ban_eos
+                return logits
+
+            logits_manipulate_fn = partial(logits_manipulate_fn_core,
+                                           manipulate_args={
+                                               'eos_id': eos_id,
+                                               'max_len': config.response_length,
+                                               'gen_start_ids': gen_start_ids
+                                           })
         elif config.train_generate_kwargs['min_p'] != -1:
             logits_manipulate_fn = partial(logits_manipulate_fn_minp,
                                            manipulate_args={
@@ -163,6 +199,11 @@ class AsyncXPerfGPTRollout(object):
             logits_manipulate_fn = partial(logits_manipulate_fn_eta,
                                            manipulate_args={
                                                'eta_epsilon': config.train_generate_kwargs.eta_epsilon,
+                                           })
+        elif config.train_generate_kwargs['logits_clamp'] != 0:
+            logits_manipulate_fn = partial(logits_manipulate_fn_clip,
+                                           manipulate_args={
+                                               'logits_clamp': config.train_generate_kwargs.logits_clamp,
                                            })
         else:
             logits_manipulate_fn = None

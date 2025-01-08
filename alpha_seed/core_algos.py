@@ -195,7 +195,8 @@ def compute_rewards(token_level_scores, old_log_prob, ref_log_prob, kl_ratio):
 
 
 def compute_policy_loss(old_log_prob, ref_log_prob, log_prob, advantages, upgo_advantages, eos_mask, cliprange,
-                        cliprange2, scale_pg_by_kl, upgo_loss_weight, use_ewma_loss):
+                        cliprange2, scale_pg_by_kl, scale_pg_by_local_kl, upgo_loss_weight, use_ewma_loss,
+                        kl_penalty_type):
     """Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py#L1122
 
     Args:
@@ -231,14 +232,20 @@ def compute_policy_loss(old_log_prob, ref_log_prob, log_prob, advantages, upgo_a
         pg_losses = torch.exp(ref_log_prob - old_log_prob) * pg_losses
     pg_loss = torch.sum(pg_losses * eos_mask, dim=1) / seq_len_per_sample
 
-    negative_approx_kl = log_prob - old_log_prob
+    negative_approx_kl = kl_penalty(log_prob, old_log_prob, kl_penalty_type=kl_penalty_type)
     ppo_kl = verl_F.masked_mean(-negative_approx_kl, eos_mask)
     ppo_kl_sum = torch.mean(torch.sum(-negative_approx_kl * eos_mask, dim=1))
 
     if scale_pg_by_kl:
         sqrt_kl = torch.sqrt(
-            torch.clamp(torch.sum(kl_penalty(old_log_prob, ref_log_prob, kl_penalty='low_var_kl') * eos_mask, dim=1),
+            torch.clamp(torch.sum(kl_penalty(old_log_prob, ref_log_prob, kl_penalty_type=kl_penalty_type) * eos_mask,
+                                  dim=1),
                         min=1.0))
+        normed_sqrt_kl = (1 / sqrt_kl) / (torch.sum(1 / sqrt_kl)) * torch.clamp(torch.sum(eos_mask[:, 0]), min=1.0)
+        pg_loss = pg_loss * normed_sqrt_kl
+
+    if scale_pg_by_local_kl:
+        sqrt_kl = torch.sqrt(torch.clamp(torch.sum(negative_approx_kl * eos_mask, dim=1), min=1.0))
         normed_sqrt_kl = (1 / sqrt_kl) / (torch.sum(1 / sqrt_kl)) * torch.clamp(torch.sum(eos_mask[:, 0]), min=1.0)
         pg_loss = pg_loss * normed_sqrt_kl
     pg_loss = torch.mean(pg_loss)
@@ -327,7 +334,10 @@ def compute_kl_loss(log_prob, ref_log_prob, eos_mask, kl_penalty_):
     return kl_loss
 
 
-def kl_penalty(logprob: torch.FloatTensor, ref_logprob: torch.FloatTensor, kl_penalty) -> torch.FloatTensor:
+from alpha_seed.utils.functional import clip_by_value_preserve_gradient
+
+
+def kl_penalty(logprob: torch.FloatTensor, ref_logprob: torch.FloatTensor, kl_penalty_type) -> torch.FloatTensor:
     """Compute KL divergence given logprob and ref_logprob.
     Copied from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py#L1104
 
@@ -339,20 +349,20 @@ def kl_penalty(logprob: torch.FloatTensor, ref_logprob: torch.FloatTensor, kl_pe
         per_token_kl: (bs, response_len)
 
     """
-    if kl_penalty == "kl":
+    if kl_penalty_type == "kl":
         return logprob - ref_logprob
 
-    if kl_penalty == "abs":
+    if kl_penalty_type == "abs":
         return (logprob - ref_logprob).abs()
 
-    if kl_penalty == "mse":
+    if kl_penalty_type == "mse":
         return 0.5 * (logprob - ref_logprob).square()
 
-    if kl_penalty == "low_var_kl":
+    if kl_penalty_type == "low_var_kl":
         ratio = ref_logprob - logprob
-        return torch.clamp(torch.exp(ratio) - ratio - 1, max=10, min=-10)
+        return torch.clamp(torch.exp(ratio) - ratio - 1, min=-10, max=10)
 
-    if kl_penalty == "full":
+    if kl_penalty_type == "full":
         # so, here logprob and ref_logprob should contain the logits for every token in vocabulary
         raise NotImplementedError
         # total_logprob = torch.softmax(logits, dim=-1)

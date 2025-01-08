@@ -5,7 +5,7 @@ CommitLint:
   mr_title_lint_name: regex
   # below is an example:
   # [megatron] feat: add tensor parallel memory efficient allgather option
-  mr_title_regex: "^(WIP:|)( |)\\[(ray|sft|rm|ppo|ci|perf|dataloader|dataset|ckpt|profiler|release|cli|megatron|rollout|misc|torch_rpc|example|infer|model|eval|cook|debuggability)\\] (feat|fix|chore|test|docs|refactor): (.+)$"
+  mr_title_regex: "^(WIP:|)( |)\\[(ray|sft|algo|rm|ppo|ci|perf|dataloader|dataset|ckpt|profiler|release|cli|megatron|rollout|misc|torch_rpc|example|infer|model|eval|cook|debuggability)\\] (feat|fix|chore|test|docs|refactor): (.+)$"
 
 Merge Request Notification:
   notification_lark_group: ['7315378905446252548'] # 默认的lark群组id，如果设置则会被默认发送到该群组，除非命中monorepo通知规则，获取地址：https://open.feishu.cn/tool/token

@@ -1,6 +1,7 @@
 import re
 import signal
 from typing import Optional
+import torch
 
 try:
     import sympy
@@ -311,21 +312,18 @@ def is_correct_minerva(og_pred, gt, gt_need_extract=False):
     return (pred == gt), pred
 
 
-def is_correct_strict_box(pred, gt):
-    pred = pred[-100:]
+def is_correct_strict_box(pred, gt, pause_tokens_index):
+    if pause_tokens_index is not None:
+        assert len(pause_tokens_index) == 4
+        pred = pred[pause_tokens_index[-1] - 100:]
+    else:
+        pred = pred[-100:]
     pred = last_boxed_only_string_v2(pred)
     pred = remove_boxed(pred) if pred is not None else None
     return 1 if (pred == gt) else -1, pred
 
 
-def verify(pred,
-           answer,
-           resp_len,
-           max_resp_len,
-           reward_0_for_overlong_rsp=False,
-           punish_no_answer="v0",
-           add_int_verify=True,
-           strict_box_verify=False):
+def verify(pred, answer, resp_len, max_resp_len, add_int_verify=True, strict_box_verify=False, pause_tokens_index=None):
     """
     default行为：对给1，其余给-1
     punish_no_answer:
@@ -334,7 +332,7 @@ def verify(pred,
     * v2: -0.2
     """
     if strict_box_verify:
-        corr_strict_box, pred_strict_box = is_correct_strict_box(pred, answer)
+        corr_strict_box, pred_strict_box = is_correct_strict_box(pred, answer, pause_tokens_index)
         return corr_strict_box
 
     corr_minerva, pred_minerva = is_correct_minerva(pred,
@@ -348,28 +346,24 @@ def verify(pred,
         corr = corr_minerva
 
     reward = 1 if corr else -1
-    if reward_0_for_overlong_rsp and reward == -1 and pred == "[INVALID]" and (max_resp_len - resp_len) < 100:
-        reward = 0.0
-    # 不含答案的全部设为-0.2
-    assert punish_no_answer in ['v0', 'v1', 'v2']
-    if punish_no_answer != 'v0' and pred == "[INVALID]":
-        if punish_no_answer == 'v1':
-            reward = -0.1
-        elif punish_no_answer == 'v2':
-            reward = -0.2
     return reward
 
 
-def compute_score(batch_info, solution_str, ground_truth, config, **argv) -> float:
+def compute_score(batch_info, solution_str, ground_truth, config, rm_name, pause_tokens_index, **argv) -> float:
     prompt_length = batch_info['prompts'].shape[-1]
     max_resp_len = batch_info['responses'].shape[-1]
     resp_len = sum(batch_info['attention_mask'][prompt_length:].tolist())
-    reward_0_for_overlong_rsp = config.reward_model.reward_0_for_overlong_rsp and argv.get('rm_name') == "train"
-    punish_no_answer = config.reward_model.punish_no_answer if argv.get('rm_name') == "train" else "v0"
     add_int_verify = config.reward_model.add_int_verify
     strict_box_verify = config.reward_model.strict_box_verify
-    return verify(solution_str, ground_truth, resp_len, max_resp_len, reward_0_for_overlong_rsp, punish_no_answer,
-                  add_int_verify, strict_box_verify)
+
+    correct_reward = verify(solution_str, ground_truth, resp_len, max_resp_len, add_int_verify, strict_box_verify,
+                            pause_tokens_index)
+
+    final_reward = correct_reward
+
+    if isinstance(final_reward, torch.Tensor):
+        final_reward = final_reward.item()
+    return final_reward
 
 
 if __name__ == "__main__":

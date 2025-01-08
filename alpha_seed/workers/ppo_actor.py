@@ -137,6 +137,12 @@ class DataParallelPPOActor(BasePPOActor):
             else:
                 output = self.actor_module(input_ids=input_ids_rmpad, position_ids=position_ids_rmpad, use_cache=False)
 
+                if self.config.get('logits_clamp', 0) != 0:
+                    from alpha_seed.utils.functional import clip_by_value_preserve_gradient
+                    output.logits = clip_by_value_preserve_gradient(output.logits,
+                                                                    min=-self.config.logits_clamp,
+                                                                    max=self.config.logits_clamp)
+
                 logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
                 logits_rmpad.div_(temperature)
 
@@ -286,6 +292,8 @@ class DataParallelPPOActor(BasePPOActor):
                     micro_batches = mini_batch.split(self.config.ppo_micro_batch_size)
                 self.actor_optimizer.zero_grad()
 
+                minibatch_early_stop = False
+
                 for i, micro_data in enumerate(micro_batches):
                     assert micro_data.device == torch.device('cpu')
                     micro_data = micro_data.cuda()  # actor device is cpu when using offload
@@ -301,10 +309,11 @@ class DataParallelPPOActor(BasePPOActor):
                     clip_ratio = self.config.clip_ratio
                     clip_ratio2 = self.config.clip_ratio2
                     scale_pg_by_kl = self.config.scale_pg_by_kl
+                    scale_pg_by_local_kl = self.config.scale_pg_by_local_kl
                     entropy_coeff = self.config.entropy_coeff
                     upgo_loss_weight = self.config.upgo_loss_weight
                     kl_loss_weight = self.config.kl_loss_weight
-                    kl_penalty = self.config.kl_penalty
+                    kl_penalty_type = self.config.kl_penalty
 
                     if entropy_coeff <= 0.:
                         compute_entropy = False
@@ -325,8 +334,14 @@ class DataParallelPPOActor(BasePPOActor):
                         cliprange=clip_ratio,
                         cliprange2=clip_ratio2,
                         scale_pg_by_kl=scale_pg_by_kl,
+                        scale_pg_by_local_kl=scale_pg_by_local_kl,
                         upgo_loss_weight=upgo_loss_weight,
-                        use_ewma_loss=self.config.use_ewma_loss)
+                        use_ewma_loss=self.config.use_ewma_loss,
+                        kl_penalty_type=kl_penalty_type)
+
+                    if self.config.early_stop_by_kl != 0 and ppo_kl > self.config.early_stop_by_kl and batch_idx > 0:
+                        minibatch_early_stop = True
+                        break
 
                     if kl_loss_weight > 0.0:
                         kl_loss = core_algos.compute_kl_loss(log_prob, ref_log_prob, response_mask, kl_penalty)
@@ -362,6 +377,10 @@ class DataParallelPPOActor(BasePPOActor):
                         first_mini_ppo_kl_sum += ppo_kl_sum.detach().item()
 
                     append_to_dict(metrics, micro_data_metric)
+
+                if minibatch_early_stop:
+                    print(f'early stop at {batch_idx}!!!')
+                    break
 
                 grad_norm = self._optimizer_step()
 

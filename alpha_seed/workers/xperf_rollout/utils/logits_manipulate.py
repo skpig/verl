@@ -42,3 +42,15 @@ def logits_manipulate_fn_eta(logits, history_ids, manipulate_args):
     min_p_mask = probs < manipulate_args['eta_epsilon']
     logits[min_p_mask] = filter_value
     return logits
+
+
+from alpha_seed.utils.functional import clip_by_value_preserve_gradient
+
+
+def logits_manipulate_fn_clip(logits, history_ids, manipulate_args):
+    """
+    clip logits value
+    """
+    clip_value = manipulate_args['logits_clamp']
+    logits = clip_by_value_preserve_gradient(logits, min=-clip_value, max=clip_value)
+    return logits
