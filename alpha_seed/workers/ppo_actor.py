@@ -38,7 +38,7 @@ from dist_attn.ulysses.ops import gather_outputs
 from alpha_seed.workers.hybrid_engine.fsdp_ulysses import ulysses_pad_and_slice_inputs
 
 from alpha_seed import core_algos
-
+from alpha_seed.models.transformers.monkey_patch import update_gate_ema
 from verl.utils.seqlen_balancing import rearrange_micro_batches, get_reverse_idx
 
 from contextlib import nullcontext
@@ -273,6 +273,9 @@ class DataParallelPPOActor(BasePPOActor):
         dataloader = batch.split(self.config.ppo_mini_batch_size)
 
         metrics = {}
+
+        first_mini_ppo_kl_sum = 0
+
         for batch_idx, mini_batch in enumerate(dataloader):
             with self.profiler_context as p:
                 if self.config.use_dynamic_bsz:
@@ -354,9 +357,18 @@ class DataParallelPPOActor(BasePPOActor):
                         'actor/ppo_kl_sum': ppo_kl_sum.detach().item(),
                         'actor/tokens_per_micro_batch_update': attention_mask.sum().detach().item(),
                     }
+
+                    if batch_idx == 0:
+                        first_mini_ppo_kl_sum += ppo_kl_sum.detach().item()
+
                     append_to_dict(metrics, micro_data_metric)
 
                 grad_norm = self._optimizer_step()
+
+                if self.config.get('update_gate_ema', False):
+                    # update gate_ema
+                    update_gate_ema(self.actor_module)
+
                 data_metric = {
                     'actor/grad_norm': grad_norm.detach().item(),
                     'actor/#micro_batch_update': len(micro_batches)
@@ -365,6 +377,8 @@ class DataParallelPPOActor(BasePPOActor):
 
                 p.step()
                 self.memory_profiler.step()
+
+        append_to_dict(metrics, {'first_mini_ppo_kl_sum': first_mini_ppo_kl_sum})
 
         self.actor_optimizer.zero_grad()
         return metrics

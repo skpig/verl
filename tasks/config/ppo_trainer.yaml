@@ -20,6 +20,7 @@ data:
 
 
 actor_rollout_ref:
+  update_gate_ema: False
   hybrid_engine: True
   model:
     path: hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/models/deepseek-llm-7b-chat
@@ -131,6 +132,7 @@ actor_rollout_ref:
   use_cuda_timer: False
 
 critic:
+  update_gate_ema: False
   load_score_head: True
   strategy: fsdp
   optim:

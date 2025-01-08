@@ -17,6 +17,45 @@
 Apply monkey-patch function to models
 """
 
+import torch
+from torch import distributed as dist
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from collections import defaultdict
+from seed_models import M8Config
+
+
+def get_ignore_modules_in_mixed_precision(model_type):
+    from seed_models.models.m8.modeling_m8 import M8TopkCapGate
+    from seed_models.models.p6.modeling_p6 import P6TopkCapGate
+    from seed_models.models.p7.modeling_p7 import P7TopkCapGate
+    _IGNORE_MODULES_IN_MIXED_PRECISION = defaultdict(tuple)
+
+    _IGNORE_MODULES_IN_MIXED_PRECISION.update({
+        "seed_p6": (P6TopkCapGate,),
+        "seed_p7": (P7TopkCapGate,),
+        "seed_m8": (M8TopkCapGate,)
+    })
+
+    return _IGNORE_MODULES_IN_MIXED_PRECISION[model_type]
+
+
+def update_gate_ema(fsdp_module):
+    config = fsdp_module.module.config
+    if isinstance(config, M8Config):
+        if dist.is_initialized() and dist.get_rank() == 0:
+            print('Update gate ema for M8')
+        update_gate_ema_m8(fsdp_module=fsdp_module)
+
+
+def update_gate_ema_m8(fsdp_module):
+    assert isinstance(fsdp_module.module.config, M8Config)
+    with torch.inference_mode():
+        for i in range(fsdp_module.module.config.num_hidden_layers):
+            gate = fsdp_module.module.transformer.h[i].module.mlp.moe.gate
+            with FSDP.summon_full_params(gate, rank0_only=False, offload_to_cpu=False):
+                gate.module.update_gate_ema()
+
+
 #### Open Source Models
 
 

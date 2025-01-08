@@ -37,6 +37,9 @@ from alpha_seed import core_algos
 
 from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
 from dist_attn.ulysses.ops import gather_outputs
+# Note that this one doesn't change the original order
+# Note that this one should only used for training because it changes the original order
+from alpha_seed.models.transformers.monkey_patch import update_gate_ema
 from verl.utils.seqlen_balancing import rearrange_micro_batches, get_reverse_idx
 from contextlib import nullcontext
 
@@ -249,6 +252,11 @@ class DataParallelPPOCritic(BasePPOCritic):
                     append_to_dict(metrics, micro_data_metric)
 
                 grad_norm = self._optimizer_step()
+
+                if self.config.get('update_gate_ema', False):
+                    # update gate_ema
+                    update_gate_ema(self.critic_module)
+
                 data_metric = {
                     'critic/grad_norm': grad_norm.detach().item(),
                     'critic/#micro_batch_update': len(micro_batches)
@@ -259,4 +267,5 @@ class DataParallelPPOCritic(BasePPOCritic):
                 self.memory_profiler.step()
 
         self.critic_optimizer.zero_grad()
+
         return metrics
