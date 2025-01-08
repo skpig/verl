@@ -404,29 +404,27 @@ class AsyncActorRolloutRefWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def to(self, device: str, model: bool = True, optimizer: bool = True):
-        if self._is_actor and self.config.actor.fsdp_config.param_offload:
-            return
-        if self._is_ref and self.config.ref.fsdp_config.param_offload:
-            return
         assert device in ("cuda", "cpu")
         if device == "cuda":
             device = torch.cuda.current_device()
             if self._is_actor or self._is_standalone_rollout or self._is_standalone_validator:
-                if model:
-                    load_fsdp_model_to_gpu(self.actor_module_fsdp)
-                if optimizer and self.actor_optimizer is not None:
-                    load_fsdp_optimizer(self.actor_optimizer, device)
+                if not self.config.actor.fsdp_config.param_offload:
+                    if model:
+                        load_fsdp_model_to_gpu(self.actor_module_fsdp)
+                    if optimizer and self.actor_optimizer is not None:
+                        load_fsdp_optimizer(self.actor_optimizer, device)
             if self._is_ref:
-                if model:
+                if model and not self.config.ref.fsdp_config.param_offload:
                     load_fsdp_model_to_gpu(self.ref_module_fsdp)
         elif device == "cpu":
             if self._is_actor or self._is_standalone_rollout or self._is_standalone_validator:
-                if model:
-                    offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-                if optimizer and self.actor_optimizer is not None:
-                    offload_fsdp_optimizer(self.actor_optimizer)
+                if not self.config.actor.fsdp_config.param_offload:
+                    if model:
+                        offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+                    if optimizer and self.actor_optimizer is not None:
+                        offload_fsdp_optimizer(self.actor_optimizer)
             if self._is_ref:
-                if model:
+                if model and not self.config.ref.fsdp_config.param_offload:
                     offload_fsdp_model_to_cpu(self.ref_module_fsdp)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
