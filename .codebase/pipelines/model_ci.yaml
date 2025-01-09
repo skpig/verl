@@ -32,15 +32,22 @@ jobs:
         name: setup doas
         id: doas
         uses: actions/doas
-      - name: monkey patch tests
+      - &step_setup_env
+        name: setup env
         commands:
+          - pip3 install --upgrade byted-omnistore
           - cd /opt/tiger
           - git clone git@code.byted.org:data/verl
           - git clone git@code.byted.org:seed/seed_models
+          - export PYTHONPATH=/opt/tiger/seed_models:/opt/tiger/verl/:$PYTHONPATH
           - cd -
+      - name: monkey patch tests
+        commands:
           - pytest -s tests/models/transformers/test_ce_loss_op.py
-          # - /opt/tiger/arnold/hdfs_client/hdfs
       - name: parallelize tests
         commands:
-          - export PYTHONPATH=/opt/tiger/alpha-seed/:/opt/tiger/seed_models:/opt/tiger/verl/:$PYTHONPATH
-          - pytest -s tests/parallelize/test_group_gemm_ep.py
+          - export PYTHONPATH=/opt/tiger/seed_models:/opt/tiger/verl/:$PYTHONPATH
+          - pytest tests/parallelize/test_create_mesh.py
+          - pytest tests/parallelize/test_parallel_init.py
+          - pytest tests/parallelize/test_group_gemm_ep.py
+          - pytest tests/parallelize/test_save_load.py

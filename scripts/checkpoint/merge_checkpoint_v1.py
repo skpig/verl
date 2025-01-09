@@ -1,5 +1,6 @@
+from typing import List, Tuple, Dict
 import shutil
-import seed_models  # noqa
+import seed_models
 import os
 import torch
 import argparse
@@ -9,7 +10,19 @@ from concurrent.futures import ThreadPoolExecutor
 import hdfs_io
 from tqdm.auto import trange
 from seed_models.commands.convert_to_megatron import convert_seed_models_to_megatron
-from torch.distributed._tensor import DTensor, Replicate, Shard
+from torch.distributed._tensor import DTensor, Shard, Placement
+
+
+def merge_by_placement(tensors: List[torch.Tensor], placement: Placement):
+    if placement.is_replicate():
+        return tensors[0]
+    elif placement.is_partial():
+        raise NotImplementedError("Partial placement is not supported yet")
+    elif placement.is_shard():
+        return torch.cat(tensors, dim=placement.dim).contiguous()
+    else:
+        raise ValueError(f"Unsupported placement: {placement}")
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -52,11 +65,23 @@ if __name__ == '__main__':
 
     print(f'Got device mesh {mesh}, mesh_dim_names {mesh_dim_names}')
 
-    assert mesh_dim_names in (('fsdp',), ('dp', 'fsdp'))
+    assert mesh_dim_names in (
+        ('fsdp',),
+        ('dp', 'fsdp'),
+        ('fsdp', 'tp'),
+        ('dp', 'fsdp', 'tp'),
+    ), f'Unsupported mesh_dim_names {mesh_dim_names}'
 
-    total_shards = mesh.shape[-1]
+    if 'tp' in mesh_dim_names:
+        # fsdp * tp
+        total_shards = mesh.shape[-1] * mesh.shape[-2]
+        mesh_shape = (mesh.shape[-2], mesh.shape[-1])
+    else:
+        # fsdp
+        total_shards = mesh.shape[-1]
+        mesh_shape = (mesh.shape[-1],)
 
-    print(f'Processing model shards with {total_shards} in total')
+    print(f'Processing model shards with {total_shards} {mesh_shape} in total')
 
     model_state_dict_lst = []
     model_state_dict_lst.append(state_dict)
@@ -67,7 +92,7 @@ if __name__ == '__main__':
                      os.path.join(local_dir, f'model_optim_rank_{rank}.pt'),
                      chunk_thread_num=16)
         model_path = os.path.join(local_dir, f'model_optim_rank_{rank}.pt')
-        state_dict = torch.load(model_path, map_location='cpu')
+        state_dict = torch.load(model_path, map_location='cpu', weights_only=False)
         model_state_dict_lst[rank] = state_dict['model']
         os.remove(model_path)
 
@@ -77,7 +102,7 @@ if __name__ == '__main__':
 
     # reorder model_state_dict based on keys
     state_dict = {}
-    shard_dim = {}
+    param_placements: Dict[str, List[Placement]] = {}
     keys = set(model_state_dict_lst[0].keys())
     for key in keys:
         state_dict[key] = []
@@ -85,29 +110,46 @@ if __name__ == '__main__':
             tensor = model_state_dict.pop(key)
             if isinstance(tensor, DTensor):
                 state_dict[key].append(tensor._local_tensor.bfloat16())
-                if key in shard_dim:
-                    assert shard_dim[key] == tensor.placements[-1]
+                placements = tuple(tensor.placements)
+                # replicated placement at dp dimension can be discarded
+                if mesh_dim_names[0] == 'dp':
+                    placements = placements[1:]
+                if key not in param_placements:
+                    param_placements[key] = placements
                 else:
-                    shard_dim[key] = tensor.placements[-1]
+                    assert param_placements[key] == placements
             else:
                 state_dict[key] = tensor.bfloat16()
 
     del model_state_dict_lst
 
     for key in sorted(state_dict):
-        if isinstance(state_dict[key], list):
-            if isinstance(shard_dim[key], Shard):
-                sdim = shard_dim[key].dim
-                print(f"Merging sharded tensor {key} at dimension {sdim}")
-                state_dict[key] = torch.cat(state_dict[key], dim=sdim)
-            elif isinstance(shard_dim[key], Replicate):
-                print(f"Unexpected replicated tensor {key}. Only take the first one")
-                state_dict[key] = state_dict[key][0]
-            else:
-                raise ValueError(f'Unknown shard dim {shard_dim[key]}')
-            print(f'Merged {key} shape: {state_dict[key].size()}')
+        if not isinstance(state_dict[key], list):
+            print(f"No need to merge key {key}")
+            continue
+        # merge shards
+        placements: Tuple[Shard] = param_placements[key]
+        if len(mesh_shape) == 1:
+            # 1-D list, FSDP without TP
+            assert len(placements) == 1
+            shards = state_dict[key]
+            state_dict[key] = merge_by_placement(shards, placements[0])
         else:
-            print(f'No need to concat key {key}')
+            # 2-D list, FSDP + TP
+            assert len(placements) == 2 and len(mesh_shape) == 2
+            flatten = state_dict[key]
+            shards = []
+            for i in range(mesh_shape[0]):
+                tp_shards = [flatten[i * mesh_shape[1] + j] for j in range(mesh_shape[1])]
+                shards.append(tp_shards)
+            # merge at tp dimension
+            tp_placement = placements[1]
+            fsdp_shards = [merge_by_placement(tp_shards, tp_placement) for tp_shards in shards]
+            # merge at fsdp dimension
+            fsdp_placement = placements[0]
+            state_dict[key] = merge_by_placement(fsdp_shards, fsdp_placement)
+        print(f'Merged {key} shape: {state_dict[key].size()}')
+
     print('Writing to local disk')
     hf_path = os.path.join(local_dir, 'huggingface')
     config = AutoConfig.from_pretrained(hf_path)

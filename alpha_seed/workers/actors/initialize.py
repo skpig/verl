@@ -49,6 +49,51 @@ from safetensors.torch import load_file
 import hdfs_io
 import itertools
 from verl.utils.fs import copy_local_path_from_hdfs
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed._tensor import Replicate, Shard
+from alpha_seed.models.transformers.parallel import TPSpec
+
+
+def create_mesh(fsdp_size: int, tp_size: int, sp_size: int):
+    """
+    Create device meshes for fsdp, tp, and sp.
+
+    Returns:
+        fsdp_mesh: DeviceMesh for FSDP/HSDP (can be 1-D or 2-D)
+        tp_mesh: DeviceMesh for TP (1-D)
+        sp_mesh: DeviceMesh for SP (1-D)
+        gather_mesh: DeviceMesh for data replication group (1-D)
+    """
+    world_size = dist.get_world_size()
+    fsdp_size = world_size if fsdp_size <= 0 else fsdp_size
+    assert world_size % (tp_size * sp_size) == 0
+    # train mesh
+    remain_size = world_size // tp_size
+    if fsdp_size > remain_size:
+        fsdp_size = remain_size
+    assert remain_size % fsdp_size == 0
+    dp_size = remain_size // fsdp_size
+    if dp_size == 1:
+        train_mesh = init_device_mesh("cuda", (fsdp_size, tp_size), mesh_dim_names=("fsdp", "tp"))
+        fsdp_mesh = train_mesh["fsdp"]
+        tp_mesh = train_mesh["tp"]
+    else:
+        train_mesh = init_device_mesh("cuda", (dp_size, fsdp_size, tp_size), mesh_dim_names=("dp", "fsdp", "tp"))
+        fsdp_mesh = train_mesh["dp", "fsdp"]
+        tp_mesh = train_mesh["tp"]
+    assert fsdp_mesh.size() == fsdp_size * dp_size
+    assert tp_mesh.size() == tp_size
+    # sp mesh
+    gather_size = tp_size * sp_size
+    data_dp_size = world_size // gather_size
+    data_mesh = init_device_mesh("cuda", (data_dp_size, sp_size, tp_size), mesh_dim_names=("dp", "sp", "tp"))
+    sp_mesh = data_mesh["sp"]
+    assert sp_mesh.size() == sp_size
+    # data gather mesh
+    gather_mesh = init_device_mesh("cuda", (data_dp_size, gather_size), mesh_dim_names=("dp", "replicate"))
+    gather_mesh = gather_mesh["replicate"]
+    assert gather_mesh.size() == gather_size
+    return fsdp_mesh, tp_mesh, sp_mesh, gather_mesh
 
 
 def create_init_fn(module: torch.nn.Module) -> Callable:
@@ -179,6 +224,25 @@ def parallel_init_fsdp_fn(module: torch.nn.Module, shard_states: Dict[str, torch
     shared = set(s for s, names in state2fqn.items() if len(names) > 1)
     materialized_states = {}
 
+    def make_full_tensor(param: torch.Tensor, tp_spec: TPSpec):
+        device = torch.cuda.current_device()
+        if isinstance(tp_spec.shard, Replicate):
+            return torch.empty_like(param.data, device=device)
+        else:
+            assert isinstance(tp_spec.shard, Shard)
+            size = list(param.shape)
+            size[tp_spec.shard.dim] *= tp_spec.mesh.size()
+            return torch.empty(size, dtype=param.dtype, device=device)
+
+    def copy_to_local(param: torch.Tensor, full_data: torch.Tensor, tp_spec: TPSpec):
+        if isinstance(tp_spec.shard, Replicate):
+            param.data.copy_(full_data)
+        else:
+            assert isinstance(tp_spec.shard, Shard)
+            local_data = full_data.chunk(tp_spec.mesh.size(), dim=tp_spec.shard.dim)[tp_spec.mesh.get_local_rank()]
+            param.data.copy_(local_data.contiguous())
+        param._spec = tp_spec
+
     @torch.no_grad()
     def create_and_sync_state(param_name, state, is_param):
         assert param_name in shard_states, f"{param_name} not loaded"
@@ -189,11 +253,19 @@ def parallel_init_fsdp_fn(module: torch.nn.Module, shard_states: Dict[str, torch
             param = torch.empty_like(state.data, device=device)
         loaded = shard_states[param_name]
         if isinstance(loaded, (torch.nn.Parameter, torch.Tensor)):
-            param.data.copy_(loaded.data)
-            dist.broadcast(param.data, src=dist.get_rank())
+            dist.broadcast(loaded.data.to(param.dtype), src=dist.get_rank())
+            if hasattr(state, "_spec"):
+                copy_to_local(param, loaded.data, state._spec)
+            else:
+                param.data.copy_(loaded.data)
         else:
             assert isinstance(loaded, int)  # the rank that holds the state
-            dist.broadcast(param.data, src=loaded)
+            if hasattr(state, "_spec"):
+                full_data = make_full_tensor(param, state._spec)
+                dist.broadcast(full_data, src=loaded)
+                copy_to_local(param, full_data, state._spec)
+            else:
+                dist.broadcast(param.data, src=loaded)
         shard_states.pop(param_name)
         del loaded
         return param
