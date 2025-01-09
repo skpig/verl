@@ -32,6 +32,7 @@ from verl.utils.model import compute_position_id_with_mask
 
 from tensordict import TensorDict
 
+from alpha_seed.workers.actors import activation_offload
 from alpha_seed.workers.hybrid_engine.fsdp_ulysses import ulysses_pad_and_slice_inputs
 from alpha_seed import core_algos
 
@@ -80,6 +81,9 @@ class DataParallelPPOCritic(BasePPOCritic):
 
         self.value_loss = torch.compile(core_algos.compute_value_loss, disable=True)
 
+        enable_act_offload = self.config.act_offload if critic_optimizer is not None else False
+        self.act_offload_ctx = activation_offload.get_offload_context(enable_act_offload, self.critic_module)
+
     def _forward_micro_batch(self, micro_batch: TensorDict):
         from flash_attn.bert_padding import pad_input, unpad_input, index_first_axis, rearrange
 
@@ -103,9 +107,10 @@ class DataParallelPPOCritic(BasePPOCritic):
                 input_ids_rmpad, position_ids_rmpad, pad_size = ulysses_pad_and_slice_inputs(
                     input_ids_rmpad, position_ids_rmpad, sp_size)
                 # forward
-                values_rmpad = self.critic_module(input_ids=input_ids_rmpad,
-                                                  position_ids=position_ids_rmpad,
-                                                  use_cache=False).logits  # (1, total_nnz / sp_size, 1)
+                with self.act_offload_ctx:
+                    values_rmpad = self.critic_module(input_ids=input_ids_rmpad,
+                                                      position_ids=position_ids_rmpad,
+                                                      use_cache=False).logits  # (1, total_nnz / sp_size, 1)
                 values_rmpad = values_rmpad.squeeze(0).squeeze(-1)  # (total_nnz / sp_size)
                 # handle ulysses sequence parallelism
                 if sp_size > 1:

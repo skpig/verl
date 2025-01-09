@@ -266,7 +266,13 @@ class AsyncActorRolloutRefWorker(Worker):
             actor_module.to(torch_dtype)
 
             if enable_gradient_checkpointing:
-                actor_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': False})
+                use_reentrant = self.config.actor.act_offload
+                if self.config.actor.act_offload:
+                    # doc link: https://bytedance.us.larkoffice.com/docx/NiWVd0QgoopepBxBXmDuHJKwsNe
+                    from alpha_seed.workers.actors import activation_offload
+                    torch.utils.checkpoint.CheckpointFunction = activation_offload.CheckpointFunction
+                actor_module.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={'use_reentrant': use_reentrant})
                 actor_module.train()
                 if self.rank == 0:
                     print(actor_module)

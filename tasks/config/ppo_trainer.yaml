@@ -51,6 +51,7 @@ actor_rollout_ref:
     ppo_epochs: 1
     shuffle: True
     use_ewma_loss: False
+    act_offload: False
     optim:
       lr: 1e-5
       betas: [0.9, 0.95]
@@ -175,6 +176,7 @@ critic:
   shuffle: ${actor_rollout_ref.actor.shuffle}
   grad_clip: 1.0
   cliprange_value: 0.5
+  act_offload: False
   profile:
     filename: p6_400m_ppo_critic
     profile_on_ranks:

@@ -157,7 +157,10 @@ class CriticWorker(Worker):
             critic_module.to(torch_dtype)
 
             if config.model.enable_gradient_checkpointing:
-                critic_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': False})
+                # doc link: https://bytedance.us.larkoffice.com/docx/NiWVd0QgoopepBxBXmDuHJKwsNe
+                use_reentrant = self.config.act_offload
+                critic_module.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={'use_reentrant': use_reentrant})
                 critic_module.train()
                 if self.rank == 0:
                     print(critic_module)

@@ -41,6 +41,8 @@ from alpha_seed import core_algos
 from alpha_seed.models.transformers.monkey_patch import update_gate_ema
 from verl.utils.seqlen_balancing import rearrange_micro_batches, get_reverse_idx
 
+from alpha_seed.workers.actors import activation_offload
+
 from contextlib import nullcontext
 
 __all__ = ['DataParallelPPOActor']
@@ -90,6 +92,9 @@ class DataParallelPPOActor(BasePPOActor):
         self.compute_entropy_loss = torch.compile(core_algos.compute_entropy_loss, dynamic=True)
         self.entropy_from_logits = torch.compile(verl_F.entropy_from_logits, dynamic=True)
 
+        enable_act_offload = self.config.act_offload if actor_optimizer is not None else False
+        self.act_offload_ctx = activation_offload.get_offload_context(enable_act_offload, self.actor_module)
+
     def _forward_micro_batch(self, micro_batch: TensorDict, temperature, compute_entropy):
         from flash_attn.bert_padding import index_first_axis, rearrange
 
@@ -128,14 +133,18 @@ class DataParallelPPOActor(BasePPOActor):
                     'temperature': temperature,
                     'fuse_lm_head_ce_loss': True,
                 }
-                output = self.actor_module(
-                    **kwargs,
-                    use_cache=False,
-                    output_hidden_states=False,
-                )
+                with self.act_offload_ctx:
+                    output = self.actor_module(
+                        **kwargs,
+                        use_cache=False,
+                        output_hidden_states=False,
+                    )
                 full_log_probs_rmpad = output.loss * (-1.0)
             else:
-                output = self.actor_module(input_ids=input_ids_rmpad, position_ids=position_ids_rmpad, use_cache=False)
+                with self.act_offload_ctx:
+                    output = self.actor_module(input_ids=input_ids_rmpad,
+                                               position_ids=position_ids_rmpad,
+                                               use_cache=False)
 
                 if self.config.get('logits_clamp', 0) != 0:
                     from alpha_seed.utils.functional import clip_by_value_preserve_gradient
