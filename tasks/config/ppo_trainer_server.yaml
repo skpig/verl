@@ -1,0 +1,113 @@
+# Configs that used for server and cannot be overwrited by client config
+data:
+  max_prompt_length: 512
+  max_response_length: 512
+
+actor_rollout_ref:
+  hybrid_engine: True
+  model:
+    path: hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/models/deepseek-llm-7b-chat
+    external_lib: null
+  actor:
+    strategy: fsdp  # This is for backward-compatibility
+    ulysses_sequence_parallel_size: 1
+    fsdp_size: -1
+    use_dynamic_bsz: True
+    fsdp_config:
+      wrap_policy:
+        # transformer_layer_cls_to_wrap: None
+        min_num_params: 0
+      param_offload: False
+      use_orig_params: ${trainer.ckpt_enable_flatten}
+  ref:
+    fsdp_config:
+      param_offload: True
+      wrap_policy:
+        # transformer_layer_cls_to_wrap: None
+        min_num_params: 0
+    ulysses_sequence_parallel_size: 1
+    fsdp_size: -1
+    use_dynamic_bsz: True
+    max_token_len: -1
+  rollout:
+    name: xperf_gpt
+    prompt_length: ${data.max_prompt_length}  # for xperf_gpt
+    response_length: ${data.max_response_length}
+
+    # for vllm rollout
+    dtype: bfloat16 # should align with FSDP
+    ignore_eos: False
+    enforce_eager: True
+    free_cache_engine: True
+    load_format: dummy_dtensor
+    tensor_model_parallel_size: 2
+    max_num_batched_tokens: 8192
+    max_num_seqs: 1024
+    use_dynamic_bsz: True
+    max_token_len: -1
+    log_prob_micro_batch_size: 128
+    # for xperf_gpt
+    micro_batch_size: 2048
+    num_bon: 1
+    eval_bon: 1
+    eval_bon_every: 20
+    bon_strategy: "best"
+    quant_mode: "NO_QUANT"
+    gpu_memory_utilization: 0.7
+  use_cuda_timer: False
+
+critic:
+  strategy: fsdp
+  model:
+    path: hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/models/deepseek-llm-7b-chat
+    tokenizer_path: ${actor_rollout_ref.model.path}
+    override_config: {}
+    external_lib: ${actor_rollout_ref.model.external_lib}
+    enable_gradient_checkpointing: False
+    fsdp_config:
+      param_offload: False
+      wrap_policy:
+        # transformer_layer_cls_to_wrap: None
+        min_num_params: 0
+      use_orig_params: ${trainer.ckpt_enable_flatten}
+  ulysses_sequence_parallel_size: 1
+  fsdp_size: -1
+  NO_DEVICE_MESH: False # handle old critic ckpt stored as ShardedTensor
+  use_dynamic_bsz: True
+  ppo_max_token_len: -1
+  use_cuda_timer: False
+
+reward_model:
+  enable: False
+  model:
+    input_tokenizer: ${actor_rollout_ref.model.path}  # set this to null if the chat template is identical
+    path: hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/models/FsfairX-LLaMA3-RM-v0.1
+    external_lib: ${actor_rollout_ref.model.external_lib}
+    fsdp_config:
+      min_num_params: 0
+      param_offload: True
+      use_orig_params: ${trainer.ckpt_enable_flatten}
+  ulysses_sequence_parallel_size: 1
+  fsdp_size: -1
+  use_dynamic_bsz: True
+  max_token_len: -1
+  max_length: null
+  max_prompt_length: ${data.max_prompt_length}
+  max_response_length: ${data.max_response_length}
+  reward_executor_maxnum: 128
+  use_cuda_timer: False
+
+trainer:
+  nnodes: 1
+  n_gpus_per_node: 8
+  ckpt_enable_flatten: False
+
+streaming_rollout:
+  n_gpus_per_node: 0
+  nnodes: 0
+  warmup_step: 0
+  force_eos: False
+
+streaming_validator:
+  n_gpus_per_node: 0
+  nnodes: 0

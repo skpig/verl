@@ -436,3 +436,12 @@ class RewardModelWorker(Worker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def do_ndtimeline_action(self, action, *args, **kwargs):
         ndtimeline.do_ndtimeline_action(action, *args, **kwargs)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def reinit(self, config):
+        import gc
+        if self._model_initialized:
+            del self.reward_module
+        gc.collect()
+        torch.cuda.empty_cache()
+        self.__init__(config)

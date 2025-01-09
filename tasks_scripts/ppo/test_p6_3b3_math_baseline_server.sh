@@ -137,4 +137,4 @@ python3 tasks/main_ppo.py \
     critic.model.fsdp_config.param_offload=${offload_all} \
     actor_rollout_ref.actor.profile.enable=True \
     critic.profile.enable=True \
-    +trainer.server_only=True \
+    server_client.role=server \

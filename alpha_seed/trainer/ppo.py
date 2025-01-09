@@ -583,6 +583,48 @@ class RayPPOTrainer(object):
             self.config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
             self.config.critic.optim.total_training_steps = total_training_steps
 
+    def reset_server(self):
+        """reset server state for server-only mode"""
+        timer = Timer("reset_server")
+        timer.start()
+        init_futures = []
+
+        if self.use_standalone_reference_policy or not self.use_reference_policy:
+            self.actor_rollout_wg.reinit(self.config.actor_rollout_ref, "actor_rollout")
+        elif self.use_colocate_reference_policy:
+            self.actor_rollout_wg.reinit(self.config.actor_rollout_ref, "actor_rollout_ref")
+        else:
+            raise NotImplementedError
+
+        init_futures.append(self.actor_rollout_wg.init_model())
+
+        if self.use_standalone_rollout:
+            self.standalone_rollout_wg.reinit(self.config.actor_rollout_ref, "standalone_rollout")
+            init_futures.append(self.standalone_rollout_wg.init_model())
+
+        if self.use_standalone_validator:
+            self.standalone_validator_wg.reinit(self.config.actor_rollout_ref, "standalone_validator")
+            init_futures.append(self.standalone_validator_wg.init_model())
+
+        if self.use_critic:
+            self.critic_wg.reinit(self.config.critic)
+            init_futures.append(self.critic_wg.init_model())
+
+        if self.use_standalone_reference_policy:
+            self.ref_policy_wg.reinit(self.config.actor_rollout_ref, "ref")
+            init_futures.append(self.ref_policy_wg.init_model())
+        elif self.use_colocate_reference_policy:
+            pass
+
+        if self.use_rm:
+            self.rm_wg.reinit(self.config.reward_model)
+            init_futures.append(self.rm_wg.init_model())
+
+        for fut in init_futures:
+            ray.wait(fut)
+        timer.stop()
+        print(f"reset_server elapsed: {timer.last:.4f}s")
+
     def init_workers(self, kv_store_name="kv_store", ckpt_global_uploader=None):
         """Init resource pool and worker group"""
 
@@ -656,14 +698,15 @@ class RayPPOTrainer(object):
             self.resource_pool_to_cls[resource_pool]['rm'] = rm_cls
 
         kv_store = ray.get_actor(name=kv_store_name)
-        server_only = ray.get(kv_store.get_by_key.remote("server_only"))
+        server_client_split = ray.get(kv_store.get_by_key.remote("server_client"))
         # initialize WorkerGroup
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
             # no role allocated to this resource pool
             if len(class_dict) == 0:
                 continue
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
-            worker_names = ray.get(kv_store.get_by_key.remote(resource_pool.name_prefix)) if server_only else None
+            worker_names = ray.get(kv_store.get_by_key.remote(
+                resource_pool.name_prefix)) if server_client_split else None
             wg_dict = self.ray_worker_group_cls(
                 ray_cls_with_init=worker_dict_cls, worker_names=worker_names) if isinstance(
                     worker_names, list) and len(worker_names) > 0 else self.ray_worker_group_cls(
@@ -676,12 +719,12 @@ class RayPPOTrainer(object):
             self.internal_wg_roles.append(list(class_dict.keys()))
 
         # init ckpt global uploader
-        self.ckpt_global_uploader = CkptGlobalUploader.options(
-            name=CkptGlobalUploader.name).remote(use_critic=self.use_critic,
-                                                 ckpt_version=self.config.trainer.ckpt_version,
-                                                 default_local_dir=self.config.trainer.default_local_dir,
-                                                 default_remote_dir=self.config.trainer.default_hdfs_dir
-                                                ) if ckpt_global_uploader is None else ckpt_global_uploader
+        self.ckpt_global_uploader = CkptGlobalUploader.options(name=CkptGlobalUploader.name).remote(
+            use_critic=self.use_critic,
+            ckpt_version=self.config.trainer.ckpt_version,
+            default_local_dir=self.config.trainer.default_local_dir,
+            default_remote_dir=self.config.trainer.default_hdfs_dir) if (
+                ckpt_global_uploader is None and not server_client_split) else ckpt_global_uploader
 
         for wg_name in self.all_wg:
             self.all_meta[wg_name] = self.all_wg[wg_name].get_meta()

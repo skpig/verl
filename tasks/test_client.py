@@ -46,8 +46,7 @@ class ClientPPOTrainer(RayPPOTrainer):
 
     def init_workers(self):
         """Connect to worker group"""
-        ckpt_global_uploader = ray.get_actor(CkptGlobalUploader.name)
-        super().init_workers(ckpt_global_uploader=ckpt_global_uploader)
+        super().init_workers(ckpt_global_uploader=None)
 
     def fit(self):
         super().fit()

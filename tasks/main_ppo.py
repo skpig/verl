@@ -410,8 +410,13 @@ def main(config):
         override(config, recipe)
 
     with metric_collection_context:
-        init_ray()
-        check_arnold_resources(config=config)
+        if config.server_client.role == "client":
+            init_ray(address=config.server_client.ray_address)
+            config = validate_client_config(config)
+        else:
+            init_ray(address=None)
+            check_arnold_resources(config=config)
+
     runner = TaskRunner.remote()
     ray.get(runner.main.remote(main_task, config=config))
 
@@ -463,7 +468,7 @@ def check_arnold_resources(config):
     wait_till_nodes_ready(total_required_gpus)
 
 
-def init_ray():
+def init_ray(address=None):
     if not ray.is_initialized():
         # this is for local ray cluster
         remote_cache_env = {
@@ -480,7 +485,7 @@ def init_ray():
         if ENABLE_REDIS_TRITON_CACHE:
             runtime_env['env_vars'].update(remote_cache_env)
 
-        ray.init(namespace="alphaseed", runtime_env=runtime_env)
+        ray.init(namespace="alphaseed", runtime_env=runtime_env, address=address)
 
 
 def validate_config(config):
@@ -555,6 +560,77 @@ def validate_config(config):
             print(f"Warning: config.reward_model.max_token_len is set to {config.reward_model.max_token_len}")
 
 
+def validate_client_config(config: DictConfig):
+    assert config.server_client.role == "client"
+    config_yaml_dir = os.path.join(os.path.dirname(__file__), "config")
+    ref_server_client_common_config = omegaconf.OmegaConf.load(
+        os.path.join(config_yaml_dir, "ppo_trainer_server_client_common.yaml"))
+    ref_server_config = omegaconf.OmegaConf.load(os.path.join(config_yaml_dir, "ppo_trainer_server.yaml"))
+
+    kv_store = ray.get_actor(KVStore.name)
+    server_config = ray.get(kv_store.get_by_key.remote("config"))
+    assert server_config is not None, "get server config failed"
+
+    def filter_config(target, ref):
+        filtered = omegaconf.OmegaConf.create({})
+        for key in target:
+            if isinstance(target[key], DictConfig):
+                if (key in ref) and isinstance(ref[key], DictConfig):
+                    filtered[key] = filter_config(target[key], ref[key])
+            elif key in ref:
+                try:
+                    if not isinstance(ref[key], DictConfig):
+                        filtered[key] = target[key]
+                except:
+                    import ipdb
+                    ipdb.set_trace()
+                    print()
+        return filtered
+
+    server_config = filter_config(server_config, ref_server_config)
+    common_config_server = filter_config(server_config, ref_server_client_common_config)
+    common_config_client = filter_config(config, ref_server_client_common_config)
+
+    def assert_config_match(prefix, server_conf, client_conf):
+        if (not isinstance(server_conf, DictConfig)) or (not isinstance(client_conf, DictConfig)):
+            if server_conf != client_conf:
+                raise ValueError(f"Common config [{prefix}] mismatch: {server_conf}(server) != {client_conf}(client)")
+            return
+        for key in server_conf:
+            if key in client_conf:
+                assert_config_match(prefix + "." + key, server_conf[key], client_conf[key])
+
+    assert isinstance(common_config_server, DictConfig)
+    assert isinstance(common_config_client, DictConfig)
+    assert_config_match("", common_config_server, common_config_client)
+
+    # overwrite configs that should be server config but passed by different value by client
+    config = omegaconf.OmegaConf.merge(config, server_config)
+    return config
+
+
+class KVStore:
+    name = "kv_store"
+
+    def __init__(self):
+        self.kwargs = dict()
+
+    def set_key_val(self, k, v):
+        self.kwargs[k] = v
+
+    def get_by_key(self, k):
+        return self.kwargs.get(k, None)
+
+    @staticmethod
+    def get_or_create_actor():
+        trainer_config_actor = None
+        try:
+            trainer_config_actor = ray.get_actor(name=KVStore.name)
+        except Exception as e:
+            trainer_config_actor = ray.remote(KVStore).options(name=KVStore.name, lifetime="detached").remote()
+        return trainer_config_actor
+
+
 def config_to_trainer_kwargs(config):
     from verl.utils.fs import copy_local_path_from_hdfs
     from transformers import AutoTokenizer
@@ -564,11 +640,6 @@ def config_to_trainer_kwargs(config):
     from omegaconf import OmegaConf
     pprint(OmegaConf.to_container(config, resolve=True))  # resolve=True will eval symbol values
     OmegaConf.resolve(config)
-
-    logger = Tracking(project_name=config.trainer.project_name,
-                      experiment_name=config.trainer.experiment_name,
-                      default_backend=config.trainer.logger,
-                      config=OmegaConf.to_container(config, resolve=True))
 
     # download the checkpoint from hdfs
     local_path = copy_local_path_from_hdfs(config.actor_rollout_ref.model.path)
@@ -622,50 +693,40 @@ def config_to_trainer_kwargs(config):
         role_worker_mapping[Role.RewardModel] = RewardModelWorker
         mapping[Role.RewardModel] = global_pool_id
 
-    reward_fn = RewardManager(tokenizer=tokenizer, config=config, logger=logger, rm_name="train")
-
-    # Note that we always use function-based RM for validation
-    val_reward_fn = RewardManager(tokenizer=tokenizer, config=config, logger=logger, rm_name="val")
-
     resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
-
-    if config.trainer.use_remote_sandbox:
-        sandbox_client = SandboxClient.options(name='sandbox_client').remote(config=config, tokenizer=tokenizer)
-    else:
-        sandbox_client = None
 
     kwargs = {
         "config": config,
-        "tokenizer": tokenizer,
         "role_worker_mapping": role_worker_mapping,
         "resource_pool_manager": resource_pool_manager,
         "ray_worker_group_cls": ray_worker_group_cls,
-        "sandbox_client": sandbox_client,
+        "tokenizer": tokenizer,
+        "sandbox_client": None,
     }
 
-    class KVStore:
+    trainer_config_actor = KVStore.get_or_create_actor()
 
-        def __init__(self):
-            self.kwargs = dict()
-
-        def set_key_val(self, k, v):
-            self.kwargs[k] = v
-
-        def get_by_key(self, k):
-            return self.kwargs.get(k, None)
-
-    try:
-        trainer_config_actor = ray.get_actor(name="kv_store")
-    except Exception as e:
-        trainer_config_actor = ray.remote(KVStore).options(name="kv_store", lifetime="detached").remote()
-
-    if config.trainer.get("server_only", False):
-        trainer_config_actor.set_key_val.remote("server_only", True)
+    if config.server_client.role == "server":
+        trainer_config_actor.set_key_val.remote("server_client", True)
         for k, v in kwargs.items():
             print(f"setting {k}")
             trainer_config_actor.set_key_val.remote(k, v)
     else:
         # the following parameters are only used in fit() and _validate() so skip them in server_only mode
+        logger = Tracking(project_name=config.trainer.project_name,
+                          experiment_name=config.trainer.experiment_name,
+                          default_backend=config.trainer.logger,
+                          config=OmegaConf.to_container(config, resolve=True))
+
+        reward_fn = RewardManager(tokenizer=tokenizer, config=config, logger=logger, rm_name="train")
+        # Note that we always use function-based RM for validation
+        val_reward_fn = RewardManager(tokenizer=tokenizer, config=config, logger=logger, rm_name="val")
+
+        if config.trainer.use_remote_sandbox:
+            kwargs['sandbox_client'] = SandboxClient.options(name='sandbox_client').remote(config=config,
+                                                                                           tokenizer=tokenizer)
+
+        kwargs['tokenizer'] = tokenizer
         kwargs['logger'] = logger
         kwargs['reward_fn'] = reward_fn
         kwargs['val_reward_fn'] = val_reward_fn
@@ -678,6 +739,13 @@ class TaskRunner:
 
     def main(self, func, *args, **kwargs):
         return func(*args, **kwargs)
+
+
+@ray.remote(num_gpus=0, num_cpus=1)
+class ServerHealthCheck:
+
+    def is_ready(self):
+        return True
 
 
 def main_task(config):
@@ -693,15 +761,19 @@ def main_task(config):
         if MegavisionMetricsCtx else contextlib.nullcontext()
     with metric_collection_context:
         trainer.init_workers()
-    send_message_to_employee("alpha seed任务开始训练", f"任务链接: {task_url}", user_email)
 
-    if config.trainer.get("server_only"):
+    if config.server_client.role == "server":
+        send_message_to_employee("alpha seed server启动", f"任务链接: {task_url}", user_email)
+        ServerHealthCheck.options(name="server_health_check", lifetime="detached").remote()
         print("============== server started ==============")
         time.sleep(3600 * 24 * 100)
     elif config.convert_ckpt_to_omnistore_task.enable:
         trainer.convert_ckpt_to_omnistore()
         send_message_to_employee("alpha seed任务转换ckpt到omnistore完成，任务结束", f"任务链接: {task_url}", user_email)
     else:
+        send_message_to_employee("alpha seed任务开始训练", f"任务链接: {task_url}", user_email)
+        if config.server_client.role == "client":
+            trainer.reset_server()
         trainer.fit()
 
 

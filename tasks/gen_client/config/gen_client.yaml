@@ -1,0 +1,24 @@
+ray:
+  server_addr: auto
+
+data:
+  tokenizer: null
+  input_files: []
+  output_file: 'gen_output.parquet'
+  prompt_key: prompt
+  max_prompt_length: 1024
+  truncation: 'error'
+
+gen:
+  skip: False
+  batch_size: 1024
+  generate_kwargs:
+    top_k: -1 # 0 for hf rollout, -1 for vllm rollout
+    top_p: 1.0
+    temperature: 1.0
+    do_sample: True
+
+
+eval:
+  sample_num: 200
+  bon_list: [1,4,8,16,32,64]

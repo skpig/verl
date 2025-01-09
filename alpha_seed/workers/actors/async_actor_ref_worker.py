@@ -802,6 +802,23 @@ class AsyncActorRolloutRefWorker(Worker):
     def do_ndtimeline_action(self, action, *args, **kwargs):
         ndtimeline.do_ndtimeline_action(action, *args, **kwargs)
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def reinit(self, config: DictConfig, role: str):
+        import gc
+        if self._model_initialized:
+            if self._is_actor or self._is_standalone_rollout or self._is_standalone_validator:
+                del self.actor_module_fsdp
+                del self.actor_optimizer
+            if self._is_rollout or self._is_standalone_rollout or self._is_standalone_validator:
+                del self.rollout
+                del self.sharding_manager
+            if self._is_ref:
+                del self.ref_module_fsdp
+            self._model_initialized = False
+        gc.collect()
+        torch.cuda.empty_cache()
+        self.__init__(config, role)
+
 
 def summerize_data(data: Union[dict, tuple, list], name: str = 'summary', level: int = 0, show_value=False) -> str:
     """Return the summary of a Tensor dict/tuple.

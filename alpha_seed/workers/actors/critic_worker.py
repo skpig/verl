@@ -367,3 +367,14 @@ class CriticWorker(Worker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def do_ndtimeline_action(self, action, *args, **kwargs):
         ndtimeline.do_ndtimeline_action(action, *args, **kwargs)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def reinit(self, config):
+        import gc
+        if self._model_initialized:
+            del self.critic_module
+            del self.critic_optimizer
+            self._model_initialized = False
+        gc.collect()
+        torch.cuda.empty_cache()
+        self.__init__(config)

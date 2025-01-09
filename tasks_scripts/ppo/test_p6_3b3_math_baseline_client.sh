@@ -87,3 +87,5 @@ python3 tasks/test_client.py \
     trainer.save_freq=${save_freq} \
     trainer.test_freq=${test_freq} \
     trainer.total_epochs=${total_epochs} \
+    server_client.role=client \
+    server_client.ray_address=auto
