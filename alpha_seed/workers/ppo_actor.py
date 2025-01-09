@@ -353,7 +353,7 @@ class DataParallelPPOActor(BasePPOActor):
                         break
 
                     if kl_loss_weight > 0.0:
-                        kl_loss = core_algos.compute_kl_loss(log_prob, ref_log_prob, response_mask, kl_penalty)
+                        kl_loss = core_algos.compute_kl_loss(log_prob, ref_log_prob, response_mask, kl_penalty_type)
                     else:
                         kl_loss = torch.zeros((), device=pg_loss.device)
 

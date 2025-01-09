@@ -55,4 +55,5 @@ jobs:
           - ray start --num-cpus=100 --head
           - bash tasks_scripts/ci/run_p6d_0b5_math_v1_ppo_async.sh
           - bash tasks_scripts/ci/run_p6d_0b5_math_v1_grpo.sh
+          - bash tasks_scripts/ci/run_p6d_0b5_math_v1_grpo_kl0.sh
           - ray stop --force
