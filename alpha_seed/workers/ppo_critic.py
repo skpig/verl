@@ -56,7 +56,7 @@ class DataParallelPPOCritic(BasePPOCritic):
 
     def __init__(self, config, critic_module: nn.Module, critic_optimizer: optim.Optimizer):
         super().__init__(config=config)
-        self.critic_module = critic_module
+        self.critic_module: FSDP = critic_module
         self.critic_optimizer = critic_optimizer
 
         self.use_rmpad = self.config.get('use_rmpad', False)
@@ -144,6 +144,15 @@ class DataParallelPPOCritic(BasePPOCritic):
         self.critic_optimizer.step()
         return grad_norm
 
+    def _optimizer_zero_grad(self):
+        # NOTE(zhiqi.0): when use_orig_params=True, parameters in optimizer are nn.Parameter instead of
+        # FlatParam. The param.grad is a view of FlatParam.grad. Therefore, optimizer.zero_grad()
+        # only removes tensor views of gradients, but cannot remove the FlatParam.grad.
+        self.critic_optimizer.zero_grad()
+        if self.critic_module._use_orig_params:
+            for module in FSDP.fsdp_modules(self.critic_module):
+                module._flat_param.grad = None
+
     def compute_values(self, data: DataProto) -> torch.Tensor:
         self.critic_module.eval()
 
@@ -213,7 +222,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                 else:
                     # split batch into micro_batches
                     micro_batches = mini_batch.split(self.config.ppo_micro_batch_size)
-                self.critic_optimizer.zero_grad()
+                self._optimizer_zero_grad()
 
                 for i, micro_data in enumerate(micro_batches):
                     assert micro_data.device == torch.device('cpu')
@@ -266,6 +275,6 @@ class DataParallelPPOCritic(BasePPOCritic):
                 p.step()
                 self.memory_profiler.step()
 
-        self.critic_optimizer.zero_grad()
+        self._optimizer_zero_grad()
 
         return metrics

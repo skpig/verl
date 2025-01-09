@@ -66,7 +66,7 @@ class DataParallelPPOActor(BasePPOActor):
         created with a dedicated struct instead of using users' config directly.
         """
         super().__init__(config)
-        self.actor_module = actor_module
+        self.actor_module: FSDP = actor_module
         self.actor_optimizer = actor_optimizer
         self.use_rmpad = self.config.get('use_rmpad', False)
         if torch.distributed.get_rank() == 0:
@@ -201,6 +201,15 @@ class DataParallelPPOActor(BasePPOActor):
         self.actor_optimizer.step()
         return grad_norm
 
+    def _optimizer_zero_grad(self):
+        # NOTE(zhiqi.0): when use_orig_params=True, parameters in optimizer are nn.Parameter instead of
+        # FlatParam. The param.grad is a view of FlatParam.grad. Therefore, optimizer.zero_grad()
+        # only removes tensor views of gradients, but cannot remove the FlatParam.grad.
+        self.actor_optimizer.zero_grad()
+        if self.actor_module._use_orig_params:
+            for module in FSDP.fsdp_modules(self.actor_module):
+                module._flat_param.grad = None
+
     def compute_log_prob(self, data: DataProto) -> DataProto:
         # set to eval
         self.actor_module.eval()
@@ -290,7 +299,7 @@ class DataParallelPPOActor(BasePPOActor):
                 else:
                     # split batch into micro_batches
                     micro_batches = mini_batch.split(self.config.ppo_micro_batch_size)
-                self.actor_optimizer.zero_grad()
+                self._optimizer_zero_grad()
 
                 minibatch_early_stop = False
 
@@ -399,5 +408,5 @@ class DataParallelPPOActor(BasePPOActor):
 
         append_to_dict(metrics, {'first_mini_ppo_kl_sum': first_mini_ppo_kl_sum})
 
-        self.actor_optimizer.zero_grad()
+        self._optimizer_zero_grad()
         return metrics
