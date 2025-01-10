@@ -553,6 +553,10 @@ class AsyncActorRolloutRefWorker(Worker):
 
         log_gpu_memory_usage('Before update policy', logger=logger)
 
+        # note optimizer offload will be managed inside `update_policy`
+        if self.config.actor.train_memory_offload:
+            self.to("cuda", model=True, optimizer=False)
+
         with self.actor_ulysses_sharding_manager:
             data = self.actor_ulysses_sharding_manager.preprocess_data(data)
 
@@ -574,6 +578,8 @@ class AsyncActorRolloutRefWorker(Worker):
         # TODO: here, we should return all metrics
         output = DataProto(meta_info={'metrics': metrics})
         output = output.to('cpu')
+        if self.config.actor.train_memory_offload:
+            self.to("cpu", model=True, optimizer=True)
 
         torch.cuda.empty_cache()
         return output
@@ -588,6 +594,10 @@ class AsyncActorRolloutRefWorker(Worker):
 
         output = prompts
         if self._is_actor and recompute_log_prob:
+
+            if self.config.actor.train_memory_offload:
+                self.to("cuda", model=True, optimizer=False)
+
             # we should always recompute old_log_probs when it is HybridEngine
             output.meta_info['temperature'] = prompts.meta_info['generation_kwargs']['temperature']
             # align with the training config
@@ -602,6 +612,9 @@ class AsyncActorRolloutRefWorker(Worker):
                 output.batch['old_log_probs'] = old_log_probs
                 output.batch['old_entropy'] = old_entropy
                 output = self.actor_ulysses_sharding_manager.postprocess_data(output)
+
+            if self.config.actor.train_memory_offload:
+                self.to("cpu", model=True, optimizer=False)
 
         output = output.to('cpu')
 
@@ -651,7 +664,17 @@ class AsyncActorRolloutRefWorker(Worker):
         prompts.batch = prompts.batch.cuda()
         meta_info = {'eos_token_id': self.tokenizer.eos_token_id, 'pad_token_id': self.tokenizer.pad_token_id}
         prompts.meta_info.update(meta_info)
+
+        # xperf needs parameters from actor
+        if self.config.actor.train_memory_offload:
+            self.to("cuda", model=True, optimizer=False)
+
         with self.sharding_manager:
+
+            # after parameters go to xperf, offload actor model to CPU
+            if self.config.actor.train_memory_offload:
+                self.to("cpu", model=True, optimizer=False)
+
             log_gpu_memory_usage('After entering sharding manager', logger=logger)
             prompts = self.sharding_manager.preprocess_data(prompts)
 
@@ -736,12 +759,16 @@ class AsyncActorRolloutRefWorker(Worker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, hdfs_path=None, version='v1', enable_flatten=False):
         assert self._is_actor
+        if self.config.actor.train_memory_offload:
+            self.to("cuda")
         # TODO: support omnistore
         self.checkpoint_manager.load_checkpoint(version=version,
                                                 hdfs_path=hdfs_path,
                                                 device_mesh=self.device_mesh,
                                                 role='actor',
                                                 enable_flatten=enable_flatten)
+        if self.config.actor.train_memory_offload:
+            self.to("cpu")
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def save_checkpoint(self,
@@ -753,6 +780,8 @@ class AsyncActorRolloutRefWorker(Worker):
                         enable_flatten=False):
         # TODO: support omnistore
         assert self._is_actor
+        if self.config.actor.train_memory_offload:
+            self.to("cuda")
         self.checkpoint_manager.save_checkpoint(version=version,
                                                 local_path=local_path,
                                                 hdfs_path=hdfs_path,
@@ -761,6 +790,8 @@ class AsyncActorRolloutRefWorker(Worker):
                                                 global_step=global_step,
                                                 ckpt_global_uploader_ref=ckpt_global_uploader_ref,
                                                 enable_flatten=enable_flatten)
+        if self.config.actor.train_memory_offload:
+            self.to("cpu")
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def release_param_and_cache(self):

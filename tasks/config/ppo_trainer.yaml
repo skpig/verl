@@ -52,6 +52,7 @@ actor_rollout_ref:
     shuffle: True
     use_ewma_loss: False
     act_offload: False
+    train_memory_offload: ${trainer.offload_train_memory}
     optim:
       lr: 1e-5
       betas: [0.9, 0.95]
@@ -177,6 +178,7 @@ critic:
   grad_clip: 1.0
   cliprange_value: 0.5
   act_offload: False
+  train_memory_offload: ${trainer.offload_train_memory}
   profile:
     filename: p6_400m_ppo_critic
     profile_on_ranks:

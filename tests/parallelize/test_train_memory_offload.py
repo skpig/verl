@@ -1,8 +1,3 @@
-"""
-PYTHONPATH=.:$PYTHONPATH torchrun --nproc_per_node=2 tests/hybrid_engine/test_fsdp_offload.py
-"""
-
-# disbale recompute warning
 import warnings
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -39,20 +34,18 @@ from verl.utils.fs import copy_local_path_from_hdfs
 from alpha_seed.workers.actors.offload import offload_fsdp_model_to_cpu, load_fsdp_model_to_gpu
 
 from tests.hybrid_engine.utils import prepare_data, print_each_rank, to_random, ref_loss_fn
-import gc
+from ..launch import torchrun
+from functools import partial
 
 torch.use_deterministic_algorithms(True)
 torch.backends.cudnn.flags(deterministic=True)
 
 p6_400m_path = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhiqi.0/rlhf/p6_400m_sft'
-p6_path = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/alphaseed/20241107/ct128kv2_baseline_sft32k_v27_lr2e5_epoch4_rope1000_hf'
-p6dense_path = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/P6.1_12B_32k_SFT29_Fix_RoPE_Base_hf'
-p7_path = 'hdfs://haruna/home/byte_data_seed/ssd_lq/public/seed_models/Seed-2B5-P7_32k_sft29_32gpu'
-m8_path = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/25B_MoE_SFT29_32k_bsz6_lr2e5_tp4_hf'
 
 
 def get_model(use_orig_params: bool):
 
+    world_size = torch.distributed.get_world_size()
     device_mesh = init_device_mesh('cuda', mesh_shape=(world_size,), mesh_dim_names=['fsdp'])
     model_path = copy_local_path_from_hdfs(p6_400m_path)
 
@@ -109,7 +102,7 @@ def train(model: FSDP, optimizer, offload: bool, steps=3):
     return losses, gnorms
 
 
-def test_offload_and_load(use_orig_params: bool = False):
+def offload_and_load(use_orig_params: bool = False):
 
     model, _ = get_model(use_orig_params=use_orig_params)
     curr_memory = torch.cuda.memory_allocated()
@@ -127,7 +120,7 @@ def test_offload_and_load(use_orig_params: bool = False):
     assert offload_memory / (1024**3) < 0.1
 
 
-def test_offload_and_load_correctness(use_orig_params: bool = False):
+def offload_and_load_correctness(use_orig_params: bool = False):
 
     torch.manual_seed(42)
     model, optimizer = get_model(use_orig_params=use_orig_params)
@@ -139,39 +132,16 @@ def test_offload_and_load_correctness(use_orig_params: bool = False):
 
     for idx in range(len(ref_losses)):
         ref_loss, real_loss = ref_losses[idx], offload_losses[idx]
-        torch.testing.assert_close(ref_loss,
-                                   real_loss,
-                                   atol=1e-5,
-                                   rtol=1e-6,
-                                   msg=f"loss {idx}, {ref_loss} vs. {real_loss}")
+        torch.testing.assert_close(ref_loss, real_loss, atol=0, rtol=0, msg=f"loss {idx}, {ref_loss} vs. {real_loss}")
         ref_gnorm, real_gnorm = ref_gnorms[idx], offload_gnorms[idx]
         torch.testing.assert_close(ref_gnorm,
                                    real_gnorm,
-                                   atol=1e-5,
-                                   rtol=1e-6,
+                                   atol=0,
+                                   rtol=0,
                                    msg=f"gnorm {idx}, {ref_gnorm} vs. {real_gnorm}")
 
 
-if __name__ == "__main__":
-    dist.init_process_group(backend="nccl")
-    world_size = dist.get_world_size()
-    torch.cuda.set_device(dist.get_rank())
-    device_mesh = init_device_mesh('cuda', mesh_shape=(world_size,), mesh_dim_names=['fsdp'])
-
-    test_fns = [
-        functools.partial(test_offload_and_load, use_orig_params=True),
-        functools.partial(test_offload_and_load, use_orig_params=False),
-        functools.partial(test_offload_and_load_correctness, use_orig_params=True),
-        functools.partial(test_offload_and_load_correctness, use_orig_params=False),
-    ]
-
-    for test_fn in test_fns:
-        test_fn()
-
-        if dist.get_rank() == 0:
-            print(f"{test_fn.func.__name__} passed")
-
-        gc.collect()
-        torch.cuda.empty_cache()
-
-    dist.destroy_process_group()
+test_offload_memory_orig_param = partial(torchrun, 4, offload_and_load, True)
+test_offload_memory_not_orig_param = partial(torchrun, 4, offload_and_load, False)
+test_offload_bitwise_correctness_orig_param = partial(torchrun, 4, offload_and_load_correctness, True)
+test_offload_bitwise_correctness_not_orig_param = partial(torchrun, 4, offload_and_load_correctness, False)

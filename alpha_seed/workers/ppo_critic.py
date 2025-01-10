@@ -29,6 +29,7 @@ from verl.trainer.ppo.critic import BasePPOCritic
 from verl.utils.py_functional import append_to_dict
 from verl.utils.torch_functional import masked_mean
 from verl.utils.model import compute_position_id_with_mask
+from verl.utils.fsdp_utils import offload_fsdp_optimizer, load_fsdp_optimizer
 
 from tensordict import TensorDict
 
@@ -140,6 +141,9 @@ class DataParallelPPOCritic(BasePPOCritic):
                                   dataloader_kwargs={'shuffle': self.config.shuffle})
 
     def _optimizer_step(self):
+        if self.config.train_memory_offload:
+            load_fsdp_optimizer(self.critic_optimizer, torch.cuda.current_device())
+
         assert self.config.grad_clip is not None
 
         if isinstance(self.critic_module, FSDP):
@@ -147,6 +151,9 @@ class DataParallelPPOCritic(BasePPOCritic):
         else:
             grad_norm = torch.nn.utils.clip_grad_norm_(self.critic_module.parameters(), max_norm=self.config.grad_clip)
         self.critic_optimizer.step()
+
+        if self.config.train_memory_offload:
+            offload_fsdp_optimizer(self.critic_optimizer)
         return grad_norm
 
     def _optimizer_zero_grad(self):

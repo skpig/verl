@@ -252,17 +252,20 @@ class CriticWorker(Worker):
         return critic_module, critic_optimizer, critic_lr_scheduler, critic_model_config
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def to(self, device: str):
+    def to(self, device: str, model=True, optimizer=True):
         assert device in ("cuda", "cpu")
         if self.config.model.fsdp_config.param_offload:
             return
         if device == "cuda":
-            device = torch.cuda.current_device()
-            load_fsdp_model_to_gpu(self.critic_module)
-            load_fsdp_optimizer(self.critic_optimizer, device)
+            if model:
+                load_fsdp_model_to_gpu(self.critic_module)
+            if optimizer:
+                load_fsdp_optimizer(self.critic_optimizer, torch.cuda.current_device())
         elif device == "cpu":
-            offload_fsdp_model_to_cpu(self.critic_module)
-            offload_fsdp_optimizer(self.critic_optimizer)
+            if model:
+                offload_fsdp_model_to_cpu(self.critic_module)
+            if optimizer:
+                offload_fsdp_optimizer(self.critic_optimizer)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
@@ -287,6 +290,8 @@ class CriticWorker(Worker):
                                                            lr_scheduler=self.critic_lr_scheduler,
                                                            tokenizer=self.tokenizer)
 
+        if self.config.train_memory_offload:
+            self.to("cpu")
         torch.cuda.empty_cache()
 
         self._model_initialized = True
@@ -294,6 +299,11 @@ class CriticWorker(Worker):
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_values(self, data: DataProto):
         # data = data.to('cuda')
+
+        # Note we don't offload to cpu after compute_values
+        # as it next will update critic
+        if self.config.train_memory_offload:
+            self.to("cuda", model=True, optimizer=False)
 
         micro_batch_size = self.config.infer_micro_batch_size
         data.meta_info['use_dynamic_bsz'] = self.config.use_dynamic_bsz
@@ -316,6 +326,11 @@ class CriticWorker(Worker):
 
         log_gpu_memory_usage('Before Critic update', logger=logger)
 
+        # optimizer will be loaded just before the step to save
+        # forward & backward memory
+        if self.config.train_memory_offload:
+            self.to("cuda", model=True, optimizer=False)
+
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
 
@@ -334,18 +349,24 @@ class CriticWorker(Worker):
             output = DataProto(batch=None, meta_info={'metrics': metrics})
             output = self.ulysses_sharding_manager.postprocess_data(output)
 
-        log_gpu_memory_usage('After Critic update', logger=logger)
-        torch.cuda.empty_cache()
+        if self.config.train_memory_offload:
+            self.to("cpu")
         output = output.to('cpu')
+
+        log_gpu_memory_usage('After Critic update', logger=logger)
         return output
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, hdfs_path=None, version='v1', enable_flatten=False):
+        if self.config.train_memory_offload:
+            self.to("cuda")
         self.checkpoint_manager.load_checkpoint(version=version,
                                                 hdfs_path=hdfs_path,
                                                 device_mesh=self.device_mesh,
                                                 role='critic',
                                                 enable_flatten=enable_flatten)
+        if self.config.train_memory_offload:
+            self.to("cpu")
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def save_checkpoint(self,
@@ -355,6 +376,8 @@ class CriticWorker(Worker):
                         global_step=0,
                         ckpt_global_uploader_ref=None,
                         enable_flatten=False):
+        if self.config.train_memory_offload:
+            self.to("cuda")
         self.checkpoint_manager.save_checkpoint(version=version,
                                                 local_path=local_path,
                                                 hdfs_path=hdfs_path,
@@ -363,6 +386,8 @@ class CriticWorker(Worker):
                                                 global_step=global_step,
                                                 ckpt_global_uploader_ref=ckpt_global_uploader_ref,
                                                 enable_flatten=enable_flatten)
+        if self.config.train_memory_offload:
+            self.to("cpu")
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def do_ndtimeline_action(self, action, *args, **kwargs):

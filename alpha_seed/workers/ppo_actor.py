@@ -30,6 +30,7 @@ from verl.trainer.ppo.actor import BasePPOActor
 from verl.utils.py_functional import append_to_dict
 from verl.utils.torch_functional import logprobs_from_logits, log_probs_from_logits_response_rmpad, get_unpad_data
 import verl.utils.torch_functional as verl_F
+from verl.utils.fsdp_utils import offload_fsdp_optimizer, load_fsdp_optimizer
 
 from verl.utils.model import compute_position_id_with_mask
 
@@ -201,6 +202,9 @@ class DataParallelPPOActor(BasePPOActor):
                                   dataloader_kwargs={'shuffle': self.config.shuffle})
 
     def _optimizer_step(self):
+        if self.config.train_memory_offload:
+            load_fsdp_optimizer(self.actor_optimizer, torch.cuda.current_device())
+
         assert self.config.grad_clip is not None
 
         if isinstance(self.actor_module, FSDP):
@@ -208,6 +212,9 @@ class DataParallelPPOActor(BasePPOActor):
         else:
             grad_norm = torch.nn.utils.clip_grad_norm_(self.actor_module.parameters(), max_norm=self.config.grad_clip)
         self.actor_optimizer.step()
+
+        if self.config.train_memory_offload:
+            offload_fsdp_optimizer(self.actor_optimizer)
         return grad_norm
 
     def _optimizer_zero_grad(self):
