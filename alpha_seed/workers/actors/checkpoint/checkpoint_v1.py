@@ -45,6 +45,10 @@ class CheckpointManagerV1(BaseCheckpointManager):
         local_path = copy_local_path_from_hdfs(remote_path)
 
         state_dict = torch.load(local_path)
+        try:
+            os.remove(local_path)
+        except Exception as e:
+            print(f'[rank-{self.rank}]: remove local load ckpt file failed, exception {e} will be ignored')
 
         model_state_dict = state_dict['model']
         optimizer_state_dict = state_dict['optimizer']
