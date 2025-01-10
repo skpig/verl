@@ -1,15 +1,15 @@
-# ===========================================
-# reference trial: https://ml.byteintl.net/development/instance/jobs/f026a45dc803fadd?robustRunId=129927&tabState=task_config&trialId=9550565
-# ===========================================
+
+# ============== M8 14B GRPO ==============
+# reference trial: https://ml.byteintl.net/development/instance/jobs/f74e0dba291cae38?tabState=run_info&trialId=9916555
+# ===============================================
 
 actor_rollout_ref:
   model:
     enable_gradient_checkpointing: True
-    use_ce_loss_fusion: True
   actor:
     use_dynamic_bsz: True
-    ppo_max_token_len: 50000
-    fsdp_size: 128
+    ppo_max_token_len: 49152
+    fsdp_size: 256
     ulysses_sequence_parallel_size: 8
     fsdp_config:
       param_offload: False
@@ -17,19 +17,19 @@ actor_rollout_ref:
     profile:
       enable: True
       upload_to_mlx: True
-      filename: "actor_xperf_tp4_fsdp_512"
+      filename: "actor"
       profile_on_ranks: [0,8,16,24]
   ref:
     use_dynamic_bsz: True
-    max_token_len: 20000
-    fsdp_size: 128
+    max_token_len: 49152
+    fsdp_size: 256
     ulysses_sequence_parallel_size: 8
     fsdp_config:
       param_offload: True
       use_orig_params: True
   rollout:
-    max_token_len: 20000
-    tensor_model_parallel_size: 4
+    max_token_len: 24576
+    tensor_model_parallel_size: 8
 
 critic:
   model:
@@ -37,9 +37,14 @@ critic:
     fsdp_config:
       param_offload: False
       use_orig_params: True
-  fsdp_size: 128
+  fsdp_size: 256
   ulysses_sequence_parallel_size: 8
-  ppo_max_token_len: 400000
+  ppo_max_token_len: 49152
+  profile:
+    enable: True
+    upload_to_mlx: True
+    filename: "critic"
+    profile_on_ranks: [0,8,16,24]
 
 trainer:
   offload_train_memory: True
