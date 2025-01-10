@@ -144,8 +144,8 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
     return data, metrics
 
 
-def compute_advantage(data: DataProto, gamma, lam, adv_estimator, upgo_loss_version, num_bon, adv_whiten,
-                      use_async_gen):
+def compute_advantage(data: DataProto, gamma, lam, adv_estimator, upgo_loss_version, num_bon, adv_whiten, use_async_gen,
+                      use_separate_critic_lam, critic_lam):
     # TODO: add other ways to estimate advantages
     token_level_rewards = data.batch['token_level_rewards']
     responses = data.batch['responses']
@@ -160,7 +160,9 @@ def compute_advantage(data: DataProto, gamma, lam, adv_estimator, upgo_loss_vers
             eos_mask=response_mask,
             gamma=gamma,
             lam=lam,
-            adv_whiten=adv_whiten)
+            adv_whiten=adv_whiten,
+            use_separate_critic_lam=use_separate_critic_lam,
+            critic_lam=critic_lam)
         data.batch['advantages'] = advantages
         data.batch['origin_advantages'] = origin_advantages
         data.batch['returns'] = returns
@@ -1300,7 +1302,10 @@ class RayPPOTrainer(object):
                             upgo_loss_version=self.config.actor_rollout_ref.actor.upgo_loss_version,
                             num_bon=self.config.actor_rollout_ref.rollout.num_bon,
                             adv_whiten=self.config.algorithm.adv_whiten,
-                            use_async_gen=use_async_gen)
+                            use_async_gen=use_async_gen,
+                            use_separate_critic_lam=self.config.algorithm.use_separate_critic_lam,
+                            critic_lam=self.config.algorithm.critic_lam,
+                        )
                         metrics.update(adv_metrics)
                     metrics['timing/adv'] = timer.last
 

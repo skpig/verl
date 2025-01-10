@@ -67,7 +67,8 @@ def get_kl_controller(config):
 
 
 def compute_gae_advantage_return(token_level_rewards: torch.Tensor, values: torch.Tensor, eos_mask: torch.Tensor,
-                                 gamma: torch.Tensor, lam: torch.Tensor, adv_whiten: bool):
+                                 gamma: torch.Tensor, lam: torch.Tensor, adv_whiten: bool,
+                                 use_separate_critic_lam: bool, critic_lam: torch.Tensor):
     """Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py
 
     Args:
@@ -94,16 +95,25 @@ def compute_gae_advantage_return(token_level_rewards: torch.Tensor, values: torc
     with torch.no_grad():
         lastgaelam = 0
         advantages_reversed = []
-        gen_len = token_level_rewards.shape[-1]
+        if use_separate_critic_lam:
+            critic_lastgaelam = 0
+            critic_advantages_reversed = []
 
+        gen_len = token_level_rewards.shape[-1]
         for t in reversed(range(gen_len)):
             nextvalues = values[:, t + 1] if t < gen_len - 1 else 0.0
             delta = token_level_rewards[:, t] + gamma * nextvalues - values[:, t]
             lastgaelam = delta + gamma * lam * lastgaelam
             advantages_reversed.append(lastgaelam)
+            if use_separate_critic_lam:
+                critic_lastgaelam = delta + gamma * critic_lam * critic_lastgaelam
+                critic_advantages_reversed.append(critic_lastgaelam)
         advantages = torch.stack(advantages_reversed[::-1], dim=1)
-
-        returns = advantages + values
+        if use_separate_critic_lam:
+            critic_advantages = torch.stack(critic_advantages_reversed[::-1], dim=1)
+            returns = critic_advantages + values
+        else:
+            returns = advantages + values
         origin_advantages = advantages
         if adv_whiten:
             advantages = verl_F.masked_whiten(origin_advantages, eos_mask)
