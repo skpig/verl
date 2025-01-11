@@ -14,38 +14,53 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import inspect
+from typing import Optional, Tuple
+
+import seed_models
+from seed_models.models.m8.modeling_m8 import (
+    apply_rotary_pos_emb,
+    repeat_kv,
+    _flash_attention_forward,
+    _flash_supports_window_size,
+    KVMirrorManagerHook,
+    Cache,
+    M8FusedMoeBlock,
+)
+
 import torch
-import warnings
-from typing import Tuple
-import logging
+from torch.distributed._tensor import Shard
+from torch.distributed.device_mesh import DeviceMesh
 
-from transformers.models.qwen2.modeling_qwen2 import Cache
-import torch.distributed as dist
-
-from transformers.cache_utils import Cache
-from typing import Optional
+from .parallel.collectives import allreduce_identity, identity_allreduce
+from .ops.group_gemm_ep import FusedMoeExpertFunctionEP
+from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
 
 from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
-from dist_attn.ulysses.ops import gather_seq_scatter_heads, gather_heads_scatter_seq, gather_outputs, slice_input_tensor
+from dist_attn.ulysses.ops import gather_seq_scatter_heads, gather_heads_scatter_seq
 
-import torch.nn.functional as F
-
-from .modeling_flash_attention_utils import _flash_attention_forward, _flash_supports_window_size
+import logging
 
 logger = logging.getLogger(__file__)
 
 
-def _get_unpad_data(attention_mask):
-    seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
-    indices = torch.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
-    max_seqlen_in_batch = seqlens_in_batch.max().item()
-    cu_seqlens = F.pad(torch.cumsum(seqlens_in_batch, dim=0, dtype=torch.int32), (1, 0))
-    return (
-        indices,
-        cu_seqlens,
-        max_seqlen_in_batch,
-    )
+def make_m8_plan():
+    plan = {
+        # attention block (TP)
+        "k_proj": Shard(0),
+        "q_proj": Shard(0),
+        "v_proj": Shard(0),
+        "o_proj": Shard(1),
+        # moe experts (EP)
+        "moe.experts.fc1_1": Shard(0),
+        "moe.experts.fc1_2": Shard(0),
+        "moe.experts.fc2": Shard(0),
+        # moe shared experts (TP)
+        "moe.experts_share.fc1_1": Shard(0),
+        "moe.experts_share.fc1_2": Shard(0),
+        "moe.experts_share.fc2": Shard(1),
+        # TODO: support Megatron sequence parallelism
+    }
+    return plan
 
 
 def flash_attn2_rmpad_forward(
@@ -62,32 +77,51 @@ def flash_attn2_rmpad_forward(
     gradient_checkpointing: bool = False,
     **kwargs,
 ):
-    assert (past_key_value is None) and (not use_cache)
+    assert (not use_cache) and (not past_key_value)
+    assert len(kwargs) == 0
+    assert position_embeddings is not None
     assert cu_seqlens is None
-    from seed_models.models.m8.modeling_m8 import (apply_rotary_pos_emb, repeat_kv, KVMirrorManagerHook)
-    if "padding_mask" in kwargs:
-        warnings.warn(
-            "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"
-        )
-        # overwrite attention_mask with padding_mask
-        attention_mask = kwargs.pop("padding_mask")
-    sp_size = get_ulysses_sequence_parallel_world_size()
-    if sp_size > 1:
-        if position_ids.size(0) != 1:
-            raise RuntimeError(f"You are using an old version of seed models, please upgrade to the latest one.")
-    bsz, q_len, _ = hidden_states.size()  # q_len = seqlen/sp
+    assert max_seqlen is not None
+    assert self.q_proj.bias is None and self.k_proj.bias is None and \
+           self.v_proj.bias is None and self.o_proj.bias is None
+    if position_ids.size(0) != 1:
+        raise RuntimeError(f"You are using an old version of seed models, please upgrade to the latest one.")
 
-    query_states = self.q_proj(hidden_states)  # bsz, seqlen/sp, hidden
+    tp_mesh: DeviceMesh = self._tp_mesh
+    tp_size = 1 if tp_mesh is None else tp_mesh.size()
+    tp_group = None if tp_mesh is None else tp_mesh.get_group()
+    sp_size = get_ulysses_sequence_parallel_world_size()
+    assert self.num_query_heads % (tp_size * sp_size) == 0
+
+    # ============== tensor parallel region ================
+    if tp_size > 1:
+        hidden_states = identity_allreduce(hidden_states, tp_group)
+    # ============== tensor parallel region ================
+
+    bsz, q_len, _ = hidden_states.size()
+
+    query_states = self.q_proj(hidden_states)
     key_states = self.k_proj(hidden_states)
     value_states = self.v_proj(hidden_states)
 
-    # bsz, nhead, seqlen/sp, hdim
-    if hasattr(self, "num_query_heads"):
-        query_states = query_states.view(bsz, q_len, self.num_query_heads, self.head_dim).transpose(1, 2)
-    else:
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-    key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-    value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+    query_states = query_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
+    key_states = key_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
+    value_states = value_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
+
+    # =============== ulysses sp region ==================
+    if sp_size > 1:
+        local_kv_heads = key_states.size(1)
+        if sp_size > local_kv_heads:
+            assert sp_size % local_kv_heads == 0
+            n_repeat = sp_size // local_kv_heads
+            key_states = repeat_kv(key_states, n_repeat)
+            value_states = repeat_kv(value_states, n_repeat)
+
+        query_states = gather_seq_scatter_heads(query_states, seq_dim=2, head_dim=1)
+        key_states = gather_seq_scatter_heads(key_states, seq_dim=2, head_dim=1)
+        value_states = gather_seq_scatter_heads(value_states, seq_dim=2, head_dim=1)
+    full_qlen = query_states.size(2)
+    # =============== ulysses sp region ==================
 
     if self.config.use_key_layernorm:
         key_states = self.key_layernorm(key_states)
@@ -103,24 +137,8 @@ def flash_attn2_rmpad_forward(
                                                   [self.head_dim - self.rope_cut_head_dim, self.rope_cut_head_dim],
                                                   dim=-1)
 
-    if cu_seqlens is None:
-        kv_seq_len = key_states.shape[-2]
-    else:
-        kv_seq_len = cu_seqlens.diff().max().item()
-
-    if position_embeddings is None:
-        if sp_size > 1:
-            sliced_pos_ids = slice_input_tensor(position_ids, dim=1, padding=False)
-        else:
-            sliced_pos_ids = position_ids
-        cos, sin = self.rotary_emb(value_states, sliced_pos_ids)
-    else:
-        cos, sin = position_embeddings
-        if sp_size > 1:
-            cos = slice_input_tensor(cos, dim=1, padding=False)
-            sin = slice_input_tensor(sin, dim=1, padding=False)
-
-    # bsz, nhead, seqlen/sp, hdim
+    kv_seq_len = key_states.shape[-2]
+    cos, sin = position_embeddings
     query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
     if self.rope_cut:
@@ -135,8 +153,6 @@ def flash_attn2_rmpad_forward(
             "The current flash attention version does not support sliding window attention, for a more memory"
             " efficient implementation make sure to upgrade flash-attn library.")
 
-    assert past_key_value is None, "past_key_value is not supported in AlphaSeed Monkey Patch flash attention, please check Seed_Models implementation"
-
     key_states, value_states = KVMirrorManagerHook.apply(
         key_states,
         value_states,
@@ -147,22 +163,7 @@ def flash_attn2_rmpad_forward(
         gradient_checkpointing,
     )
 
-    # repeat k/v heads if n_kv_heads < n_heads
-    key_states = repeat_kv(key_states, self.num_key_value_groups)
-    value_states = repeat_kv(value_states, self.num_key_value_groups)
     dropout_rate = 0.0 if not self.training else self.attention_dropout
-
-    # ulysses region
-    # [bsz, nhead, seqlen/sp, hdim] -> [bsz, nhead/sp, seqlen, ,hdim]
-    if sp_size > 1:
-        query_states = gather_seq_scatter_heads(query_states, seq_dim=2, head_dim=1)
-        key_states = gather_seq_scatter_heads(key_states, seq_dim=2, head_dim=1)
-        value_states = gather_seq_scatter_heads(value_states, seq_dim=2, head_dim=1)
-        # the position_ids and max_seqlen is required to be global for flash attention
-        # TODO: optimize this, no need to allgather at each layer
-        # position_ids = gather_outputs(position_ids, gather_dim=1)
-        # max_seqlen = position_ids.max().item() + 1
-    full_qlen = query_states.size(2)
 
     # In PEFT, usually we cast the layer norms in float32 for training stability reasons
     # therefore the input hidden states gets silently casted in float32. Hence, we need
@@ -187,7 +188,6 @@ def flash_attn2_rmpad_forward(
         value_states = value_states.to(target_dtype)
 
     # Reashape to the expected shape for Flash Attention
-    # [bsz, seqlen, nhead/sp, hdim]
     query_states = query_states.transpose(1, 2)
     key_states = key_states.transpose(1, 2)
     value_states = value_states.transpose(1, 2)
@@ -209,23 +209,70 @@ def flash_attn2_rmpad_forward(
         max_seqlen=max_seqlen,
     )
 
-    # [bsz, seqlen, nhead/sp, hdim] -> [bsz, seqlen/sp, nhead, hdim]
-    attn_output = attn_output.reshape(bsz, full_qlen, -1, self.head_dim).contiguous()
-
-    if sp_size > 1:
-        attn_output = gather_heads_scatter_seq(attn_output, seq_dim=1, head_dim=2)
-
     if self.config.use_context_groupnorm:
         attn_output = self.context_norm(attn_output)
-
-    if hasattr(self, "query_head_scale_factor"):
-        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size * self.query_head_scale_factor).contiguous()
-    else:
-        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size).contiguous()
+    # ============== ulysses sp region ===================
+    if sp_size > 1:
+        attn_output = attn_output.reshape(bsz, full_qlen, -1, self.head_dim).contiguous()
+        attn_output = gather_heads_scatter_seq(attn_output, head_dim=2, seq_dim=1)
+    # ============== ulysses sp region ===================
+    attn_output = attn_output.reshape(bsz, q_len, -1)
     attn_output = self.o_proj(attn_output)
+    # ============== tensor parallel region ================
+    if tp_size > 1:
+        attn_output = allreduce_identity(attn_output, tp_group)
+    # ============== tensor parallel region ================
     attn_output = self.resid_dropout(attn_output)
-
     if not output_attentions:
         attn_weights = None
 
     return attn_output, attn_weights, past_key_value
+
+
+def _fused_moe_ep_forward(
+    self: M8FusedMoeBlock,
+    hidden_states: torch.Tensor,
+    output_aux_losses: Optional[bool] = None,
+):
+    """Patched moe forward function to support EP"""
+
+    ep_mesh: DeviceMesh = self._tp_mesh
+    ep_group = None if ep_mesh is None else ep_mesh.get_group()
+    ep_size = 1 if ep_mesh is None else ep_mesh.size()
+
+    batch_size, sequence_length, hidden_dim = hidden_states.shape
+    hidden_states = hidden_states.view(-1, hidden_dim)
+
+    # MOE Step 1: compute each token's weight for all experts.
+    # router_logits shape (batch_size * sequence_len, num_experts)
+    # router_weights shape: (batch_size * sequence_len, topk)
+    routing_weights, router_logits, aux_loss, _, selected_experts = self.gate(hidden_states, output_aux_losses)
+
+    # MOE Step 2: compute experts with group gemm.
+    routing_weights = routing_weights.bfloat16()
+    hidden_states = hidden_states.bfloat16()
+    final_hidden_states = FusedMoeExpertFunctionEP.apply(
+        self.num_experts,
+        routing_weights,
+        selected_experts,
+        hidden_states,
+        self.experts.fc1_1,
+        self.experts.fc1_2,
+        self.experts.fc2,
+        ep_group,
+    )
+
+    # MOE Step 3: compute with shared experts
+    if ep_size > 1:
+        hidden_states = identity_allreduce(hidden_states, group=ep_group)
+
+    experts_share_states = self.experts_share(hidden_states)
+
+    if ep_size > 1:
+        experts_share_states = allreduce_identity(experts_share_states, group=ep_group)
+
+    final_hidden_states = final_hidden_states + experts_share_states
+
+    # reshape output to input shape
+    final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
+    return final_hidden_states, router_logits, aux_loss

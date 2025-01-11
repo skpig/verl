@@ -34,26 +34,23 @@ from single_controller.base.decorator import register, Dispatch
 from verl import DataProto
 from verl.utils.model import compute_position_id_with_mask
 from verl.utils.fs import copy_local_path_from_hdfs
-from verl.utils.fsdp_utils import get_fsdp_wrap_policy, load_fsdp_grad, offload_fsdp_grad, init_fn, get_init_weight_context_manager
+from verl.utils.fsdp_utils import get_fsdp_wrap_policy
 from .offload import offload_fsdp_model_to_cpu, load_fsdp_model_to_gpu
 from verl.utils.fsdp_utils import offload_fsdp_optimizer, load_fsdp_optimizer
 from verl.utils.import_utils import import_external_libs
 from verl.utils.debug import log_gpu_memory_usage
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from verl.utils.torch_functional import broadcast_dict_tensor, allgather_dict_tensors
-from verl.utils.model import compute_position_id_with_mask
 from verl.utils.debug import get_profiler_context
 import numpy as np
 
-from alpha_seed.workers.hybrid_engine.hsdp import create_device_mesh, calculate_device_mesh_shape
-from alpha_seed.workers.hybrid_engine.fsdp_ulysses import FSDPUlyssesShardingManager
 from alpha_seed.utils import ndtimeline
+from alpha_seed.workers.hybrid_engine.fsdp_gather import DataGatherManager
+from alpha_seed.models.transformers.parallel import apply_parallel_plan
+from .initialize import create_mesh, calculate_device_mesh_shape
 from .initialize import parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init
 from .checkpoint.extensions import register_dtensor_save_hook
-from dist_attn.ulysses.parallel_states import set_ulysses_sequence_parallel_group, get_ulysses_sequence_parallel_world_size
-from dist_attn.ulysses.ops import slice_input_tensor, gather_outputs
 from alpha_seed.workers.ppo_actor import DataParallelPPOActor
-from alpha_seed.workers.ppo_critic import DataParallelPPOCritic
 from alpha_seed.utils.kernels.persist_gemm import deploy_persist_gemm, undelopy_persist_gemm
 from seed_models.utils.count_flops import FlopsCounter
 
@@ -91,7 +88,7 @@ class AsyncActorRolloutRefWorker(Worker):
             torch.distributed.init_process_group(backend="nccl", timeout=timeout)
 
         ndtimeline.set_cuda_timer_option(config["use_cuda_timer"])
-        mesh_shape = calculate_device_mesh_shape(config.actor.fsdp_size)
+        mesh_shape = calculate_device_mesh_shape(config.actor.fsdp_size * config.actor.tp_size)
         if len(mesh_shape) == 2:  # align with ndtimeline internal settings
             mesh_shape = (mesh_shape[1], mesh_shape[0])
         ndtimeline.init_ndtimers(mesh_shape=mesh_shape, ray_class_instance=self)
@@ -102,9 +99,6 @@ class AsyncActorRolloutRefWorker(Worker):
 
         print(f'Master address: {self.master_address}, Master port: {self.master_port}')
         world_size = torch.distributed.get_world_size()
-
-        # Note that here we assume actor and refernce policy have the same device mesh
-        self.device_mesh = create_device_mesh(config.actor.fsdp_size, role)
 
         self.role = role
         assert self.role in [
@@ -118,6 +112,42 @@ class AsyncActorRolloutRefWorker(Worker):
         self._is_ref = self.role in ['ref', 'actor_rollout_ref']
         self._is_standalone_validator = self.role in ['standalone_validator']
 
+        # actor model
+        actor_fsdp_size = config.actor.fsdp_size
+        actor_sp_size = config.actor.ulysses_sequence_parallel_size
+        actor_tp_size = config.actor.tp_size
+        actor_meshes = create_mesh(fsdp_size=actor_fsdp_size, tp_size=actor_tp_size, sp_size=actor_sp_size)
+        self.actor_fsdp_mesh = actor_meshes[0]
+        self.actor_tp_mesh = actor_meshes[1]  # shared for both train and inference
+        self.actor_sp_mesh = actor_meshes[2]
+        self.actor_gather_mesh = actor_meshes[3]
+        self.actor_gather_manager = DataGatherManager(self.actor_gather_mesh, self.actor_sp_mesh)
+        if torch.distributed.get_rank():
+            print(f"Created actor with fsdp_size={self.actor_fsdp_mesh.shape}, tp_size={self.actor_tp_mesh.size()}, "
+                  f"actor sp_size={self.actor_sp_mesh.size()}")
+        if actor_tp_size > 1:
+            if not config.actor.fsdp_config.use_orig_params:
+                raise ValueError("enable tensor / expert parallelism must set actor.fsdp_config.use_orig_params=True")
+
+        # reference model
+        if self._is_ref:
+            ref_fsdp_size = config.ref.fsdp_size
+            ref_sp_size = config.ref.ulysses_sequence_parallel_size
+            ref_tp_size = config.ref.tp_size
+            ref_meshes = create_mesh(fsdp_size=ref_fsdp_size, tp_size=ref_tp_size, sp_size=ref_sp_size)
+            self.ref_fsdp_mesh = ref_meshes[0]
+            self.ref_tp_mesh = ref_meshes[1]
+            self.ref_sp_mesh = ref_meshes[2]
+            self.ref_gather_mesh = ref_meshes[3]
+            self.ref_gather_manager = DataGatherManager(self.ref_gather_mesh, self.ref_sp_mesh)
+            if torch.distributed.get_rank():
+                print(
+                    f"Created reference with fsdp_size={self.ref_fsdp_mesh.shape}, tp_size={self.ref_tp_mesh.size()}, "
+                    f"infer sp_size={self.ref_sp_mesh.size()}")
+            if ref_tp_size > 1:
+                if not config.ref.fsdp_config.use_orig_params:
+                    raise ValueError("enable tensor / expert parallelism must set ref.fsdp_config.use_orig_params=True")
+
         profile_fname = f"trace_{self.role}_rank{self.rank}.json"
         self.profiler_context = get_profiler_context(filename=profile_fname,
                                                      profile_on_ranks=[0],
@@ -129,43 +159,19 @@ class AsyncActorRolloutRefWorker(Worker):
                                                      active=1)
         if config.actor.get("sm_margin", 0) > 0:
             deploy_persist_gemm(int(config.actor.get("sm_margin", 0)))
-        # build device mesh for ulysses parallel. Note that we need to split the naming for actor and ref
-        # to handle the case that actor and ref can colocate or not colocate
-        # for actor
-        if self._is_actor:
-            sp_size = config.actor.ulysses_sequence_parallel_size
-            if sp_size > 1:
-                self.actor_ulysses_sp_device_mesh = init_device_mesh('cuda',
-                                                                     mesh_shape=(world_size // sp_size, sp_size),
-                                                                     mesh_dim_names=['dp', 'sp'])
-            else:
-                self.actor_ulysses_sp_device_mesh = None
-
-            self.actor_ulysses_sharding_manager = FSDPUlyssesShardingManager(self.actor_ulysses_sp_device_mesh)
-
-        if self._is_ref:
-            sp_size = config.ref.ulysses_sequence_parallel_size
-            if sp_size > 1:
-                self.ref_ulysses_sp_device_mesh = init_device_mesh('cuda',
-                                                                   mesh_shape=(world_size // sp_size, sp_size),
-                                                                   mesh_dim_names=['dp', 'sp'])
-            else:
-                self.ref_ulysses_sp_device_mesh = None
-
-            self.ref_ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ref_ulysses_sp_device_mesh)
 
         # normalize config
         if self._is_actor:
             sp_size = config.actor.ulysses_sequence_parallel_size
-            self.config.actor.ppo_mini_batch_size //= world_size // sp_size
-            self.config.actor.ppo_micro_batch_size //= world_size // sp_size
+            self.config.actor.ppo_mini_batch_size //= (world_size // sp_size // actor_tp_size)
+            self.config.actor.ppo_micro_batch_size //= (world_size // sp_size // actor_tp_size)
         if self._is_rollout or self._is_standalone_rollout:
             sp_size = config.actor.ulysses_sequence_parallel_size
             self.config.rollout.micro_batch_size //= world_size  # for xperf-gpt
-            self.config.rollout.log_prob_micro_batch_size //= world_size // sp_size
+            self.config.rollout.log_prob_micro_batch_size //= (world_size // sp_size // actor_tp_size)
         if self._is_ref:
             sp_size = config.ref.ulysses_sequence_parallel_size
-            self.config.ref.log_prob_micro_batch_size //= world_size // sp_size
+            self.config.ref.log_prob_micro_batch_size //= (world_size // sp_size // ref_tp_size)
         self.save_sequences = self.config.rollout.get('save_sequences', None)
         self.load_sequences = self.config.rollout.get('load_sequences', None)
 
@@ -287,6 +293,10 @@ class AsyncActorRolloutRefWorker(Worker):
                         print(
                             f'{model.gradient_checkpointing=}, {model.training=}, {model._gradient_checkpointing_func=}'
                         )
+        # use shard plan
+        tp_mesh = self.ref_tp_mesh if role == 'ref' else self.actor_tp_mesh
+        shard_plan = apply_parallel_plan(actor_module, actor_module.config, tp_mesh)
+
         torch.distributed.barrier()
 
         if self.rank == 0:
@@ -330,12 +340,13 @@ class AsyncActorRolloutRefWorker(Worker):
                 cpu_offload = CPUOffload(offload_params=True)
 
         # we only support ZeRO3 of hybrid DP+FSDP or full FSDP
-        if self.device_mesh.ndim == 1:
+        fsdp_mesh = self.ref_fsdp_mesh if role == 'ref' else self.actor_fsdp_mesh
+        if fsdp_mesh.ndim == 1:
             sharding_strategy = ShardingStrategy.FULL_SHARD
-        elif self.device_mesh.ndim == 2:
+        elif fsdp_mesh.ndim == 2:
             sharding_strategy = ShardingStrategy.HYBRID_SHARD
         else:
-            raise NotImplementedError(f"get device mesh ndim={self.device_mesh.ndim}, but only support 1 or 2")
+            raise NotImplementedError(f"role: {role}: get device mesh ndim={fsdp_mesh.ndim}, but only support 1 or 2")
 
         # TODO: add transformer policy
         actor_module_fsdp = FSDP(actor_module,
@@ -348,10 +359,10 @@ class AsyncActorRolloutRefWorker(Worker):
                                  mixed_precision=mixed_precision,
                                  sync_module_states=False,
                                  forward_prefetch=True,
-                                 device_mesh=self.device_mesh,
+                                 device_mesh=fsdp_mesh,
                                  cpu_offload=cpu_offload)
 
-        register_dtensor_save_hook(actor_module_fsdp)
+        register_dtensor_save_hook(actor_module_fsdp, shard_plan)
 
         log_gpu_memory_usage('After Actor FSDP init', logger=logger)
 
@@ -557,8 +568,8 @@ class AsyncActorRolloutRefWorker(Worker):
         if self.config.actor.train_memory_offload:
             self.to("cuda", model=True, optimizer=False)
 
-        with self.actor_ulysses_sharding_manager:
-            data = self.actor_ulysses_sharding_manager.preprocess_data(data)
+        with self.actor_gather_manager:
+            data = self.actor_gather_manager.preprocess_data(data)
 
             with Timer(name='update_critic', logger=None) as timer:
                 metrics = self.actor.update_policy(data=data)
@@ -567,7 +578,7 @@ class AsyncActorRolloutRefWorker(Worker):
             estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
             metrics['mfu/actor'] = estimated_flops * self.config.actor.ppo_epochs / promised_flops / self.world_size
 
-            data = self.actor_ulysses_sharding_manager.postprocess_data(data)
+            data = self.actor_gather_manager.postprocess_data(data)
 
         self.actor_lr_scheduler.step()
         lr = self.actor_lr_scheduler.get_last_lr()[0]
@@ -606,12 +617,12 @@ class AsyncActorRolloutRefWorker(Worker):
                 output.meta_info['max_token_len'] = self.config.actor.ppo_max_token_len
             else:
                 output.meta_info['micro_batch_size'] = self.config.actor.ppo_micro_batch_size
-            with self.actor_ulysses_sharding_manager:
-                output = self.actor_ulysses_sharding_manager.preprocess_data(output)
+            with self.actor_gather_manager:
+                output = self.actor_gather_manager.preprocess_data(output)
                 old_entropy, old_log_probs = self.actor.compute_log_prob(data=output)
                 output.batch['old_log_probs'] = old_log_probs
                 output.batch['old_entropy'] = old_entropy
-                output = self.actor_ulysses_sharding_manager.postprocess_data(output)
+                output = self.actor_gather_manager.postprocess_data(output)
 
             if self.config.actor.train_memory_offload:
                 self.to("cpu", model=True, optimizer=False)
@@ -741,11 +752,11 @@ class AsyncActorRolloutRefWorker(Worker):
 
         log_gpu_memory_usage('Before reference recompute log prob', logger=logger)
 
-        with self.ref_ulysses_sharding_manager:
-            data = self.ref_ulysses_sharding_manager.preprocess_data(data)
+        with self.ref_gather_manager:
+            data = self.ref_gather_manager.preprocess_data(data)
             _, output = self.ref_policy.compute_log_prob(data=data)
             output = DataProto.from_dict(tensors={'ref_log_prob': output})
-            output = self.ref_ulysses_sharding_manager.postprocess_data(output)
+            output = self.ref_gather_manager.postprocess_data(output)
 
         output = output.to('cpu')
 
@@ -761,10 +772,9 @@ class AsyncActorRolloutRefWorker(Worker):
         assert self._is_actor
         if self.config.actor.train_memory_offload:
             self.to("cuda")
-        # TODO: support omnistore
         self.checkpoint_manager.load_checkpoint(version=version,
                                                 hdfs_path=hdfs_path,
-                                                device_mesh=self.device_mesh,
+                                                device_mesh=self.actor_fsdp_mesh,
                                                 role='actor',
                                                 enable_flatten=enable_flatten)
         if self.config.actor.train_memory_offload:
@@ -785,7 +795,7 @@ class AsyncActorRolloutRefWorker(Worker):
         self.checkpoint_manager.save_checkpoint(version=version,
                                                 local_path=local_path,
                                                 hdfs_path=hdfs_path,
-                                                device_mesh=self.device_mesh,
+                                                device_mesh=self.actor_fsdp_mesh,
                                                 role='actor',
                                                 global_step=global_step,
                                                 ckpt_global_uploader_ref=ckpt_global_uploader_ref,

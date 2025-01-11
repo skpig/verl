@@ -28,11 +28,8 @@ def apply_parallel_plan(model: torch.nn.Module, config, tp_mesh: DeviceMesh) -> 
     """
     make_plan_fn = None
     if config.model_type == 'seed_m8':
-        from .._modeling_m8 import make_m8_plan
+        from ..modeling_m8 import make_m8_plan
         make_plan_fn = make_m8_plan
-    elif config.model_type == "seed_p7":
-        from ..modeling_p7 import make_p7_plan
-        make_plan_fn = make_p7_plan
 
     if make_plan_fn is None:
         assert tp_mesh.size() == 1, f"tensor parallelism is not support for model: {config.model_type}"

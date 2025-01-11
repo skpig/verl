@@ -559,6 +559,10 @@ def validate_config(config):
             config.reward_model.max_token_len = min_required_seq_len
             print(f"Warning: config.reward_model.max_token_len is set to {config.reward_model.max_token_len}")
 
+    # save load
+    if config.actor_rollout_ref.actor.tp_size > 1 or config.actor_rollout_ref.ref.tp_size > 1 or config.critic.tp_size > 1:
+        assert config.trainer.ckpt_version == "v1", f"Detected enable training TP/EP, only support ckpt version v1 but got {config.trainer.ckpt_version}"
+
 
 def validate_client_config(config: DictConfig):
     assert config.server_client.role == "client"

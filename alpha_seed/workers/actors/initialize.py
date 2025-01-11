@@ -54,6 +54,17 @@ from torch.distributed._tensor import Replicate, Shard
 from alpha_seed.models.transformers.parallel import TPSpec
 
 
+def calculate_device_mesh_shape(parallel_size):
+    # parallel size can be fsdp_size * ep/tp_size
+    world_size = torch.distributed.get_world_size()
+    if parallel_size > 0 and (world_size // parallel_size) > 1:
+        assert world_size % parallel_size == 0, "world_size must be divisible by fsdp_size"
+        dp_size = world_size // parallel_size
+        return (dp_size, parallel_size)
+    else:
+        return (world_size,)
+
+
 def create_mesh(fsdp_size: int, tp_size: int, sp_size: int):
     """
     Create device meshes for fsdp, tp, and sp.

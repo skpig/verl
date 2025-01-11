@@ -31,17 +31,17 @@ from single_controller.base.decorator import register, Dispatch
 from verl import DataProto
 from verl.utils.fs import copy_local_path_from_hdfs
 from verl.utils.fsdp_utils import get_fsdp_wrap_policy
+from alpha_seed.models.transformers.parallel import apply_parallel_plan
+from .initialize import create_mesh, calculate_device_mesh_shape
 from .initialize import parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init
 from .checkpoint.extensions import register_dtensor_save_hook
-from verl.utils.fsdp_utils import offload_fsdp_optimizer, offload_fsdp_param_and_grad, load_fsdp_optimizer, load_fsdp_param_and_grad
+from verl.utils.fsdp_utils import offload_fsdp_optimizer, load_fsdp_optimizer
 from .offload import offload_fsdp_model_to_cpu, load_fsdp_model_to_gpu
 from verl.utils.fsdp_utils import offload_fsdp_optimizer, load_fsdp_optimizer
 from verl.utils.import_utils import import_external_libs
 from verl.utils.debug import log_gpu_memory_usage
-from torch.distributed.device_mesh import init_device_mesh
 
-from alpha_seed.workers.hybrid_engine.fsdp_ulysses import FSDPUlyssesShardingManager
-from alpha_seed.workers.hybrid_engine.hsdp import create_device_mesh, calculate_device_mesh_shape
+from alpha_seed.workers.hybrid_engine.fsdp_gather import DataGatherManager
 from alpha_seed.workers.ppo_critic import DataParallelPPOCritic
 from alpha_seed.utils import ndtimeline
 
@@ -79,23 +79,26 @@ class CriticWorker(Worker):
 
         world_size = torch.distributed.get_world_size()
 
+        fsdp_size = config.fsdp_size
+        sp_size = config.ulysses_sequence_parallel_size
+        tp_size = config.tp_size
+        meshes = create_mesh(fsdp_size=fsdp_size, tp_size=tp_size, sp_size=sp_size)
         # Deprecated case: critic model is saved as ShardedTensor
         # we will always use full FSDP
-        self.device_mesh = None
+        self.fsdp_mesh = None
         if not config.NO_DEVICE_MESH:
-            self.device_mesh = create_device_mesh(config.fsdp_size, 'Critic')
-        # create ulysses sequence parallel device mesh
-        sp_size = config.ulysses_sequence_parallel_size
-        self.ulysses_sp_device_mesh = None
-        if sp_size > 1:
-            self.ulysses_sp_device_mesh = init_device_mesh('cuda',
-                                                           mesh_shape=(world_size // sp_size, sp_size),
-                                                           mesh_dim_names=['dp', 'sp'])
-        self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_sp_device_mesh)
+            self.fsdp_mesh = meshes[0]
+        self.tp_mesh = meshes[1]
+        self.sp_mesh = meshes[2]
+        self.gather_mesh = meshes[3]
+        self.gather_manager = DataGatherManager(self.gather_mesh, self.sp_mesh)
+        if tp_size > 1:
+            if not self.config.model.fsdp_config.use_orig_params:
+                raise RuntimeError("enable tensor / expert parallelism requires use_orig_params=True")
 
         # normalize config
-        self.config.ppo_mini_batch_size //= world_size // sp_size
-        self.config.ppo_micro_batch_size //= world_size // sp_size
+        self.config.ppo_mini_batch_size //= (world_size // sp_size // tp_size)
+        self.config.ppo_micro_batch_size //= (world_size // sp_size // tp_size)
 
         self._model_initialized = False
 
@@ -174,6 +177,7 @@ class CriticWorker(Worker):
                         print(
                             f'{model.gradient_checkpointing=}, {model.training=}, {model._gradient_checkpointing_func=}'
                         )
+        shard_plan = apply_parallel_plan(critic_module, critic_module.config, self.tp_mesh)
 
         if self.rank == 0:
             print(f'Critic overriding config {override_config_kwargs}')
@@ -207,12 +211,12 @@ class CriticWorker(Worker):
             cpu_offload = CPUOffload(offload_params=False)
 
         # we only support ZeRO3 of hybrid DP+FSDP or full FSDP
-        if self.device_mesh is None or self.device_mesh.ndim == 1:
+        if self.fsdp_mesh is None or self.fsdp_mesh.ndim == 1:
             sharding_strategy = ShardingStrategy.FULL_SHARD
-        elif self.device_mesh.ndim == 2:
+        elif self.fsdp_mesh.ndim == 2:
             sharding_strategy = ShardingStrategy.HYBRID_SHARD
         else:
-            raise NotImplementedError(f"get device mesh ndim={self.device_mesh.ndim}, but only support 1 or 2")
+            raise NotImplementedError(f"get device mesh ndim={self.fsdp_mesh.ndim}, but only support 1 or 2")
 
         critic_module = FSDP(critic_module,
                              param_init_fn=parallel_init_fsdp_fn(critic_module, parallel_load_safetensors(local_path)),
@@ -220,13 +224,13 @@ class CriticWorker(Worker):
                              auto_wrap_policy=auto_wrap_policy,
                              device_id=torch.cuda.current_device(),
                              sharding_strategy=sharding_strategy,
-                             device_mesh=self.device_mesh,
+                             device_mesh=self.fsdp_mesh,
                              mixed_precision=mixed_precision,
                              forward_prefetch=True,
                              sync_module_states=False,
                              cpu_offload=cpu_offload)
 
-        register_dtensor_save_hook(critic_module)
+        register_dtensor_save_hook(critic_module, shard_plan)
 
         log_gpu_memory_usage('After critic FSDP', logger=logger)
 
@@ -311,11 +315,11 @@ class CriticWorker(Worker):
             data.meta_info['max_token_len'] = self.config.get('infer_ppo_max_token_len', self.config.ppo_max_token_len)
         else:
             data.meta_info['micro_batch_size'] = micro_batch_size
-        with self.ulysses_sharding_manager:
-            data = self.ulysses_sharding_manager.preprocess_data(data)
+        with self.gather_manager:
+            data = self.gather_manager.preprocess_data(data)
             values = self.critic.compute_values(data=data)
             output = DataProto.from_dict(tensors={'values': values})
-            output = self.ulysses_sharding_manager.postprocess_data(output)
+            output = self.gather_manager.postprocess_data(output)
         output = output.to('cpu')
         torch.cuda.empty_cache()
         return output
@@ -331,8 +335,8 @@ class CriticWorker(Worker):
         if self.config.train_memory_offload:
             self.to("cuda", model=True, optimizer=False)
 
-        with self.ulysses_sharding_manager:
-            data = self.ulysses_sharding_manager.preprocess_data(data)
+        with self.gather_manager:
+            data = self.gather_manager.preprocess_data(data)
 
             with Timer(name='update_critic', logger=None) as timer:
                 metrics = self.critic.update_critic(data=data)
@@ -347,7 +351,7 @@ class CriticWorker(Worker):
             metrics['critic/lr(1e-4)'] = lr * 1e4
 
             output = DataProto(batch=None, meta_info={'metrics': metrics})
-            output = self.ulysses_sharding_manager.postprocess_data(output)
+            output = self.gather_manager.postprocess_data(output)
 
         if self.config.train_memory_offload:
             self.to("cpu")
@@ -362,7 +366,7 @@ class CriticWorker(Worker):
             self.to("cuda")
         self.checkpoint_manager.load_checkpoint(version=version,
                                                 hdfs_path=hdfs_path,
-                                                device_mesh=self.device_mesh,
+                                                device_mesh=self.fsdp_mesh,
                                                 role='critic',
                                                 enable_flatten=enable_flatten)
         if self.config.train_memory_offload:
@@ -381,7 +385,7 @@ class CriticWorker(Worker):
         self.checkpoint_manager.save_checkpoint(version=version,
                                                 local_path=local_path,
                                                 hdfs_path=hdfs_path,
-                                                device_mesh=self.device_mesh,
+                                                device_mesh=self.fsdp_mesh,
                                                 role='critic',
                                                 global_step=global_step,
                                                 ckpt_global_uploader_ref=ckpt_global_uploader_ref,

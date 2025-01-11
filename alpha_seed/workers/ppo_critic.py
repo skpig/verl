@@ -34,7 +34,8 @@ from verl.utils.fsdp_utils import offload_fsdp_optimizer, load_fsdp_optimizer
 from tensordict import TensorDict
 
 from alpha_seed.workers.actors import activation_offload
-from alpha_seed.workers.hybrid_engine.fsdp_ulysses import ulysses_pad_and_slice_inputs
+from alpha_seed.workers.hybrid_engine.fsdp_gather import ulysses_pad_and_slice_inputs
+from alpha_seed.models.transformers.ops import clip_grad_norm_
 from alpha_seed import core_algos
 
 from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
@@ -145,11 +146,7 @@ class DataParallelPPOCritic(BasePPOCritic):
             load_fsdp_optimizer(self.critic_optimizer, torch.cuda.current_device())
 
         assert self.config.grad_clip is not None
-
-        if isinstance(self.critic_module, FSDP):
-            grad_norm = self.critic_module.clip_grad_norm_(self.config.grad_clip)
-        else:
-            grad_norm = torch.nn.utils.clip_grad_norm_(self.critic_module.parameters(), max_norm=self.config.grad_clip)
+        grad_norm = clip_grad_norm_(self.critic_module, max_norm=self.config.grad_clip)
         self.critic_optimizer.step()
 
         if self.config.train_memory_offload:
