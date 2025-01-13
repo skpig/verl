@@ -40,6 +40,7 @@ from alpha_seed.workers.hybrid_engine.hsdp import create_device_mesh, calculate_
 from alpha_seed.workers.hybrid_engine.fsdp_ulysses import (FSDPUlyssesShardingManager, ulysses_pad_and_slice_inputs)
 from verl.utils.seqlen_balancing import rearrange_micro_batches
 from alpha_seed.utils import ndtimeline
+from alpha_seed.models.transformers.parallel.collectives import get_memory
 from .initialize import parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init
 from dist_attn.ulysses.ops import slice_input_tensor, gather_outputs
 from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
@@ -394,6 +395,7 @@ class RewardModelWorker(Worker):
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_rm_score(self, data: DataProto):
+        torch.cuda.reset_peak_memory_stats()
         data = data.to('cuda')
         if self._do_switch_chat_template:
             rm_data = self._switch_chat_template(data)
@@ -431,6 +433,11 @@ class RewardModelWorker(Worker):
         # reset FSDP buffer after forward
         self.reward_module._handle.reshard(True)
         torch.cuda.empty_cache()
+        max_memory_allocated, max_memory_reserved = get_memory()
+        output.meta_info.update({
+            'memory/rm_max_allocated': max_memory_allocated,
+            'memory/rm_max_reserved': max_memory_reserved
+        })
         return output
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)

@@ -52,6 +52,7 @@ from .initialize import parallel_init_fsdp_fn, parallel_load_safetensors, meta_d
 from .checkpoint.extensions import register_dtensor_save_hook
 from alpha_seed.workers.ppo_actor import DataParallelPPOActor
 from alpha_seed.utils.kernels.persist_gemm import deploy_persist_gemm, undelopy_persist_gemm
+from alpha_seed.models.transformers.parallel.collectives import get_memory
 from seed_models.utils.count_flops import FlopsCounter
 
 from codetiming import Timer
@@ -557,6 +558,7 @@ class AsyncActorRolloutRefWorker(Worker):
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def update_actor(self, data: DataProto):
+        torch.cuda.reset_peak_memory_stats()
         # data = data.to('cuda')
 
         assert self._is_actor
@@ -587,12 +589,19 @@ class AsyncActorRolloutRefWorker(Worker):
         log_gpu_memory_usage('After update policy', logger=logger)
 
         # TODO: here, we should return all metrics
-        output = DataProto(meta_info={'metrics': metrics})
+        max_memory_allocated, max_memory_reserved = get_memory()
+        output = DataProto(
+            meta_info={
+                'metrics': metrics,
+                'memory/actor_max_allocated': max_memory_allocated,
+                'memory/actor_max_reserved': max_memory_reserved
+            })
         output = output.to('cpu')
         if self.config.actor.train_memory_offload:
             self.to("cpu", model=True, optimizer=True)
 
         torch.cuda.empty_cache()
+
         return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
@@ -668,6 +677,7 @@ class AsyncActorRolloutRefWorker(Worker):
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def generate_sequences(self, prompts: DataProto):
+        torch.cuda.reset_peak_memory_stats()
         prompts = prompts.to('cuda')
 
         assert self._is_rollout or self._is_standalone_validator
@@ -700,9 +710,13 @@ class AsyncActorRolloutRefWorker(Worker):
 
             output = self.sharding_manager.postprocess_data(output)
 
+        max_memory_allocated, max_memory_reserved = get_memory()
+        output.meta_info.update({
+            'memory/gen_max_allocated': max_memory_allocated,
+            'memory/gen_max_reserved': max_memory_reserved
+        })
         output = output.to('cpu')
         # torch.distributed.barrier()
-        torch.cuda.empty_cache()
 
         log_gpu_memory_usage('After rollout generation', logger=logger)
         # clear kv cache
@@ -738,6 +752,7 @@ class AsyncActorRolloutRefWorker(Worker):
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_ref_log_prob(self, data: DataProto):
+        torch.cuda.reset_peak_memory_stats()
         assert self._is_ref
 
         # data = data.to('cuda')
@@ -758,12 +773,16 @@ class AsyncActorRolloutRefWorker(Worker):
             output = DataProto.from_dict(tensors={'ref_log_prob': output})
             output = self.ref_gather_manager.postprocess_data(output)
 
-        output = output.to('cpu')
-
         # reset FSDP buffer after forward
         self.ref_policy.actor_module._handle.reshard(True)
         log_gpu_memory_usage('After reference recompute log prob', logger=logger)
 
+        max_memory_allocated, max_memory_reserved = get_memory()
+        output.meta_info.update({
+            'memory/ref_max_allocated': max_memory_allocated,
+            'memory/ref_max_reserved': max_memory_reserved
+        })
+        output = output.to('cpu')
         torch.cuda.empty_cache()
         return output
 

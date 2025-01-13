@@ -32,6 +32,7 @@ from verl import DataProto
 from verl.utils.fs import copy_local_path_from_hdfs
 from verl.utils.fsdp_utils import get_fsdp_wrap_policy
 from alpha_seed.models.transformers.parallel import apply_parallel_plan
+from alpha_seed.models.transformers.parallel.collectives import get_memory
 from .initialize import create_mesh, calculate_device_mesh_shape
 from .initialize import parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init
 from .checkpoint.extensions import register_dtensor_save_hook
@@ -326,6 +327,7 @@ class CriticWorker(Worker):
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def update_critic(self, data: DataProto):
+        torch.cuda.reset_peak_memory_stats()
         # data = data.to('cuda')
 
         log_gpu_memory_usage('Before Critic update', logger=logger)
@@ -350,7 +352,13 @@ class CriticWorker(Worker):
             lr = self.critic_lr_scheduler.get_last_lr()[0]
             metrics['critic/lr(1e-4)'] = lr * 1e4
 
-            output = DataProto(batch=None, meta_info={'metrics': metrics})
+            max_memory_allocated, max_memory_reserved = get_memory()
+            output = DataProto(batch=None,
+                               meta_info={
+                                   'metrics': metrics,
+                                   'memory/critic_max_allocated': max_memory_allocated,
+                                   'memory/critic_max_reserved': max_memory_reserved
+                               })
             output = self.gather_manager.postprocess_data(output)
 
         if self.config.train_memory_offload:

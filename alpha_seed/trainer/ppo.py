@@ -999,6 +999,8 @@ class RayPPOTrainer(object):
 
         metrics['timing/gen'] = timer.last
         metrics['rollout/hybrid_input_batch'] = len(batch)
+        metrics['memory/gen_max_allocated'] = gen_batch_output.meta_info['memory/gen_max_allocated']
+        metrics['memory/gen_max_reserved'] = gen_batch_output.meta_info['memory/gen_max_reserved']
 
         # for debugging purpose only. we manually set all the attention_mask to 1 to
         # test the training performance under maximum workload.
@@ -1192,6 +1194,8 @@ class RayPPOTrainer(object):
                             # we first compute reward model score
                             reward_tensor = self.rm_wg.compute_rm_score(batch)
                             batch = batch.union(reward_tensor)
+                            metrics['memory/rm_max_allocated'] = reward_tensor.meta_info['memory/rm_max_allocated']
+                            metrics['memory/rm_max_reserved'] = reward_tensor.meta_info['memory/rm_max_reserved']
                     metrics['timing/rm_score'] = timer.last
 
                     print_dataproto_size(batch, head='After Reward Model')
@@ -1260,6 +1264,8 @@ class RayPPOTrainer(object):
                                 ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
                                 batch = batch.union(ref_log_prob)
                             metrics['timing/ref'] = timer.last
+                            metrics['memory/ref_max_allocated'] = ref_log_prob.meta_info['memory/ref_max_allocated']
+                            metrics['memory/ref_max_reserved'] = ref_log_prob.meta_info['memory/ref_max_reserved']
 
                     print_dataproto_size(batch, head='After reference policy')
 
@@ -1309,6 +1315,8 @@ class RayPPOTrainer(object):
                         with Timer(name='update_critic', logger=None) as timer:
                             critic_output = self.critic_wg.update_critic(batch)
                         metrics['timing/update_critic'] = timer.last
+                        metrics['memory/critic_max_allocated'] = critic_output.meta_info['memory/critic_max_allocated']
+                        metrics['memory/critic_max_reserved'] = critic_output.meta_info['memory/critic_max_reserved']
                         critic_output_metrics = reduce_metrics(critic_output.meta_info['metrics'])
                         metrics.update(critic_output_metrics)
 
@@ -1327,6 +1335,8 @@ class RayPPOTrainer(object):
                         with Timer(name='update_actor', logger=None) as timer:
                             actor_output = self.actor_rollout_wg.update_actor(batch)
                         metrics['timing/update_actor'] = timer.last
+                        metrics['memory/actor_max_allocated'] = actor_output.meta_info['memory/actor_max_allocated']
+                        metrics['memory/actor_max_reserved'] = actor_output.meta_info['memory/actor_max_reserved']
                         actor_output_metrics = reduce_metrics(actor_output.meta_info['metrics'])
                         metrics.update(actor_output_metrics)
 
