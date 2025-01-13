@@ -369,14 +369,15 @@ class CriticWorker(Worker):
         return output
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def load_checkpoint(self, hdfs_path=None, version='v1', enable_flatten=False):
+    def load_checkpoint(self, hdfs_path=None, version='v1', enable_flatten=False, enable_shm=False):
         if self.config.train_memory_offload:
             self.to("cuda")
         self.checkpoint_manager.load_checkpoint(version=version,
                                                 hdfs_path=hdfs_path,
                                                 device_mesh=self.fsdp_mesh,
                                                 role='critic',
-                                                enable_flatten=enable_flatten)
+                                                enable_flatten=enable_flatten,
+                                                enable_shm=enable_shm)
         if self.config.train_memory_offload:
             self.to("cpu")
 
@@ -387,7 +388,8 @@ class CriticWorker(Worker):
                         version='v1',
                         global_step=0,
                         ckpt_global_uploader_ref=None,
-                        enable_flatten=False):
+                        enable_flatten=False,
+                        enable_shm=False):
         if self.config.train_memory_offload:
             self.to("cuda")
         self.checkpoint_manager.save_checkpoint(version=version,
@@ -397,7 +399,8 @@ class CriticWorker(Worker):
                                                 role='critic',
                                                 global_step=global_step,
                                                 ckpt_global_uploader_ref=ckpt_global_uploader_ref,
-                                                enable_flatten=enable_flatten)
+                                                enable_flatten=enable_flatten,
+                                                enable_shm=enable_shm)
         if self.config.train_memory_offload:
             self.to("cpu")
 

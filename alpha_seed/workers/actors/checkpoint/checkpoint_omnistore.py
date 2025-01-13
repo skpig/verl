@@ -60,7 +60,13 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
                  lr_scheduler: torch.optim.lr_scheduler.LRScheduler, tokenizer: PreTrainedTokenizer):
         super().__init__(model, optimizer, lr_scheduler, tokenizer)
 
-    def load_checkpoint(self, hdfs_path=None, role: str = 'actor', enable_flatten: bool = False, *args, **kwargs):
+    def load_checkpoint(self,
+                        hdfs_path=None,
+                        role: str = 'actor',
+                        enable_flatten: bool = False,
+                        enable_shm: bool = False,
+                        *args,
+                        **kwargs):
         if hdfs_path is None:
             return
 
@@ -74,7 +80,7 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
         ckpt_state = {'model': self.model, 'optimizer': self.optimizer, 'extra_state': {}}
         RLFSDPCheckpointer.load(hdfs_path,
                                 ckpt_state,
-                                enable_shm_download_ckpt_tmp=True,
+                                enable_shm_download_ckpt_tmp=enable_shm,
                                 allow_extra_states=True,
                                 rl_role=role,
                                 load_flatten_model_optimizer=enable_flatten)
@@ -88,7 +94,8 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
         print(f'[rank-{self.rank}]: finish loading checkpoint {hdfs_path}')
 
     def save_checkpoint(self, local_path: str, hdfs_path: str, role: str, global_step: int,
-                        ckpt_global_uploader_ref: CkptGlobalUploader, enable_flatten: bool, *args, **kwargs):
+                        ckpt_global_uploader_ref: CkptGlobalUploader, enable_flatten: bool, enable_shm: bool, *args,
+                        **kwargs):
         path = os.path.abspath(local_path)
         print(f'[rank-{self.rank}]: start saving checkpoint {path}')
         # wait for previous upload to hdfs
@@ -124,6 +131,7 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
             RLFSDPCheckpointer.save(
                 path,
                 ckpt_state,
+                enable_shm_upload_ckpt_tmp=enable_shm,
                 async_fast_checkpoint=False,
                 enable_tree_topo=True,
                 global_steps=global_step,

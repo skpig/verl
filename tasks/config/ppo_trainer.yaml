@@ -272,6 +272,7 @@ trainer:
   resume_steps: auto
   ckpt_version: v1
   ckpt_enable_flatten: False
+  ckpt_enable_shm: False
   ckpt_upload_retry_count: 3
   set_fake_attention_mask: False
   fake_seqlen_ratio: 0.5

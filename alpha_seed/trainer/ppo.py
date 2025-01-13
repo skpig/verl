@@ -864,13 +864,15 @@ class RayPPOTrainer(object):
         actor_upload_future = self.actor_rollout_wg.save_checkpoint(
             actor_local_path, actor_remote_path,
             specified_ckpt_version if specified_ckpt_version is not None else self.config.trainer.ckpt_version,
-            self.global_step, self.ckpt_global_uploader, self.config.trainer.ckpt_enable_flatten)
+            self.global_step, self.ckpt_global_uploader, self.config.trainer.ckpt_enable_flatten,
+            self.config.trainer.ckpt_enable_shm)
 
         if self.use_critic:
             critic_upload_future = self.critic_wg.save_checkpoint(
                 critic_local_path, critic_remote_path,
                 specified_ckpt_version if specified_ckpt_version is not None else self.config.trainer.ckpt_version,
-                self.global_step, self.ckpt_global_uploader, self.config.trainer.ckpt_enable_flatten)
+                self.global_step, self.ckpt_global_uploader, self.config.trainer.ckpt_enable_flatten,
+                self.config.trainer.ckpt_enable_shm)
         else:
             critic_upload_future = None
 
@@ -916,11 +918,12 @@ class RayPPOTrainer(object):
         critic_remote_path = os.path.join(remote_global_step_folder, 'critic')
         # load actor
         self.actor_rollout_wg.load_checkpoint(actor_remote_path, self.config.trainer.ckpt_version,
-                                              self.config.trainer.ckpt_enable_flatten)
+                                              self.config.trainer.ckpt_enable_flatten,
+                                              self.config.trainer.ckpt_enable_shm)
         # load critic
         if self.use_critic:
             self.critic_wg.load_checkpoint(critic_remote_path, self.config.trainer.ckpt_version,
-                                           self.config.trainer.ckpt_enable_flatten)
+                                           self.config.trainer.ckpt_enable_flatten, self.config.trainer.ckpt_enable_shm)
         # load dataloader
         dataloader_remote_path = os.path.join(remote_global_step_folder, 'data.pt')
         dataloader_local_path = copy_local_path_from_hdfs(dataloader_remote_path)
