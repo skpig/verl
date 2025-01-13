@@ -725,7 +725,8 @@ class RayPPOTrainer(object):
             use_critic=self.use_critic,
             ckpt_version=self.config.trainer.ckpt_version,
             default_local_dir=self.config.trainer.default_local_dir,
-            default_remote_dir=self.config.trainer.default_hdfs_dir) if (
+            default_remote_dir=self.config.trainer.default_hdfs_dir,
+            upload_retry_count=int(self.config.trainer.ckpt_upload_retry_count)) if (
                 ckpt_global_uploader is None and not server_client_split) else ckpt_global_uploader
 
         for wg_name in self.all_wg:
