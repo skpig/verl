@@ -72,8 +72,7 @@ actor_rollout_ref:
       use_orig_params: ${trainer.ckpt_enable_flatten}
     profile:
       filename: p6_400m_ppo_actor
-      profile_on_ranks:
-        - 0
+      profile_on_ranks: null
       default_hdfs_dir: null
       upload_to_mlx: False
       enable: False
@@ -184,8 +183,7 @@ critic:
   train_memory_offload: ${trainer.offload_train_memory}
   profile:
     filename: p6_400m_ppo_critic
-    profile_on_ranks:
-      - 0
+    profile_on_ranks: null
     default_hdfs_dir: null
     upload_to_mlx: False
     enable: False
