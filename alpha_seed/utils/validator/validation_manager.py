@@ -214,6 +214,7 @@ class ValidateManager(object):
             validator_wg.release_param_and_cache()
 
         reward_tensor = torch.cat(reward_tensor_lst, dim=0).cpu()  # (valsize*num_prompt_per_data, eval_bon)
+        reward_tensor = torch.clamp(reward_tensor, min=0)
         bopxn = torch.cat(bopxn_lst, dim=0).cpu(
         ) if eval_bon > 1 and num_prompts_per_data > 0 else None  # (valsize, num_prompt_per_data*eval_bon)
 
