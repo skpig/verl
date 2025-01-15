@@ -206,7 +206,7 @@ def compute_rewards(token_level_scores, old_log_prob, ref_log_prob, kl_ratio):
 
 def compute_policy_loss(old_log_prob, ref_log_prob, log_prob, advantages, upgo_advantages, eos_mask, cliprange,
                         cliprange2, scale_pg_by_kl, scale_pg_by_local_kl, upgo_loss_weight, use_ewma_loss,
-                        kl_penalty_type):
+                        kl_penalty_type, overlong_mask):
     """Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py#L1122
 
     Args:
@@ -258,6 +258,9 @@ def compute_policy_loss(old_log_prob, ref_log_prob, log_prob, advantages, upgo_a
         sqrt_kl = torch.sqrt(torch.clamp(torch.sum(negative_approx_kl * eos_mask, dim=1), min=1.0))
         normed_sqrt_kl = (1 / sqrt_kl) / (torch.sum(1 / sqrt_kl)) * torch.clamp(torch.sum(eos_mask[:, 0]), min=1.0)
         pg_loss = pg_loss * normed_sqrt_kl
+
+    if overlong_mask is not None:
+        pg_loss = pg_loss * overlong_mask
     pg_loss = torch.mean(pg_loss)
 
     if upgo_loss_weight > 0.0:

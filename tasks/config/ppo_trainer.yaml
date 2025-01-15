@@ -227,6 +227,7 @@ reward_model:
   use_cuda_timer: True
 
 algorithm:
+  mask_overlong: False
   inference_scaling: v0
   force_append_eos: False
   phasic_critic_interval: 0

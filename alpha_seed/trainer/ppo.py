@@ -1220,6 +1220,15 @@ class RayPPOTrainer(object):
 
                     print_dataproto_size(batch, head='After Reward function')
 
+                    if self.config.algorithm.mask_overlong:
+                        prompt_length = self.config.data.max_prompt_length
+                        response_length = self.config.data.max_response_length
+                        valid_response_length = batch.batch['attention_mask'][:, prompt_length:].sum(-1)
+                        is_overlong = (response_length == valid_response_length) & (raw_scores_log == -1)
+                        # batch.batch['attention_mask'][is_overlong] = 0
+                        # batch.batch['answer_attention_mask'][is_overlong] = 0
+                        batch.batch['overlong_mask'] = (~is_overlong).int()
+
                     # league training，筛选平均通过率低的prompt
                     use_async_gen = self.config.streaming_rollout.nnodes > 0
                     if self.config.trainer.league_training_config.enable:

@@ -296,6 +296,8 @@ class DataParallelPPOActor(BasePPOActor):
         select_keys = ['responses', 'input_ids', 'attention_mask', 'old_log_probs', 'advantages', 'upgo_advantages']
         if 'ref_log_prob' in data.batch.keys():
             select_keys.append('ref_log_prob')
+        if 'overlong_mask' in data.batch.keys():
+            select_keys.append('overlong_mask')
         batch = data.select(batch_keys=select_keys).batch
         dataloader = batch.split(self.config.ppo_mini_batch_size)
 
@@ -326,6 +328,7 @@ class DataParallelPPOActor(BasePPOActor):
                     ref_log_prob = micro_data.get('ref_log_prob', None)
                     advantages = micro_data['advantages']
                     upgo_advantages = micro_data['upgo_advantages']
+                    overlong_mask = micro_data.get('overlong_mask', None)
 
                     clip_ratio = self.config.clip_ratio
                     clip_ratio2 = self.config.clip_ratio2
@@ -358,7 +361,8 @@ class DataParallelPPOActor(BasePPOActor):
                         scale_pg_by_local_kl=scale_pg_by_local_kl,
                         upgo_loss_weight=upgo_loss_weight,
                         use_ewma_loss=self.config.use_ewma_loss,
-                        kl_penalty_type=kl_penalty_type)
+                        kl_penalty_type=kl_penalty_type,
+                        overlong_mask=overlong_mask)
 
                     if self.config.early_stop_by_kl != 0 and ppo_kl > self.config.early_stop_by_kl and batch_idx > 0:
                         minibatch_early_stop = True
