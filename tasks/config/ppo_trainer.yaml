@@ -137,7 +137,7 @@ actor_rollout_ref:
       default_hdfs_dir: null
       upload_to_mlx: False
       enable: False
-  use_cuda_timer: False
+  use_cuda_timer: True
 
 critic:
   update_gate_ema: False
@@ -187,7 +187,7 @@ critic:
     default_hdfs_dir: null
     upload_to_mlx: False
     enable: False
-  use_cuda_timer: False
+  use_cuda_timer: True
 
 reward_model:
   enable: False
@@ -224,7 +224,7 @@ reward_model:
   strict_box_verify: False
   punish_format: False
   format_punish_score: -5
-  use_cuda_timer: False
+  use_cuda_timer: True
 
 algorithm:
   inference_scaling: v0

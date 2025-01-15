@@ -475,13 +475,7 @@ def init_ray(address=None):
             'TRITON_CACHE_MANAGER': 'triton.runtime.cache:RemoteCacheManager',
             'TRITON_REMOTE_CACHE_BACKEND': 'alpha_seed.utils.redis.triton_redis:BytedRedisRemoteCacheBackend'
         }
-        runtime_env = {
-            'env_vars': {
-                'TOKENIZERS_PARALLELISM': 'true',
-                'NCCL_DEBUG': 'WARN',
-                'BPEX_NO_WARN_ON_UNTUNED_CASE': '1'
-            }
-        }
+        runtime_env = {'env_vars': {'TOKENIZERS_PARALLELISM': 'true', 'BPEX_NO_WARN_ON_UNTUNED_CASE': '1'}}
         if ENABLE_REDIS_TRITON_CACHE:
             runtime_env['env_vars'].update(remote_cache_env)
 
