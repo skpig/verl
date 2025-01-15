@@ -109,6 +109,7 @@ class AsyncXPerfGPTRollout(object):
             "vllm_block_size": slot_block_size,
         }
         tp_size = self.config.get('tensor_model_parallel_size', 1)
+        use_ep = self.config.get('use_ep', False)
 
         xperf_prophet = XperfModelProphet(model_cfg, sched_cfg, tp_size)
         gpu_memory_utilization = self.config.get('gpu_memory_utilization', 0.7)
@@ -264,11 +265,13 @@ class AsyncXPerfGPTRollout(object):
                         print(
                             f'Global rank {global_rank}, tp_rank {tp_rank}, master_addr: {master_addr}, master_port: {master_port}'
                         )
-                        inference_sess.init_inference_engine(f.name,
-                                                             generate_kwargs,
-                                                             rank0_split=False,
-                                                             mp_size=tp_size,
-                                                             enable_metrics=True)
+                        with logging_set_level(self.config.get('logging_level', 'INFO')):
+                            inference_sess.init_inference_engine(f.name,
+                                                                 generate_kwargs,
+                                                                 rank0_split=False,
+                                                                 mp_size=tp_size,
+                                                                 enable_metrics=True,
+                                                                 use_ep=use_ep)
                     if dist.is_initialized() and tp_size > 1:
                         dist.barrier()
                         if tp_rank == 0:

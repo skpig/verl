@@ -1152,7 +1152,7 @@ def _reshard_fsdp_state_dict_to_xperf_m8(tp_model, state_dict, device_mesh: Devi
     tp_model.lm_head_weight.data = lm_head_tp.contiguous()  # tied weights
 
     for layer_index, (ln_1, key_norm, context_norm, qkv_w, qkv_b, dense_w, dense_b, ln_2, gate_w, _, fc1_w, _, fc2_w, _,
-                      *_) in enumerate(tp_model.layers_weight):
+                      share_fc1_w, share_fc2_w, *_) in enumerate(tp_model.layers_weight):
         ln_1_weight = state_dict.pop(f'transformer.h.{layer_index}.input_layernorm.weight').full_tensor()
         ln_1_weight = torch.stack((ln_1_weight,), dim=0).to(torch.bfloat16).reshape(1, ln_1_weight.shape[-1])
         assert ln_1.data.shape == ln_1_weight.shape
@@ -1258,8 +1258,9 @@ def _reshard_fsdp_state_dict_to_xperf_m8(tp_model, state_dict, device_mesh: Devi
             fc1_1_weight = DTensor.from_local(fc1_1_weight,
                                               device_mesh=device_mesh,
                                               placements=[Replicate(), Replicate()])
-            fc1_1_weight = fc1_1_weight.redistribute(device_mesh=device_mesh, placements=[Replicate(),
-                                                                                          Shard(1)])._local_tensor
+            fc1_1_weight = fc1_1_weight.redistribute(device_mesh=device_mesh,
+                                                     placements=[Replicate(),
+                                                                 Shard(0 if tp_model.use_ep else 1)])._local_tensor
 
         fc1_2_weight = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts.fc1_2').to(
             torch.bfloat16).full_tensor()
@@ -1268,8 +1269,9 @@ def _reshard_fsdp_state_dict_to_xperf_m8(tp_model, state_dict, device_mesh: Devi
             fc1_2_weight = DTensor.from_local(fc1_2_weight,
                                               device_mesh=device_mesh,
                                               placements=[Replicate(), Replicate()])
-            fc1_2_weight = fc1_2_weight.redistribute(device_mesh=device_mesh, placements=[Replicate(),
-                                                                                          Shard(1)])._local_tensor
+            fc1_2_weight = fc1_2_weight.redistribute(device_mesh=device_mesh,
+                                                     placements=[Replicate(),
+                                                                 Shard(0 if tp_model.use_ep else 1)])._local_tensor
 
         base_fc1_weight = torch.cat((fc1_1_weight, fc1_2_weight), dim=1)
         del fc1_1_weight
@@ -1299,18 +1301,28 @@ def _reshard_fsdp_state_dict_to_xperf_m8(tp_model, state_dict, device_mesh: Devi
         del share_fc1_1_weight
         del share_fc1_2_weight
 
-        fc1_weight = torch.cat((base_fc1_weight, share_fc1_weight), dim=0).contiguous().flatten()
+        if tp_model.use_ep:
+            fc1_weight = base_fc1_weight.contiguous().flatten()
+            s_fc1_weight = share_fc1_weight.reshape(share_fc1_weight.shape[0], 2, -1,
+                                                    share_fc1_weight.shape[-1]).transpose(0, 1).reshape(
+                                                        -1, share_fc1_weight.shape[-1])
+        else:
+            fc1_weight = torch.cat((base_fc1_weight, share_fc1_weight), dim=0).contiguous().flatten()
         del base_fc1_weight
         del share_fc1_weight
 
-        assert fc1_weight.shape == fc1_w.shape
+        assert fc1_weight.shape == fc1_w.shape, f'{fc1_weight.shape=}, {fc1_w.shape=}'
         fc1_w.data = fc1_weight.contiguous()
+        if tp_model.use_ep:
+            assert s_fc1_weight.shape == share_fc1_w.shape, f'{s_fc1_weight.shape=}, {share_fc1_w.shape=}'
+            share_fc1_w.data = s_fc1_weight.contiguous()
 
         fc2_weight = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts.fc2').to(torch.bfloat16).full_tensor()
         if device_mesh is not None:
             fc2_weight = DTensor.from_local(fc2_weight, device_mesh=device_mesh, placements=[Replicate(), Replicate()])
-            fc2_weight = fc2_weight.redistribute(device_mesh=device_mesh, placements=[Replicate(),
-                                                                                      Shard(2)])._local_tensor
+            fc2_weight = fc2_weight.redistribute(device_mesh=device_mesh,
+                                                 placements=[Replicate(),
+                                                             Shard(0 if tp_model.use_ep else 2)])._local_tensor
 
         share_fc2_weight = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts_share.fc2').to(
             torch.bfloat16).full_tensor()
@@ -1323,13 +1335,20 @@ def _reshard_fsdp_state_dict_to_xperf_m8(tp_model, state_dict, device_mesh: Devi
             share_fc2_weight = share_fc2_weight.redistribute(device_mesh=device_mesh,
                                                              placements=[Replicate(), Shard(2)])._local_tensor
 
-        fc2_weight_merge = torch.cat((fc2_weight, share_fc2_weight), dim=0).contiguous().flatten()
+        if tp_model.use_ep:
+            fc2_weight_merge = fc2_weight.contiguous().flatten()
+            s_fc2_weight_merge = share_fc2_weight.transpose(0, 1).reshape(share_fc2_weight.shape[1], -1)
+        else:
+            fc2_weight_merge = torch.cat((fc2_weight, share_fc2_weight), dim=0).contiguous().flatten()
         del fc2_weight
         del share_fc2_weight
 
         # (num_experts, intermediate_size // tp, hidden_size)
         assert fc2_weight_merge.shape == fc2_w.shape, f'{fc2_weight_merge.shape=}, {fc2_w.shape=}'
         fc2_w.data = fc2_weight_merge.contiguous()
+        if tp_model.use_ep:
+            assert s_fc2_weight_merge.shape == share_fc2_w.shape, f'{s_fc2_weight_merge.shape=}, {share_fc2_w.shape=}'
+            share_fc2_w.data = s_fc2_weight_merge.contiguous()
 
     # enforce check nan
     assert_not_nan(tp_model.layernorm_weight.data)
