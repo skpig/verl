@@ -23,6 +23,7 @@ from seed_models.models.m8.modeling_m8 import (
     _flash_attention_forward,
     _flash_supports_window_size,
     KVMirrorManagerHook,
+    KVMirrorManager,
     Cache,
     M8FusedMoeBlock,
 )
@@ -276,3 +277,8 @@ def _fused_moe_ep_forward(
     # reshape output to input shape
     final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
     return final_hidden_states, router_logits, aux_loss
+
+
+def release_m8_kv_mirror(self):
+    KVMirrorManager.activations_dict.clear()
+    KVMirrorManager.activations_grad_dict.clear()

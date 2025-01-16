@@ -142,6 +142,10 @@ class DataParallelPPOCritic(BasePPOCritic):
                                   dataloader_kwargs={'shuffle': self.config.shuffle})
 
     def _optimizer_step(self):
+        # release kv mirror memory for m8
+        if hasattr(self.critic_module, 'release_act_memory'):
+            self.critic_module.release_act_memory()
+
         if self.config.train_memory_offload:
             load_fsdp_optimizer(self.critic_optimizer, torch.cuda.current_device())
 
@@ -192,6 +196,8 @@ class DataParallelPPOCritic(BasePPOCritic):
                     micro_batch = micro_batch.cuda()  # actor device is cpu when using offload
                     values = self._forward_micro_batch(micro_batch)
                     mini_batch_values.append(values)
+            # release root module unshard memory
+            self.critic_module._handle.reshard(True)
 
             mini_values = torch.cat(mini_batch_values, dim=0)
             if use_dynamic_bsz:
