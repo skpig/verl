@@ -61,12 +61,6 @@ from datetime import timedelta
 
 from .checkpoint import CheckpointManagerWrapper
 
-try:
-    from bytedance.ndtimeline import EmergencyServer, FlightRecorderDumper
-    import bytedance.ndtimeline.flight_recorder as fr
-except ImportError:
-    EmergencyServer, FlightRecorderDumper = None, None
-
 logger = logging.getLogger(__file__)
 
 
@@ -89,6 +83,7 @@ class AsyncActorRolloutRefWorker(Worker):
             torch.distributed.init_process_group(backend="nccl", timeout=timeout)
 
         ndtimeline.set_cuda_timer_option(config["use_cuda_timer"])
+        ndtimeline.set_nccl_trace_option()
         mesh_shape = calculate_device_mesh_shape(config.actor.fsdp_size * config.actor.tp_size)
         if len(mesh_shape) == 2:  # align with ndtimeline internal settings
             mesh_shape = (mesh_shape[1], mesh_shape[0])
@@ -177,9 +172,7 @@ class AsyncActorRolloutRefWorker(Worker):
         self.load_sequences = self.config.rollout.get('load_sequences', None)
 
         local_rank = int(os.getenv("RAY_LOCAL_RANK", "0"))
-        if FlightRecorderDumper and EmergencyServer:
-            fr_dumper = FlightRecorderDumper(actor_name=ray.get_runtime_context().get_actor_name())
-            EmergencyServer.init(local_rank=local_rank, fr_dumper=fr_dumper)
+        ndtimeline.init_emergency_server(local_rank=local_rank, actor_name=ray.get_runtime_context().get_actor_name())
 
         self._model_initialized = False
 
@@ -853,13 +846,7 @@ class AsyncActorRolloutRefWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def upload_process_group(self, trigger_timestamp):
-        if FlightRecorderDumper and EmergencyServer:
-            dumper = EmergencyServer.fr_dumper
-            dump_type = 'initial'
-            dumper.dump(trigger_timestamp=trigger_timestamp, dump_type=dump_type)
-            logging.info(f'dump {dump_type} upload process group')
-        else:
-            logging.warning(f'flight recorder dumper not available, please use the latest ndtimeline version')
+        ndtimeline.upload_process_group(trigger_timestamp, ndtimeline.DumpType.initial.value)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def do_ndtimeline_action(self, action, *args, **kwargs):

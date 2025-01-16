@@ -69,6 +69,7 @@ class RewardModelWorker(Worker):
             torch.distributed.init_process_group(backend="nccl", timeout=timeout)
 
         ndtimeline.set_cuda_timer_option(config["use_cuda_timer"])
+        ndtimeline.set_nccl_trace_option()
         mesh_shape = calculate_device_mesh_shape(config.fsdp_size)
         if len(mesh_shape) == 2:  # align with ndtimeline internal settings
             mesh_shape = (mesh_shape[1], mesh_shape[0])
@@ -89,6 +90,9 @@ class RewardModelWorker(Worker):
         self.config.micro_batch_size //= world_size // sp_size
 
         self._model_initialized = True
+
+        local_rank = int(os.getenv("RAY_LOCAL_RANK", "0"))
+        ndtimeline.init_emergency_server(local_rank=local_rank, actor_name=ray.get_runtime_context().get_actor_name())
 
     def _build_model(self, config):
         # the following line is necessary
@@ -439,6 +443,10 @@ class RewardModelWorker(Worker):
             'memory/rm_max_reserved': max_memory_reserved
         })
         return output
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def upload_process_group(self, trigger_timestamp):
+        ndtimeline.upload_process_group(trigger_timestamp, ndtimeline.DumpType.initial.value)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def do_ndtimeline_action(self, action, *args, **kwargs):

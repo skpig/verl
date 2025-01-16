@@ -1466,11 +1466,9 @@ class RayPPOTrainer(object):
                     self.call_once_on_each_ray_actor("do_ndtimeline_action", "flush_and_inc")
 
                 self.global_step += 1
-                if start_step + 1 == self.global_step:
+                if ndtimeline.use_nccl_trace() and start_step + 1 == self.global_step:
                     now = int(time.time())
-                    self.ref_policy_wg.upload_process_group(now)
-                    if self.config.streaming_rollout.nnodes > 0:
-                        self.standalone_rollout_wg.upload_process_group(now)
+                    self.call_once_on_each_ray_actor("upload_process_group", now)
                     pprint(f'start upload process group at {now}')
 
                 if self.global_step >= self.total_training_steps:
