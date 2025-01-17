@@ -188,6 +188,9 @@ def flash_attn2_rmpad_forward(
         key_states = key_states.to(target_dtype)
         value_states = value_states.to(target_dtype)
 
+    query_states.stat_meta = {"name": f"layer_{self.layer_idx}.M8FlashAttention2.query_states"}
+    key_states.stat_meta = {"name": f"layer_{self.layer_idx}.M8FlashAttention2.key_states"}
+    value_states.stat_meta = {"name": f"layer_{self.layer_idx}.M8FlashAttention2.value_states"}
     # Reashape to the expected shape for Flash Attention
     query_states = query_states.transpose(1, 2)
     key_states = key_states.transpose(1, 2)

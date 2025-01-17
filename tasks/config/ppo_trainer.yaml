@@ -70,6 +70,7 @@ actor_rollout_ref:
         min_num_params: 0
       param_offload: False
       use_orig_params: ${trainer.ckpt_enable_flatten}
+    enable_training_stats: False
     profile:
       filename: p6_400m_ppo_actor
       profile_on_ranks: null

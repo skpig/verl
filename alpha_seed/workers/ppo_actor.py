@@ -14,11 +14,13 @@
 """
 Single Process Actor
 """
-from typing import Iterable
+from typing import Iterable, ContextManager
 import itertools
 
 import torch
 from tensordict import TensorDict
+from transformers import PretrainedConfig
+
 from torch import nn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
@@ -38,6 +40,7 @@ from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_worl
 from dist_attn.ulysses.ops import gather_outputs
 from alpha_seed.workers.hybrid_engine.fsdp_gather import ulysses_pad_and_slice_inputs
 from alpha_seed.models.transformers.ops import clip_grad_norm_
+from alpha_seed.utils.observility.training_stats import sync_training_stats
 from alpha_seed import core_algos
 from alpha_seed.models.transformers.monkey_patch import update_gate_ema
 from verl.utils.seqlen_balancing import rearrange_micro_batches, get_reverse_idx
@@ -58,10 +61,13 @@ except:
 class DataParallelPPOActor(BasePPOActor):
 
     def __init__(
-        self,
-        config,
-        actor_module: nn.Module,
-        actor_optimizer: torch.optim.Optimizer = None,
+            self,
+            config,
+            actor_module: nn.Module,
+            actor_optimizer: torch.optim.Optimizer = None,
+            actor_model_config: PretrainedConfig = None,
+            enable_non_reentrant_recompute: bool = False,
+            metrics_context: ContextManager = nullcontext(),
     ):
         """When optimizer is None, it is Reference Policy.
 
@@ -71,6 +77,9 @@ class DataParallelPPOActor(BasePPOActor):
         super().__init__(config)
         self.actor_module: FSDP = actor_module
         self.actor_optimizer = actor_optimizer
+        self.actor_model_config = actor_model_config
+        self.metrics_context = metrics_context
+        self.enable_non_reentrant_recompute = enable_non_reentrant_recompute
         self.use_rmpad = self.config.get('use_rmpad', False)
         if torch.distributed.get_rank() == 0:
             print(f'Actor use_rmpad={self.use_rmpad}')
@@ -311,9 +320,11 @@ class DataParallelPPOActor(BasePPOActor):
         metrics = {}
 
         first_mini_ppo_kl_sum = 0
+        # only use nullcontext for non-reentrant gradient checkpointing
+        metrics_exec_context = nullcontext() if self.enable_non_reentrant_recompute else self.metrics_context
 
         for batch_idx, mini_batch in enumerate(dataloader):
-            with self.profiler_context as p:
+            with self.profiler_context as p, metrics_exec_context:
                 if self.config.use_dynamic_bsz:
                     micro_batches, _, _ = rearrange_micro_batches(batch=mini_batch,
                                                                   max_token_len=self.config.ppo_max_token_len)
@@ -413,6 +424,11 @@ class DataParallelPPOActor(BasePPOActor):
                 if minibatch_early_stop:
                     print(f'early stop at {batch_idx}!!!')
                     break
+
+                if not isinstance(self.metrics_context, nullcontext):
+                    training_stats = sync_training_stats(self.metrics_context, self.actor_model_config,
+                                                         self.actor_module, self.config.fsdp_size)
+                    append_to_dict(metrics, training_stats)
 
                 grad_norm = self._optimizer_step()
 

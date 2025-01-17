@@ -15,15 +15,18 @@
 The main entry point to run the PPO algorithm
 """
 
+from contextlib import nullcontext
 from filelock import FileLock
 import shutil
 import warnings
 import os
 import logging
 import hdfs_io
+from functools import partial
 import ray
 import torch
 import torch.distributed
+from torch.utils.checkpoint import noop_context_fn
 from omegaconf import DictConfig, open_dict, OmegaConf
 from typing import List
 from typing import Union
@@ -53,6 +56,7 @@ from .checkpoint.extensions import register_dtensor_save_hook
 from alpha_seed.workers.ppo_actor import DataParallelPPOActor
 from alpha_seed.utils.kernels.persist_gemm import deploy_persist_gemm, undelopy_persist_gemm
 from alpha_seed.models.transformers.parallel.collectives import get_memory
+from alpha_seed.utils.observility.training_stats import MetricsTorchDispatchMode, metrics_context_fn
 from seed_models.utils.count_flops import FlopsCounter
 
 from codetiming import Timer
@@ -265,14 +269,24 @@ class AsyncActorRolloutRefWorker(Worker):
             # some parameters may not in torch_dtype. TODO(zhangchi.usc1992) remove this after we switch to fsdp2
             actor_module.to(torch_dtype)
 
+            enable_training_stats = self.config.actor.enable_training_stats
+            metrics_context = MetricsTorchDispatchMode() if enable_training_stats else nullcontext()
+
             if enable_gradient_checkpointing:
                 use_reentrant = self.config.actor.act_offload
                 if self.config.actor.act_offload:
                     # doc link: https://bytedance.us.larkoffice.com/docx/NiWVd0QgoopepBxBXmDuHJKwsNe
                     from alpha_seed.workers.actors import activation_offload
                     torch.utils.checkpoint.CheckpointFunction = activation_offload.CheckpointFunction
+
                 actor_module.gradient_checkpointing_enable(
-                    gradient_checkpointing_kwargs={'use_reentrant': use_reentrant})
+                    gradient_checkpointing_kwargs={
+                        'use_reentrant':
+                            use_reentrant,
+                        "context_fn":
+                            partial(metrics_context_fn, metrics_context) if (
+                                enable_training_stats and not use_reentrant) else noop_context_fn,
+                    })
                 actor_module.train()
                 if self.rank == 0:
                     print(actor_module)
@@ -386,7 +400,7 @@ class AsyncActorRolloutRefWorker(Worker):
 
         log_gpu_memory_usage('After actor optimizer init', logger=logger)
 
-        return actor_module_fsdp, actor_optimizer, actor_lr_scheduler, actor_model_config
+        return actor_module_fsdp, actor_optimizer, actor_lr_scheduler, actor_model_config, metrics_context
 
     def _build_rollout(self):
         assert self.config.rollout.name == 'xperf_gpt'
@@ -468,7 +482,7 @@ class AsyncActorRolloutRefWorker(Worker):
             else:
                 optim_config = None
                 fsdp_config = OmegaConf.create()
-            self.actor_module_fsdp, self.actor_optimizer, self.actor_lr_scheduler, self.actor_model_config = self._build_model_optimizer(
+            self.actor_module_fsdp, self.actor_optimizer, self.actor_lr_scheduler, self.actor_model_config, self.metrics_context = self._build_model_optimizer(
                 model_path=self.config.model.path,
                 fsdp_config=fsdp_config,
                 optim_config=optim_config,
@@ -489,9 +503,14 @@ class AsyncActorRolloutRefWorker(Worker):
             with open_dict(self.config.actor):
                 self.config.actor.use_rmpad = use_rmpad
                 self.config.actor.use_ce_loss_fusion = use_ce_loss_fusion
+            enable_non_reentrant_recompute = self.config.model.get('enable_gradient_checkpointing',
+                                                                   False) and not self.config.actor.act_offload
             self.actor = DataParallelPPOActor(config=self.config.actor,
                                               actor_module=self.actor_module_fsdp,
-                                              actor_optimizer=self.actor_optimizer)
+                                              actor_optimizer=self.actor_optimizer,
+                                              actor_model_config=self.actor_model_config,
+                                              enable_non_reentrant_recompute=enable_non_reentrant_recompute,
+                                              metrics_context=self.metrics_context)
 
         if self._is_ref:
             self.ref_module_fsdp = self._build_model_optimizer(model_path=self.config.model.path,

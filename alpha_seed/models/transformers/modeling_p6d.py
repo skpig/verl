@@ -83,6 +83,10 @@ def flash_attn2_rmpad_forward(
         cos, sin = position_embeddings
     query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
+    query_states.stat_meta = {"name": f"layer_{self.layer_idx}.P6DenseFlashAttention2.query_states"}
+    key_states.stat_meta = {"name": f"layer_{self.layer_idx}.P6DenseFlashAttention2.key_states"}
+    value_states.stat_meta = {"name": f"layer_{self.layer_idx}.P6DenseFlashAttention2.value_states"}
+
     # Reashape to the expected shape for Flash Attention
     query_states = query_states.transpose(1, 2)
     key_states = key_states.transpose(1, 2)
