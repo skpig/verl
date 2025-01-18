@@ -135,6 +135,8 @@ class DataParallelPPOCritic(BasePPOCritic):
 
     def _make_minibatch_iterator(self, data: DataProto) -> Iterable[DataProto]:
         select_keys = ['input_ids', 'responses', 'attention_mask', 'values', 'returns']
+        if 'overlong_mask' in data.batch.keys():
+            select_keys.append('overlong_mask')
         data = data.select(batch_keys=select_keys)
         return data.make_iterator(mini_batch_size=self.config.ppo_mini_batch_size,
                                   epochs=self.config.ppo_epochs if not data.meta_info.get('phasic_update', False) else
@@ -218,6 +220,8 @@ class DataParallelPPOCritic(BasePPOCritic):
             dataloader = self._make_minibatch_iterator(data)
         else:
             select_keys = ['input_ids', 'responses', 'attention_mask', 'values', 'returns']
+            if 'overlong_mask' in data.batch.keys():
+                select_keys.append('overlong_mask')
             batch = data.select(batch_keys=select_keys).batch
             dataloader = batch.split(self.config.ppo_mini_batch_size)
 
@@ -247,6 +251,8 @@ class DataParallelPPOCritic(BasePPOCritic):
                     attention_mask = micro_data['attention_mask']
                     values = micro_data['values']
                     returns = micro_data['returns']
+                    overlong_mask = micro_data.get('overlong_mask', None)
+
                     response_length = responses.size(1)
 
                     eos_mask = attention_mask[:, -response_length - 1:-1]
@@ -259,7 +265,8 @@ class DataParallelPPOCritic(BasePPOCritic):
                                                            values=values,
                                                            returns=returns,
                                                            eos_mask=eos_mask,
-                                                           cliprange_value=self.config.cliprange_value)
+                                                           cliprange_value=self.config.cliprange_value,
+                                                           overlong_mask=overlong_mask)
                     if self.config.use_dynamic_bsz:
                         loss = vf_loss * (len(micro_data) / self.config.ppo_mini_batch_size)
                     else:

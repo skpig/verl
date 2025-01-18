@@ -308,7 +308,7 @@ def compute_entropy_loss(logits, eos_mask):
     return entropy_loss
 
 
-def compute_value_loss(vpreds, returns, values, eos_mask, cliprange_value):
+def compute_value_loss(vpreds, returns, values, eos_mask, cliprange_value, overlong_mask):
     """Compute the value loss. Copied from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py#L1151
 
     Args:
@@ -330,8 +330,13 @@ def compute_value_loss(vpreds, returns, values, eos_mask, cliprange_value):
     vf_losses1 = (vpreds - returns)**2
     vf_losses2 = (vpredclipped - returns)**2
     seq_len_per_sample = torch.clamp(torch.sum(eos_mask, dim=1), min=1.0)
-    vf_loss = 0.5 * torch.mean(torch.sum(torch.max(vf_losses1, vf_losses2) * eos_mask, dim=1) / seq_len_per_sample)
+    if overlong_mask is not None:
+        vf_loss = 0.5 * torch.mean(
+            torch.sum(torch.max(vf_losses1, vf_losses2) * eos_mask, dim=1) / seq_len_per_sample * overlong_mask)
+    else:
+        vf_loss = 0.5 * torch.mean(torch.sum(torch.max(vf_losses1, vf_losses2) * eos_mask, dim=1) / seq_len_per_sample)
     vf_clipfrac = verl_F.masked_mean(torch.gt(vf_losses2, vf_losses1).float(), eos_mask)
+    vf_loss = vf_loss
     return vf_loss, vf_clipfrac
 
 
