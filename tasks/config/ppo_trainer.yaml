@@ -270,6 +270,7 @@ trainer:
   save_cases_to_hdfs: True # save all cases to hdfs each step
   # auto: find the last ckpt to resume. If can't find, start from scratch
   resume_steps: auto
+  auto_over_others: False
   ckpt_version: v1
   ckpt_enable_flatten: False
   ckpt_enable_shm: False

@@ -885,28 +885,26 @@ class RayPPOTrainer(object):
         if self.config.trainer.resume_steps == 'disable':
             return 0
 
-        # find the latest global step
+        # find the latest global step of the current default_dir
+        try:
+            from omnistore.utilities.ckpt_format_tool import find_latest_ckpt_path
+        except ImportError:
+            from omnistore.utilities.ckpt_format.common_utils import find_latest_ckpt_path
+        remote_checkpoint_folder = os.path.join(self.config.trainer.default_hdfs_dir, 'checkpoints')
+        remote_global_step_folder = find_latest_ckpt_path(remote_checkpoint_folder)  # None if no latest
+        # find remote_global_step_folder
         if self.config.trainer.resume_steps == 'auto':
-            try:
-                from omnistore.utilities.ckpt_format_tool import find_latest_ckpt_path
-            except ImportError:
-                from omnistore.utilities.ckpt_format.common_utils import find_latest_ckpt_path
-
-            remote_checkpoint_folder = os.path.join(self.config.trainer.default_hdfs_dir, 'checkpoints')
-            remote_global_step_folder = find_latest_ckpt_path(remote_checkpoint_folder)
-
             if remote_global_step_folder is None:
                 print('Training from scratch')
                 return 0
-
-            # set global step
-            self.global_step = int(remote_global_step_folder.split('global_step_')[-1])
-
         else:
-            assert isinstance(self.config.trainer.resume_steps, str), "resume ckpt must be str type"
-            assert 'global_step_' in self.config.trainer.resume_steps, "resume ckpt must specify the global_step"
-            remote_global_step_folder = self.config.trainer.resume_steps
-            self.global_step = int(remote_global_step_folder.split('global_step_')[-1])
+            if not (self.config.trainer.auto_over_others and remote_global_step_folder is not None):
+                assert isinstance(self.config.trainer.resume_steps, str), "resume ckpt must be str type"
+                assert 'global_step_' in self.config.trainer.resume_steps, "resume ckpt must specify the global_step"
+                remote_global_step_folder = self.config.trainer.resume_steps
+
+        # set global step
+        self.global_step = int(remote_global_step_folder.split('global_step_')[-1])
 
         # note that we start from the next global_step
         # self.global_step += 1
