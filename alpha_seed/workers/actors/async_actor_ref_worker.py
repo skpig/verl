@@ -324,11 +324,15 @@ class AsyncActorRolloutRefWorker(Worker):
 
         from alpha_seed.models.transformers.monkey_patch import get_ignore_modules_in_mixed_precision
 
-        mixed_precision = MixedPrecision(param_dtype=param_dtype,
-                                         reduce_dtype=reduce_dtype,
-                                         buffer_dtype=buffer_dtype,
-                                         _module_classes_to_ignore=get_ignore_modules_in_mixed_precision(
-                                             actor_model_config.model_type))
+        mp_config = dict(
+            param_dtype=param_dtype,
+            reduce_dtype=reduce_dtype,
+            buffer_dtype=buffer_dtype,
+        )
+        if self.config.update_gate_ema:
+            mp_config['_module_classes_to_ignore'] = get_ignore_modules_in_mixed_precision(
+                actor_model_config.model_type)
+        mixed_precision = MixedPrecision(**mp_config)
 
         auto_wrap_policy = get_fsdp_wrap_policy(module=actor_module, config=fsdp_config.get('wrap_policy', None))
 
