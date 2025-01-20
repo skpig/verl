@@ -107,6 +107,25 @@ class CriticWorker(Worker):
         local_rank = int(os.getenv("RAY_LOCAL_RANK", "0"))
         ndtimeline.init_emergency_server(local_rank=local_rank, actor_name=ray.get_runtime_context().get_actor_name())
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def delete_local_tmp_folder_safetensors_files(self):
+        if int(os.getenv("RAY_LOCAL_RANK", "0")) != 0:
+            return
+
+        # get local tmp folder from actor model config
+        folder_path = self.critic_model_config._name_or_path
+        if not os.path.isdir(folder_path):
+            return
+
+        for root, dirs, files in os.walk(folder_path):
+            for file in files:
+                if file.endswith('.safetensors'):
+                    file_path = os.path.join(root, file)
+                    try:
+                        os.remove(file_path)
+                    except Exception as e:
+                        print(f'failed to remove safetensors file {file_path}, exception {e} will be ignored')
+
     def _build_critic_model_optimizer(self, config):
         # the following line is necessary
         from verl.utils.model import LambdaLayer, print_model_size, squeeze
@@ -115,6 +134,7 @@ class CriticWorker(Worker):
             CPUOffload
         from torch import optim
 
+        # TODO: ignore pulling model file if resuming ckpt
         local_path = copy_local_path_from_hdfs(config.model.path)
         # note that the tokenizer between actor and critic may be different. So override tokenizer info with actor info
         # using random initialized model from any architecture. May not be the same as Actor.
@@ -407,10 +427,6 @@ class CriticWorker(Worker):
                                                 enable_shm=enable_shm)
         if self.config.train_memory_offload:
             self.to("cpu")
-
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def upload_process_group(self, trigger_timestamp):
-        ndtimeline.upload_process_group(trigger_timestamp, ndtimeline.DumpType.initial.value)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def do_ndtimeline_action(self, action, *args, **kwargs):

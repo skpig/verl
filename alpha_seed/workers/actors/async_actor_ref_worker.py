@@ -228,6 +228,7 @@ class AsyncActorRolloutRefWorker(Worker):
         from torch import optim
 
         log_gpu_memory_usage('Before init from HF AutoModel', logger=logger)
+        # TODO: ignore pulling model file if resuming ckpt
         local_path = copy_local_path_from_hdfs(model_path)
 
         # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect
@@ -405,6 +406,25 @@ class AsyncActorRolloutRefWorker(Worker):
         log_gpu_memory_usage('After actor optimizer init', logger=logger)
 
         return actor_module_fsdp, actor_optimizer, actor_lr_scheduler, actor_model_config, metrics_context
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def delete_local_tmp_folder_safetensors_files(self):
+        if int(os.getenv("RAY_LOCAL_RANK", "0")) != 0:
+            return
+
+        # get local tmp folder from actor model config
+        folder_path = self.actor_model_config._name_or_path
+        if not os.path.isdir(folder_path):
+            return
+
+        for root, dirs, files in os.walk(folder_path):
+            for file in files:
+                if file.endswith('.safetensors'):
+                    file_path = os.path.join(root, file)
+                    try:
+                        os.remove(file_path)
+                    except Exception as e:
+                        print(f'failed to remove safetensors file {file_path}, exception {e} will be ignored')
 
     def _build_rollout(self):
         assert self.config.rollout.name == 'xperf_gpt'

@@ -788,6 +788,14 @@ class RayPPOTrainer(object):
             self.rm_wg = self.all_wg['rm']
             self.rm_wg.init_model()
 
+        # remove local tmp safetensors files used for init
+        if self.config.trainer.remove_safetensors_after_init:
+            self.actor_rollout_wg.delete_local_tmp_folder_safetensors_files()
+            if self.use_critic:
+                self.critic_wg.delete_local_tmp_folder_safetensors_files()
+            if self.use_rm:
+                self.rm_wg.delete_local_tmp_folder_safetensors_files()
+
         if self.config.trainer.use_remote_sandbox:
             # set the eos_callback_fn of actor_rollout
             from xperf_gpt.inference.session import Query
@@ -926,6 +934,10 @@ class RayPPOTrainer(object):
         dataloader_remote_path = os.path.join(remote_global_step_folder, 'data.pt')
         dataloader_local_path = copy_local_path_from_hdfs(dataloader_remote_path)
         self.train_dataloader = torch.load(dataloader_local_path)
+        try:
+            os.remove(dataloader_local_path)
+        except Exception as e:
+            print(f'remove local dataloader ckpt file after loading failed, exception {e} will be ignored')
 
         # async resume
         if hexists(f"{remote_global_step_folder}/standalone_gen_batch_output.batch.pt"):

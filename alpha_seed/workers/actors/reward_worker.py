@@ -15,6 +15,7 @@
 The main entry point to run the PPO algorithm
 """
 
+import shutil
 import warnings
 import os
 import logging
@@ -102,6 +103,7 @@ class RewardModelWorker(Worker):
         # download the checkpoint from hdfs
         local_path = copy_local_path_from_hdfs(config.model.path)
 
+        input_tokenizer_local_path = None
         if self.config.model.input_tokenizer is None:
             self._do_switch_chat_template = False
         else:
@@ -175,7 +177,26 @@ class RewardModelWorker(Worker):
         if self.rank == 0:
             print(model_config)
 
-        return reward_module
+        return reward_module, model_config
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def delete_local_tmp_folder_safetensors_files(self):
+        if int(os.getenv("RAY_LOCAL_RANK", "0")) != 0:
+            return
+
+        # get local tmp folder from actor model config
+        folder_path = self.reward_model_config._name_or_path
+        if not os.path.isdir(folder_path):
+            return
+
+        for root, dirs, files in os.walk(folder_path):
+            for file in files:
+                if file.endswith('.safetensors'):
+                    file_path = os.path.join(root, file)
+                    try:
+                        os.remove(file_path)
+                    except Exception as e:
+                        print(f'failed to remove safetensors file {file_path}, exception {e} will be ignored')
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
@@ -183,7 +204,7 @@ class RewardModelWorker(Worker):
             return
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get('external_lib', None))
-        self.reward_module = self._build_model(config=self.config)
+        self.reward_module, self.reward_model_config = self._build_model(config=self.config)
         self.reward_module.eval()
         torch.cuda.empty_cache()
         self._model_initialized = True

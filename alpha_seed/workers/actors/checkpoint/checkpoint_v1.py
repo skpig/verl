@@ -48,7 +48,9 @@ class CheckpointManagerV1(BaseCheckpointManager):
         try:
             os.remove(local_path)
         except Exception as e:
-            print(f'[rank-{self.rank}]: remove local load ckpt file failed, exception {e} will be ignored')
+            print(
+                f'[rank-{self.rank}]: remove local resume ckpt file after loading failed, exception {e} will be ignored'
+            )
 
         model_state_dict = state_dict['model']
         optimizer_state_dict = state_dict['optimizer']
