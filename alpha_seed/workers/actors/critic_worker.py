@@ -33,7 +33,7 @@ from verl.utils.fs import copy_local_path_from_hdfs
 from verl.utils.fsdp_utils import get_fsdp_wrap_policy
 from alpha_seed.models.transformers.parallel import apply_parallel_plan
 from alpha_seed.models.transformers.parallel.collectives import get_memory
-from .initialize import create_mesh, calculate_device_mesh_shape
+from .initialize import create_mesh
 from .initialize import parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init
 from .checkpoint.extensions import register_dtensor_save_hook
 from verl.utils.fsdp_utils import offload_fsdp_optimizer, load_fsdp_optimizer
@@ -70,13 +70,6 @@ class CriticWorker(Worker):
             timeout = timedelta(minutes=int(os.getenv('NCCL_TIMEOUT', 60)))
             torch.distributed.init_process_group(backend="nccl", timeout=timeout)
 
-        ndtimeline.set_cuda_timer_option(config["use_cuda_timer"])
-        ndtimeline.set_nccl_trace_option()
-        mesh_shape = calculate_device_mesh_shape(config.fsdp_size)
-        if len(mesh_shape) == 2:  # align with ndtimeline internal settings
-            mesh_shape = (mesh_shape[1], mesh_shape[0])
-        ndtimeline.init_ndtimers(mesh_shape=mesh_shape, ray_class_instance=self)
-
         self.config = config
 
         world_size = torch.distributed.get_world_size()
@@ -103,28 +96,6 @@ class CriticWorker(Worker):
         self.config.ppo_micro_batch_size //= (world_size // sp_size // tp_size)
 
         self._model_initialized = False
-
-        local_rank = int(os.getenv("RAY_LOCAL_RANK", "0"))
-        ndtimeline.init_emergency_server(local_rank=local_rank, actor_name=ray.get_runtime_context().get_actor_name())
-
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    def delete_local_tmp_folder_safetensors_files(self):
-        if int(os.getenv("RAY_LOCAL_RANK", "0")) != 0:
-            return
-
-        # get local tmp folder from actor model config
-        folder_path = self.critic_model_config._name_or_path
-        if not os.path.isdir(folder_path):
-            return
-
-        for root, dirs, files in os.walk(folder_path):
-            for file in files:
-                if file.endswith('.safetensors'):
-                    file_path = os.path.join(root, file)
-                    try:
-                        os.remove(file_path)
-                    except Exception as e:
-                        print(f'failed to remove safetensors file {file_path}, exception {e} will be ignored')
 
     def _build_critic_model_optimizer(self, config):
         # the following line is necessary
@@ -302,6 +273,8 @@ class CriticWorker(Worker):
             return
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get('external_lib', None))
+
+        ndtimeline.init_with_ray(self.config.get("use_cuda_timer", False), self.fsdp_mesh.shape, self)
 
         self.critic_module, self.critic_optimizer, self.critic_lr_scheduler, self.critic_model_config = self._build_critic_model_optimizer(
             self.config)

@@ -37,7 +37,7 @@ from torch.distributed.device_mesh import init_device_mesh
 from verl.utils.model import compute_position_id_with_mask
 import numpy as np
 
-from alpha_seed.workers.hybrid_engine.hsdp import create_device_mesh, calculate_device_mesh_shape
+from alpha_seed.workers.hybrid_engine.hsdp import create_device_mesh
 from alpha_seed.workers.hybrid_engine.fsdp_ulysses import (FSDPUlyssesShardingManager, ulysses_pad_and_slice_inputs)
 from verl.utils.seqlen_balancing import rearrange_micro_batches
 from alpha_seed.utils import ndtimeline
@@ -69,13 +69,6 @@ class RewardModelWorker(Worker):
             timeout = timedelta(minutes=int(os.getenv('NCCL_TIMEOUT', 60)))
             torch.distributed.init_process_group(backend="nccl", timeout=timeout)
 
-        ndtimeline.set_cuda_timer_option(config["use_cuda_timer"])
-        ndtimeline.set_nccl_trace_option()
-        mesh_shape = calculate_device_mesh_shape(config.fsdp_size)
-        if len(mesh_shape) == 2:  # align with ndtimeline internal settings
-            mesh_shape = (mesh_shape[1], mesh_shape[0])
-        ndtimeline.init_ndtimers(mesh_shape=mesh_shape, ray_class_instance=self)
-
         self.config = config
 
         world_size = torch.distributed.get_world_size()
@@ -91,9 +84,6 @@ class RewardModelWorker(Worker):
         self.config.micro_batch_size //= world_size // sp_size
 
         self._model_initialized = True
-
-        local_rank = int(os.getenv("RAY_LOCAL_RANK", "0"))
-        ndtimeline.init_emergency_server(local_rank=local_rank, actor_name=ray.get_runtime_context().get_actor_name())
 
     def _build_model(self, config):
         # the following line is necessary
@@ -204,7 +194,10 @@ class RewardModelWorker(Worker):
             return
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get('external_lib', None))
-        self.reward_module, self.reward_model_config = self._build_model(config=self.config)
+
+        ndtimeline.init_with_ray(self.config.get("use_cuda_timer", False), self.device_mesh.shape, self)
+
+        self.reward_module = self._build_model(config=self.config)
         self.reward_module.eval()
         torch.cuda.empty_cache()
         self._model_initialized = True

@@ -50,8 +50,7 @@ import numpy as np
 from alpha_seed.utils import ndtimeline
 from alpha_seed.workers.hybrid_engine.fsdp_gather import DataGatherManager
 from alpha_seed.models.transformers.parallel import apply_parallel_plan
-from .initialize import create_mesh, calculate_device_mesh_shape
-from .initialize import parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init
+from .initialize import create_mesh, parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init
 from .checkpoint.extensions import register_dtensor_save_hook
 from alpha_seed.workers.ppo_actor import DataParallelPPOActor
 from alpha_seed.utils.kernels.persist_gemm import deploy_persist_gemm, undelopy_persist_gemm
@@ -81,17 +80,11 @@ class AsyncActorRolloutRefWorker(Worker):
         warnings.simplefilter(action='ignore', category=FutureWarning)
 
         self.config = config
+
         import torch.distributed
         if not torch.distributed.is_initialized():
             timeout = timedelta(minutes=int(os.getenv('NCCL_TIMEOUT', 60)))
             torch.distributed.init_process_group(backend="nccl", timeout=timeout)
-
-        ndtimeline.set_cuda_timer_option(config["use_cuda_timer"])
-        ndtimeline.set_nccl_trace_option()
-        mesh_shape = calculate_device_mesh_shape(config.actor.fsdp_size * config.actor.tp_size)
-        if len(mesh_shape) == 2:  # align with ndtimeline internal settings
-            mesh_shape = (mesh_shape[1], mesh_shape[0])
-        ndtimeline.init_ndtimers(mesh_shape=mesh_shape, ray_class_instance=self)
 
         # build device mesh
         self.master_address = os.getenv('MASTER_ADDR', 'localhost')
@@ -174,9 +167,6 @@ class AsyncActorRolloutRefWorker(Worker):
             self.config.ref.log_prob_micro_batch_size //= (world_size // sp_size // ref_tp_size)
         self.save_sequences = self.config.rollout.get('save_sequences', None)
         self.load_sequences = self.config.rollout.get('load_sequences', None)
-
-        local_rank = int(os.getenv("RAY_LOCAL_RANK", "0"))
-        ndtimeline.init_emergency_server(local_rank=local_rank, actor_name=ray.get_runtime_context().get_actor_name())
 
         self._model_initialized = False
 
@@ -497,6 +487,20 @@ class AsyncActorRolloutRefWorker(Worker):
 
         use_rmpad = self.config.model.get('use_rmpad', False)
         use_ce_loss_fusion = self.config.model.get('use_ce_loss_fusion', False)
+
+        if self._is_ref:
+            fsdp_shape = self.ref_fsdp_mesh.shape
+        elif self._is_actor or self._is_rollout:
+            fsdp_shape = self.actor_fsdp_mesh.shape
+        elif self._is_standalone_rollout:
+            fsdp_shape = (self.config.streaming_rollout_args.n_gpus_per_node *
+                          self.config.streaming_rollout_args.nnodes,)
+        elif self._is_standalone_validator:
+            fsdp_shape = (self.config.streaming_validator_args.n_gpus_per_node *
+                          self.config.streaming_validator_args.nnodes,)
+        else:
+            fsdp_shape = (-1,)
+        ndtimeline.init_with_ray(self.config.get("use_cuda_timer", False), fsdp_shape, self)
 
         if self._is_actor or self._is_rollout or self._is_standalone_rollout or self._is_standalone_validator:
             # we need the model for actor and rollout
