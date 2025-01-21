@@ -568,6 +568,12 @@ class AsyncActorRolloutRefWorker(Worker):
                                                                lr_scheduler=self.actor_lr_scheduler,
                                                                tokenizer=self.tokenizer)
 
+        if self._is_ref:
+            self.checkpoint_manager_ref = CheckpointManagerWrapper(model=self.ref_policy.actor_module,
+                                                                   optimizer=None,
+                                                                   lr_scheduler=None,
+                                                                   tokenizer=self.tokenizer)
+
         torch.cuda.empty_cache()
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
@@ -827,16 +833,24 @@ class AsyncActorRolloutRefWorker(Worker):
         return output
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def load_checkpoint(self, hdfs_path=None, version='v1', enable_flatten=False, enable_shm=False):
-        assert self._is_actor
+    def load_checkpoint(self, hdfs_path=None, version='v1', enable_flatten=False, enable_shm=False, model='actor'):
+        if model == 'actor':
+            assert self._is_actor
+            ckpt_manager = self.checkpoint_manager
+        elif model == 'ref':
+            assert self._is_ref
+            ckpt_manager = self.checkpoint_manager_ref
+        else:
+            raise ValueError(f'Unknown {model=}')
+
         if self.config.actor.train_memory_offload:
             self.to("cuda")
-        self.checkpoint_manager.load_checkpoint(version=version,
-                                                hdfs_path=hdfs_path,
-                                                device_mesh=self.actor_fsdp_mesh,
-                                                role='actor',
-                                                enable_flatten=enable_flatten,
-                                                enable_shm=enable_shm)
+        ckpt_manager.load_checkpoint(version=version,
+                                     hdfs_path=hdfs_path,
+                                     device_mesh=self.actor_fsdp_mesh,
+                                     role='actor',
+                                     enable_flatten=enable_flatten,
+                                     enable_shm=enable_shm)
         if self.config.actor.train_memory_offload:
             self.to("cpu")
 
@@ -848,20 +862,30 @@ class AsyncActorRolloutRefWorker(Worker):
                         global_step=0,
                         ckpt_global_uploader_ref=None,
                         enable_flatten=False,
-                        enable_shm=False):
+                        enable_shm=False,
+                        model='actor'):
         # TODO: support omnistore
-        assert self._is_actor
+        if model == 'actor':
+            assert self._is_actor
+            ckpt_manager = self.checkpoint_manager
+        elif model == 'ref':
+            assert self._is_ref
+            ckpt_manager = self.checkpoint_manager_ref
+        else:
+            raise ValueError(f'Unknown {model=}')
+
         if self.config.actor.train_memory_offload:
             self.to("cuda")
-        self.checkpoint_manager.save_checkpoint(version=version,
-                                                local_path=local_path,
-                                                hdfs_path=hdfs_path,
-                                                device_mesh=self.actor_fsdp_mesh,
-                                                role='actor',
-                                                global_step=global_step,
-                                                ckpt_global_uploader_ref=ckpt_global_uploader_ref,
-                                                enable_flatten=enable_flatten,
-                                                enable_shm=enable_shm)
+
+        ckpt_manager.save_checkpoint(version=version,
+                                     local_path=local_path,
+                                     hdfs_path=hdfs_path,
+                                     device_mesh=self.actor_fsdp_mesh,
+                                     role='actor',
+                                     global_step=global_step,
+                                     ckpt_global_uploader_ref=ckpt_global_uploader_ref,
+                                     enable_flatten=enable_flatten,
+                                     enable_shm=enable_shm)
         if self.config.actor.train_memory_offload:
             self.to("cpu")
 

@@ -849,6 +849,7 @@ class RayPPOTrainer(object):
 
         actor_local_path = os.path.join(local_global_step_folder, 'actor')
         critic_local_path = os.path.join(local_global_step_folder, 'critic')
+        ref_local_path = os.path.join(local_global_step_folder, 'ref')
 
         remote_checkpoint_folder = os.path.join(self.config.trainer.default_hdfs_dir, 'checkpoints')
         remote_global_step_folder = os.path.join(remote_checkpoint_folder, f'global_step_{self.global_step}')
@@ -857,6 +858,7 @@ class RayPPOTrainer(object):
 
         actor_remote_path = os.path.join(remote_global_step_folder, 'actor')
         critic_remote_path = os.path.join(remote_global_step_folder, 'critic')
+        ref_remote_path = os.path.join(remote_global_step_folder, 'ref')
 
         # save dataloader
         dataloader_local_path = os.path.join(local_global_step_folder, 'data.pt')
@@ -869,11 +871,13 @@ class RayPPOTrainer(object):
                                                                   dataloader_local_path, remote_global_step_folder))
         self.ckpt_global_uploader.start_uploading.remote("default", self.global_step)
 
+        use_ref_ema = self.config.actor_rollout_ref.ref.ema < 1
+
         actor_upload_future = self.actor_rollout_wg.save_checkpoint(
             actor_local_path, actor_remote_path,
             specified_ckpt_version if specified_ckpt_version is not None else self.config.trainer.ckpt_version,
             self.global_step, self.ckpt_global_uploader, self.config.trainer.ckpt_enable_flatten,
-            self.config.trainer.ckpt_enable_shm)
+            self.config.trainer.ckpt_enable_shm, 'actor')
 
         if self.use_critic:
             critic_upload_future = self.critic_wg.save_checkpoint(
@@ -884,10 +888,22 @@ class RayPPOTrainer(object):
         else:
             critic_upload_future = None
 
+        if use_ref_ema:
+            ref_uploader_future = self.actor_rollout_wg.save_checkpoint(
+                ref_local_path, ref_remote_path,
+                specified_ckpt_version if specified_ckpt_version is not None else self.config.trainer.ckpt_version,
+                self.global_step, self.ckpt_global_uploader, self.config.trainer.ckpt_enable_flatten,
+                self.config.trainer.ckpt_enable_shm, 'ref')
+        else:
+            ref_uploader_future = None
+
         ray.get(actor_upload_future)
 
         if critic_upload_future is not None:
             ray.get(critic_upload_future)
+
+        if ref_uploader_future is not None:
+            ray.get(ref_uploader_future)
 
     def load_checkpoint(self):
         if self.config.trainer.resume_steps == 'disable':
@@ -922,14 +938,23 @@ class RayPPOTrainer(object):
 
         actor_remote_path = os.path.join(remote_global_step_folder, 'actor')
         critic_remote_path = os.path.join(remote_global_step_folder, 'critic')
+        ref_remote_path = os.path.join(remote_global_step_folder, 'ref')
         # load actor
         self.actor_rollout_wg.load_checkpoint(actor_remote_path, self.config.trainer.ckpt_version,
                                               self.config.trainer.ckpt_enable_flatten,
-                                              self.config.trainer.ckpt_enable_shm)
+                                              self.config.trainer.ckpt_enable_shm, 'actor')
         # load critic
         if self.use_critic:
             self.critic_wg.load_checkpoint(critic_remote_path, self.config.trainer.ckpt_version,
                                            self.config.trainer.ckpt_enable_flatten, self.config.trainer.ckpt_enable_shm)
+
+        # load ref
+        use_ref_ema = self.config.actor_rollout_ref.ref.ema < 1
+        if use_ref_ema:
+            self.actor_rollout_wg.load_checkpoint(ref_remote_path, self.config.trainer.ckpt_version,
+                                                  self.config.trainer.ckpt_enable_flatten,
+                                                  self.config.trainer.ckpt_enable_shm, 'ref')
+
         # load dataloader
         dataloader_remote_path = os.path.join(remote_global_step_folder, 'data.pt')
         dataloader_local_path = copy_local_path_from_hdfs(dataloader_remote_path)

@@ -60,13 +60,15 @@ class CheckpointManagerV1(BaseCheckpointManager):
         optim_cfg = ShardedOptimStateDictConfig(offload_to_cpu=True)
         with FSDP.state_dict_type(self.model, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg):
             self.model.load_state_dict(model_state_dict)
-            self.optimizer.load_state_dict(optimizer_state_dict)
+            if self.optimizer is not None:
+                self.optimizer.load_state_dict(optimizer_state_dict)
         # recover random state
         if 'rng' in state_dict:
             # 'rng' may not exist for backward compatibility
             self.load_rng_state(state_dict['rng'])
 
-        self.lr_scheduler.load_state_dict(lr_scheduler_state_dict)
+        if self.lr_scheduler is not None:
+            self.lr_scheduler.load_state_dict(lr_scheduler_state_dict)
 
     def save_checkpoint(self, local_path: str, hdfs_path: str, role: str, global_step: int,
                         ckpt_global_uploader_ref: CkptGlobalUploader, *args, **kwargs):
@@ -85,11 +87,19 @@ class CheckpointManagerV1(BaseCheckpointManager):
             warnings.simplefilter("ignore")
             with FSDP.state_dict_type(self.model, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg):
                 model_state = self.model.state_dict()
-                optimizer_state_dict = self.optimizer.state_dict()
+                if self.optimizer is not None:
+                    optimizer_state_dict = self.optimizer.state_dict()
+                else:
+                    optimizer_state_dict = None
+                if self.lr_scheduler is not None:
+                    lr_scheduler_state_dict = self.lr_scheduler.state_dict()
+                else:
+                    lr_scheduler_state_dict = None
+
                 state_dict = {
                     'model': model_state,
                     'optimizer': optimizer_state_dict,
-                    'lr_scheduler': self.lr_scheduler.state_dict(),
+                    'lr_scheduler': lr_scheduler_state_dict,
                     'rng': self.get_rng_state(),
                 }
                 path = os.path.join(local_path, f'model_optim_rank_{self.rank}.pt')
