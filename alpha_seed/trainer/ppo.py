@@ -755,13 +755,18 @@ class RayPPOTrainer(object):
         else:
             raise NotImplementedError
 
-        self.actor_rollout_wg.init_model()
+        init_futures = []
+
+        self.actor_rollout_wg.init_ndtimeline()
+        init_futures.append(self.actor_rollout_wg.init_model())
+
         hybrid_master_address = self.actor_rollout_wg.get_master_addr()
         self.validation_manager.actor_rollout_wg = self.actor_rollout_wg
 
         if self.use_standalone_rollout:
             self.standalone_rollout_wg = self.all_wg['standalone_rollout']
-            self.standalone_rollout_wg.init_model()
+            self.standalone_rollout_wg.init_ndtimeline()
+            init_futures.append(self.standalone_rollout_wg.init_model())
             standalone_rollout_address = self.standalone_rollout_wg.get_master_addr()
             self.actor_rollout_wg.setup_standalone_worker_comm(hybrid_master_address, standalone_rollout_address,
                                                                "12345", "standalone_rollout")
@@ -774,7 +779,8 @@ class RayPPOTrainer(object):
 
         if self.use_standalone_validator:
             self.standalone_validator_wg = self.all_wg['standalone_validator']
-            self.standalone_validator_wg.init_model()
+            self.standalone_validator_wg.init_ndtimeline()
+            init_futures.append(self.standalone_validator_wg.init_model())
             standalone_validator_address = self.standalone_validator_wg.get_master_addr()
             self.actor_rollout_wg.setup_standalone_worker_comm(hybrid_master_address, standalone_validator_address,
                                                                "14567", "standalone_validator")
@@ -791,17 +797,19 @@ class RayPPOTrainer(object):
 
         if self.use_critic:
             self.critic_wg = self.all_wg['critic']
-            self.critic_wg.init_model()
+            self.critic_wg.init_ndtimeline()
+            self.critic_wg.init_model()  # blocking
 
         if self.use_standalone_reference_policy:
             self.ref_policy_wg = self.all_wg['ref']
-            self.ref_policy_wg.init_model()
+            init_futures.append(self.ref_policy_wg.init_model())
         elif self.use_colocate_reference_policy:
             self.ref_policy_wg = self.all_wg['actor_rollout_ref']
 
         if self.use_rm:
             self.rm_wg = self.all_wg['rm']
-            self.rm_wg.init_model()
+            self.rm_wg.init_ndtimeline()
+            self.rm_wg.init_model()  # blocking
 
         # remove local tmp safetensors files used for init
         if self.config.trainer.remove_safetensors_after_init:
@@ -843,6 +851,10 @@ class RayPPOTrainer(object):
             self.standalone_rollout_wg.set_eos_callback_fn(sandbox_callback_fn)
         if self.use_standalone_validator:
             self.standalone_validator_wg.set_eos_callback_fn(sandbox_callback_fn)
+
+        # ensure errors in model_init will be raised
+        for fut in init_futures:
+            ray.get(fut)
 
     def save_checkpoint(self, specified_ckpt_version=None):
         """Save checkpoint to hdfs.

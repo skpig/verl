@@ -274,8 +274,6 @@ class CriticWorker(Worker):
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get('external_lib', None))
 
-        ndtimeline.init_with_ray(self.config.get("use_cuda_timer", False), self.fsdp_mesh.shape, self)
-
         self.critic_module, self.critic_optimizer, self.critic_lr_scheduler, self.critic_model_config = self._build_critic_model_optimizer(
             self.config)
 
@@ -415,3 +413,10 @@ class CriticWorker(Worker):
         gc.collect()
         torch.cuda.empty_cache()
         self.__init__(config)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def init_ndtimeline(self):
+        mocked_fsdp_shape = list(self.fsdp_mesh.shape)
+        mocked_fsdp_shape[-1] *= self.tp_mesh.size()
+        mocked_fsdp_shape = tuple(mocked_fsdp_shape)
+        ndtimeline.init_with_ray(self.config.get("use_cuda_timer", False), mocked_fsdp_shape, self)
