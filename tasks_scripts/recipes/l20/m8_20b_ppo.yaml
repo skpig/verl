@@ -1,0 +1,53 @@
+
+# ============== M8 20B PPO ==============
+# reference trial: https://ml.byteintl.net/development/instance/jobs/f74e0dba291cae38?tabState=run_info&trialId=9916555
+# ===============================================
+
+actor_rollout_ref:
+  model:
+    enable_gradient_checkpointing: True
+  actor:
+    use_dynamic_bsz: True
+    ppo_max_token_len: 61440
+    fsdp_size: 128
+    tp_size: 4
+    ulysses_sequence_parallel_size: 4
+    fsdp_config:
+      param_offload: False
+      use_orig_params: True
+    profile:
+      enable: True
+      upload_to_mlx: True
+      filename: "actor"
+      profile_on_ranks: [0,16,32,48]
+  ref:
+    use_dynamic_bsz: True
+    max_token_len: 61440
+    fsdp_size: 128
+    tp_size: 4
+    ulysses_sequence_parallel_size: 4
+    fsdp_config:
+      param_offload: True
+      use_orig_params: True
+  rollout:
+    max_token_len: 24576
+    tensor_model_parallel_size: 16
+
+critic:
+  model:
+    enable_gradient_checkpointing: True
+    fsdp_config:
+      param_offload: False
+      use_orig_params: True
+  fsdp_size: 128
+  tp_size: 4
+  ulysses_sequence_parallel_size: 4
+  ppo_max_token_len: 61440
+  profile:
+    enable: True
+    upload_to_mlx: True
+    filename: "critic"
+    profile_on_ranks: [0,16,32,48]
+
+trainer:
+  offload_train_memory: True
