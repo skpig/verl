@@ -178,10 +178,10 @@ if __name__ == '__main__':
         hdfs_io.copy(hf_path, args.load_dir)
 
     # convert to megatron for autoeval
-    if 'ForCausalLM' in config.architectures[0]:
-        # only save ForCausalLM
-        print(f'Upload merged megatron model from {hf_path} to {args.save_path}')
-        convert_seed_models_to_megatron(hf_path=hf_path,
-                                        local_path=local_dir,
-                                        output_path=os.path.dirname(args.save_path),
-                                        validate=False)
+    # if 'ForCausalLM' in config.architectures[0]:
+    # only save ForCausalLM
+    print(f'Upload merged megatron model from {hf_path} to {args.save_path}')
+    convert_seed_models_to_megatron(hf_path=hf_path,
+                                    local_path=local_dir,
+                                    output_path=os.path.dirname(args.save_path),
+                                    validate=False)
