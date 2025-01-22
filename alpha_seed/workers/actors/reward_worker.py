@@ -30,20 +30,18 @@ from single_controller.base.decorator import register, Dispatch
 from verl import DataProto
 from verl.utils.model import compute_position_id_with_mask
 from verl.utils.fs import copy_local_path_from_hdfs
-from verl.utils.fsdp_utils import get_fsdp_wrap_policy, load_fsdp_grad, offload_fsdp_grad, init_fn, get_init_weight_context_manager
+from verl.utils.fsdp_utils import get_fsdp_wrap_policy
 from verl.utils.import_utils import import_external_libs
-from verl.utils.debug import log_gpu_memory_usage
-from torch.distributed.device_mesh import init_device_mesh
 from verl.utils.model import compute_position_id_with_mask
-import numpy as np
 
-from alpha_seed.workers.hybrid_engine.hsdp import create_device_mesh
-from alpha_seed.workers.hybrid_engine.fsdp_ulysses import (FSDPUlyssesShardingManager, ulysses_pad_and_slice_inputs)
+from alpha_seed.workers.hybrid_engine.fsdp_gather import DataGatherManager, ulysses_pad_and_slice_inputs
+from alpha_seed.models.transformers.parallel import apply_parallel_plan
 from verl.utils.seqlen_balancing import rearrange_micro_batches
 from alpha_seed.utils import ndtimeline
 from alpha_seed.models.transformers.parallel.collectives import get_memory
-from .initialize import parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init
-from dist_attn.ulysses.ops import slice_input_tensor, gather_outputs
+from .initialize import create_mesh, parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init
+from .checkpoint.extensions import register_dtensor_save_hook
+from dist_attn.ulysses.ops import gather_outputs
 from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
 
 from seed_models.utils.count_flops import FlopsCounter
@@ -51,8 +49,6 @@ from seed_models.utils.count_flops import FlopsCounter
 from codetiming import Timer
 
 from datetime import timedelta
-
-from .initialize import get_device_init_context, create_init_fn, parallel_init_fsdp_fn, parallel_load_safetensors
 
 logger = logging.getLogger(__file__)
 
@@ -71,17 +67,22 @@ class RewardModelWorker(Worker):
 
         self.config = config
 
-        world_size = torch.distributed.get_world_size()
-        self.device_mesh = create_device_mesh(config.fsdp_size, 'Reward')
-
-        self.ulysses_sp_device_mesh = None
+        fsdp_size = config.fsdp_size
         sp_size = config.ulysses_sequence_parallel_size
-        if sp_size > 1:
-            self.ulysses_sp_device_mesh = init_device_mesh('cuda',
-                                                           mesh_shape=(world_size // sp_size, sp_size),
-                                                           mesh_dim_names=['dp', 'sp'])
-        self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_sp_device_mesh)
-        self.config.micro_batch_size //= world_size // sp_size
+        tp_size = config.tp_size
+        world_size = torch.distributed.get_world_size()
+        meshes = create_mesh(fsdp_size=fsdp_size, tp_size=tp_size, sp_size=sp_size)
+
+        self.fsdp_mesh = meshes[0]
+        self.tp_mesh = meshes[1]
+        self.sp_mesh = meshes[2]
+        self.gather_mesh = meshes[3]
+        self.gather_manager = DataGatherManager(self.gather_mesh, self.sp_mesh)
+        if tp_size > 1:
+            if not self.config.model.fsdp_config.use_orig_params:
+                raise RuntimeError("enable tensor / expert parallelism requires use_orig_params=True")
+
+        self.config.micro_batch_size //= (world_size // sp_size // tp_size)
 
         self._model_initialized = True
 
@@ -110,8 +111,6 @@ class RewardModelWorker(Worker):
 
         trust_remote_code = config.model.get('trust_remote_code', False)
         model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code)
-        # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect
-        init_context = get_device_init_context(use_meta_tensor=True)
 
         use_rmpad = self.config.get('use_rmpad', False)
         if use_rmpad:
@@ -131,13 +130,12 @@ class RewardModelWorker(Worker):
                                                                         torch_dtype=torch.bfloat16,
                                                                         attn_implementation='flash_attention_2',
                                                                         trust_remote_code=trust_remote_code)
-            # with torch.no_grad():
-            #     # set reward model score bias to zero
-            #     if reward_module.score.bias is not None:
-            #         reward_module.score.bias.zero_()
             reward_module.to(torch.bfloat16)
             if self.rank == 0:
                 print(reward_module)
+
+        shard_plan = apply_parallel_plan(reward_module, reward_module.config, self.tp_mesh)
+
         auto_wrap_policy = get_fsdp_wrap_policy(module=reward_module, config=self.config.model.fsdp_config)
 
         cpu_offload = None
@@ -145,12 +143,12 @@ class RewardModelWorker(Worker):
             cpu_offload = CPUOffload(offload_params=True)
 
         # we only support ZeRO3 of hybrid DP+FSDP or full FSDP
-        if self.device_mesh.ndim == 1:
+        if self.fsdp_mesh.ndim == 1:
             sharding_strategy = ShardingStrategy.FULL_SHARD
-        elif self.device_mesh.ndim == 2:
+        elif self.fsdp_mesh.ndim == 2:
             sharding_strategy = ShardingStrategy.HYBRID_SHARD
         else:
-            raise NotImplementedError(f"get device mesh ndim={self.device_mesh.ndim}, but only support 1 or 2")
+            raise NotImplementedError(f"get device mesh ndim={self.fsdp_mesh.ndim}, but only support 1 or 2")
 
         reward_module = FSDP(
             reward_module,
@@ -159,10 +157,12 @@ class RewardModelWorker(Worker):
             auto_wrap_policy=auto_wrap_policy,
             device_id=torch.cuda.current_device(),
             sharding_strategy=sharding_strategy,  # zero3
-            device_mesh=self.device_mesh,
+            device_mesh=self.fsdp_mesh,
             sync_module_states=False,
             forward_prefetch=True,
-            cpu_offload=cpu_offload)  # we always offload reward
+            cpu_offload=cpu_offload)
+
+        register_dtensor_save_hook(reward_module, shard_plan)
 
         if self.rank == 0:
             print(model_config)
@@ -195,7 +195,7 @@ class RewardModelWorker(Worker):
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get('external_lib', None))
 
-        ndtimeline.init_with_ray(self.config.get("use_cuda_timer", False), self.device_mesh.shape, self)
+        ndtimeline.init_with_ray(self.config.get("use_cuda_timer", False), self.fsdp_mesh.shape, self)
 
         self.reward_module = self._build_model(config=self.config)
         self.reward_module.eval()
@@ -421,8 +421,8 @@ class RewardModelWorker(Worker):
             rm_data = data
 
         rm_data.batch = rm_data.batch.cuda()
-        with self.ulysses_sharding_manager:
-            rm_data = self.ulysses_sharding_manager.preprocess_data(rm_data)
+        with self.gather_manager:
+            rm_data = self.gather_manager.preprocess_data(rm_data)
 
             if self.config.use_dynamic_bsz:
                 micro_batches, num_micro_batches, _ = rearrange_micro_batches(batch=rm_data.batch,
@@ -444,7 +444,7 @@ class RewardModelWorker(Worker):
             # Note that this is only the scores, may not be the final rewards used to train RL
             output = DataProto.from_dict(tensors={'rm_scores': token_level_scores, 'reflection_nums': reflection_nums})
 
-            output = self.ulysses_sharding_manager.postprocess_data(output)
+            output = self.gather_manager.postprocess_data(output)
 
         output = output.to('cpu')
 
