@@ -110,6 +110,21 @@ from tensordict import TensorDict
 from verl.utils.torch_functional import masked_mean
 
 
+def calculate_score_in_length_ranges(raw_scores_log, response_length, ranges):
+    scores = {}
+    for min_length, max_length in ranges:
+        if min_length is not None and max_length is not None:
+            mask = torch.logical_and(response_length >= min_length, response_length < max_length)
+        elif min_length is not None:
+            mask = response_length >= min_length
+        elif max_length is not None:
+            mask = response_length < max_length
+        else:
+            continue
+        scores[f'score/raw_score_in_{min_length}_{max_length}'] = (raw_scores_log[mask].sum() / (mask.sum() + 1)).item()
+    return scores
+
+
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty='kl'):
     responses = data.batch['responses']
     response_length = responses.size(1)
@@ -1085,34 +1100,36 @@ class RayPPOTrainer(object):
             standalone_batch = self.standalone_batch_resume
             self.standalone_batch_resume = None
 
-        finished_num = 0
-        if len(standalone_batch) > 0:
-            if not self.standalone_gen_batch_output_resume:
-                gen_batch_output = self.standalone_rollout_wg.generate_sequences_get()
-            else:
-                gen_batch_output = self.standalone_gen_batch_output_resume
-                self.standalone_gen_batch_output_resume = None
-            if self.config.trainer.save_freq > 0 and (self.global_step -
-                                                      1) % self.config.trainer.save_freq == 0 and self.global_step != 1:
-                print(f"step {self.global_step}, saving... standalone_gen_batch")
-                # save standalone_batch and gen_batch_output
-                save_path = f"{self.config.trainer.default_hdfs_dir}/checkpoints/global_step_{self.global_step - 1}/"
-                save_dataproto(gen_batch_output, path=save_path, prefix='standalone_gen_batch_output')
-                save_dataproto(standalone_batch, path=save_path, prefix='standalone_batch')
-            # only report metrics from one generation replica
-            record_xperf_metrics(gen_batch_output, metrics, self.logger, self.global_step, prefix='standalone')
-            finished_num, ready_batch_queue, pending_batch_queue = process_output(standalone_batch,
-                                                                                  gen_batch_output,
-                                                                                  self.tokenizer,
-                                                                                  ready_batch_queue,
-                                                                                  pending_batch_queue,
-                                                                                  self.config,
-                                                                                  standalone=True)
-            pprint(
-                f'stop standalone rollout, completed_batch {finished_num}, incompleted_batch {len(standalone_batch) - finished_num}'
-                + f'ready_queue {ready_batch_queue.qsize()}, pending_queue {pending_batch_queue.qsize()}.')
-        metrics['rollout/standalone_completed_batch'] = finished_num
-        metrics['rollout/standalone_incompleted_batch'] = len(standalone_batch) - finished_num
+        with Timer(name='async_gen', logger=None) as timer:
+            finished_num = 0
+            if len(standalone_batch) > 0:
+                if not self.standalone_gen_batch_output_resume:
+                    gen_batch_output = self.standalone_rollout_wg.generate_sequences_get()
+                else:
+                    gen_batch_output = self.standalone_gen_batch_output_resume
+                    self.standalone_gen_batch_output_resume = None
+                if self.config.trainer.save_freq > 0 and (
+                        self.global_step - 1) % self.config.trainer.save_freq == 0 and self.global_step != 1:
+                    print(f"step {self.global_step}, saving... standalone_gen_batch")
+                    # save standalone_batch and gen_batch_output
+                    save_path = f"{self.config.trainer.default_hdfs_dir}/checkpoints/global_step_{self.global_step - 1}/"
+                    save_dataproto(gen_batch_output, path=save_path, prefix='standalone_gen_batch_output')
+                    save_dataproto(standalone_batch, path=save_path, prefix='standalone_batch')
+                # only report metrics from one generation replica
+                record_xperf_metrics(gen_batch_output, metrics, self.logger, self.global_step, prefix='standalone')
+                finished_num, ready_batch_queue, pending_batch_queue = process_output(standalone_batch,
+                                                                                      gen_batch_output,
+                                                                                      self.tokenizer,
+                                                                                      ready_batch_queue,
+                                                                                      pending_batch_queue,
+                                                                                      self.config,
+                                                                                      standalone=True)
+                pprint(
+                    f'stop standalone rollout, completed_batch {finished_num}, incompleted_batch {len(standalone_batch) - finished_num}'
+                    + f'ready_queue {ready_batch_queue.qsize()}, pending_queue {pending_batch_queue.qsize()}.')
+            metrics['rollout/standalone_completed_batch'] = finished_num
+            metrics['rollout/standalone_incompleted_batch'] = len(standalone_batch) - finished_num
+            metrics['timing/async_gen'] = timer.last
 
         # update standalone rollout weights
         with Timer(name='update_standalone', logger=None) as timer:
@@ -1244,7 +1261,12 @@ class RayPPOTrainer(object):
                         reward_tensor, raw_scores, length_scores = self.reward_fn(batch, global_step=self.global_step)
                         batch.batch['token_level_scores'] = reward_tensor
                         batch.batch['raw_scores'] = raw_scores
+                        response_length = batch.batch['attention_mask'][:, -batch.batch['responses'].shape[1]:].sum(-1)
                         raw_scores_log = raw_scores.sum(-1)
+                        length_ranges = [(None, 512), (512, 1024), (1024, 2048), (2048, 4096), (4096, 8192),
+                                         (8192, 16384), (16384, 32768), (32768, 65536)]
+                        scores = calculate_score_in_length_ranges(raw_scores_log, response_length, length_ranges)
+                        metrics.update(scores)
                         self.logger.log(data={"score/raw_score": wandb.Histogram(raw_scores_log)},
                                         step=self.global_step)
                         if self.config.algorithm.inference_scaling != 'v0':
