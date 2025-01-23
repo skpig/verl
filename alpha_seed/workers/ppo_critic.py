@@ -75,7 +75,9 @@ class DataParallelPPOCritic(BasePPOCritic):
                                                      default_hdfs_dir=self.config.profile.default_hdfs_dir,
                                                      upload_to_mlx=self.config.profile.upload_to_mlx,
                                                      enable=self.config.profile.enable,
-                                                     wait=10)
+                                                     warmup=self.config.profile.warmup,
+                                                     wait=self.config.profile.wait,
+                                                     active=self.config.profile.active)
         self.memory_profiler = MemoryProfiler(filename=self.config.profile.filename + 'memory',
                                               enable=torch.distributed.get_rank() == 0 and self.config.profile.enable,
                                               upload_to_mlx=self.config.profile.upload_to_mlx,

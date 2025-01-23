@@ -77,6 +77,9 @@ actor_rollout_ref:
       default_hdfs_dir: null
       upload_to_mlx: False
       enable: False
+      warmup: 5
+      wait: 10
+      active: 2
   ref:
     fsdp_config:
       param_offload: True
@@ -190,6 +193,9 @@ critic:
     default_hdfs_dir: null
     upload_to_mlx: False
     enable: False
+    warmup: 5
+    wait: 10
+    active: 2
   use_cuda_timer: True
 
 reward_model:
