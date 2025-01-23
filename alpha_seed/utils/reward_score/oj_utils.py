@@ -42,26 +42,30 @@ def compute_score_client(solution_str, ground_truth, code_sandbox_psm, data_uid,
 
 
 def compute_score(solution_str, ground_truth, code_sandbox_psm, **argv) -> float:
-    if code_sandbox_psm != "":
-        endpoint = get_sandbox_endpoint(code_sandbox_psm)
-    else:
-        endpoint = "https://faas-code-sandbox.bytedance.net/"
     if isinstance(ground_truth, str):
         ground_truth = json.loads(ground_truth)
     oj_features = ground_truth["oj_features"]
     oj_features["completion"] = solution_str
-    req = SubmitRequest(dataset=oj_features["dataset"],
-                        id=oj_features["id"],
-                        completion=solution_str,
-                        config=TestConfig(**oj_features["config"]))
-    try:
-        req_res = submit(req, endpoint=endpoint, max_attempts=OJ_MAX_ATTEMPTS, client_timeout=CLIENT_TIMEOUT)
-        if req_res.accepted:
-            return 1
-        return -1
-    except Exception as ex:
-        print(f'sandbox fail with error: {ex}')
-        return -2
+    client_timeout = 30
+    for run in range(OJ_MAX_ATTEMPTS):
+        if code_sandbox_psm != "":
+            endpoint = get_sandbox_endpoint(code_sandbox_psm)
+        else:
+            endpoint = "https://faas-code-sandbox.bytedance.net/"
+        req = SubmitRequest(dataset=oj_features["dataset"],
+                            id=oj_features["id"],
+                            completion=solution_str,
+                            config=TestConfig(**oj_features["config"]))
+        try:
+            req_res = submit(req, endpoint=endpoint, max_attempts=1, client_timeout=client_timeout)
+            if req_res.accepted:
+                return 1
+            return -1
+        except Exception as ex:
+            print(f'sandbox fail with error: {ex}, retrying with {run+1}/{OJ_MAX_ATTEMPTS} attempts')
+        client_timeout += 30
+    print(f'Finally sandbox fails')
+    return -2
 
 
 def test_compute_score():
