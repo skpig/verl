@@ -27,7 +27,7 @@ def compute_score_client(solution_str, ground_truth, code_sandbox_psm, data_uid,
     score = None
     if config.trainer.use_remote_sandbox:
         # get the sandbox client endpoint
-        handler = ray.get_actor('sandbox_client')
+        handler = ray.get_actor('remote_client')
         # retrieve the score directly
         score = ray.get(handler.get_results.remote(data_uid))
 

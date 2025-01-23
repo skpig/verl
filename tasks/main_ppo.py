@@ -33,7 +33,7 @@ from datetime import datetime
 from multiprocessing import Process
 
 # rule-based reward score
-from alpha_seed.utils.reward_score import gsm8k, math, math_v2, model_score_fn, logic_puzzle, oj_utils, math_verifier, response_post_proc, gpqa_verifier
+from alpha_seed.utils.reward_score import verifier_service, gsm8k, math, math_v2, model_score_fn, logic_puzzle, oj_utils, math_verifier, response_post_proc, gpqa_verifier
 from alpha_seed.utils.duplicate import para_dup
 from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRefWorker
 from alpha_seed.workers.actors.critic_worker import CriticWorker
@@ -67,6 +67,8 @@ def _select_rm_score_fn(reward_style):
         return math_verifier.compute_score
     elif reward_style == "rule-boxed_gpqa":
         return gpqa_verifier.compute_score
+    elif reward_style == "verifier_service":
+        return verifier_service.compute_score_client
     else:
         if reward_style.startswith("rule-logic_puzzle"):
             return logic_puzzle.compute_score
@@ -90,20 +92,18 @@ def post_process_solution_str(config, solution_str):
 
 
 @ray.remote(num_cpus=1)
-def call_oj(solution_str, ground_truth, code_sandbox_psm):
-    result = oj_utils.compute_score(solution_str=solution_str,
-                                    ground_truth=ground_truth,
-                                    code_sandbox_psm=code_sandbox_psm)
-    return result
-
-
-@ray.remote(num_cpus=1)
-class SandboxClient:
+class RemoteClient:
+    """
+    A centralized remote client that pipelines any function with generation at [EOS] 
+    """
 
     def __init__(self, config, tokenizer) -> None:
         self.config = config
         self.tokenizer = tokenizer
         self.results = {}
+
+        self.call_oj = ray.remote(num_cpus=1)(oj_utils.compute_score)
+        self.verifier_service = ray.remote(num_cpus=1)(verifier_service.compute_score)
 
     def clear(self):
         # for some cases, the results won't be claimed. So we need to clear the results.
@@ -113,10 +113,19 @@ class SandboxClient:
         """Return the number of outputs, whose result is not claimed"""
         return len(self.results)
 
-    def add_requests(self, req_id, input_ids, ground_truth):
+    def add_requests(self, req_id, input_ids, ground_truth, reward_style):
         solution_str = self.tokenizer.decode(input_ids, skip_special_tokens=True)
         solution_str_post_proc = post_process_solution_str(self.config, solution_str)
-        result_future = call_oj.remote(solution_str_post_proc, ground_truth, self.config.trainer.code_sandbox_psm)
+
+        if reward_style == 'code-sandbox':
+            result_future = self.call_oj.remote(solution_str_post_proc, ground_truth,
+                                                self.config.trainer.code_sandbox_psm)
+        elif reward_style == 'verifier_service':
+            result_future = self.verifier_service.remote(solution_str_post_proc, ground_truth,
+                                                         self.config.trainer.verifier_service_psm)
+        else:
+            raise NotImplementedError(f'Unsupported reward_style {reward_style}')
+
         assert req_id not in self.results, f"{req_id} already exists"
         self.results[req_id] = result_future
 
@@ -222,6 +231,8 @@ class RewardManager():
             }
             if reward_style == "code-sandbox":
                 score_fn_inputs["code_sandbox_psm"] = self.config.trainer.code_sandbox_psm
+            if reward_style == "verifier_service":
+                score_fn_inputs["verifier_service_psm"] = self.config.trainer.verifier_service_psm
             score = compute_score_fn(**score_fn_inputs)
             is_para_dup = para_dup.find_single_turn_duplicate(solution_str)[0]
             is_trunc = (response_length == valid_response_length) and score == -1
@@ -699,7 +710,7 @@ def config_to_trainer_kwargs(config):
         "resource_pool_manager": resource_pool_manager,
         "ray_worker_group_cls": ray_worker_group_cls,
         "tokenizer": tokenizer,
-        "sandbox_client": None,
+        "remote_client": None,
     }
 
     trainer_config_actor = KVStore.get_or_create_actor()
@@ -720,9 +731,8 @@ def config_to_trainer_kwargs(config):
         # Note that we always use function-based RM for validation
         val_reward_fn = RewardManager(tokenizer=tokenizer, config=config, logger=logger, rm_name="val")
 
-        if config.trainer.use_remote_sandbox:
-            kwargs['sandbox_client'] = SandboxClient.options(name='sandbox_client').remote(config=config,
-                                                                                           tokenizer=tokenizer)
+        # we will always start a remote client
+        kwargs['remote_client'] = RemoteClient.options(name='remote_client').remote(config=config, tokenizer=tokenizer)
 
         kwargs['tokenizer'] = tokenizer
         kwargs['logger'] = logger

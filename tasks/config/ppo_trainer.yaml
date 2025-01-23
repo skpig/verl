@@ -274,7 +274,9 @@ trainer:
   num_cases_to_wandb: 10 # number of samples log to wandb each step
   logger_step_interval: 5 # how many steps to log to wandb
   code_sandbox_psm: ""
+  verifier_service_psm: ""
   use_remote_sandbox: False
+  use_remote_verifier: False
   save_cases_to_hdfs: True # save all cases to hdfs each step
   # auto: find the last ckpt to resume. If can't find, start from scratch
   resume_steps: auto

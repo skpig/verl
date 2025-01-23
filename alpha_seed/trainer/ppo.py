@@ -462,14 +462,14 @@ class RayPPOTrainer(object):
                  reward_fn=None,
                  val_reward_fn=None,
                  logger=None,
-                 sandbox_client=None):
+                 remote_client=None):
         # assert torch.cuda.is_available(), 'cuda must be available on driver'
 
         self.all_wg = {}
         self.internal_wgs = []
         self.internal_wg_roles = []
         self.all_meta = {}
-        self.sandbox_client = sandbox_client
+        self.remote_client = remote_client
         self.tokenizer = tokenizer
         self.config = config
         self.reward_fn = reward_fn
@@ -811,29 +811,38 @@ class RayPPOTrainer(object):
             if self.use_rm:
                 self.rm_wg.delete_local_tmp_folder_safetensors_files()
 
+        remote_reward_style = []
         if self.config.trainer.use_remote_sandbox:
-            # set the eos_callback_fn of actor_rollout
-            from xperf_gpt.inference.session import Query
+            remote_reward_style.append('code-sandbox')
+        if self.config.trainer.use_remote_verifier:
+            remote_reward_style.append('verifier_service')
+        # add more reward style here that are going to be pipelined inside generation
 
-            def sandbox_callback_fn(query: Query):
-                input_ids = query.input_ids + query.new_token_ids
-                req_id = query.meta_info['uid']
-                reward_model = query.meta_info['reward_model']
-                reward_style = reward_model['style']
-                ground_truth = reward_model['ground_truth']
+        # set the eos_callback_fn of actor_rollout
+        from xperf_gpt.inference.session import Query
 
-                # note that the uid of padding dataproto should be None
-                if reward_style == 'code-sandbox' and req_id is not None:
-                    # get the sandbox ray handler
-                    handler = ray.get_actor('sandbox_client')
-                    # this is non-blocking
-                    handler.add_requests.remote(req_id=req_id, input_ids=input_ids, ground_truth=ground_truth)
+        def sandbox_callback_fn(query: Query):
+            input_ids = query.input_ids + query.new_token_ids
+            req_id = query.meta_info['uid']
+            reward_model = query.meta_info['reward_model']
+            reward_style = reward_model['style']
+            ground_truth = reward_model['ground_truth']
 
-            self.actor_rollout_wg.set_eos_callback_fn(sandbox_callback_fn)
-            if self.standalone_rollout_wg is not None:
-                self.standalone_rollout_wg.set_eos_callback_fn(sandbox_callback_fn)
-            if self.use_standalone_validator:
-                self.standalone_validator_wg.set_eos_callback_fn(sandbox_callback_fn)
+            # note that the uid of padding dataproto should be None
+            if reward_style in remote_reward_style and req_id is not None:
+                # get the sandbox ray handler
+                handler = ray.get_actor('remote_client')
+                # this is non-blocking
+                handler.add_requests.remote(req_id=req_id,
+                                            input_ids=input_ids,
+                                            ground_truth=ground_truth,
+                                            reward_style=reward_style)
+
+        self.actor_rollout_wg.set_eos_callback_fn(sandbox_callback_fn)
+        if self.standalone_rollout_wg is not None:
+            self.standalone_rollout_wg.set_eos_callback_fn(sandbox_callback_fn)
+        if self.use_standalone_validator:
+            self.standalone_validator_wg.set_eos_callback_fn(sandbox_callback_fn)
 
     def save_checkpoint(self, specified_ckpt_version=None):
         """Save checkpoint to hdfs.
@@ -1509,9 +1518,9 @@ class RayPPOTrainer(object):
 
                     # collect sandbox client remaining results
                     if self.config.trainer.use_remote_sandbox:
-                        sandbox_client = ray.get_actor('sandbox_client')
-                        num_remaining_results = ray.get(sandbox_client.get_num_pending_outputs.remote())
-                        metrics['sandbox/remaining_results'] = num_remaining_results
+                        remote_client = ray.get_actor('remote_client')
+                        num_remaining_results = ray.get(remote_client.get_num_pending_outputs.remote())
+                        metrics['remote_client/remaining_results'] = num_remaining_results
 
                 metrics['timing/step'] = step_timer.last
                 # TODO: make a canonical logger that supports various backend
