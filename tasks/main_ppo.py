@@ -349,19 +349,17 @@ class RewardManager():
 
         log_table = None
         if self.config.trainer.num_cases_to_wandb > 0:
+            log_table = {
+                f"gen&score_{self.rm_name}_{global_step}":
+                    wandb.Table(columns=[
+                        "Step", "Prompt", "Gen Sequence", "GroundTruth", "Score", "Gen Sequence PostProc", "Is_Dup",
+                        "Is_Trunc", "Len"
+                    ],
+                                data=self.log_table)
+            }
             if not is_validation and global_step % self.config.trainer.logger_step_interval == 0:
                 # logger_step = global_step - global_step % self.config.trainer.logger_step_interval
-                self.logger.log(
-                    {
-                        f"gen&score_{self.rm_name}_{global_step}":
-                            wandb.Table(columns=[
-                                "Step", "Prompt", "Gen Sequence", "GroundTruth", "Score", "Gen Sequence PostProc",
-                                "Is_Dup", "Is_Trunc", "Len"
-                            ],
-                                        data=self.log_table)
-                    },
-                    step=global_step,
-                    backend='tracking')
+                self.logger.log(log_table, step=global_step, backend='tracking')
 
         if self.config.trainer.save_cases_to_hdfs:
             print(f"reward_fn begin hput: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
