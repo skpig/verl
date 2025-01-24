@@ -80,6 +80,7 @@ actor_rollout_ref:
       warmup: 5
       wait: 10
       active: 2
+      mem_enable: False
   ref:
     fsdp_config:
       param_offload: True
@@ -196,6 +197,7 @@ critic:
     warmup: 5
     wait: 10
     active: 2
+    mem_enable: False
   use_cuda_timer: True
 
 reward_model:
