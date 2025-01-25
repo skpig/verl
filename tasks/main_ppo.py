@@ -18,6 +18,7 @@ Note that we don't combine the main with ray_trainer as ray_trainer is used by o
 import time
 import warnings
 import contextlib
+import json
 
 import ray
 from alpha_seed.utils.reward_score.extra_reward import add_length_reward, punish_format
@@ -31,7 +32,7 @@ import pandas as pd
 import hdfs_io
 from datetime import datetime
 from multiprocessing import Process
-
+from collections import Counter
 # rule-based reward score
 from alpha_seed.utils.reward_score import verifier_service, gsm8k, math, math_v2, model_score_fn, logic_puzzle, oj_utils, math_verifier, response_post_proc, gpqa_verifier
 from alpha_seed.utils.duplicate import para_dup
@@ -39,6 +40,7 @@ from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRe
 from alpha_seed.workers.actors.critic_worker import CriticWorker
 from alpha_seed.utils.alarm.lark_util import send_message_to_employee
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import defaultdict
 try:
     from bytedance.trainingmetrics.rl_metrics_client_context_manager import RLMetricsClientContextManager as MegavisionMetricsCtx
 except ImportError:
@@ -144,6 +146,12 @@ except ImportError:
     ngrams = None
     print('nltk not installed, please install nltk. Disable diversity metrics.')
 
+import math
+
+
+def is_divisible_by_0_point_1(score):
+    return math.isclose(score * 10, round(score * 10))
+
 
 class RewardManager():
 
@@ -163,6 +171,57 @@ class RewardManager():
         self.punish_score = dict(map(lambda x: (x.split(':')[0], float(x.split(':')[1])), self.punish_score.split(',')))
         self.need_punish_trunc = self.config.reward_model.get('need_punish_trunc', False)
         self.trunc_punish_score = self.config.reward_model.get('trunc_punish_score', -5)
+        self.len_ema_without_overlong = self.config.reward_model.get(
+            'len_ema_without_overlong', False)  # 在计算平均长度时不考虑超长的，这部分反正会被打压（配合trunc_punish_score一起用）
+        self.length_ema_method = self.config.reward_model.get('length_ema_method', 'mean')
+        assert not self.len_ema_without_overlong or self.need_punish_trunc or self.config.algorithm.mask_overlong or self.config.algorithm.overlong_punish != 'v0', "len_ema_without_overlong is True, so self.need_punish_trunc or mask_overlong must be true."
+        self.len_ema_lambda = self.config.reward_model.get('len_ema_lambda', 1)
+        self.len_ema = {}
+        self.len_ema_json = self.config.reward_model.get('len_ema_json', None)
+        if self.len_ema_json is not None and len(self.len_ema) == 0:
+            hdfs_io.hcopy(self.len_ema_json, 'len_ema.json')
+            with open('len_ema.json') as f:
+                self.len_ema = json.load(f)
+            for k, v in self.len_ema.items():
+                self.len_ema[k] = torch.tensor(v, dtype=torch.float32)
+
+    def update_len_ema(self, data: DataProto):
+        index = data.non_tensor_batch['index']
+        lengths = data.batch['attention_mask'][:, self.config.data.max_prompt_length:].sum(-1)
+
+        len_lst = {}
+        for idx, length in enumerate(lengths):
+            if index[idx] not in len_lst:
+                len_lst[index[idx]] = []
+            if self.len_ema_without_overlong is True:
+                if 'max_new_tokens' in data.non_tensor_batch:
+                    if length >= data.non_tensor_batch['max_new_tokens'][idx]:
+                        continue
+                if length >= self.config.data.max_response_length:
+                    continue
+            len_lst[index[idx]].append(length)
+
+        for idx in len_lst:
+            lst = len_lst[idx]
+            if not lst:  # 全是超长，用之前的 EMA 或默认值 maxlen
+                default_value = torch.tensor(self.config.data.max_response_length)
+                # if 'max_new_tokens' in data.non_tensor_batch:
+                #     default_value = torch.tensor(data.non_tensor_batch['max_new_tokens'][idx])
+                cur_stat = self.len_ema.get(idx, default_value)
+            else:
+                if self.length_ema_method == 'mean':
+                    cur_stat = sum(lst) / len(lst)
+                elif self.length_ema_method == 'median':
+                    cur_stat = sorted(lst)[len(lst) // 2]
+                else:
+                    raise ValueError(f"Unknown length_ema_method: {self.length_ema_method}")
+            if idx not in self.len_ema:
+                self.len_ema[idx] = cur_stat
+            else:
+                self.len_ema[idx] = (1 - self.len_ema_lambda) * self.len_ema[idx] + self.len_ema_lambda * cur_stat
+
+        mean_len_per_prompt = [self.len_ema[idx].item() for idx in index]
+        return mean_len_per_prompt
 
     def __call__(self, data: DataProto, global_step=None, need_norm=True, is_validation=False):
         """We will expand this function gradually based on the available datasets"""
@@ -176,6 +235,10 @@ class RewardManager():
         rm_res_future_list = []
         if global_step is not None and global_step % self.config.trainer.logger_step_interval == 0:
             self.log_table = []  # 清空self.log_table
+
+        mean_len_per_prompt = self.update_len_ema(data)
+        current_mean_len = data.batch['attention_mask'][:, self.config.data.max_prompt_length:].sum(
+            -1).float().mean().item()
 
         def get_rm_score(idx):
             """
@@ -253,7 +316,8 @@ class RewardManager():
                 "ngram": ngram,
                 "format_reward": format_reward,
                 "pause_tokens_index": pause_tokens_index,
-                "thinking_len": thinking_len
+                "thinking_len": thinking_len,
+                'global_index': data_item.non_tensor_batch['index']
             }
 
             return return_dict
@@ -267,6 +331,8 @@ class RewardManager():
         not_dup_lens = []
         from tqdm import tqdm
         all_ngram = []
+        all_final_scores = []
+        all_final_scores_to_lens = defaultdict(list)
         for res in tqdm(as_completed(rm_res_future_list), total=len(data), desc="get_rm_score"):
             output_dict = res.result()
             prompt_str = output_dict["prompt_str"]
@@ -283,6 +349,7 @@ class RewardManager():
             thinking_len = output_dict['thinking_len']
             pause_tokens_index = output_dict['pause_tokens_index']
             format_reward = output_dict['format_reward']
+            global_index = output_dict['global_index']
 
             all_ngram.extend(ngram)
             if reward_style == "code-sandbox":
@@ -301,7 +368,7 @@ class RewardManager():
             if self.rm_name == 'train':
                 # length reward有不同版本，by default不加length reward
                 thinking_len = valid_response_length if thinking_len == 0 else thinking_len
-                score = add_length_reward(thinking_len, score, self.config)
+                score = add_length_reward(thinking_len, score, self.config, current_mean_len=mean_len_per_prompt[idx])
                 len_scores[idx, valid_response_length - 1] = score
 
             if is_para_dup:
@@ -317,6 +384,13 @@ class RewardManager():
                 score = format_reward
             reward_tensor[idx, valid_response_length - 1] = score
 
+            if is_divisible_by_0_point_1(score):
+                all_final_scores.append(score)
+                all_final_scores_to_lens[score].append(valid_response_length)
+            else:
+                all_final_scores.append(-10)
+                all_final_scores_to_lens[-10].append(valid_response_length)
+
             if reward_style not in already_print_data_sources:
                 already_print_data_sources[reward_style] = 0
 
@@ -325,23 +399,29 @@ class RewardManager():
                 if reward_style == "code-sandbox":
                     ground_truth = ''  # 对于OJ问题，ground_truth会比较大，扛不住
                 self.log_table.append([
-                    global_step, prompt_str, solution_str, ground_truth, score, solution_str_post_proc, is_para_dup,
-                    is_trunc, valid_response_length
+                    global_index, global_step, prompt_str, solution_str, ground_truth, score,
+                    solution_str_post_proc[-32:], is_para_dup, is_trunc, valid_response_length
                 ])
             save_to_hdfs.append([
-                idx, global_step, prompt_str, solution_str, ground_truth, score, solution_str_post_proc, is_para_dup,
-                is_trunc, valid_response_length
+                global_index, idx, global_step, prompt_str, solution_str, ground_truth, score,
+                solution_str_post_proc[-32:], is_para_dup, is_trunc, valid_response_length
             ])
 
+        counter = Counter(all_final_scores)
+        all_final_scores_to_lens = {key: sum(value) / len(value) for key, value in all_final_scores_to_lens.items()}
         prefix = "" if not is_validation else "val/"
-        self.logger.log(data={
+        log_data = {
             prefix + "oj/fail_rate": fail_cnt / total_cnt if total_cnt > 0 else -1,
             prefix + "dup/para_dup": dup_cnt / len(data),
             prefix + "dup/dup_response_len": sum(dup_lens) / max(1, len(dup_lens)),
             prefix + "dup/not_dup_response_len": sum(not_dup_lens) / max(1, len(not_dup_lens)),
-            prefix + 'unique_2gram': len(set(all_ngram)) / (len(all_ngram) + 1)
-        },
-                        step=global_step)
+            prefix + 'unique_2gram': len(set(all_ngram)) / (len(all_ngram) + 1),
+            prefix + 'current_mean_len': current_mean_len
+        }
+        log_counter = {prefix + f"score_counter/{key}": value for key, value in counter.items()}
+        log_score_to_lens = {prefix + f"score_to_lens/{key}": value for key, value in all_final_scores_to_lens.items()}
+        log_data = {**log_data, **log_counter, **log_score_to_lens}
+        self.logger.log(data=log_data, step=global_step)
 
         if total_cnt > 0 and fail_cnt / total_cnt >= 0.01:
             send_message_to_employee("alpha seed任务oj失败率过高", f"任务链接: {task_url}, 失败率: {round(fail_cnt/total_cnt, 2)}",
@@ -352,8 +432,8 @@ class RewardManager():
             log_table = {
                 f"gen&score_{self.rm_name}_{global_step}":
                     wandb.Table(columns=[
-                        "Step", "Prompt", "Gen Sequence", "GroundTruth", "Score", "Gen Sequence PostProc", "Is_Dup",
-                        "Is_Trunc", "Len"
+                        "Index", "Step", "Prompt", "Gen Sequence", "GroundTruth", "Score", "Gen Sequence PostProc",
+                        "Is_Dup", "Is_Trunc", "Len"
                     ],
                                 data=self.log_table)
             }
@@ -368,7 +448,8 @@ class RewardManager():
 
             def async_hput(save_to_hdfs, dir_name, file_name):
                 df = pd.DataFrame(columns=[
-                    "idx", "step", "prompt", "gen", "groundtruth", "score", "gen_postproc", "is_dup", "is_trunc", 'len'
+                    "global_index", "idx", "step", "prompt", "gen", "groundtruth", "score", "gen_postproc", "is_dup",
+                    "is_trunc", 'len'
                 ],
                                   data=save_to_hdfs)
                 df.to_parquet(f"{dir_name}{file_name}")

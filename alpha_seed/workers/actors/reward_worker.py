@@ -194,7 +194,6 @@ class RewardModelWorker(Worker):
             return
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get('external_lib', None))
-
         self.reward_module = self._build_model(config=self.config)
         self.reward_module.eval()
         torch.cuda.empty_cache()

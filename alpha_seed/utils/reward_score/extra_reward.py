@@ -1,7 +1,8 @@
 import re
+import torch
 
 
-def add_length_reward(thinking_len, correct_reward, config):
+def add_length_reward(thinking_len, correct_reward, config, current_mean_len=None):
     """
     ratio: 从多长开始奖励
     enhance: 最多多奖励多少
@@ -44,6 +45,96 @@ def add_length_reward(thinking_len, correct_reward, config):
         if correct_reward > 0:
             correct_reward = (max_reward -
                               min_reward) * thinking_len / config.data.max_response_length + min_reward  # linear reward
+    elif config.algorithm.inference_scaling == 'meanv0':
+        min_reward = 0.0
+        max_reward = 1.0
+        interval = 1024.0
+        if correct_reward > 0:
+            correct_reward = torch.sigmoid(torch.tensor(
+                (thinking_len - current_mean_len) / interval)) * (max_reward - min_reward) + min_reward
+            correct_reward = correct_reward.item()
+    elif config.algorithm.inference_scaling == 'meanv1':
+        min_reward = 0.0
+        max_reward = 2.0
+        interval = 2048.0
+        if correct_reward > 0:
+            correct_reward = (max(min((thinking_len - current_mean_len) / interval, 1.0), -1.0) * 0.5 +
+                              0.5) * (max_reward - min_reward) + min_reward
+    elif 'stepv2' in config.algorithm.inference_scaling:
+        overlong_reward = 0
+        if config.algorithm.overlong_punish == 'v1':
+            overlong_length = config.data.max_response_length - config.algorithm.overlong_punish_cache
+            # overlong_length -> config.data.max_response_length, 0 -> -1
+            if thinking_len > overlong_length:
+                overlong_reward = -(thinking_len - overlong_length) / (config.data.max_response_length -
+                                                                       overlong_length)
+        if overlong_reward != 0:
+            return overlong_reward + correct_reward
+
+        if config.algorithm.no_length_reward == 'v1':
+            if thinking_len > 12288:
+                return correct_reward
+
+        length_reward_slope = config.algorithm.get("inference_scaling_slope", 0.1)
+        length_reward_steps = config.algorithm.get("length_reward_steps", 1)
+        # length_reward_step_interval = config.algorithm.get("length_reward_step_interval", 512)
+        if thinking_len > current_mean_len:
+            length_reward = length_reward_steps
+        elif thinking_len < current_mean_len:
+            length_reward = -length_reward_steps
+        else:
+            length_reward = 0
+        length_reward = length_reward * length_reward_slope
+        if config.algorithm.inference_scaling == "stepv2_all":
+            correct_reward = length_reward + correct_reward
+        elif config.algorithm.inference_scaling == "stepv2_correct":
+            if correct_reward > 0:
+                correct_reward = length_reward + correct_reward
+        elif config.algorithm.inference_scaling == "stepv2_wrong":
+            if correct_reward < 0:
+                correct_reward = length_reward + correct_reward
+        else:
+            raise NotImplementedError
+    elif 'step' in config.algorithm.inference_scaling and 'stepv1' not in config.algorithm.inference_scaling:
+        length_reward_slope = config.algorithm.get("inference_scaling_slope", 0.1)
+        length_reward_steps = config.algorithm.get("length_reward_steps", 1)
+        length_reward_step_interval = config.algorithm.get("length_reward_step_interval", 512)
+        length_reward = max(min((thinking_len - current_mean_len) // length_reward_step_interval, length_reward_steps),
+                            -length_reward_steps) * length_reward_slope
+        if config.algorithm.inference_scaling == "step_all":
+            correct_reward = length_reward + correct_reward
+        elif config.algorithm.inference_scaling == "step_correct":
+            if correct_reward > 0:
+                correct_reward = length_reward + correct_reward
+        elif config.algorithm.inference_scaling == "step_wrong":
+            if correct_reward < 0:
+                correct_reward = length_reward + correct_reward
+        else:
+            raise NotImplementedError
+    elif 'stepv1' in config.algorithm.inference_scaling:
+        length_reward_slope = config.algorithm.get("inference_scaling_slope", 0.1)
+        punish_overlong_interval = config.algorithm.get("punish_overlong_interval",
+                                                        min(int(config.data.max_response_length / 16), 1024))
+
+        if current_mean_len > config.data.max_response_length - punish_overlong_interval:  #均值已经过长，越短越好
+            length_reward = -(1 if thinking_len - current_mean_len > 0 else -1) * length_reward_slope
+        else:  # 均值还不够长，越长越好
+            length_reward = (1 if thinking_len - current_mean_len > 0 else -1) * length_reward_slope
+
+        # 不管够不够长，太长的集体集体打压， * 4 这样14k的反而更高分，
+        if thinking_len > config.data.max_response_length - punish_overlong_interval:
+            length_reward -= length_reward_slope * 4
+
+        if config.algorithm.inference_scaling == "stepv1_all":
+            correct_reward = length_reward + correct_reward
+        elif config.algorithm.inference_scaling == "stepv1_correct":
+            if correct_reward > 0:
+                correct_reward = length_reward + correct_reward
+        elif config.algorithm.inference_scaling == "stepv1_wrong":
+            if correct_reward < 0:
+                correct_reward = length_reward + correct_reward
+        else:
+            raise NotImplementedError
     elif config.algorithm.inference_scaling == "v0":
         return correct_reward
     else:

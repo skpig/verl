@@ -80,7 +80,6 @@ class AsyncActorRolloutRefWorker(Worker):
         warnings.simplefilter(action='ignore', category=FutureWarning)
 
         self.config = config
-
         import torch.distributed
         if not torch.distributed.is_initialized():
             timeout = timedelta(minutes=int(os.getenv('NCCL_TIMEOUT', 60)))
@@ -633,7 +632,6 @@ class AsyncActorRolloutRefWorker(Worker):
             self.to("cpu", model=True, optimizer=True)
 
         torch.cuda.empty_cache()
-
         return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)

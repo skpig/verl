@@ -59,6 +59,7 @@ except ImportError:
     print('Cannot find pad_dataproto_to_divisor. Please use latest verl master')
     raise
 from alpha_seed import core_algos
+import pickle as pkl
 
 try:
     from bytedance.trainingmetrics.rl_metrics_client_context_manager import RLMetricsClientContextManager as MegavisionMetricsCtx
@@ -160,7 +161,7 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
 
 
 def compute_advantage(data: DataProto, gamma, lam, adv_estimator, upgo_loss_version, num_bon, adv_whiten, use_async_gen,
-                      use_separate_critic_lam, critic_lam):
+                      use_separate_critic_lam, critic_lam, group_mode):
     # TODO: add other ways to estimate advantages
     token_level_rewards = data.batch['token_level_rewards']
     responses = data.batch['responses']
@@ -195,7 +196,8 @@ def compute_advantage(data: DataProto, gamma, lam, adv_estimator, upgo_loss_vers
             eos_mask=response_mask,
             index=index,
             num_bon=num_bon,
-            use_async_gen=use_async_gen)
+            use_async_gen=use_async_gen,
+            group_mode=group_mode)
         data.batch['advantages'] = advantages
         data.batch['origin_advantages'] = advantages
         data.batch['returns'] = returns
@@ -280,7 +282,7 @@ def compute_data_metrics(self, batch: DataProto):
     valid_returns_mean, valid_returns_max, valid_returns_min, valid_returns_std = distributed_mean_max_min_std(
         valid_returns)
     response_length_mean, response_length_max, response_length_min, response_length_std = distributed_mean_max_min_std(
-        response_length, compute_std=False)
+        response_length, compute_std=True)
     response_clip_ratio = distributed_mean_max_min_std(torch.eq(response_length, max_response_length).float(),
                                                        compute_max=False,
                                                        compute_min=False,
@@ -338,6 +340,7 @@ def compute_data_metrics(self, batch: DataProto):
         'response_length/mean': response_length_mean.detach().item(),
         'response_length/max': response_length_max.detach().item(),
         'response_length/min': response_length_min.detach().item(),
+        'response_length/std': response_length_std.detach().item(),
         ## response clip ratio
         'response_length/clip_ratio': response_clip_ratio.detach().item(),
         # prompt length
@@ -522,6 +525,8 @@ class RayPPOTrainer(object):
         self.standalone_gen_batch_output_resume = None
         self.standalone_batch_resume = None
         self.megavision_metrics_collector = MegavisionMetricsCtx() if MegavisionMetricsCtx else None
+
+        self.data_len_per_query = None
 
     def _create_dataloader(self):
         from torch.utils.data import DataLoader
@@ -896,6 +901,28 @@ class RayPPOTrainer(object):
         critic_remote_path = os.path.join(remote_global_step_folder, 'critic')
         ref_remote_path = os.path.join(remote_global_step_folder, 'ref')
 
+        # save data len per query
+        data_len_per_query_local_path = os.path.join(local_global_step_folder, 'data_len_per_query.pkl')
+        if self.data_len_per_query is not None:
+            with open(data_len_per_query_local_path, 'wb') as fout:
+                pkl.dump(self.data_len_per_query, fout)
+            # hcopy(data_len_per_query_local_path, f"{remote_global_step_folder}/data_len_per_query.pkl")
+            ray.get(
+                self.ckpt_global_uploader.register_upload_task.remote("default", self.global_step,
+                                                                      ray.get_runtime_context().get_node_id(),
+                                                                      data_len_per_query_local_path,
+                                                                      remote_global_step_folder))
+
+        # save len_ema
+        len_ema_local_path = os.path.join(local_global_step_folder, 'len_ema.json')
+        if self.data_len_per_query is not None:
+            with open(len_ema_local_path, 'wb') as fout:
+                pkl.dump(self.reward_fn.len_ema, fout)
+            ray.get(
+                self.ckpt_global_uploader.register_upload_task.remote("default", self.global_step,
+                                                                      ray.get_runtime_context().get_node_id(),
+                                                                      len_ema_local_path, remote_global_step_folder))
+
         # save dataloader
         dataloader_local_path = os.path.join(local_global_step_folder, 'data.pt')
         import dill
@@ -995,10 +1022,29 @@ class RayPPOTrainer(object):
         dataloader_remote_path = os.path.join(remote_global_step_folder, 'data.pt')
         dataloader_local_path = copy_local_path_from_hdfs(dataloader_remote_path)
         self.train_dataloader = torch.load(dataloader_local_path)
+
         try:
             os.remove(dataloader_local_path)
         except Exception as e:
             print(f'remove local dataloader ckpt file after loading failed, exception {e} will be ignored')
+
+        # resume data_len info
+        data_len_per_query_remote_path = os.path.join(remote_global_step_folder, 'data_len_per_query.pkl')
+        if hexists(data_len_per_query_remote_path):
+            data_len_per_query_local_path = copy_local_path_from_hdfs(data_len_per_query_remote_path)
+            with open(data_len_per_query_local_path, 'rb') as fin:
+                self.data_len_per_query = pkl.load(fin)
+                print("DATA_LEN INFO RESUMED!!!!!!")
+        else:
+            self.data_len_per_query = None
+
+        # resume len_ema
+        len_ema_remote_path = os.path.join(remote_global_step_folder, 'len_ema.json')
+        if hexists(len_ema_remote_path):
+            len_ema_local_path = copy_local_path_from_hdfs(len_ema_remote_path)
+            with open(len_ema_local_path, 'rb') as fin:
+                self.reward_fn.len_ema = pkl.load(fin)
+                print("LEN_EMA RESUMED!!!!!!")
 
         # async resume
         if hexists(f"{remote_global_step_folder}/standalone_gen_batch_output.batch.pt"):
@@ -1208,6 +1254,69 @@ class RayPPOTrainer(object):
 
         return batch, standalone_batch
 
+    def get_mean_max_len_per_query(self, batch, metrics):
+        if self.config.trainer.per_query_max_length is True:
+            if self.data_len_per_query is None:
+                batch.non_tensor_batch['max_new_tokens'] = np.array([self.config.trainer.per_query_max_length_init] *
+                                                                    batch.batch['input_ids'].shape[0],
+                                                                    dtype=object)
+                batch.non_tensor_batch['mean_new_tokens'] = np.array(
+                    [self.config.trainer.per_query_max_length_init // 2] * batch.batch['input_ids'].shape[0],
+                    dtype=object)
+            else:
+                per_query_max_length = []
+                per_query_mean_length = []
+                for i in range(batch.batch['input_ids'].shape[0]):
+                    len_lst = torch.tensor(
+                        self.data_len_per_query.get(batch.non_tensor_batch['index'][i],
+                                                    self.data_len_per_query.get('overall_mean')))  # TODO
+                    count = 16
+                    mean_len = torch.mean(len_lst[-count:])
+                    std_len = torch.std(len_lst[-count:]) if len(len_lst) > 2 else mean_len
+                    max_len = 3 * mean_len + std_len
+                    per_query_max_length.append(max_len)
+                    per_query_mean_length.append(mean_len)
+                batch.non_tensor_batch['max_new_tokens'] = np.array(per_query_max_length, dtype=object)
+                batch.non_tensor_batch['mean_new_tokens'] = np.array(per_query_mean_length, dtype=object)
+
+            metrics.update({
+                "max_len_per_query/mean": batch.non_tensor_batch['max_new_tokens'].mean(),
+                "max_len_per_query/std": batch.non_tensor_batch['max_new_tokens'].std(),
+                "max_len_per_query/min": batch.non_tensor_batch['max_new_tokens'].min(),
+                "max_len_per_query/max": batch.non_tensor_batch['max_new_tokens'].max(),
+            })
+
+    def update_len_per_query(self, batch, metrics):
+        if self.data_len_per_query is None:
+            self.data_len_per_query = defaultdict(list)
+
+        cur_batch_len = []
+        prompt_length = self.config.data.max_prompt_length
+        overlonged_count = 0
+        for i in range(batch.batch['input_ids'].shape[0]):
+            valid_response_length = batch.batch['attention_mask'][i, prompt_length:].sum().item()  # TODO
+            self.data_len_per_query[batch.non_tensor_batch['index'][i]].append(valid_response_length)
+            cur_batch_len.append(valid_response_length)
+
+            if 'max_new_tokens' in batch.non_tensor_batch:
+                query_max_len = batch.non_tensor_batch['max_new_tokens'][i]
+            else:
+                query_max_len = self.config.data.max_response_length
+            if valid_response_length >= query_max_len:
+                overlonged_count += 1
+
+        cur_batch_mean = sum(cur_batch_len) // len(cur_batch_len)
+        self.data_len_per_query['overall_mean'].append(cur_batch_mean)
+        overlonged_frac = overlonged_count / len(batch.batch['input_ids'])
+
+        metrics.update({
+            "max_len_per_query/cur_batch_mean": sum(cur_batch_len) // len(cur_batch_len),
+            "max_len_per_query/cur_batch_std": np.std(cur_batch_len),
+            "max_len_per_query/cur_batch_min": min(cur_batch_len),
+            "max_len_per_query/cur_batch_max": max(cur_batch_len),
+            "max_len_per_query/overlonged_frac": overlonged_frac,
+        })
+
     def fit(self):
         self.global_step = 0
 
@@ -1245,6 +1354,9 @@ class RayPPOTrainer(object):
                     # hybrid generate (on policy)
                     if self.config.trainer.load_train_batch_path is None:
                         batch: DataProto = DataProto.from_single_dict(batch_dict)
+
+                        self.get_mean_max_len_per_query(batch, metrics)
+
                         batch, standalone_batch = self._generate(batch=batch,
                                                                  resume_step=resume_step,
                                                                  metrics=metrics,
@@ -1261,6 +1373,8 @@ class RayPPOTrainer(object):
                         print(f'Using loaded train batch {self.config.trainer.load_train_batch_path} for training')
                         batch_local_filepath = copy_local_path_from_hdfs(self.config.trainer.load_train_batch_path)
                         batch = DataProto.load_from_disk(batch_local_filepath)
+
+                    self.update_len_per_query(batch, metrics)
 
                     # training
                     with Timer(name='rm_score', logger=None) as timer:
@@ -1296,16 +1410,20 @@ class RayPPOTrainer(object):
                                             step=self.global_step)
                     metrics['timing/reward_fn'] = timer.last
 
-                    print_dataproto_size(batch, head='After Reward function')
-
                     if self.config.algorithm.mask_overlong:
                         prompt_length = self.config.data.max_prompt_length
-                        response_length = self.config.data.max_response_length
+                        if 'max_new_tokens' in batch.non_tensor_batch:
+                            response_length = batch.non_tensor_batch['max_new_tokens']
+                        else:
+                            response_length = self.config.data.max_response_length
                         valid_response_length = batch.batch['attention_mask'][:, prompt_length:].sum(-1)
                         is_overlong = (response_length == valid_response_length) & (raw_scores_log == -1)
                         # batch.batch['attention_mask'][is_overlong] = 0
                         # batch.batch['answer_attention_mask'][is_overlong] = 0
                         batch.batch['overlong_mask'] = (~is_overlong).int()
+                        metrics.update({'max_len_per_query/overlong_masked': is_overlong.to(torch.int64).sum().item()})
+
+                    print_dataproto_size(batch, head='After Reward function')
 
                     # league training，筛选平均通过率低的prompt
                     use_async_gen = self.config.streaming_rollout.nnodes > 0
@@ -1389,6 +1507,7 @@ class RayPPOTrainer(object):
                             num_bon=self.config.actor_rollout_ref.rollout.num_bon,
                             adv_whiten=self.config.algorithm.adv_whiten,
                             use_async_gen=use_async_gen,
+                            group_mode=self.config.algorithm.group_mode,
                             use_separate_critic_lam=self.config.algorithm.use_separate_critic_lam,
                             critic_lam=self.config.algorithm.critic_lam,
                         )

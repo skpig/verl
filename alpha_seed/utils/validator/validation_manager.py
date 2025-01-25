@@ -286,15 +286,26 @@ class ValidateManager(object):
         for source, rwds in source2rwd.items():
             if len(rwds[0]) == 32:
                 for n in [4, 8, 16, 32]:
-                    total = len(rwds) * 5
+                    total = len(rwds) * 128
                     correct = 0
                     for rwd in rwds:
-                        for _ in range(5):
+                        for _ in range(128):
                             sample_n = random.sample(rwd, k=n)
                             if max(sample_n) == 1:
                                 correct += 1
                     acc = correct / total
                     metric_dict[f'test_score/{source}_bo{n}'] = acc
+                # worst of n
+                for n in [4, 8, 16, 32]:
+                    total = len(rwds) * 128
+                    correct = 0
+                    for rwd in rwds:
+                        for _ in range(128):
+                            sample_n = random.sample(rwd, k=n)
+                            if min(sample_n) == 1:
+                                correct += 1
+                    acc = correct / total
+                    metric_dict[f'test_score/{source}_wo{n}'] = acc
 
         for data_source, rewards in data_source_reward.items():
             rewards_tensor_data_source = torch.vstack(rewards)

@@ -150,7 +150,8 @@ def compute_grpo_advantage_return(token_level_scores: torch.Tensor,
                                   eos_mask: torch.Tensor,
                                   index: torch.Tensor,
                                   epsilon: float = 1e-6,
-                                  use_async_gen: bool = False):
+                                  use_async_gen: bool = False,
+                                  group_mode: str = "normal"):  # normal, no_std, clamp, trinary
     """Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py
 
     Args:
@@ -177,7 +178,13 @@ def compute_grpo_advantage_return(token_level_scores: torch.Tensor,
     with torch.no_grad():
         bsz = scores.shape[0]
         for i in range(bsz):
-            id2score[index[i]].append(scores[i])
+            if group_mode not in ["clamp", "trinary"]:
+                id2score[index[i]].append(scores[i])
+            elif group_mode == "clamp":
+                id2score[index[i]].append(min(max(scores[i], -1.0), 1.0))
+            elif group_mode == "trinary":
+                id2score[index[i]].append(1.0 if scores[i] > 0 else 0 if scores[i] >= 0 else -1.0)
+
         lens = list(map(lambda x: len(x), id2score.values()))
         for idx in id2score:
             if len(id2score[idx]) == 1:
@@ -187,7 +194,10 @@ def compute_grpo_advantage_return(token_level_scores: torch.Tensor,
                 id2mean[idx] = torch.mean(torch.tensor(id2score[idx]))
                 id2std[idx] = torch.std(torch.tensor(id2score[idx]))
         for i in range(bsz):
-            scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
+            if group_mode != "no_std":
+                scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
+            else:
+                scores[i] = scores[i] - id2mean[index[i]]
         scores = scores.unsqueeze(dim=1).tile([1, response_length]) * eos_mask
 
     if use_async_gen:
