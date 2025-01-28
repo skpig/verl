@@ -45,10 +45,12 @@ from alpha_seed.workers.xperf_rollout.utils import get_xperf_gpt_config
 from alpha_seed.workers.xperf_rollout.utils.layout_convert_helper import init_meta
 from alpha_seed.workers.streaming_service.xperf_model_prophet import XperfModelProphet
 from alpha_seed.workers.xperf_rollout.utils.logits_manipulate import logits_manipulate_fn_core, logits_manipulate_fn_eta, logits_manipulate_fn_minp, logits_manipulate_fn_clip
+from alpha_seed.utils.observility import get_profiler_context_wrapped, profile_step
 from functools import partial
 
+import ray
+
 try:
-    from verl.utils.debug import get_profiler_context
     from verl.utils.debug.performance import NullProfileEnter
 except:
     print('Cannot find profile utilities. Please use latest verl master')
@@ -86,12 +88,11 @@ class AsyncXPerfGPTRollout(object):
         self.config = config
         self.tokenizer = tokenizer
         if hasattr(config, 'profile'):
-            self.profiler_context = get_profiler_context(filename=config.profile.filename,
-                                                         profile_on_ranks=config.profile.profile_on_ranks,
-                                                         default_hdfs_dir=config.profile.default_hdfs_dir,
-                                                         upload_to_mlx=config.profile.upload_to_mlx,
-                                                         enable=config.profile.enable,
-                                                         wait=10)
+            self.profiler_context = get_profiler_context_wrapped(filename=config.profile.filename,
+                                                                 profile_on_ranks=config.profile.profile_on_ranks,
+                                                                 upload_to_mlx=config.profile.upload_to_mlx,
+                                                                 enable=config.profile.enable,
+                                                                 wait=1)
         else:
             self.profiler_context = nullcontext(NullProfileEnter())
         self.is_standalone = is_standalone
@@ -323,7 +324,7 @@ class AsyncXPerfGPTRollout(object):
                                                   complete_ratio=complete_ratio,
                                                   stop_event=self.stop_event if self.is_standalone else None,
                                                   prompt_meta_info=prompt_meta_info)
-                    p.step()
+                    profile_step(p, None)
                 except Exception as e:
                     if os.getenv('XPERF_DUMP_NAN', '1') == '1':
                         global_rank = 0 if not dist.is_initialized() else dist.get_rank()

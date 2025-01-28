@@ -44,7 +44,6 @@ from verl.utils.import_utils import import_external_libs
 from verl.utils.debug import log_gpu_memory_usage
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from verl.utils.torch_functional import broadcast_dict_tensor, allgather_dict_tensors
-from verl.utils.debug import get_profiler_context
 import numpy as np
 
 from alpha_seed.utils import ndtimeline
@@ -56,6 +55,8 @@ from alpha_seed.workers.ppo_actor import DataParallelPPOActor
 from alpha_seed.utils.kernels.persist_gemm import deploy_persist_gemm, undelopy_persist_gemm
 from alpha_seed.models.transformers.parallel.collectives import get_memory
 from alpha_seed.utils.observility.training_stats import MetricsTorchDispatchMode, metrics_context_fn
+from alpha_seed.utils.observility import get_profiler_context_wrapped
+
 from seed_models.utils.count_flops import FlopsCounter
 
 from codetiming import Timer
@@ -141,14 +142,14 @@ class AsyncActorRolloutRefWorker(Worker):
                     raise ValueError("enable tensor / expert parallelism must set ref.fsdp_config.use_orig_params=True")
 
         profile_fname = f"trace_{self.role}_rank{self.rank}.json"
-        self.profiler_context = get_profiler_context(filename=profile_fname,
-                                                     profile_on_ranks=[0],
-                                                     default_hdfs_dir=None,
-                                                     upload_to_mlx=False,
-                                                     enable=False,
-                                                     wait=0,
-                                                     warmup=0,
-                                                     active=1)
+
+        self.profiler_context = get_profiler_context_wrapped(filename=profile_fname,
+                                                             profile_on_ranks=[0],
+                                                             upload_to_mlx=True,
+                                                             enable=False,
+                                                             wait=0,
+                                                             warmup=0,
+                                                             active=1)
         if config.actor.get("sm_margin", 0) > 0:
             deploy_persist_gemm(int(config.actor.get("sm_margin", 0)))
 
@@ -238,6 +239,7 @@ class AsyncActorRolloutRefWorker(Worker):
             'pad_token_id': self.tokenizer.pad_token_id,
         }
         override_config_kwargs.update(override_model_config)
+
         update_model_config(actor_model_config, override_config_kwargs=override_config_kwargs)
         setattr(actor_model_config, '_moe_implementation', 'fused')
         if self.rank == 0:

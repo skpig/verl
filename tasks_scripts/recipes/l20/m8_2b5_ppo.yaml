@@ -48,6 +48,5 @@ critic:
     upload_to_mlx: True
     filename: "critic"
     profile_on_ranks: [0,16,32,48]
-
 trainer:
   offload_train_memory: True

@@ -45,11 +45,12 @@ from dist_attn.ulysses.ops import gather_outputs
 from alpha_seed.models.transformers.monkey_patch import update_gate_ema
 from verl.utils.seqlen_balancing import rearrange_micro_batches, get_reverse_idx
 from contextlib import nullcontext
+from alpha_seed.utils.observility import get_profiler_context_wrapped, profile_step
 
 __all__ = ['DataParallelPPOCritic']
 
 try:
-    from verl.utils.debug import get_profiler_context, MemoryProfiler
+    from verl.utils.debug import MemoryProfiler
 except:
     print('Cannot find profile utilities. Please use latest verl master')
     raise
@@ -70,14 +71,14 @@ class DataParallelPPOCritic(BasePPOCritic):
             assert self.config.ppo_mini_batch_size % self.config.ppo_micro_batch_size == 0, f'{self.config.ppo_mini_batch_size=}, {self.config.ppo_micro_batch_size=}'
             self.gradient_accumulation = self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size
 
-        self.profiler_context = get_profiler_context(filename=self.config.profile.filename,
-                                                     profile_on_ranks=self.config.profile.profile_on_ranks,
-                                                     default_hdfs_dir=self.config.profile.default_hdfs_dir,
-                                                     upload_to_mlx=self.config.profile.upload_to_mlx,
-                                                     enable=self.config.profile.enable,
-                                                     warmup=self.config.profile.warmup,
-                                                     wait=self.config.profile.wait,
-                                                     active=self.config.profile.active)
+        self.profiler_context = get_profiler_context_wrapped(filename=self.config.profile.filename,
+                                                             profile_on_ranks=self.config.profile.profile_on_ranks,
+                                                             upload_to_mlx=self.config.profile.upload_to_mlx,
+                                                             enable=self.config.profile.enable,
+                                                             warmup=self.config.profile.warmup,
+                                                             wait=self.config.profile.wait,
+                                                             active=self.config.profile.active)
+
         self.memory_profiler = MemoryProfiler(filename=self.config.profile.filename + 'memory',
                                               enable=torch.distributed.get_rank() == 0 and
                                               self.config.profile.mem_enable,
@@ -234,6 +235,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                     f'Number of {self.gradient_accumulation=} is too large when turn on profile. Try to turn off profile or reduce ppo_mini_batch_size.'
                 )
 
+        global_step = data.meta_info.get('global_step')
         for batch_idx, mini_batch in enumerate(dataloader):
             if self.config.shuffle:
                 mini_batch = mini_batch.batch
@@ -297,7 +299,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                 }
                 append_to_dict(metrics, data_metric)
 
-                p.step()
+                profile_step(p, global_step)
                 self.memory_profiler.step()
 
         self._optimizer_zero_grad()

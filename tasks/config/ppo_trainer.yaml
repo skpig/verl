@@ -74,7 +74,6 @@ actor_rollout_ref:
     profile:
       filename: p6_400m_ppo_actor
       profile_on_ranks: null
-      default_hdfs_dir: null
       upload_to_mlx: False
       enable: False
       warmup: 5

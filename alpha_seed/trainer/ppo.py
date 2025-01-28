@@ -1374,6 +1374,7 @@ class RayPPOTrainer(object):
                         batch_local_filepath = copy_local_path_from_hdfs(self.config.trainer.load_train_batch_path)
                         batch = DataProto.load_from_disk(batch_local_filepath)
 
+                    batch.meta_info['global_step'] = self.global_step
                     self.update_len_per_query(batch, metrics)
 
                     # training

@@ -146,6 +146,7 @@ class CriticWorker(Worker):
             warnings.simplefilter("ignore")
             setattr(critic_model_config, 'classifier_dropout', 0.)
             setattr(critic_model_config, '_moe_implementation', 'fused')
+
             critic_module = AutoModelForTokenClassification.from_config(critic_model_config,
                                                                         torch_dtype=torch_dtype,
                                                                         attn_implementation='flash_attention_2',

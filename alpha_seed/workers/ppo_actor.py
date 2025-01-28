@@ -41,6 +41,7 @@ from dist_attn.ulysses.ops import gather_outputs
 from alpha_seed.workers.hybrid_engine.fsdp_gather import ulysses_pad_and_slice_inputs
 from alpha_seed.models.transformers.ops import clip_grad_norm_
 from alpha_seed.utils.observility.training_stats import sync_training_stats
+from alpha_seed.utils.observility import get_profiler_context_wrapped, profile_step
 from alpha_seed import core_algos
 from alpha_seed.models.transformers.monkey_patch import update_gate_ema
 from verl.utils.seqlen_balancing import rearrange_micro_batches, get_reverse_idx
@@ -48,11 +49,12 @@ from verl.utils.seqlen_balancing import rearrange_micro_batches, get_reverse_idx
 from alpha_seed.workers.actors import activation_offload
 
 from contextlib import nullcontext
+import ray
 
 __all__ = ['DataParallelPPOActor']
 
 try:
-    from verl.utils.debug import get_profiler_context, MemoryProfiler
+    from verl.utils.debug import MemoryProfiler
 except:
     print('Cannot find profile utilities. Please use latest verl master')
     raise
@@ -87,14 +89,14 @@ class DataParallelPPOActor(BasePPOActor):
 
         if hasattr(self.config, 'profile'):
             # refernce doesn't need debug
-            self.profiler_context = get_profiler_context(filename=self.config.profile.filename,
-                                                         profile_on_ranks=self.config.profile.profile_on_ranks,
-                                                         default_hdfs_dir=self.config.profile.default_hdfs_dir,
-                                                         upload_to_mlx=self.config.profile.upload_to_mlx,
-                                                         enable=self.config.profile.enable,
-                                                         warmup=self.config.profile.warmup,
-                                                         wait=self.config.profile.wait,
-                                                         active=self.config.profile.active)
+            self.profiler_context = get_profiler_context_wrapped(filename=self.config.profile.filename,
+                                                                 profile_on_ranks=self.config.profile.profile_on_ranks,
+                                                                 upload_to_mlx=self.config.profile.upload_to_mlx,
+                                                                 enable=self.config.profile.enable,
+                                                                 warmup=self.config.profile.warmup,
+                                                                 wait=self.config.profile.wait,
+                                                                 active=self.config.profile.active)
+
             self.memory_profiler = MemoryProfiler(filename=self.config.profile.filename + 'memory',
                                                   enable=torch.distributed.get_rank() == 0 and
                                                   self.config.profile.mem_enable,
@@ -308,6 +310,7 @@ class DataParallelPPOActor(BasePPOActor):
                     f'Number of {self.gradient_accumulation=} is too large when turn on profile. Try to turn off profile or reduce ppo_mini_batch_size.'
                 )
         temperature = data.meta_info['temperature']  # temperature must be in the data.meta_info to avoid slient error
+        global_step = data.meta_info.get('global_step')
 
         # make minibatch iterator
         # dataloader = self._make_minibatch_iterator(data=data)
@@ -444,7 +447,7 @@ class DataParallelPPOActor(BasePPOActor):
                 }
                 append_to_dict(metrics, data_metric)
 
-                p.step()
+                profile_step(p, global_step)
                 self.memory_profiler.step()
 
         append_to_dict(metrics, {'first_mini_ppo_kl_sum': first_mini_ppo_kl_sum})
