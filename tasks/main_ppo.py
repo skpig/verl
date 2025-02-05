@@ -257,8 +257,8 @@ class RewardManager():
             valid_response_ids = response_ids[:valid_response_length]
 
             # decode
-            prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
-            solution_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
+            prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=False)
+            solution_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=False)
 
             solution_str_post_proc = post_process_solution_str(config=self.config, solution_str=solution_str)
 
