@@ -43,6 +43,8 @@ from alpha_seed.workers.streaming_service.streaming_utils import pad, process_ou
 from alpha_seed.workers.actors.checkpoint import CkptGlobalUploader
 from alpha_seed.utils.observility.pretty_print import pprint
 from alpha_seed.utils import ndtimeline
+from alpha_seed.utils.dataset.rl_dataset import RLHFDataset
+
 from single_controller.base import Worker
 from single_controller.ray import RayResourcePool, RayWorkerGroup, RayClassWithInitArgs
 from single_controller.ray.base import create_colocated_worker_cls
@@ -1022,6 +1024,8 @@ class RayPPOTrainer(object):
         dataloader_remote_path = os.path.join(remote_global_step_folder, 'data.pt')
         dataloader_local_path = copy_local_path_from_hdfs(dataloader_remote_path)
         self.train_dataloader = torch.load(dataloader_local_path)
+        if isinstance(self.train_dataloader.dataset, RLHFDataset):
+            self.train_dataloader.dataset.resume_dataset_state()
 
         try:
             os.remove(dataloader_local_path)

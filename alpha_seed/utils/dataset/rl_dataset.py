@@ -17,6 +17,7 @@ SFT dataset
 - We load all the data into the memory.
 Each parquet file contains
 """
+import copy
 
 from omegaconf import ListConfig
 import os
@@ -87,7 +88,8 @@ class RLHFDataset(Dataset):
         if not isinstance(parquet_files, (List, ListConfig)):
             parquet_files = [parquet_files]
 
-        self.parquet_files = parquet_files
+        self.parquet_files = copy.deepcopy(parquet_files)
+        self.original_parquet_files = copy.deepcopy(parquet_files)
         self.cache_dir = os.path.expanduser(cache_dir)
         self.tokenizer = tokenizer
 
@@ -104,6 +106,7 @@ class RLHFDataset(Dataset):
         self.multi_prompts = multi_prompts
         self.num_prompts_per_data = num_prompts_per_data
         self.is_eval = is_eval
+        self.new_dataset_flag = True
 
         self._download()
         self._read_files_and_tokenize()
@@ -117,9 +120,10 @@ class RLHFDataset(Dataset):
     ):
         self.prompts = load_prompts(self.multi_prompts)
 
-    def _download(self):
+    def _download(self, origin=False):
         from verl.utils.fs import copy_local_path_from_hdfs
-        for i, parquet_file in enumerate(self.parquet_files):
+        parquet_files = self.parquet_files if not origin else self.original_parquet_files
+        for i, parquet_file in enumerate(parquet_files):
             self.parquet_files[i] = copy_local_path_from_hdfs(src=parquet_file, cache_dir=self.cache_dir)
 
     def _read_files_and_tokenize(self):
@@ -140,6 +144,15 @@ class RLHFDataset(Dataset):
         #                                                      axis=1)]
 
         print(f'filter dataset len: {len(self.dataframe)}')
+
+    def resume_dataset_state(self):
+        self.new_dataset_flag = True if hasattr(self, 'original_parquet_files') else False
+        # resume dataframe if not it's serialized in data.pt
+        if self.new_dataset_flag:
+            self._download(origin=True)
+            self._read_files_and_tokenize()
+        else:
+            print(r'old dataloader ckpt file is used, please train from scratch for better ckpt performance')
 
     def __len__(self):
         return len(self.dataframe)
@@ -229,6 +242,15 @@ class RLHFDataset(Dataset):
         row_dict['answer_attention_mask'] = row_dict['answer_attention_mask'].to(torch.int8)
         row_dict['off_policy_steps'] = torch.zeros([1]).to(torch.int8)
         return row_dict
+
+    def __getstate__(self):
+        if self.new_dataset_flag:
+            state = self.__dict__.copy()
+
+            if 'dataframe' in state:
+                del state['dataframe']
+            return state
+        return self.__dict__.copy()
 
 
 if __name__ == '__main__':
