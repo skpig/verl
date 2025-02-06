@@ -1,3 +1,5 @@
+import os
+import time
 from collections import defaultdict
 import uuid
 import json
@@ -35,7 +37,9 @@ class ValidateManager(object):
         self.standalone_validator_wg = None
         self.val_thread = None
         self.val_result_queue = queue.Queue()
-
+        self.fast_result = os.getenv('WANDB_IGNORE_STEP_ORDER') == '1'
+        if self.fast_result:
+            print('Using fast result on wandb mode.')
         assert len(self.val_dataloader) == 1, "for bon metrics computation"
 
     def validate(self,
@@ -47,7 +51,6 @@ class ValidateManager(object):
 
         if is_async:
             assert not self.use_rm, "Async validation is not supported with RM yet."
-
         if self.val_thread is not None:
             self.val_thread.join()
             if self.val_result_queue.qsize() > 0:
@@ -55,10 +58,11 @@ class ValidateManager(object):
                 for metric in val_metrics.keys():
                     wandb.define_metric(metric, step_metric="val_step")
                 val_metrics["val_step"] = val_step
-                self.logger.log(data=val_metrics, step=global_step)
-                for val_log in val_log_lst:
-                    if val_log is not None:
-                        self.logger.log(data=val_log, step=global_step, backend="tracking")
+                if not self.fast_result:
+                    self.logger.log(data=val_metrics, step=global_step)
+                    for val_log in val_log_lst:
+                        if val_log is not None:
+                            self.logger.log(data=val_log, step=global_step, backend="tracking")
 
         if is_async:
             self.actor_rollout_wg.update_standalone_worker("standalone_validator")
@@ -94,6 +98,7 @@ class ValidateManager(object):
         return
 
     def _validate(self, val_epoch, need_log, log_file, is_async, global_step, validator_wg):
+        print(f'{time.time()} start validate with fast_result={self.fast_result}')
         metric_dict = {}
         reward_tensor_lst = []
         data_source_lst = []
@@ -320,4 +325,11 @@ class ValidateManager(object):
         }
         if global_step == 0:
             pprint(f'Initial validation metrics: {val_metrics}')
+
+        if self.fast_result:
+            self.logger.log(data=val_metrics, step=global_step)
+            for val_log in val_log_lst:
+                if val_log is not None:
+                    self.logger.log(data=val_log, step=global_step, backend="tracking")
+        print(f'{time.time()} end validate with fast_result={self.fast_result}')
         self.val_result_queue.put((val_metrics, val_log_lst, global_step))
