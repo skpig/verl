@@ -4,7 +4,7 @@ import time
 import re
 import hdfs_io
 import torch
-from transformers import AutoConfig, AutoModelForCausalLM
+from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForTokenClassification
 from omnistore.utilities.ckpt_format.merge_tool import omnistore_ckpt_to_pytorch_ckpt
 from seed_models.commands.convert_to_megatron import convert_seed_models_to_megatron
 
@@ -56,8 +56,15 @@ if __name__ == '__main__':
     print(f'Merge omnistore checkpoint successfully! cost time: {time.time() - time_begin}s')
     config = AutoConfig.from_pretrained(hf_path)
 
+    if 'ForTokenClassification' in config.architectures[0]:
+        auto_model = AutoModelForTokenClassification
+    elif 'ForCausalLM' in config.architectures[0]:
+        auto_model = AutoModelForCausalLM
+    else:
+        raise NotImplementedError(f'Unknown architecture {config["architectures"]}')
+
     with torch.device('meta'):
-        model = AutoModelForCausalLM.from_config(config, torch_dtype=torch.bfloat16)
+        model = auto_model.from_config(config, torch_dtype=torch.bfloat16)
     model.to_empty(device='cpu')
 
     print(f'Step3: saving merged model to local {hf_path}')
