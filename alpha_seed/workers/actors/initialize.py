@@ -52,6 +52,7 @@ from verl.utils.fs import copy_local_path_from_hdfs
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed._tensor import Replicate, Shard
 from alpha_seed.models.transformers.parallel import TPSpec
+import warnings
 
 
 def calculate_device_mesh_shape(parallel_size):
@@ -256,12 +257,19 @@ def parallel_init_fsdp_fn(module: torch.nn.Module, shard_states: Dict[str, torch
 
     @torch.no_grad()
     def create_and_sync_state(param_name, state, is_param):
-        assert param_name in shard_states, f"{param_name} not loaded"
         device = torch.cuda.current_device()
         if is_param:
             param = torch.nn.Parameter(torch.empty_like(state.data, device=device), requires_grad=state.requires_grad)
         else:  # buffer
             param = torch.empty_like(state.data, device=device)
+        if param_name not in shard_states:
+            warnings.warn(f"{param_name} not found in shard states, init it from random")
+            assert is_param
+            if dist.get_rank() == 0:
+                shard_states[param_name] = torch.nn.Parameter(
+                    torch.randn_like(state, device=torch.cuda.current_device()))
+            else:
+                shard_states[param_name] = 0
         loaded = shard_states[param_name]
         if isinstance(loaded, (torch.nn.Parameter, torch.Tensor)):
             dist.broadcast(loaded.data.to(param.dtype), src=dist.get_rank())

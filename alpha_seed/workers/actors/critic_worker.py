@@ -146,7 +146,9 @@ class CriticWorker(Worker):
             warnings.simplefilter("ignore")
             setattr(critic_model_config, 'classifier_dropout', 0.)
             setattr(critic_model_config, '_moe_implementation', 'fused')
-
+            # NOTE: this is to support loading sft models directly
+            setattr(critic_model_config, "id2label", {0: "LABEL_0"})
+            setattr(critic_model_config, "label2id", {"LABEL_0": 0})
             critic_module = AutoModelForTokenClassification.from_config(critic_model_config,
                                                                         torch_dtype=torch_dtype,
                                                                         attn_implementation='flash_attention_2',
