@@ -853,15 +853,15 @@ class RayPPOTrainer(object):
                                             ground_truth=ground_truth,
                                             reward_style=reward_style)
 
+        # ensure errors in model_init will be raised
+        for fut in init_futures:
+            ray.get(fut)
+
         self.actor_rollout_wg.set_eos_callback_fn(sandbox_callback_fn)
         if self.standalone_rollout_wg is not None:
             self.standalone_rollout_wg.set_eos_callback_fn(sandbox_callback_fn)
         if self.use_standalone_validator:
             self.standalone_validator_wg.set_eos_callback_fn(sandbox_callback_fn)
-
-        # ensure errors in model_init will be raised
-        for fut in init_futures:
-            ray.get(fut)
 
     def save_checkpoint(self, specified_ckpt_version=None):
         """Save checkpoint to hdfs.
