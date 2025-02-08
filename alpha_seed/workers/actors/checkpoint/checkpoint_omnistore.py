@@ -77,7 +77,9 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
             raise ValueError(f'[rank-{self.rank}] Invalid hdfs path: {hdfs_path}, no global step section found.')
         hdfs_path = os.path.join(hdfs_path, f'global_step_{global_step}')
         assert check_ckpt_is_omnistore(hdfs_path), f'{hdfs_path} is not in omnistore checkpoint format, resume failed'
-        ckpt_state = {'model': self.model, 'optimizer': self.optimizer, 'extra_state': {}}
+        ckpt_state = {'model': self.model, 'extra_state': {}}
+        if self.optimizer:
+            ckpt_state['optimizer'] = self.optimizer
         RLFSDPCheckpointer.load(hdfs_path,
                                 ckpt_state,
                                 enable_shm_download_ckpt_tmp=enable_shm,
@@ -109,23 +111,21 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
 
         file_path_list = [(f'global_step_{global_step}/model',
                            os.path.join(path, f'global_step_{global_step}/model', f'__{self.rank}_0.distcp')),
-                          (f'global_step_{global_step}/optimizer',
-                           os.path.join(path, f'global_step_{global_step}/optimizer', f'__{self.rank}_0.distcp')),
                           (f'global_step_{global_step}/extra_state',
                            os.path.join(path, f'global_step_{global_step}/extra_state',
                                         f'extra_state_rank_{self.rank}.pt'))]
+        if self.optimizer:
+            file_path_list.append((f'global_step_{global_step}/optimizer',
+                                   os.path.join(path, f'global_step_{global_step}/optimizer',
+                                                f'__{self.rank}_0.distcp')))
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            ckpt_state = {
-                'model': self.model,
-                'optimizer': self.optimizer,
-                'extra_state': {
-                    'lr_scheduler':
-                        self.lr_scheduler if isinstance(self.lr_scheduler, dict) else self.lr_scheduler.state_dict(),
-                    'rng_state':
-                        self.get_rng_state(),
-                }
-            }
+            ckpt_state = {'model': self.model, 'extra_state': {'rng_state': self.get_rng_state(),}}
+            if self.optimizer:
+                ckpt_state['optimizer'] = self.optimizer
+            if self.lr_scheduler:
+                ckpt_state['extra_state']['lr_scheduler'] = self.lr_scheduler if isinstance(
+                    self.lr_scheduler, dict) else self.lr_scheduler.state_dict()
 
             print(f'[rank-{self.rank}]: Saving checkpoint to {os.path.abspath(path)} with omnistore FSDP')
             RLFSDPCheckpointer.save(
@@ -145,8 +145,9 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
                 file_path_list.append(
                     (f'global_step_{global_step}/model', os.path.join(path,
                                                                       f'global_step_{global_step}/model/.metadata')))
-                file_path_list.append((f'global_step_{global_step}/optimizer',
-                                       os.path.join(path, f'global_step_{global_step}/optimizer/.metadata')))
+                if self.optimizer:
+                    file_path_list.append((f'global_step_{global_step}/optimizer',
+                                           os.path.join(path, f'global_step_{global_step}/optimizer/.metadata')))
             for sub_folder_name, file_local_path in file_path_list:
                 file_local_path = os.path.abspath(file_local_path)
                 hdfs_path_sub_folder = os.path.join(hdfs_path, sub_folder_name)
