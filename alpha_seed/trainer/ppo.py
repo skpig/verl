@@ -765,16 +765,17 @@ class RayPPOTrainer(object):
         init_futures = []
 
         self.actor_rollout_wg.init_ndtimeline()
+        hybrid_master_address = self.actor_rollout_wg.get_master_addr()
+
         init_futures.append(self.actor_rollout_wg.init_model())
 
-        hybrid_master_address = self.actor_rollout_wg.get_master_addr()
         self.validation_manager.actor_rollout_wg = self.actor_rollout_wg
 
         if self.use_standalone_rollout:
             self.standalone_rollout_wg = self.all_wg['standalone_rollout']
             self.standalone_rollout_wg.init_ndtimeline()
-            init_futures.append(self.standalone_rollout_wg.init_model())
             standalone_rollout_address = self.standalone_rollout_wg.get_master_addr()
+            init_futures.append(self.standalone_rollout_wg.init_model())
             self.actor_rollout_wg.setup_standalone_worker_comm(hybrid_master_address, standalone_rollout_address,
                                                                "12345", "standalone_rollout")
             self.standalone_rollout_wg.setup_standalone_worker_comm(hybrid_master_address, standalone_rollout_address,
@@ -787,8 +788,8 @@ class RayPPOTrainer(object):
         if self.use_standalone_validator:
             self.standalone_validator_wg = self.all_wg['standalone_validator']
             self.standalone_validator_wg.init_ndtimeline()
-            init_futures.append(self.standalone_validator_wg.init_model())
             standalone_validator_address = self.standalone_validator_wg.get_master_addr()
+            init_futures.append(self.standalone_validator_wg.init_model())
             self.actor_rollout_wg.setup_standalone_worker_comm(hybrid_master_address, standalone_validator_address,
                                                                "14567", "standalone_validator")
             self.standalone_validator_wg.setup_standalone_worker_comm(hybrid_master_address,
