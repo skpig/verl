@@ -8,7 +8,7 @@ from torch.distributed.fsdp._runtime_utils import _lazy_init
 
 
 @torch.no_grad()
-def offload_fsdp_model_to_cpu(model: FSDP):
+def offload_fsdp_model_to_cpu(model: FSDP, empty_cache: bool = True):
     assert isinstance(model, FSDP)
     # lazy init FSDP model
     _lazy_init(model, model)
@@ -24,7 +24,8 @@ def offload_fsdp_model_to_cpu(model: FSDP):
         # the following still keeps id(._local_shard) != id(.data)
         flat_param._local_shard = flat_param.data
         assert id(flat_param._local_shard) != id(flat_param.data)
-    torch.cuda.empty_cache()
+    if empty_cache:
+        torch.cuda.empty_cache()
 
 
 @torch.no_grad()
@@ -41,3 +42,23 @@ def load_fsdp_model_to_gpu(model: FSDP):
         handle.flat_param_to(torch.device(f"cuda:{device_id}"), non_blocking=True)
         # the following still keeps id(._local_shard) != id(.data)
         flat_param._local_shard = flat_param.data
+
+
+@torch.no_grad()
+def offload_fsdp_optimizer(optimizer):
+    for param_group in optimizer.param_groups:
+        for param in param_group['params']:
+            state = optimizer.state[param]
+            for key, value in state.items():
+                if isinstance(value, torch.Tensor):
+                    state[key] = value.to("cpu", non_blocking=True)
+
+
+@torch.no_grad()
+def load_fsdp_optimizer(optimizer, device_id):
+    for param_group in optimizer.param_groups:
+        for param in param_group['params']:
+            state = optimizer.state[param]
+            for key, value in state.items():
+                if isinstance(value, torch.Tensor):
+                    state[key] = value.to(device_id, non_blocking=True)

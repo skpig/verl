@@ -255,7 +255,7 @@ class CriticWorker(Worker):
         return critic_module, critic_optimizer, critic_lr_scheduler, critic_model_config
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def to(self, device: str, model=True, optimizer=True):
+    def to(self, device: str, model=True, optimizer=True, model_empty_cache=True):
         assert device in ("cuda", "cpu")
         if self.config.model.fsdp_config.param_offload:
             return
@@ -266,7 +266,7 @@ class CriticWorker(Worker):
                 load_fsdp_optimizer(self.critic_optimizer, torch.cuda.current_device())
         elif device == "cpu":
             if model:
-                offload_fsdp_model_to_cpu(self.critic_module)
+                offload_fsdp_model_to_cpu(self.critic_module, model_empty_cache)
             if optimizer:
                 offload_fsdp_optimizer(self.critic_optimizer)
 
@@ -320,7 +320,7 @@ class CriticWorker(Worker):
             output = DataProto.from_dict(tensors={'values': values})
             output = self.gather_manager.postprocess_data(output)
         output = output.to('cpu')
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache()
         return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
@@ -360,7 +360,7 @@ class CriticWorker(Worker):
             output = self.gather_manager.postprocess_data(output)
 
         if self.config.train_memory_offload:
-            self.to("cpu")
+            self.to("cpu", model_empty_cache=False)
         output = output.to('cpu')
 
         log_gpu_memory_usage('After Critic update', logger=logger)

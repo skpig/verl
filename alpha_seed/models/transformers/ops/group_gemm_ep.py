@@ -10,6 +10,10 @@ class FusedMoeExpertFunctionEP(torch.autograd.Function):
         expert_output ([batch_size * seqlen, hidden_size]):
             full value of hidden states, matching with
             single-device result.
+        handle:
+            if async_op is specified, a handle will returned that
+            user should call handle.wait() to finish the last communication
+            operation to get correct expert_output
 
     backward output:
         gate_weights_grad ([batch_size * seqlen, topk]):
@@ -32,13 +36,14 @@ class FusedMoeExpertFunctionEP(torch.autograd.Function):
         fc1_2_weight,
         fc2_weight,
         ep_group: dist.ProcessGroup,
+        async_op: bool = False,
     ):
 
         # ==================== EP Region: init ======================
         # get owned expert range
         ctx._ep_group = ep_group
         ep_size = 1 if ep_group is None else dist.get_world_size(ep_group)
-        ep_rank = 1 if ep_group is None else dist.get_rank(ep_group)
+        ep_rank = 0 if ep_group is None else dist.get_rank(ep_group)
         assert num_experts % ep_size == 0
         local_num_experts = num_experts // ep_size
         expert_start = local_num_experts * ep_rank
@@ -63,8 +68,10 @@ class FusedMoeExpertFunctionEP(torch.autograd.Function):
 
         # =============== EP Region: get owned hidden dimension =================
         if ep_size > 1:
-            token_start = torch.sum(splits[:expert_start])
-            token_end = torch.sum(splits[:expert_end])
+            # use unsqueeze to skip cpu-gpu synchronize
+            cpu_splits = splits.cpu()
+            token_start = torch.sum(cpu_splits[:expert_start]).item()
+            token_end = torch.sum(cpu_splits[:expert_end]).item()
             splits = splits[expert_start:expert_end]
             scatter_output = scatter_output[token_start:token_end]
         # =============== EP Region: get owned hidden dimension =================
@@ -140,10 +147,12 @@ class FusedMoeExpertFunctionEP(torch.autograd.Function):
         # =============== EP Region: get overall expert output =================
 
         expert_output = moe_gather(fc2_output, scatter_index)
-        dist.all_reduce(expert_output, group=ep_group)
-
         # reshape the output with input shape
         output = expert_output.reshape(hidden_states.shape)
+
+        handle = None
+        if ep_size > 1:
+            handle = dist.all_reduce(output, group=ep_group, async_op=async_op)
 
         ctx.num_experts = num_experts
         ctx.save_for_backward(
@@ -164,10 +173,10 @@ class FusedMoeExpertFunctionEP(torch.autograd.Function):
         if ep_size > 1:
             ctx.start_end_tokens = (token_start, token_end)
 
-        return output
+        return output, handle
 
     @staticmethod
-    def backward(ctx, grad_output):
+    def backward(ctx, grad_output, grad_handle):
         (
             gate_weights,
             fc1_1_weight,
@@ -334,7 +343,9 @@ class FusedMoeExpertFunctionEP(torch.autograd.Function):
         # =============== EP Region ================
 
         grad_hidden_states = moe_gather(grad_scatter_output, scatter_index)
-        dist.all_reduce(grad_hidden_states, group=ep_group)
+
+        if ep_size > 1:
+            dist.all_reduce(grad_hidden_states, group=ep_group)
 
         # MOE Step 3-2: no grad
         # MOE Step 3-1: no grad
@@ -351,4 +362,5 @@ class FusedMoeExpertFunctionEP(torch.autograd.Function):
             grad_fc1_2_weight,  # fc1_2_weight
             grad_fc2_weight,  # fc2_weight
             None,  # ep_group
+            None,  # async_op
         )

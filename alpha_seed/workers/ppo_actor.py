@@ -32,7 +32,6 @@ from verl.trainer.ppo.actor import BasePPOActor
 from verl.utils.py_functional import append_to_dict
 from verl.utils.torch_functional import logprobs_from_logits, log_probs_from_logits_response_rmpad, get_unpad_data
 import verl.utils.torch_functional as verl_F
-from verl.utils.fsdp_utils import offload_fsdp_optimizer, load_fsdp_optimizer
 
 from verl.utils.model import compute_position_id_with_mask
 
@@ -47,6 +46,7 @@ from alpha_seed.models.transformers.monkey_patch import update_gate_ema
 from verl.utils.seqlen_balancing import rearrange_micro_batches, get_reverse_idx
 
 from alpha_seed.workers.actors import activation_offload
+from alpha_seed.workers.actors.offload import offload_fsdp_optimizer, load_fsdp_optimizer
 
 from contextlib import nullcontext
 import ray

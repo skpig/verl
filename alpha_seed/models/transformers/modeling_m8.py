@@ -20,13 +20,12 @@ import seed_models
 from seed_models.models.m8.modeling_m8 import (
     apply_rotary_pos_emb,
     repeat_kv,
-    _flash_attention_forward,
-    _flash_supports_window_size,
     KVMirrorManagerHook,
     KVMirrorManager,
     Cache,
     M8FusedMoeBlock,
 )
+from .modeling_flash_attention_utils import _flash_attention_forward, _flash_supports_window_size
 
 import torch
 from torch.distributed._tensor import Shard
@@ -211,6 +210,7 @@ def flash_attn2_rmpad_forward(
         training=self.training,
         layer_number=self.layer_idx,
         max_seqlen=max_seqlen,
+        varlen=True,
     )
 
     if self.config.use_context_groupnorm:
@@ -255,7 +255,7 @@ def _fused_moe_ep_forward(
     # MOE Step 2: compute experts with group gemm.
     routing_weights = routing_weights.bfloat16()
     hidden_states = hidden_states.bfloat16()
-    final_hidden_states = FusedMoeExpertFunctionEP.apply(
+    final_hidden_states, handle = FusedMoeExpertFunctionEP.apply(
         self.num_experts,
         routing_weights,
         selected_experts,

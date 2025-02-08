@@ -1,5 +1,5 @@
 """
-torchrun --nproc_per_node=4 tests/hybrid_engine/test_group_gemm_ep.py \
+torchrun --nproc_per_node=4 --master-port=12322 tests/parallelize/test_group_gemm_ep.py \
     2>&1 | tee test_op.log
 """
 import os
@@ -95,7 +95,7 @@ def compare_moe_expert_parallel():
     fc2_local = fc2.chunk(tp_size, dim=0)[tp_rank]
 
     # the first time maybe slow as triton kernel may need JIT compile
-    output = FusedMoeExpertFunctionEP.apply(
+    output, handle = FusedMoeExpertFunctionEP.apply(
         num_experts,
         gate_weights,
         expert_index,
@@ -105,6 +105,7 @@ def compare_moe_expert_parallel():
         fc2_local,
         tp_group,
     )
+    # handle.wait()
     output.sum().backward()
 
     dist.all_reduce(fc1_1.grad)

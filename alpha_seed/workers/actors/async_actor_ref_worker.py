@@ -671,7 +671,6 @@ class AsyncActorRolloutRefWorker(Worker):
         output = output.to('cpu')
 
         # clear kv cache
-        torch.cuda.empty_cache()
         log_gpu_memory_usage('After recompute log prob', logger=logger)
         return output
 
@@ -815,7 +814,6 @@ class AsyncActorRolloutRefWorker(Worker):
             'memory/ref_max_reserved': max_memory_reserved
         })
         output = output.to('cpu')
-        torch.cuda.empty_cache()
         return output
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)

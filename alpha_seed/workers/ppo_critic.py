@@ -29,7 +29,6 @@ from verl.trainer.ppo.critic import BasePPOCritic
 from verl.utils.py_functional import append_to_dict
 from verl.utils.torch_functional import masked_mean
 from verl.utils.model import compute_position_id_with_mask
-from verl.utils.fsdp_utils import offload_fsdp_optimizer, load_fsdp_optimizer
 
 from tensordict import TensorDict
 
@@ -37,6 +36,7 @@ from alpha_seed.workers.actors import activation_offload
 from alpha_seed.workers.hybrid_engine.fsdp_gather import ulysses_pad_and_slice_inputs
 from alpha_seed.models.transformers.ops import clip_grad_norm_
 from alpha_seed import core_algos
+from alpha_seed.workers.actors.offload import offload_fsdp_optimizer, load_fsdp_optimizer
 
 from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
 from dist_attn.ulysses.ops import gather_outputs
