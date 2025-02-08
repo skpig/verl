@@ -93,7 +93,7 @@ def post_process_solution_str(config, solution_str):
     return solution_str_post_proc
 
 
-@ray.remote(num_cpus=1)
+@ray.remote(num_cpus=2)
 class RemoteClient:
     """
     A centralized remote client that pipelines any function with generation at [EOS] 
@@ -807,7 +807,8 @@ def config_to_trainer_kwargs(config):
         val_reward_fn = RewardManager(tokenizer=tokenizer, config=config, logger=logger, rm_name="val")
 
         # we will always start a remote client
-        kwargs['remote_client'] = RemoteClient.options(name='remote_client').remote(config=config, tokenizer=tokenizer)
+        kwargs['remote_client'] = RemoteClient.options(name='remote_client',
+                                                       max_concurrency=10).remote(config=config, tokenizer=tokenizer)
 
         kwargs['tokenizer'] = tokenizer
         kwargs['logger'] = logger
