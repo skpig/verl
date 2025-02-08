@@ -13,8 +13,8 @@ TEST_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlh
 default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/test/p6_400m_omnistore_test_1
 
 # 训练长度
-max_prompt_length=1024
-max_response_length=2048
+max_prompt_length=128
+max_response_length=128
 # batch size && 训练epoch
 train_batch_size=512
 ppo_mini_batch_size=320
@@ -94,7 +94,7 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.rollout.name=xperf_gpt \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.2 \
     +actor_rollout_ref.rollout.num_slots=256 \
-    +actor_rollout_ref.rollout.slot_block_size=1024 \
+    +actor_rollout_ref.rollout.slot_block_size=256 \
     actor_rollout_ref.ref.log_prob_micro_batch_size=${infer_micro_batch_size} \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.scale_pg_by_kl=False \
@@ -143,7 +143,7 @@ python3 tasks/main_ppo.py \
     trainer.save_freq=${save_freq} \
     trainer.test_freq=${test_freq} \
     trainer.total_epochs=${total_epochs} \
-    trainer.eval_before_training=True \
+    trainer.eval_before_training=False \
     trainer.val_only=False \
     trainer.val_epoch=1 \
     trainer.need_log=False \

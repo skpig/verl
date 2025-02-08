@@ -2,7 +2,7 @@ name: unit tests
 trigger:
   change
 jobs:
-  e2e_runnable_tests:
+  e2e_runnable_tests_2:
     # Merlin - data.aml.verl:v85
     image: hub.byted.org/reckon/data.reckon.mlx.image_5940:5d8d8b56cf680f0c733e63b516035223
     if: ${{ !contains(Event.Change.Title, "WIP") }}
@@ -44,7 +44,6 @@ jobs:
           - cd verl
           - pip3 install -e . --user
           - pip3 install bytedance.ndtimeline==2.2.8
-
       - name: math v1 ppo async and grpo
         commands:
           - cd -
@@ -54,6 +53,6 @@ jobs:
           - wandb offline
           - ray stop --force
           - ray start --num-cpus=100 --head
-          - bash tasks_scripts/ci/run_p6d_0b5_math_v1_grpo_kl0.sh
-          - bash tasks_scripts/ci/run_m8_100m_math_v1_grpo.sh
+          - bash tasks_scripts/ci/run_p6d_0b5_math_v1_ppo_async.sh
+          - bash tasks_scripts/ci/run_p6d_0b5_math_v1_grpo.sh
           - ray stop --force

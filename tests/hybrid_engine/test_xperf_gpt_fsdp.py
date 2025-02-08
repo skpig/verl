@@ -32,7 +32,7 @@ p6_path = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl
 p6dense_path = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/P6.1_12B_32k_SFT29_Fix_RoPE_Base_hf'
 # p6dense_path1 = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/models/p6dense-0.5B-Instruct'
 p7_path = 'hdfs://haruna/home/byte_data_seed/ssd_lq/public/seed_models/Seed-2B5-P7_32k_sft29_32gpu'
-m8_path = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/25B_MoE_SFT29_32k_bsz6_lr2e5_tp4_hf'
+m8_path = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/M8_680m_SFT_hf'
 p6_path_qwen = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/qwen2.5_32b_v3.1.2_o1-mini-monologue_241201_hf'
 
 from verl.utils.seed import CHAT_TEMPLATE
@@ -80,9 +80,9 @@ rollout_config = OmegaConf.create({
     'prompt_length': 256,
     'response_length': 2048,
     'micro_batch_size': 128,
-    'tensor_model_parallel_size': 8,
+    'tensor_model_parallel_size': 2,
     'train_generate_kwargs': {
-        'do_sample': False,
+        'do_sample': True,
         'top_k': 0,
         'top_p': 1.,
         'temperature': 1.,

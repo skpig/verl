@@ -1,3 +1,5 @@
+# for CI purpose only. The model is randomly initialized
+
 set -x
 
 NUM_STEPS="${NUM_STEPS:-120}"
@@ -6,7 +8,7 @@ echo $NUM_STEPS
 N_GPUS_PER_NODE="${N_GPUS_PER_NODE:-8}"
 
 # ckpt和路径
-SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/models/p6dense-0.5B-Instruct
+SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/models/m8_100m_random
 RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/rm_p6_moe_400m_0716_sftv27_stage2_hf
 TRAIN_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/train_with_ref_ans.parquet
 TEST_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/test_with_ref_ans.parquet
@@ -145,7 +147,7 @@ python3 tasks/main_ppo.py \
     trainer.save_freq=${save_freq} \
     trainer.test_freq=${test_freq} \
     trainer.total_epochs=${total_epochs} \
-    trainer.eval_before_training=False \
+    trainer.eval_before_training=True \
     trainer.val_only=False \
     trainer.val_epoch=1 \
     trainer.need_log=False \
