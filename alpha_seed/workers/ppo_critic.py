@@ -112,6 +112,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                 total_s = input_ids_rmpad.size(1)
                 input_ids_rmpad, position_ids_rmpad, pad_size = ulysses_pad_and_slice_inputs(
                     input_ids_rmpad, position_ids_rmpad, sp_size)
+                seqlen_rmpad = input_ids_rmpad.size(1)
                 # forward
                 with self.act_offload_ctx:
                     values_rmpad = self.critic_module(input_ids=input_ids_rmpad,
@@ -135,7 +136,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                                             use_cache=False)  # prevent model thinks we are generating
                 values = output.logits
             values = values[:, -response_length - 1:-1]
-            return values
+            return values, seqlen_rmpad
 
     def _make_minibatch_iterator(self, data: DataProto) -> Iterable[DataProto]:
         select_keys = ['input_ids', 'responses', 'attention_mask', 'values', 'returns']
@@ -200,7 +201,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                 for micro_batch in micro_batches:
                     assert micro_batch.device == torch.device('cpu')
                     micro_batch = micro_batch.cuda()  # actor device is cpu when using offload
-                    values = self._forward_micro_batch(micro_batch)
+                    values, _ = self._forward_micro_batch(micro_batch)
                     mini_batch_values.append(values)
             # release root module unshard memory
             self.critic_module._handle.reshard(True)
@@ -262,7 +263,7 @@ class DataParallelPPOCritic(BasePPOCritic):
 
                     eos_mask = attention_mask[:, -response_length - 1:-1]
 
-                    vpreds = self._forward_micro_batch(micro_data)
+                    vpreds, seqlen = self._forward_micro_batch(micro_data)
 
                     # assert not torch.any(torch.isnan(vpreds)).item()
 
@@ -283,6 +284,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                         'critic/vf_clipfrac': vf_clipfrac.detach().item(),
                         'critic/vpred_mean': masked_mean(vpreds, eos_mask).detach().item(),
                         'critic/tokens_per_micro_batch_update': attention_mask.sum().detach().item(),
+                        'critic/seqlen': seqlen,
                     }
 
                     append_to_dict(metrics, micro_data_metric)

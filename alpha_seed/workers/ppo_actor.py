@@ -137,6 +137,8 @@ class DataParallelPPOActor(BasePPOActor):
             input_ids_rmpad_rolled = input_ids_rmpad_rolled.squeeze(0)
             batch_size, seqlen = input_ids.shape
 
+            seqlen_rmpad = input_ids_rmpad.size(1)
+
             # forward
             if self.use_ce_loss_fusion and not compute_entropy:
                 # forward with lm_head CE fusion
@@ -203,7 +205,7 @@ class DataParallelPPOActor(BasePPOActor):
             else:
                 entropy = None
 
-            return entropy, log_probs
+            return entropy, log_probs, seqlen_rmpad
 
     def _make_minibatch_iterator(self, data: DataProto) -> Iterable[DataProto]:
         select_keys = ['responses', 'input_ids', 'attention_mask', 'old_log_probs', 'advantages', 'upgo_advantages']
@@ -273,9 +275,9 @@ class DataParallelPPOActor(BasePPOActor):
                 for i, micro_batch in enumerate(micro_batches):
                     assert micro_batch.device == torch.device('cpu')
                     micro_batch = micro_batch.cuda()
-                    entropy, log_probs = self._forward_micro_batch(micro_batch=micro_batch,
-                                                                   temperature=temperature,
-                                                                   compute_entropy=True)
+                    entropy, log_probs, _ = self._forward_micro_batch(micro_batch=micro_batch,
+                                                                      temperature=temperature,
+                                                                      compute_entropy=True)
                     mini_batch_log_prob.append(log_probs)
                     mini_batch_entropy.append(entropy)
             # release root module unshard memory
@@ -367,9 +369,9 @@ class DataParallelPPOActor(BasePPOActor):
                     else:
                         compute_entropy = True
 
-                    full_entropy, log_prob = self._forward_micro_batch(micro_batch=micro_data,
-                                                                       temperature=temperature,
-                                                                       compute_entropy=compute_entropy)
+                    full_entropy, log_prob, seqlen = self._forward_micro_batch(micro_batch=micro_data,
+                                                                               temperature=temperature,
+                                                                               compute_entropy=compute_entropy)
 
                     total_loss, pg_loss, upgo_loss, pg_clipfrac, pg_clipfrac2, ppo_kl, ppo_kl_sum = core_algos.compute_policy_loss(
                         old_log_prob=old_log_prob,
@@ -419,6 +421,7 @@ class DataParallelPPOActor(BasePPOActor):
                         'actor/ppo_kl': ppo_kl.detach().item(),
                         'actor/ppo_kl_sum': ppo_kl_sum.detach().item(),
                         'actor/tokens_per_micro_batch_update': attention_mask.sum().detach().item(),
+                        'actor/seqlen': seqlen,
                     }
 
                     if batch_idx == 0:
@@ -443,7 +446,7 @@ class DataParallelPPOActor(BasePPOActor):
 
                 data_metric = {
                     'actor/grad_norm': grad_norm.detach().item(),
-                    'actor/#micro_batch_update': len(micro_batches)
+                    'actor/#micro_batch_update': len(micro_batches),
                 }
                 append_to_dict(metrics, data_metric)
 
