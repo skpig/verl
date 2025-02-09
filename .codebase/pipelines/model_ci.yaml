@@ -46,6 +46,7 @@ jobs:
           - pytest -s tests/models/transformers/test_ce_loss_op.py
       - name: parallelize tests
         commands:
+          - export export NCCL_SHM_DISABLE=1
           - export PYTHONPATH=/opt/tiger/seed_models:/opt/tiger/verl/:$PYTHONPATH
           - pytest tests/parallelize/test_create_mesh.py
           - pytest tests/parallelize/test_parallel_init.py

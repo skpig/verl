@@ -24,6 +24,8 @@ from functools import partial
 import os
 from .test_parallel_init import DummyModel, tp_plan, MLP
 from alpha_seed.models.transformers.parallel.parallelize import parallelize_module
+import torch.distributed.checkpoint as dcp
+import tempfile
 
 os.environ['NCCL_DEBUG'] = '0'
 
@@ -77,6 +79,7 @@ def train_one_step(model, optimizer):
     optimizer.zero_grad()
     output = model(input_ids)
     loss = torch.sum(output)
+    loss.backward()
 
     gnorm = clip_grad_norm_(model, max_norm=1.0)
     optimizer.step()
@@ -124,32 +127,94 @@ def load_v1(model, optimizer, folder):
     print_each_rank(f"finished loading checkpoint from {filepath}.")
 
 
-def model_save_load_fsdp_tp(fsdp_size: int, tp_size: int):
+def save_dcp(model, optimizer, folder):
+    if dist.get_rank() == 0:
+        os.makedirs(folder, exist_ok=True)
+    dist.barrier()
+    state_dict_cfg = ShardedStateDictConfig(offload_to_cpu=True)
+    optim_cfg = ShardedOptimStateDictConfig(offload_to_cpu=True)
+    with FSDP.state_dict_type(model, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg):
+        model_state_dict = model.state_dict()
+        optimizer_state_dict = FSDP.optim_state_dict(model, optimizer)
+        state = {"model": model_state_dict, "optimizer": optimizer_state_dict}
+    dcp.save(state, checkpoint_id=folder)
+    # save rng
+    filename = f"rng_rank_{dist.get_rank()}.pt"
+    rng = {
+        'cpu': torch.random.get_rng_state(),
+        'cuda': torch.cuda.get_rng_state(),
+        'numpy': np.random.get_state(),
+        'random': random.getstate(),
+    }
+    torch.save(rng, os.path.join(folder, filename))
+    print_each_rank(f"finished saving checkpoint to {folder}")
 
+
+def load_dcp(model, optimizer, folder):
+    # load model and state
+    with FSDP.state_dict_type(model, StateDictType.SHARDED_STATE_DICT):
+        ckpt = {
+            "model": model.state_dict(),
+            "optimizer": FSDP.optim_state_dict(model, optimizer),
+        }
+        dcp.load(ckpt, checkpoint_id=folder)
+        model.load_state_dict(ckpt["model"])
+        optimizer_state_dict = FSDP.optim_state_dict_to_load(model, optimizer, ckpt["optimizer"])
+        optimizer.load_state_dict(optimizer_state_dict)
+    # load rng
+    filename = f"rng_rank_{dist.get_rank()}.pt"
+    rng = torch.load(os.path.join(folder, filename))
+    torch.cuda.random.set_rng_state(rng['cuda'])
+    torch.random.set_rng_state(rng['cpu'])
+    np.random.set_state(rng['numpy'])
+    random.setstate(rng['random'])
+    print_each_rank(f"finished loading checkpoint from {folder}.")
+
+
+def model_save_load_fsdp_tp(fsdp_size: int, tp_size: int, version='v1'):
+
+    # cannot use tempfile here because every rank gets a different one
+    tmpdir = "/tmp/ckpt_12321"
     model, optim, meshes = build_model(fsdp_size=fsdp_size, tp_size=tp_size)
 
     iter_res = []
 
     iter_res.append(train_one_step(model, optim))
     # save
-    save_v1(model, optim, "/tmp/ckpt")
+    if version == 'v1':
+        save_v1(model, optim, tmpdir)
+    elif version == 'dcp':
+        save_dcp(model, optim, tmpdir)
+    else:
+        raise NotImplementedError()
     # train 2 steps
     iter_res.append(train_one_step(model, optim))
     iter_res.append(train_one_step(model, optim))
     # load
-    load_v1(model, optim, "/tmp/ckpt")
+    if version == 'v1':
+        load_v1(model, optim, tmpdir)
+    elif version == 'dcp':
+        load_dcp(model, optim, tmpdir)
+    else:
+        raise NotImplementedError()
     # train 2 steps
     iter_res.append(train_one_step(model, optim))
     iter_res.append(train_one_step(model, optim))
 
     # bitwise resume correct
-    assert torch.allclose(iter_res[-1][0], iter_res[-3][0], rtol=0, atol=0)
-    assert torch.allclose(iter_res[-1][1], iter_res[-3][1], rtol=0, atol=0)
-    assert torch.allclose(iter_res[-2][0], iter_res[-4][0], rtol=0, atol=0)
-    assert torch.allclose(iter_res[-2][1], iter_res[-4][1], rtol=0, atol=0)
+    torch.testing.assert_close(iter_res[-1][0], iter_res[-3][0], rtol=0, atol=0)
+    torch.testing.assert_close(iter_res[-1][1], iter_res[-3][1], rtol=0, atol=0)
+    torch.testing.assert_close(iter_res[-2][0], iter_res[-4][0], rtol=0, atol=0)
+    torch.testing.assert_close(iter_res[-2][1], iter_res[-4][1], rtol=0, atol=0)
 
 
-test_model_save_load_fsdp_v1 = partial(torchrun, 4, model_save_load_fsdp_tp, 4, 1)
-test_model_save_load_hsdp_v1 = partial(torchrun, 4, model_save_load_fsdp_tp, 2, 1)
-test_model_save_load_fsdp_tp_v1 = partial(torchrun, 4, model_save_load_fsdp_tp, 2, 2)
-test_model_save_load_hsdp_tp_v1 = partial(torchrun, 8, model_save_load_fsdp_tp, 2, 2)
+# v1 test
+test_model_save_load_fsdp_v1 = partial(torchrun, 4, model_save_load_fsdp_tp, 4, 1, 'v1')
+test_model_save_load_hsdp_v1 = partial(torchrun, 4, model_save_load_fsdp_tp, 2, 1, 'v1')
+test_model_save_load_fsdp_tp_v1 = partial(torchrun, 4, model_save_load_fsdp_tp, 2, 2, 'v1')
+test_model_save_load_hsdp_tp_v1 = partial(torchrun, 8, model_save_load_fsdp_tp, 2, 2, 'v1')
+# dcp test
+test_model_save_load_fsdp_dcp = partial(torchrun, 4, model_save_load_fsdp_tp, 4, 1, 'dcp')
+test_model_save_load_hsdp_dcp = partial(torchrun, 4, model_save_load_fsdp_tp, 2, 1, 'dcp')
+test_model_save_load_fsdp_tp_dcp = partial(torchrun, 4, model_save_load_fsdp_tp, 2, 2, 'dcp')
+test_model_save_load_hsdp_tp_dcp = partial(torchrun, 8, model_save_load_fsdp_tp, 2, 2, 'dcp')

@@ -12,14 +12,15 @@ def torchrun(ngpus, test_fn, *args, **kwargs):
 
     test_xxx = functools.partial(torchrun, 2, example)
     """
+    assert len(kwargs) == 0, f"kwargs not supported"
     if ngpus == 1:
-        return test_fn(*args, **kwargs)
+        return test_fn(*args)
     else:
         os.environ["MASTER_ADDR"] = "localhost"
         os.environ["MASTER_PORT"] = str(random.randint(10000, 60000))
         spawn(
             entry_fn,
-            args=(ngpus, test_fn, *args, *kwargs),
+            args=(ngpus, test_fn, *args),
             nprocs=ngpus,
         )
 
