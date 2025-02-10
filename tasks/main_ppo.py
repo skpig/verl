@@ -34,7 +34,7 @@ from datetime import datetime
 from multiprocessing import Process
 from collections import Counter
 # rule-based reward score
-from alpha_seed.utils.reward_score import math_v1, verifier_service, gsm8k, math_v2, model_score_fn, logic_puzzle, oj_utils, math_verifier, response_post_proc, gpqa_verifier, math_deepscale
+from alpha_seed.utils.reward_score import math_v1, verifier_service, gsm8k, math_v2, model_score_fn, logic_puzzle, oj_utils, math_verifier, response_post_proc, gpqa_verifier, math_deepscale, code_local_verifier
 from alpha_seed.utils.duplicate import para_dup
 from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRefWorker
 from alpha_seed.workers.actors.critic_worker import CriticWorker
@@ -61,6 +61,8 @@ def _select_rm_score_fn(reward_style):
         return model_score_fn.raw_score_reflection_penalty
     elif reward_style == "code-sandbox":
         return oj_utils.compute_score_client
+    elif reward_style == "code-localexec":
+        return code_local_verifier.compute_score
     elif reward_style == 'rule-openai/gsm8k':
         return gsm8k.compute_score
     elif reward_style == 'rule-lighteval/MATH':
