@@ -532,14 +532,15 @@ class AsyncActorRolloutRefWorker(Worker):
                                               metrics_context=self.metrics_context)
 
         if self._is_ref:
-            self.ref_module_fsdp = self._build_model_optimizer(model_path=self.config.model.path,
-                                                               fsdp_config=self.config.ref.fsdp_config,
-                                                               optim_config=None,
-                                                               use_rmpad=use_rmpad,
-                                                               override_model_config=override_model_config,
-                                                               trust_remote_code=self.config.model.get(
-                                                                   'trust_remote_code', False),
-                                                               role='ref')[0]
+            self.ref_module_fsdp = self._build_model_optimizer(
+                model_path=self.config.model.path,
+                fsdp_config=self.config.ref.fsdp_config,
+                optim_config=None,
+                use_rmpad=use_rmpad,
+                override_model_config=override_model_config,
+                enable_gradient_checkpointing=self.config.model.get('enable_gradient_checkpointing', False),
+                trust_remote_code=self.config.model.get('trust_remote_code', False),
+                role='ref')[0]
             self.ref_module_fsdp.eval()
 
             OmegaConf.set_struct(self.config.ref, True)
