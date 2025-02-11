@@ -55,10 +55,10 @@ class ValidateManager(object):
             self.val_thread.join()
             if self.val_result_queue.qsize() > 0:
                 val_metrics, val_log_lst, val_step = self.val_result_queue.get()
-                for metric in val_metrics.keys():
-                    wandb.define_metric(metric, step_metric="val_step")
-                val_metrics["val_step"] = val_step
                 if not self.fast_result:
+                    for metric in val_metrics.keys():
+                        wandb.define_metric(metric, step_metric="val_step")
+                    val_metrics["val_step"] = val_step
                     self.logger.log(data=val_metrics, step=global_step)
                     for val_log in val_log_lst:
                         if val_log is not None:
@@ -327,6 +327,9 @@ class ValidateManager(object):
             pprint(f'Initial validation metrics: {val_metrics}')
 
         if self.fast_result:
+            for metric in val_metrics.keys():
+                wandb.define_metric(metric, step_metric="val_step")
+            val_metrics["val_step"] = global_step
             self.logger.log(data=val_metrics, step=global_step)
             for val_log in val_log_lst:
                 if val_log is not None:
