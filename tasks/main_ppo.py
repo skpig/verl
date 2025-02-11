@@ -81,7 +81,8 @@ def _select_rm_score_fn(reward_style):
         raise NotImplementedError
 
 
-def post_process_solution_str(config, solution_str):
+def post_process_solution_str(config, solution_str, eos_token):
+    solution_str = solution_str.rsplit(eos_token, 1)[0]
     if config.reward_model.use_last_response == 'summarize':
         solution_str_post_proc = response_post_proc.summary_postprocess(
             solution_str,
@@ -189,6 +190,11 @@ class RewardManager():
             for k, v in self.len_ema.items():
                 self.len_ema[k] = torch.tensor(v, dtype=torch.float32)
 
+        if self.config.reward_model.add_int_verify:
+            warnings.warn(
+                "int_verify is deprecated and needs attention. It selects the last integer and judges its correctness, which could lead to unexpected behaviour. Robust verification like \\boxed{} is recommended."
+            )
+
     def update_len_ema(self, data: DataProto):
         index = data.non_tensor_batch['index']
         lengths = data.batch['attention_mask'][:, self.config.data.max_prompt_length:].sum(-1)
@@ -265,7 +271,9 @@ class RewardManager():
             prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=False)
             solution_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=False)
 
-            solution_str_post_proc = post_process_solution_str(config=self.config, solution_str=solution_str)
+            solution_str_post_proc = post_process_solution_str(config=self.config,
+                                                               solution_str=solution_str,
+                                                               eos_token=self.tokenizer.eos_token)
 
             format_reward = 0  # 默认是0
             pause_tokens_index = None
