@@ -2,14 +2,10 @@
 torchrun --nproc_per_node=$ARNOLD_WORKER_GPU --nnodes=$ARNOLD_WORKER_NUM --node_rank=$ARNOLD_ID \
     --master_addr=$ARNOLD_WORKER_0_HOST --master_port=12321 \
     tests/hybrid_engine/test_parallel.py \
-    --model m8 --fsdp-size 4 --tp-size 2 --sp-size 2 --offload \
+    --model hdfs://harunava/home/byte_data_seed_us/hdd_va/user/zhiqi.0/rlhf/m8_2B5_sft \
+    --tp-size 2 --sp-size 2 --grad-accum 4 --max-token 16384 --seqlen 16384 \
     2>&1 | tee log.txt
 
-torchrun --nproc_per_node=4 --nnodes=$ARNOLD_WORKER_NUM --node_rank=$ARNOLD_ID \
-    --master_addr=$ARNOLD_WORKER_0_HOST --master_port=12321 \
-    tests/hybrid_engine/test_parallel.py \
-    --model m8 --fsdp-size 4 --tp-size 2 --sp-size 2 --offload \
-    2>&1 | tee log.txt
 """
 import warnings
 
@@ -24,7 +20,7 @@ os.environ['NCCL_DEBUG'] = '0'
 
 # make deterministic
 
-deterministic = True
+deterministic = False
 
 if deterministic:
     os.environ['FLASH_ATTENTION_DETERMINISTIC'] = '1'
@@ -40,7 +36,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed._tensor import DTensor, Shard
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp import StateDictType, CPUOffload
+from torch.distributed.fsdp import StateDictType
 from torch.distributed.fsdp.api import ShardingStrategy, MixedPrecision
 from transformers import AutoConfig, AutoModelForCausalLM
 from alpha_seed.workers.actors.initialize import create_mesh, parallel_load_safetensors, parallel_init_fsdp_fn, meta_device_init
@@ -51,23 +47,25 @@ from alpha_seed.models.transformers.monkey_patch import apply_monkey_patch
 from alpha_seed.workers.actors.checkpoint.extensions import register_dtensor_save_hook
 from alpha_seed.models.transformers.parallel import apply_parallel_plan
 from alpha_seed.models.transformers.ops import clip_grad_norm_
+from alpha_seed.workers.actors.offload import offload_fsdp_optimizer, load_fsdp_optimizer
 
-from verl.utils.debug import get_profiler_context
+from verl.utils.debug import get_profiler_context, MemoryProfiler
 from verl.utils.fs import copy_local_path_from_hdfs
 from verl.utils.fsdp_utils import get_fsdp_wrap_policy
 from tests.hybrid_engine.utils import prepare_data, print_each_rank, ref_loss_fn
+from flash_attn.ops.triton.cross_entropy import cross_entropy_loss
 import time
 from tqdm import trange
 import numpy as np
 import random
 import argparse
+import verl.utils.torch_functional as verl_F
 
-p7_path = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/20241123/1118a2_2.5b'
-# m8_path = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/25B_MoE_SFT29_32k_bsz6_lr2e5_tp4_hf'
-m8_path = 'hdfs://harunava/home/byte_data_seed_us/hdd_va/user/zhiqi.0/rlhf/m8_2B5_sft'
+# p7_path = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/20241123/1118a2_2.5b'
+# m8_path = 'hdfs://harunava/home/byte_data_seed_us/hdd_va/user/zhiqi.0/rlhf/m8_2B5_sft'
 
 
-def init_model(model_path: str, fsdp_size: int, tp_size: int, sp_size: int, offload: bool):
+def init_model(model_path: str, fsdp_size: int, tp_size: int, sp_size: int):
 
     meshes = create_mesh(fsdp_size, tp_size, sp_size)
     fsdp_mesh, tp_mesh = meshes[:2]
@@ -81,13 +79,19 @@ def init_model(model_path: str, fsdp_size: int, tp_size: int, sp_size: int, offl
         setattr(config, 'attention_dropout', 0.0)
         setattr(config, 'resid_pdrop', 0.0)
 
+        # shrink layer
+        # setattr(config, 'num_hidden_layers', 10)
+        # setattr(config, "kv_mirror_imitated_layers", list(range(0, 2)))
+        # setattr(config, "kv_mirror_layers", list(range(8, 10)))
+        # setattr(config, "pre_post_layernorm_layers", list(range(0, 10)))
+
         # monkey patch
         apply_monkey_patch(config)
         model = AutoModelForCausalLM.from_config(config=config,
                                                  torch_dtype=torch.float32,
                                                  attn_implementation="flash_attention_2")
         # enable recompute
-        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': True})
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': False})
 
         nparams = sum(p.numel() for p in model.parameters())
         print_each_rank(f"number of parameters before parallelization: {nparams / (1e9):.2f}B")
@@ -100,7 +104,6 @@ def init_model(model_path: str, fsdp_size: int, tp_size: int, sp_size: int, offl
     print_each_rank(f"After init from HF model: {torch.cuda.memory_allocated() / (1024**3):.2f} GB")
 
     mixed_precision = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.float32, buffer_dtype=torch.float32)
-    cpu_offload = CPUOffload(offload_params=offload)
     auto_wrap_policy = get_fsdp_wrap_policy(module=model)
 
     shards = parallel_load_safetensors(model_path)
@@ -114,17 +117,39 @@ def init_model(model_path: str, fsdp_size: int, tp_size: int, sp_size: int, offl
                  auto_wrap_policy=auto_wrap_policy,
                  sharding_strategy=strategy,
                  mixed_precision=mixed_precision,
-                 cpu_offload=cpu_offload,
+                 cpu_offload=None,
                  forward_prefetch=True,
                  sync_module_states=False,
                  device_id=torch.cuda.current_device(),
                  device_mesh=fsdp_mesh)
+    if len(shards) > 0:
+        warnings.warn(
+            "detected some parameter is not loaded in the model. Ignore this warning if you shrink the model layers.")
+        shards.clear()
 
     register_dtensor_save_hook(model, shard_plan)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
     print_each_rank(f"After FSDP init: memory: {torch.cuda.memory_allocated() / (1024**3):.2f} GB")
     return model, optimizer, meshes
+
+
+def init_random_data(seqlen: int, max_token: int):
+
+    num_seqs = max_token // seqlen
+    assert num_seqs >= 1
+    seqs = [seqlen] * num_seqs + [max_token % seqlen]
+    input_ids, position_ids = [], []
+    device = torch.cuda.current_device()
+    for seq in seqs:
+        input_ids += [torch.randint(0, 8192, size=(seq,), dtype=torch.long, device=device)]
+        position_ids += [torch.arange(seq, dtype=torch.long, device=device)]
+    input_ids = torch.concat(input_ids).unsqueeze(0)
+    assert input_ids.size(1) == max_token
+    position_ids = torch.concat(position_ids).unsqueeze(0)
+    input_ids_rolled = torch.roll(input_ids, shifts=-1, dims=1).squeeze(0)
+    masks = torch.ones_like(input_ids).squeeze(0)
+    return input_ids, input_ids_rolled, masks, position_ids, seqs
 
 
 @torch.no_grad()
@@ -144,7 +169,7 @@ def train(model, optimizer, meshes, steps: int = 20, profile_to_mlx: bool = Fals
     world_size = dist.get_world_size()
 
     profile_context = get_profiler_context(
-        filename=f"profile_{dist.get_rank()}",
+        filename=f"rank{dist.get_rank()}.seqlen.{args.seqlen}",
         profile_on_ranks=[0],
         upload_to_mlx=profile_to_mlx,
         default_hdfs_dir="/opt/tiger/alpha-seed/profile",
@@ -154,60 +179,81 @@ def train(model, optimizer, meshes, steps: int = 20, profile_to_mlx: bool = Fals
         active=1,
     )
 
+    memory_profiler = MemoryProfiler(filename='./memory',
+                                     enable=torch.distributed.get_rank() == 0,
+                                     upload_to_mlx=profile_to_mlx,
+                                     wait=2 * args.grad_accum - 1,
+                                     active=1)
+
     bar = trange(steps, total=steps, disable=dist.get_rank() != 0)
 
     for step in range(steps):
-        torch.manual_seed(42)
 
-        if step == 2:
-            save_checkpoint(model, optimizer, "checkpoint/")
-        if step == 5:
-            load_checkpoint(model, optimizer, "checkpoint/")
+        if args.test_save_load:
+            if step == 2:
+                save_checkpoint(model, optimizer, "checkpoint/")
+            if step == 5:
+                load_checkpoint(model, optimizer, "checkpoint/")
 
-        input_ids, input_ids_rolled, masks, position_ids = prepare_data()
+        input_ids, input_ids_rolled, masks, position_ids, seqs = init_random_data(args.seqlen, args.max_token)
 
         with profile_context as prof:
 
+            torch.manual_seed(gather_mesh.get_local_rank())
             torch.cuda.synchronize()
             start = time.time()
 
-            if sp_mesh.size() > 1:
+            if gather_mesh.size() > 1:
                 input_ids = gather_inputs(input_ids, gather_mesh, gather_dim=1)
                 input_ids_rolled = gather_inputs(input_ids_rolled, gather_mesh, gather_dim=0)
                 position_ids = gather_inputs(position_ids, gather_mesh, gather_dim=1)
                 masks = gather_inputs(masks, gather_mesh, gather_dim=0)
                 unpad_size = input_ids.size(1)
                 input_ids, position_ids, _ = ulysses_pad_and_slice_inputs(input_ids, position_ids, sp_mesh.size())
+                input_ids_rolled, _, _ = ulysses_pad_and_slice_inputs(input_ids_rolled.unsqueeze(0), None,
+                                                                      sp_mesh.size())
+                input_ids_rolled = input_ids_rolled.squeeze(0)
 
-            optimizer.zero_grad()
             # forward
             output = model(input_ids=input_ids, position_ids=position_ids, use_cache=False)
+            logits = output.logits.squeeze(0)
+            entropy = cross_entropy_loss(logits, input_ids_rolled, inplace_backward=True)[0]
             if sp_mesh.size() > 1:
-                output.logits = gather_outputs(output.logits, gather_dim=1, padding_dim=1, unpad_dim_size=unpad_size)
-            loss, _ = ref_loss_fn(output, input_ids_rolled, masks)
+                entropy = gather_outputs(entropy, gather_dim=0, padding_dim=0, unpad_dim_size=unpad_size)
+            loss = verl_F.masked_mean(entropy, masks)
+
             # backward
             loss.backward()
 
-            gnorm = clip_grad_norm_(model, max_norm=1.0)
-            optimizer.step()
+            gnorm = 0.0
+            if (step + 1) % args.grad_accum == 0:
+                gnorm = clip_grad_norm_(model, max_norm=1.0).item()
+                load_fsdp_optimizer(optimizer, torch.cuda.current_device())
+                optimizer.step()
+                optimizer.zero_grad()
+                offload_fsdp_optimizer(optimizer)
+                for module in FSDP.fsdp_modules(model):
+                    module._flat_param.grad = None
 
             torch.cuda.synchronize()
             span = time.time() - start
 
             # metrics
-            ntokens = masks.sum().item() * world_size / gather_mesh.size()
-            estimated_flops, promised_flops = flops_counter.estimate_flops([ntokens], span)
+            global_seqs = seqs * world_size
+            estimated_flops, promised_flops = flops_counter.estimate_flops(global_seqs, span)
             mfu = round(estimated_flops / (promised_flops * world_size), 3)
-            memory = round(torch.cuda.max_memory_allocated() / (1024**3), 3)
+            memory_reserve = round(torch.cuda.max_memory_reserved() / (1024**3), 3)
+            memory_alloc = round(torch.cuda.max_memory_allocated() / (1024**3), 3)
             bar.set_postfix({
                 'loss': loss.item(),
-                'ntokens': ntokens,
+                'ntokens': sum(global_seqs),
                 'mfu': mfu,
-                'memory(GB)': memory,
-                'gnorm': gnorm.item()
+                'memory(GB)': f"({memory_alloc}/{memory_reserve})",
+                'gnorm': gnorm,
             })
             bar.update()
             prof.step()
+            memory_profiler.step()
 
 
 def save_checkpoint(model, optimizer, folder):
@@ -255,41 +301,33 @@ def load_checkpoint(fsdp_model: FSDP, optimizer: torch.optim.Optimizer, folder):
     print_each_rank(f"finished loading checkpoint from {filepath}.")
 
 
-def test_performance(model_path: str,
-                     fsdp_size: int,
-                     tp_size: int,
-                     sp_size: int,
-                     offload: bool,
-                     profile_to_mlx: bool = False):
+def test_performance(model_path: str, fsdp_size: int, tp_size: int, sp_size: int, profile_to_mlx: bool = False):
 
-    model, optimizer, device_mesh = init_model(model_path, fsdp_size, tp_size, sp_size, offload)
+    model, optimizer, device_mesh = init_model(model_path, fsdp_size, tp_size, sp_size)
     train(model, optimizer, device_mesh, profile_to_mlx=profile_to_mlx)
 
 
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default="m8", choices=['m8', 'p7'])
-    parser.add_argument("--offload", action='store_true', default=False)
-    parser.add_argument("--fsdp-size", type=int, default=4)
+    parser.add_argument("--model", type=str, required=True)
+    parser.add_argument("--fsdp-size", type=int, default=-1)
     parser.add_argument("--tp-size", type=int, default=2)
     parser.add_argument("--sp-size", type=int, default=2)
     parser.add_argument("--profile-to-mlx", action='store_true', default=False)
+    parser.add_argument("--test-save-load", action='store_true', default=False)
+    parser.add_argument("--max-token", type=int, default=16384, help="max token length (total) for a batch")
+    parser.add_argument("--seqlen", type=int, default=16384, help="sequence length for a device (before tp / sp)")
+    parser.add_argument("--grad-accum", type=int, default=1, help="gradient accumulation times")
     args = parser.parse_args()
     print(args)
 
     dist.init_process_group(backend='nccl')
     torch.cuda.set_device(int(os.environ['LOCAL_RANK']))
 
-    model_path = {
-        "m8": m8_path,
-        "p7": p7_path,
-    }
-
-    test_performance(model_path[args.model],
+    test_performance(args.model,
                      fsdp_size=args.fsdp_size,
                      tp_size=args.tp_size,
                      sp_size=args.sp_size,
-                     offload=args.offload,
                      profile_to_mlx=args.profile_to_mlx)
     dist.destroy_process_group()
