@@ -329,3 +329,4 @@ recipe: null
 server_client:
   role: null # [server,client]
   ray_address: null
+  reset_server: False # for client

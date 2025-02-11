@@ -56,8 +56,9 @@ class ValidateManager(object):
             if self.val_result_queue.qsize() > 0:
                 val_metrics, val_log_lst, val_step = self.val_result_queue.get()
                 if not self.fast_result:
-                    for metric in val_metrics.keys():
-                        wandb.define_metric(metric, step_metric="val_step")
+                    if wandb.run is not None:
+                        for metric in val_metrics.keys():
+                            wandb.define_metric(metric, step_metric="val_step")
                     val_metrics["val_step"] = val_step
                     self.logger.log(data=val_metrics, step=global_step)
                     for val_log in val_log_lst:
@@ -88,8 +89,9 @@ class ValidateManager(object):
                     assert self.val_thread.is_alive()
 
             self.val_thread = None
-            for metric in val_metrics.keys():
-                wandb.define_metric(metric, step_metric="val_step")
+            if wandb.run is not None:
+                for metric in val_metrics.keys():
+                    wandb.define_metric(metric, step_metric="val_step")
             val_metrics["val_step"] = val_step
             self.logger.log(data=val_metrics, step=global_step)
             for val_log in val_log_lst:

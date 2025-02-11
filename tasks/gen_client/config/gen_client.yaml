@@ -1,11 +1,14 @@
 ray:
   server_addr: auto
 
-data:
+data:  
+  total_num: -1
+  format: 'simple' # [rl,simple]
   tokenizer: null
   input_files: []
   output_file: 'gen_output.parquet'
   prompt_key: prompt
+  answer_key: answer
   max_prompt_length: 1024
   truncation: 'error'
 

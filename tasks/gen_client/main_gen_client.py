@@ -19,6 +19,8 @@ from typing import Union, List
 from collections import defaultdict
 import tempfile
 import random
+import numpy as np
+from codetiming import Timer
 
 from verl import DataProto
 import torch
@@ -34,15 +36,323 @@ from torch.utils.data import Dataset, DataLoader
 from transformers import AutoTokenizer, PreTrainedTokenizer
 from alpha_seed.trainer.ppo import RayPPOTrainer
 from alpha_seed.utils.duplicate import para_dup
-from alpha_seed.utils.dataset.rl_dataset import collate_fn
+from alpha_seed.utils.dataset.rl_dataset import collate_fn, RLHFDataset
 from alpha_seed.workers.actors.checkpoint import CkptGlobalUploader
+from alpha_seed.workers.streaming_service.streaming_utils import record_xperf_metrics
+from alpha_seed.utils.server_client import ClientTaskRunner, ServerHealthCheck, recreate_actor
 from tasks.main_ppo import validate_config, RewardManager
-from omegaconf import OmegaConf, ListConfig
+from omegaconf import OmegaConf, ListConfig, DictConfig
 import ray
 import hydra
 from verl.utils.fs import copy_local_path_from_hdfs
-from math_verifier import compute_score
 from hdfs_io.hdfs_io import hcopy, hmkdir
+
+import re
+import signal
+from typing import Optional
+
+try:
+    import sympy
+    from sympy.parsing.latex import parse_latex
+except ModuleNotFoundError:
+    raise ModuleNotFoundError(
+        "`sympy` is required for generating translation task prompt templates. \
+please install sympy via pip install lm-eval[math] or pip install -e .[math]",
+    )
+
+
+def list_fewshot_samples() -> list[dict]:
+    return [
+        {
+            "problem":
+                "Find the domain of the expression  $\\frac{\\sqrt{x-2}}{\\sqrt{5-x}}$.}",
+            "solution":
+                "The expressions inside each square root must be non-negative. Therefore, $x-2 \\ge 0$, so $x\\ge2$, and $5 - x \\ge 0$, so $x \\le 5$. Also, the denominator cannot be equal to zero, so $5-x>0$, which gives $x<5$. Therefore, the domain of the expression is $\\boxed{[2,5)}$.\nFinal Answer: The final answer is $[2,5)$. I hope it is correct.",
+            "few_shot":
+                "1",
+        },
+        {
+            "problem":
+                "If $\\det \\mathbf{A} = 2$ and $\\det \\mathbf{B} = 12,$ then find $\\det (\\mathbf{A} \\mathbf{B}).$",
+            "solution":
+                "We have that $\\det (\\mathbf{A} \\mathbf{B}) = (\\det \\mathbf{A})(\\det \\mathbf{B}) = (2)(12) = \\boxed{24}.$\nFinal Answer: The final answer is $24$. I hope it is correct.",
+            "few_shot":
+                "1",
+        },
+        {
+            "problem":
+                "Terrell usually lifts two 20-pound weights 12 times. If he uses two 15-pound weights instead, how many times must Terrell lift them in order to lift the same total weight?",
+            "solution":
+                "If Terrell lifts two 20-pound weights 12 times, he lifts a total of $2\\cdot 12\\cdot20=480$ pounds of weight.  If he lifts two 15-pound weights instead for $n$ times, he will lift a total of $2\\cdot15\\cdot n=30n$ pounds of weight.  Equating this to 480 pounds, we can solve for $n$:\n\\begin{align*}\n30n&=480\\\n\\Rightarrow\\qquad n&=480/30=\\boxed{16}\n\\end{align*}\nFinal Answer: The final answer is $16$. I hope it is correct.",
+            "few_shot":
+                "1",
+        },
+        {
+            "problem":
+                "If the system of equations\n\n\\begin{align*}\n6x-4y&=a,\\\n6y-9x &=b.\n\\end{align*}has a solution $(x, y)$ where $x$ and $y$ are both nonzero,\nfind $\\frac{a}{b},$ assuming $b$ is nonzero.",
+            "solution":
+                "If we multiply the first equation by $-\\frac{3}{2}$, we obtain\n\n$$6y-9x=-\\frac{3}{2}a.$$Since we also know that $6y-9x=b$, we have\n\n$$-\\frac{3}{2}a=b\\Rightarrow\\frac{a}{b}=\\boxed{-\\frac{2}{3}}.$$\nFinal Answer: The final answer is $-\\frac{2}{3}$. I hope it is correct.",
+            "few_shot":
+                "1",
+        },
+    ]
+
+
+def last_boxed_only_string(string: str) -> Optional[str]:
+    idx = string.rfind("\\boxed")
+    if "\\boxed " in string:
+        return "\\boxed " + string.split("\\boxed ")[-1].split("$")[0]
+    if idx < 0:
+        idx = string.rfind("\\fbox")
+        if idx < 0:
+            return None
+
+    i = idx
+    right_brace_idx = None
+    num_left_braces_open = 0
+    while i < len(string):
+        if string[i] == "{":
+            num_left_braces_open += 1
+        if string[i] == "}":
+            num_left_braces_open -= 1
+            if num_left_braces_open == 0:
+                right_brace_idx = i
+                break
+        i += 1
+
+    if right_brace_idx is None:
+        retval = None
+    else:
+        retval = string[idx:right_brace_idx + 1]
+
+    return retval
+
+
+def remove_boxed(s: str) -> str:
+    if "\\boxed " in s:
+        left = "\\boxed "
+        assert s[:len(left)] == left
+        return s[len(left):]
+
+    left = "\\boxed{"
+
+    assert s[:len(left)] == left
+    assert s[-1] == "}"
+
+    return s[len(left):-1]
+
+
+class timeout:
+
+    def __init__(self, seconds=1, error_message="Timeout"):
+        self.seconds = seconds
+        self.error_message = error_message
+
+    def handle_timeout(self, signum, frame):
+        raise TimeoutError(self.error_message)
+
+    def __enter__(self):
+        signal.signal(signal.SIGALRM, self.handle_timeout)
+        signal.alarm(self.seconds)
+
+    def __exit__(self, type, value, traceback):
+        signal.alarm(0)
+
+
+def is_equiv(x1: str, x2: str) -> bool:
+    """
+    x1 and x2 are normalized latex string
+    """
+    try:
+        with timeout(seconds=10):
+            try:
+                parsed_x1 = parse_latex(x1)
+                parsed_x2 = parse_latex(x2)
+            except (
+                    sympy.parsing.latex.errors.LaTeXParsingError,
+                    sympy.SympifyError,
+                    TypeError,
+            ):
+                # eval_logger.debug(f"couldn't parse one of {x1} or {x2}")
+                return False
+
+            try:
+                diff = parsed_x1 - parsed_x2
+            except TypeError:
+                # eval_logger.debug(f"couldn't subtract {x1} and {x2}")
+                return False
+
+            try:
+                if sympy.simplify(diff) == 0:
+                    return True
+                else:
+                    return False
+            except ValueError:
+                # eval_logger.debug(
+                # f"Had some trouble simplifying when comparing {x1} and {x2}"
+                # )
+                return False
+
+    except TimeoutError:
+        # eval_logger.debug(f"Timed out comparing {x1} and {x2}")
+        return False
+    except ImportError as e:
+        # eval_logger.error(e)
+        raise
+    except Exception as e:
+        # eval_logger.debug(f"Failed comparing {x1} and {x2} with {e}")
+        return False
+
+
+SUBSTITUTIONS = [
+    ("an ", ""),
+    ("a ", ""),
+    (".$", "$"),
+    ("\\$", ""),
+    (r"\ ", ""),
+    (" ", ""),
+    ("mbox", "text"),
+    (",\\text{and}", ","),
+    ("\\text{and}", ","),
+    ("\\text{m}", "\\text{}"),
+]
+REMOVED_EXPRESSIONS = [
+    "square",
+    "ways",
+    "integers",
+    "dollars",
+    "mph",
+    "inches",
+    # "ft", #this is dangerous, infty, left will be damaged!
+    "hours",
+    "km",
+    "units",
+    "\\ldots",
+    "sue",
+    "points",
+    "feet",
+    "minutes",
+    "digits",
+    "cents",
+    "degrees",
+    "cm",
+    "gm",
+    "pounds",
+    "meters",
+    "meals",
+    "edges",
+    "students",
+    "childrentickets",
+    "multiples",
+    "\\text{s}",
+    "\\text{.}",
+    "\\text{\ns}",
+    "\\text{}^2",
+    "\\text{}^3",
+    "\\text{\n}",
+    "\\text{}",
+    r"\mathrm{th}",
+    r"^\circ",
+    r"^{\circ}",
+    r"\;",
+    r",\!",
+    "{,}",
+    '"',
+    "\\dots",
+]
+
+
+def normalize_final_answer(final_answer: str) -> str:
+    """
+    Normalize a final answer to a quantitative reasoning question.
+
+    Copied character for character from appendix D of Lewkowycz et al. (2022)
+    """
+    final_answer = final_answer.split("=")[-1]
+
+    for before, after in SUBSTITUTIONS:
+        final_answer = final_answer.replace(before, after)
+    for expr in REMOVED_EXPRESSIONS:
+        final_answer = final_answer.replace(expr, "")
+
+    # Extract answer that is in LaTeX math, is bold,
+    # is surrounded by a box, etc.
+    final_answer = re.sub(r"(.*?)(\$)(.*?)(\$)(.*)", "$\\3$", final_answer)
+    final_answer = re.sub(r"(\\text\{)(.*?)(\})", "\\2", final_answer)
+    final_answer = re.sub(r"(\\textbf\{)(.*?)(\})", "\\2", final_answer)
+    final_answer = re.sub(r"(\\overline\{)(.*?)(\})", "\\2", final_answer)
+    final_answer = re.sub(r"(\\boxed\{)(.*)(\})", "\\2", final_answer)
+
+    # Normalize shorthand TeX:
+    #  \fracab -> \frac{a}{b}
+    #  \frac{abc}{bef} -> \frac{abc}{bef}
+    #  \fracabc -> \frac{a}{b}c
+    #  \sqrta -> \sqrt{a}
+    #  \sqrtab -> sqrt{a}b
+    final_answer = re.sub(r"(frac)([^{])(.)", "frac{\\2}{\\3}", final_answer)
+    final_answer = re.sub(r"(sqrt)([^{])", "sqrt{\\2}", final_answer)
+    final_answer = final_answer.replace("$", "")
+
+    # Normalize 100,000 -> 100000
+    if final_answer.replace(",", "").isdigit():
+        final_answer = final_answer.replace(",", "")
+
+    return final_answer.strip()
+
+
+INVALID_ANS_GSM8k = "[invalid]"
+ANSWER_PATTERN = r"(?i)Answer\s*:\s*([^\n]+)"
+
+
+def filter_ignores(st, regexes_to_ignore):
+    if regexes_to_ignore is not None:
+        for s in regexes_to_ignore:
+            st = re.sub(s, "", st)
+    return st
+
+
+def is_correct_integer(
+    og_pred,
+    gt,
+):
+    numbers = re.findall(r'-?\d+', og_pred)
+    numbers = numbers[-1] if len(numbers) > 0 else ""  # 很难通过枚举把最后一个搞成正确答案
+    correctness = gt == numbers
+    return correctness, og_pred
+
+
+def is_correct_minerva(og_pred, gt, gt_need_extract=False):
+    match = re.findall(ANSWER_PATTERN, og_pred)
+    extracted_answer = match[-1] if match else "[INVALID]"
+    pred = normalize_final_answer(extracted_answer)
+    if gt_need_extract:
+        gt = normalize_final_answer(remove_boxed(last_boxed_only_string(gt)))
+    else:
+        gt = normalize_final_answer(gt)
+    # return (pred == gt or is_equiv(pred, gt)), pred
+    return (pred == gt), pred
+
+
+def compute_score(
+    pred,
+    answer,
+):
+    """
+    default行为：对给1，其余给-1
+    punish_no_answer:
+    * v0: 0
+    * v1: -0.1
+    * v2: -0.2
+    """
+    # breakpoint()
+    corr_minerva, pred_minerva = is_correct_minerva(pred,
+                                                    answer)  # To remove if math is also converted to interger format
+    corr_integer, pred_integer = is_correct_integer(pred, answer)
+    pred = pred_minerva if corr_minerva else pred_integer
+    corr = corr_minerva or corr_integer
+
+    reward = 1 if corr else 0
+    return reward
 
 
 class SimpleDataset(Dataset):
@@ -169,24 +479,11 @@ class GenClient:
         local_path = copy_local_path_from_hdfs(self.config.data.tokenizer)
         # instantiate tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(local_path)
-
-        is_ready = False
-        for i in range(200):
-            try:
-                server_health_check = ray.get_actor("server_health_check")
-                is_ready = ray.get(server_health_check.is_ready.remote())
-                if is_ready:
-                    break
-            except:
-                print(f"waiting for server to be ready (iter #{i})...")
-                time.sleep(5)
-
-        if not is_ready:
-            raise RuntimeError("wait for server ready timeout")
-
         self.kv_store = ray.get_actor(kv_store_name)
         server_config = ray.get(self.kv_store.get_by_key.remote('config'))
-        validate_config(server_config)
+        client_config = server_config
+        client_config.server_client.role = "client"
+
         server_tokenizer = ray.get(self.kv_store.get_by_key.remote('tokenizer'))
 
         resource_pool_manager = ray.get(self.kv_store.get_by_key.remote('resource_pool_manager'))
@@ -197,29 +494,53 @@ class GenClient:
 
         print(f"The server provides roles: {', '.join([str(role) for role in available_roles])}")
 
-        self.trainer = RayPPOTrainer(config=server_config,
+        self.dataloader = self._create_dataloader()
+
+        self.logger = Tracking(project_name=server_config.trainer.project_name,
+                               experiment_name=server_config.trainer.experiment_name,
+                               default_backend=server_config.trainer.logger,
+                               config=OmegaConf.to_container(config, resolve=True))
+
+        self.trainer = RayPPOTrainer(config=client_config,
                                      tokenizer=server_tokenizer,
                                      role_worker_mapping=role_worker_mapping,
                                      resource_pool_manager=resource_pool_manager,
                                      ray_worker_group_cls=ray_worker_group_cls,
                                      reward_fn=None,
                                      val_reward_fn=None,
-                                     logger=None)
+                                     logger=self.logger)
 
-    def init_workers(self):
-        self.trainer.init_workers(ckpt_global_uploader=None)
-        self.actor_rollout_wg = self.trainer.actor_rollout_wg
-
-    def gen(self, input_files, output_file, preprocess_mode):
-        dataset = SimpleDataset(parquet_files=input_files,
-                                tokenizer=self.tokenizer,
-                                prompt_key=self.config.data.prompt_key,
-                                max_prompt_length=self.config.data.max_prompt_length,
-                                truncation=self.config.data.truncation,
-                                preprocess_mode=preprocess_mode)
-
+    def _create_dataloader(self):
         from torch.utils.data import SequentialSampler
+        if self.config.data.format == "simple":
+            assert self.config.data.answer_key == "answer", "answer_key=answer required for this dataset format"
+            dataset = SimpleDataset(parquet_files=self.config.data.input_files,
+                                    tokenizer=self.tokenizer,
+                                    prompt_key=self.config.data.prompt_key,
+                                    max_prompt_length=self.config.data.max_prompt_length,
+                                    truncation=self.config.data.truncation,
+                                    preprocess_mode="CHATML_SESSION")
 
+        elif self.config.data.format == "rl":
+            from verl.utils.seed import CHAT_TEMPLATE
+            self.tokenizer.chat_template = CHAT_TEMPLATE
+            dataset = RLHFDataset(parquet_files=self.config.data.input_files,
+                                  tokenizer=self.tokenizer,
+                                  prompt_key=self.config.data.prompt_key,
+                                  answer_key=self.config.data.answer_key,
+                                  use_ref_answer=False,
+                                  max_prompt_length=self.config.data.max_prompt_length,
+                                  filter_prompts=True,
+                                  return_raw_chat=self.config.data.get('return_raw_chat', False),
+                                  truncation=self.config.data.get('truncation', 'error'),
+                                  multi_prompts=self.config.data.get("multi_prompts", "none"),
+                                  num_prompts_per_data=self.config.data.get("num_prompts_per_data", 1))
+        else:
+            raise ValueError(f"unsupported data format {self.config.data.format}")
+
+        if self.config.data.total_num > 0:
+            from torch.utils.data import Subset
+            dataset = torch.utils.data.Subset(dataset, indices=range(0, self.config.data.total_num))
         sampler = SequentialSampler(data_source=dataset)
         dataloader = DataLoader(dataset=dataset,
                                 batch_size=self.config.gen.batch_size,
@@ -227,11 +548,17 @@ class GenClient:
                                 drop_last=False,
                                 collate_fn=collate_fn,
                                 sampler=sampler)
+        return dataloader
 
-        total_iters = len(dataloader)
+    def init_workers(self):
+        self.trainer.init_workers(kv_store=self.kv_store, ckpt_global_uploader=None)
+        self.actor_rollout_wg = self.trainer.actor_rollout_wg
+
+    def gen(self):
+        total_iters = len(self.dataloader)
         data = []
         gen_bs = self.config.gen.batch_size
-        for iter, batch_dict in enumerate(dataloader):
+        for iter, batch_dict in enumerate(self.dataloader):
             print(f"Running iter #{iter}/{total_iters}...")
             batch: DataProto = DataProto.from_single_dict(batch_dict)
             origin_bs = len(batch)
@@ -242,9 +569,16 @@ class GenClient:
                 batch = batch.repeat(repeat_num, interleave=False)
                 batch = slice_data_proto(batch, gen_bs)
 
+            if 'id' not in batch.non_tensor_batch:
+                batch.non_tensor_batch['id'] = np.array(list(range(iter * gen_bs, (iter + 1) * gen_bs)), dtype=object)
+
             gen_batch = batch.pop(batch_keys=['input_ids', 'attention_mask', 'off_policy_steps'])
             gen_batch.meta_info.update({'generation_kwargs': self.config.gen.generate_kwargs, 'complete_ratio': 1.0})
-            gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+            metrics = dict()
+            with Timer(name='gen', logger=None) as timer:
+                gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+            metrics['timing/gen'] = timer.last
+            record_xperf_metrics(gen_batch_output, metrics, self.logger, iter, prefix='hybrix')
 
             if len(gen_batch_output) > origin_bs:
                 # remove padding
@@ -260,25 +594,31 @@ class GenClient:
 
             for i in range(len(batch)):
                 item = {
-                    self.config.data.prompt_key: batch.non_tensor_batch[self.config.data.prompt_key][i],
                     'id': batch.non_tensor_batch['id'][i],
-                    'index': batch.non_tensor_batch['index'][i],
-                    'eval_prompt': batch.non_tensor_batch['eval_prompt'][i],
-                    'answer': batch.non_tensor_batch['answer'][i],
-                    'prompt': self.tokenizer.decode(rmv_padding_prompt_ids[i]),
+                    self.config.data.prompt_key: self.tokenizer.decode(rmv_padding_prompt_ids[i]),
+                    self.config.data.answer_key: batch.non_tensor_batch['answer'][i],
                     'output': self.tokenizer.decode(response_ids[i, :], skip_special_tokens=True),
                 }
                 data.append(item)
+
+            self.logger.log(data=metrics, step=iter)
+
         df = pd.DataFrame(data)
         with tempfile.NamedTemporaryFile(mode='w', suffix=".parquet") as f:
             df.to_parquet(f.name)
-            hmkdir(os.path.dirname(output_file))
-            hcopy(f.name, output_file)
+            hmkdir(os.path.dirname(self.config.data.output_file))
+            hcopy(f.name, self.config.data.output_file)
         return df
 
     def gen_and_eval(self):
-        df = self.gen(self.config.data.input_files, self.config.data.output_file, preprocess_mode="CHATML_SESSION")
+        df = self.gen()
         sample_and_compute_score(df, self.config.eval.bon_list, self.config.eval.sample_num)
+
+
+def main_task(config: DictConfig):
+    gen_cli = GenClient(config)
+    gen_cli.init_workers()
+    gen_cli.gen_and_eval()
 
 
 @hydra.main(config_path='config', config_name='gen_client', version_base=None)
@@ -292,16 +632,35 @@ def main(config):
     alpha_seed_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
     with open(os.path.join(alpha_seed_root, "tasks/runtime_env/runtime_env.yaml")) as fin:
         runtime_env = yaml.safe_load(fin)
+
+    ray_is_ready = False
     for _ in range(600):
         try:
             ray.init(namespace="alphaseed", address=config.ray.server_addr, runtime_env=runtime_env)
+            ray_is_ready = True
             break
         except:
             print("waiting for ray server init...")
             time.sleep(1)
-    gen_cli = GenClient(config)
-    gen_cli.init_workers()
-    gen_cli.gen_and_eval()
+    if not ray_is_ready:
+        raise RuntimeError("wait for ray cluster ready timeout")
+
+    is_server_ready = False
+    for i in range(200):
+        try:
+            server_health_check = ray.get_actor(ServerHealthCheck.name)
+            is_server_ready = ray.get(server_health_check.is_ready.remote())
+            if is_server_ready:
+                break
+        except Exception as e:
+            print(f"waiting for server to be ready (iter #{i})...: [{e}]")
+            time.sleep(5)
+
+    if not is_server_ready:
+        raise RuntimeError("wait for server ready timeout")
+
+    runner = recreate_actor(ClientTaskRunner, name=ClientTaskRunner.name)
+    ray.get(runner.main.remote(main_task, config=config))
 
 
 if __name__ == '__main__':

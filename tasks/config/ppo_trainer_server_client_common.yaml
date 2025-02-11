@@ -9,12 +9,14 @@ actor_rollout_ref:
   model:
     path: hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/models/deepseek-llm-7b-chat
     external_lib: null
+    override_config: {}
 
 critic:
   model:
     path: hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/models/deepseek-llm-7b-chat
     tokenizer_path: ${actor_rollout_ref.model.path}
     external_lib: ${actor_rollout_ref.model.external_lib}
+    override_config: {}
 
 reward_model:
   enable: False

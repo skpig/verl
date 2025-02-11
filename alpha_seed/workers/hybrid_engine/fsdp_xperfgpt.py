@@ -38,7 +38,7 @@ from torch.distributed._tensor import DTensor
 
 from verl import DataProto
 
-from alpha_seed.workers.xperf_rollout.utils.layout_convert_helper import offload_to_cpu
+from alpha_seed.workers.xperf_rollout.utils.layout_convert_helper import offload_to_cpu, load_to_cuda
 from alpha_seed.workers.xperf_rollout.utils.weight_loader import get_xperf_gpt_weight_bind_fn
 import logging
 
@@ -52,7 +52,8 @@ class FSDPXPerfGPTShardingManager(BaseShardingManager):
                  model_config,
                  inference_engine: InferenceSession,
                  device_mesh: DeviceMesh,
-                 standalone=False):
+                 standalone=False,
+                 only_bind_once=False):
         super().__init__()
         self.module = module
         self.inference_engine = inference_engine
@@ -75,6 +76,10 @@ class FSDPXPerfGPTShardingManager(BaseShardingManager):
         else:
             self.gen_random_states = None
         # broadcast random states across tp group
+
+        # True for generation only scenarios, we don't need to update weights, only call bind_fn for once
+        self.only_bind_once = only_bind_once
+        self._bind_fn_called = False
 
     def setup_standalone_worker_comm(self, hybrid_master_address, standalone_master_address, port, role):
         assert role in ["standalone_rollout", "standalone_validator"]
@@ -125,16 +130,21 @@ class FSDPXPerfGPTShardingManager(BaseShardingManager):
         # gather full state_dict in CPU
         from torch.distributed.fsdp import ShardedStateDictConfig, StateDictType
 
-        # TODO: optimize this. Since state_dict is a copy, there are actually two copies in the GPU memory
-        # We need to switch to FSDP2 to handle this.
-        cfg = ShardedStateDictConfig(offload_to_cpu=False)
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            with FSDP.state_dict_type(self.module, StateDictType.SHARDED_STATE_DICT, cfg):
-                state_dict = self.module.state_dict()
+        if (not self.only_bind_once) or (not self._bind_fn_called):
+            # TODO: optimize this. Since state_dict is a copy, there are actually two copies in the GPU memory
+            # We need to switch to FSDP2 to handle this.
+            cfg = ShardedStateDictConfig(offload_to_cpu=False)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                with FSDP.state_dict_type(self.module, StateDictType.SHARDED_STATE_DICT, cfg):
+                    state_dict = self.module.state_dict()
 
-        # prepare the state_dict into a format for xperf_gpt
-        self.bind_fn(self.inference_engine.engine.module, state_dict=state_dict, device_mesh=self.device_mesh)
+            # prepare the state_dict into a format for xperf_gpt
+            self.bind_fn(self.inference_engine.engine.module, state_dict=state_dict, device_mesh=self.device_mesh)
+            self._bind_fn_called = True
+        else:
+            load_to_cuda(tp_model=self.inference_engine.engine.module)
+
         if hasattr(self.inference_engine.pp_scheduler, "init_cuda_graph"):
             self.inference_engine.pp_scheduler.init_cuda_graph()
         # important: need to manually set the random states of each tp to be identical. Otherwise, xperf_gpt will hang

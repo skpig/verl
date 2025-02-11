@@ -8,11 +8,14 @@ actor_rollout_ref:
   model:
     path: hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/models/deepseek-llm-7b-chat
     external_lib: null
+    override_config: {}
   actor:
     strategy: fsdp  # This is for backward-compatibility
     ulysses_sequence_parallel_size: 1
     fsdp_size: -1
     use_dynamic_bsz: True
+    ppo_max_token_len: -1
+    act_offload: False
     fsdp_config:
       wrap_policy:
         # transformer_layer_cls_to_wrap: None
@@ -36,7 +39,6 @@ actor_rollout_ref:
 
     # for vllm rollout
     dtype: bfloat16 # should align with FSDP
-    ignore_eos: False
     enforce_eager: True
     free_cache_engine: True
     load_format: dummy_dtensor
@@ -45,13 +47,7 @@ actor_rollout_ref:
     max_num_seqs: 1024
     use_dynamic_bsz: True
     max_token_len: -1
-    log_prob_micro_batch_size: 128
     # for xperf_gpt
-    micro_batch_size: 2048
-    num_bon: 1
-    eval_bon: 1
-    eval_bon_every: 20
-    bon_strategy: "best"
     quant_mode: "NO_QUANT"
     gpu_memory_utilization: 0.7
   use_cuda_timer: False
@@ -63,7 +59,6 @@ critic:
     tokenizer_path: ${actor_rollout_ref.model.path}
     override_config: {}
     external_lib: ${actor_rollout_ref.model.external_lib}
-    enable_gradient_checkpointing: False
     fsdp_config:
       param_offload: False
       wrap_policy:
@@ -75,6 +70,7 @@ critic:
   NO_DEVICE_MESH: False # handle old critic ckpt stored as ShardedTensor
   use_dynamic_bsz: True
   ppo_max_token_len: -1
+  act_offload: False
   use_cuda_timer: False
 
 reward_model:

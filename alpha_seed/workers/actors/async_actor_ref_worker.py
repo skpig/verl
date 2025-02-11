@@ -226,7 +226,7 @@ class AsyncActorRolloutRefWorker(Worker):
         self.tokenizer = AutoTokenizer.from_pretrained(local_path, trust_remote_code=trust_remote_code)
         torch_dtype = fsdp_config.get('model_dtype', None)
         if torch_dtype is None:
-            torch_dtype = torch.float32 if self._is_actor else torch.float32
+            torch_dtype = torch.float32 if self._is_actor else torch.bfloat16
         else:
             torch_dtype = PrecisionType.to_dtype(torch_dtype)
 
@@ -342,6 +342,9 @@ class AsyncActorRolloutRefWorker(Worker):
         elif role == 'ref':
             if self.config.ref.fsdp_config.param_offload:
                 cpu_offload = CPUOffload(offload_params=True)
+        elif role == 'rollout':
+            # rollout only, requires cpu_offload
+            cpu_offload = CPUOffload(offload_params=True)
 
         # we only support ZeRO3 of hybrid DP+FSDP or full FSDP
         fsdp_mesh = self.ref_fsdp_mesh if role == 'ref' else self.actor_fsdp_mesh
@@ -437,7 +440,8 @@ class AsyncActorRolloutRefWorker(Worker):
                                                        inference_engine=rollout.inference_engine,
                                                        device_mesh=rollout.device_mesh,
                                                        standalone=self._is_standalone_rollout or
-                                                       self._is_standalone_validator)
+                                                       self._is_standalone_validator,
+                                                       only_bind_once=self.role == "rollout")
         sharding_manager.release_param_and_cache()
         log_gpu_memory_usage('After AsyncXPerfGPTRollout release parameter and kv cache', logger=logger)
         return rollout, sharding_manager

@@ -94,6 +94,7 @@ class ResourcePoolManager:
     resource_pool_spec: dict[str, list[int]]
     mapping: dict[Role, str]
     resource_pool_dict: dict[str, RayResourcePool] = field(default_factory=dict)
+    server_client_split: bool = False
 
     def create_resource_pool(self):
         for resource_pool_name, process_on_nodes in self.resource_pool_spec.items():
@@ -480,6 +481,7 @@ class RayPPOTrainer(object):
         self.reward_fn = reward_fn
         self.val_reward_fn = val_reward_fn
         self.logger = logger
+        self.workers = []
 
         # ckpt global uploader will be instantiated in init_workers func
         self.ckpt_global_uploader = None
@@ -503,24 +505,6 @@ class RayPPOTrainer(object):
 
         self.ray_worker_group_cls = ray_worker_group_cls
         self.num_bon = self.config.actor_rollout_ref.rollout.get("num_bon", 1)
-
-        # define KL control
-        if self.use_reference_policy:
-            if config.algorithm.kl_ctrl.type == 'fixed':
-                self.kl_ctrl = core_algos.FixedKLController(kl_coef=config.algorithm.kl_ctrl.kl_coef)
-            elif config.algorithm.kl_ctrl.type == 'adaptive':
-                assert config.algorithm.kl_ctrl.horizon > 0, f'horizon must be larger than 0. Got {config.critic.kl_ctrl.horizon}'
-                self.kl_ctrl = core_algos.AdaptiveKLController(init_kl_coef=config.algorithm.kl_ctrl.kl_coef,
-                                                               target_kl=config.algorithm.kl_ctrl.target_kl,
-                                                               horizon=config.algorithm.kl_ctrl.horizon)
-            else:
-                raise NotImplementedError
-        else:
-            self.kl_ctrl = core_algos.FixedKLController(kl_coef=0.)
-
-        self._create_dataloader()
-        self.validation_manager = ValidateManager(self.config, self.logger, self.val_dataloader, self.tokenizer,
-                                                  self.use_rm, self.val_reward_fn)
 
         self.phasic_critic_buffer = None
 
@@ -607,49 +591,30 @@ class RayPPOTrainer(object):
             self.config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
             self.config.critic.optim.total_training_steps = total_training_steps
 
-    def reset_server(self):
-        """reset server state for server-only mode"""
-        timer = Timer("reset_server")
-        timer.start()
-        init_futures = []
-
-        if self.use_standalone_reference_policy or not self.use_reference_policy:
-            self.actor_rollout_wg.reinit(self.config.actor_rollout_ref, "actor_rollout")
-        elif self.use_colocate_reference_policy:
-            self.actor_rollout_wg.reinit(self.config.actor_rollout_ref, "actor_rollout_ref")
+    def _create_kl_control(self):
+        # define KL control
+        if self.use_reference_policy:
+            if self.config.algorithm.kl_ctrl.type == 'fixed':
+                self.kl_ctrl = core_algos.FixedKLController(kl_coef=self.config.algorithm.kl_ctrl.kl_coef)
+            elif self.config.algorithm.kl_ctrl.type == 'adaptive':
+                assert self.config.algorithm.kl_ctrl.horizon > 0, f'horizon must be larger than 0. Got {self.config.critic.kl_ctrl.horizon}'
+                self.kl_ctrl = core_algos.AdaptiveKLController(init_kl_coef=self.config.algorithm.kl_ctrl.kl_coef,
+                                                               target_kl=self.config.algorithm.kl_ctrl.target_kl,
+                                                               horizon=self.config.algorithm.kl_ctrl.horizon)
+            else:
+                raise NotImplementedError
         else:
-            raise NotImplementedError
+            self.kl_ctrl = core_algos.FixedKLController(kl_coef=0.)
 
-        init_futures.append(self.actor_rollout_wg.init_model())
+    def _create_validation_manager(self):
+        self.validation_manager = ValidateManager(self.config, self.logger, self.val_dataloader, self.tokenizer,
+                                                  self.use_rm, self.val_reward_fn)
 
-        if self.use_standalone_rollout:
-            self.standalone_rollout_wg.reinit(self.config.actor_rollout_ref, "standalone_rollout")
-            init_futures.append(self.standalone_rollout_wg.init_model())
-
+        self.validation_manager.actor_rollout_wg = self.actor_rollout_wg
         if self.use_standalone_validator:
-            self.standalone_validator_wg.reinit(self.config.actor_rollout_ref, "standalone_validator")
-            init_futures.append(self.standalone_validator_wg.init_model())
+            self.validation_manager.standalone_validator_wg = self.standalone_validator_wg
 
-        if self.use_critic:
-            self.critic_wg.reinit(self.config.critic)
-            init_futures.append(self.critic_wg.init_model())
-
-        if self.use_standalone_reference_policy:
-            self.ref_policy_wg.reinit(self.config.actor_rollout_ref, "ref")
-            init_futures.append(self.ref_policy_wg.init_model())
-        elif self.use_colocate_reference_policy:
-            pass
-
-        if self.use_rm:
-            self.rm_wg.reinit(self.config.reward_model)
-            init_futures.append(self.rm_wg.init_model())
-
-        for fut in init_futures:
-            ray.wait(fut)
-        timer.stop()
-        print(f"reset_server elapsed: {timer.last:.4f}s")
-
-    def init_workers(self, kv_store_name="kv_store", ckpt_global_uploader=None):
+    def init_workers(self, kv_store=None, ckpt_global_uploader=None):
         """Init resource pool and worker group"""
 
         self.resource_pool_manager.create_resource_pool()
@@ -659,16 +624,18 @@ class RayPPOTrainer(object):
         # create actor and rollout
         if self.hybrid_engine:
             if self.use_standalone_reference_policy or not self.use_reference_policy:
+                role = 'rollout' if self.config.trainer.val_only else 'actor_rollout'
                 resource_pool = self.resource_pool_manager.get_resource_pool(Role.ActorRollout)
                 actor_rollout_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.ActorRollout],
                                                          config=self.config.actor_rollout_ref,
-                                                         role='actor_rollout')
+                                                         role=role)
                 self.resource_pool_to_cls[resource_pool]['actor_rollout'] = actor_rollout_cls
             elif self.use_colocate_reference_policy:
+                role = 'rollout' if self.config.trainer.val_only else 'actor_rollout_ref'
                 resource_pool = self.resource_pool_manager.get_resource_pool(Role.ActorRolloutRef)
                 actor_rollout_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.ActorRolloutRef],
                                                          config=self.config.actor_rollout_ref,
-                                                         role='actor_rollout_ref')
+                                                         role=role)
                 self.resource_pool_to_cls[resource_pool]['actor_rollout_ref'] = actor_rollout_cls
             else:
                 raise NotImplementedError('Must instantiate actor and rollout')
@@ -721,22 +688,48 @@ class RayPPOTrainer(object):
             rm_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RewardModel], config=self.config.reward_model)
             self.resource_pool_to_cls[resource_pool]['rm'] = rm_cls
 
-        kv_store = ray.get_actor(name=kv_store_name)
-        server_client_split = ray.get(kv_store.get_by_key.remote("server_client"))
+        server_client_split = self.config.server_client.role in ["server", "client"]
         # initialize WorkerGroup
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
             # no role allocated to this resource pool
             if len(class_dict) == 0:
                 continue
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
-            worker_names = ray.get(kv_store.get_by_key.remote(
-                resource_pool.name_prefix)) if server_client_split else None
-            wg_dict = self.ray_worker_group_cls(
-                ray_cls_with_init=worker_dict_cls, worker_names=worker_names) if isinstance(
-                    worker_names, list) and len(worker_names) > 0 else self.ray_worker_group_cls(
-                        resource_pool=resource_pool, ray_cls_with_init=worker_dict_cls)
-            if worker_names is None:
-                kv_store.set_key_val.remote(resource_pool.name_prefix, wg_dict.worker_names)
+            if self.config.server_client.role == "client":
+                # call this function to initialize resource_pool's placement_groups
+                # by attaching to existing ones
+                try:
+                    resource_pool.get_placement_groups(attach_existing=True)
+                except Exception as e:
+                    print("[WARN]: attach to existing placement group has error: {e}")
+
+                assert kv_store is not None, f"client script must have kv_store"
+                worker_names = ray.get(kv_store.get_by_key.remote(resource_pool.name_prefix))
+                assert isinstance(worker_names, list) and len(worker_names) > 0
+                wg_dict = self.ray_worker_group_cls(ray_cls_with_init=worker_dict_cls, worker_names=worker_names)
+
+                if self.config.server_client.reset_server:
+                    # already existing actors, stop and recreate
+                    try:
+                        print("Killing existing actors...")
+                        for worker in wg_dict.workers:
+                            ray.kill(worker)
+                    except Exception as e:
+                        print(f"[WARN] lookup and kill existing actors fail with: [{e}]")
+
+                    print("Recreating actors...")
+                    with Timer(name="recreate_actors"):
+                        wg_dict = self.ray_worker_group_cls(resource_pool=resource_pool,
+                                                            ray_cls_with_init=worker_dict_cls)
+                    # update worker_names
+                    kv_store.set_key_val.remote(resource_pool.name_prefix, wg_dict.worker_names)
+
+                self.workers += wg_dict.workers
+            else:
+                # create workers
+                wg_dict = self.ray_worker_group_cls(resource_pool=resource_pool, ray_cls_with_init=worker_dict_cls)
+                if self.config.server_client.role == "server":
+                    kv_store.set_key_val.remote(resource_pool.name_prefix, wg_dict.worker_names)
             spawn_wg = wg_dict.spawn(prefix_set=class_dict.keys())
             self.all_wg.update(spawn_wg)
             self.internal_wgs.append(wg_dict)
@@ -769,8 +762,6 @@ class RayPPOTrainer(object):
 
         init_futures.append(self.actor_rollout_wg.init_model())
 
-        self.validation_manager.actor_rollout_wg = self.actor_rollout_wg
-
         if self.use_standalone_rollout:
             self.standalone_rollout_wg = self.all_wg['standalone_rollout']
             self.standalone_rollout_wg.init_ndtimeline()
@@ -795,7 +786,6 @@ class RayPPOTrainer(object):
             self.standalone_validator_wg.setup_standalone_worker_comm(hybrid_master_address,
                                                                       standalone_validator_address, "14567",
                                                                       "standalone_validator")
-            self.validation_manager.standalone_validator_wg = self.standalone_validator_wg
             # offload standalone_validator_wg FSDP GPU memory
             self.standalone_validator_wg.to('cpu')
 
@@ -858,11 +848,12 @@ class RayPPOTrainer(object):
         for fut in init_futures:
             ray.get(fut)
 
-        self.actor_rollout_wg.set_eos_callback_fn(sandbox_callback_fn)
-        if self.standalone_rollout_wg is not None:
-            self.standalone_rollout_wg.set_eos_callback_fn(sandbox_callback_fn)
-        if self.use_standalone_validator:
-            self.standalone_validator_wg.set_eos_callback_fn(sandbox_callback_fn)
+        if self.config.trainer.use_remote_sandbox:
+            self.actor_rollout_wg.set_eos_callback_fn(sandbox_callback_fn)
+            if self.standalone_rollout_wg is not None:
+                self.standalone_rollout_wg.set_eos_callback_fn(sandbox_callback_fn)
+            if self.use_standalone_validator:
+                self.standalone_validator_wg.set_eos_callback_fn(sandbox_callback_fn)
 
     def save_checkpoint(self, specified_ckpt_version=None):
         """Save checkpoint to hdfs.
@@ -1323,6 +1314,10 @@ class RayPPOTrainer(object):
         })
 
     def fit(self):
+        self._create_kl_control()
+        self._create_dataloader()
+        self._create_validation_manager()
+
         self.global_step = 0
 
         metric_collection_context = self.megavision_metrics_collector.collect_resume_from_checkpoint_duration() \

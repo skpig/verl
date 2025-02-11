@@ -1,5 +1,5 @@
 set -x
-ray stop --force
+# ray stop --force
 
 # ckpt和路径
 SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/ct128kv2_baseline_sft32k_v27_lr2e5_epoch4_rope1000_hf_new
@@ -49,11 +49,23 @@ export SEC_KV_AUTH=1
 export BYTED_RAY_DISABLE_COLOR_LOG=true
 export HDFS_IO_THROW_EXCEPTION=1
 export USE_FLASH_ATTENTION_2=1
-export PYTHONPATH=$PYTHONPATH:/data01/home/liuxin.ai/alpha-seed:/data01/home/liuxin.ai/verl:/data01/home/liuxin.ai/verifiable_tasks:/data01/home/liuxin.ai/bpex_triton:/data01/home/liuxin.ai/seed_models
+export PYTHONPATH=$PYTHONPATH:/opt/tiger/alpha-seed:/opt/tiger/verl:/opt/tiger/verifiable_tasks:/opt/tiger/bpex_triton:/opt/tiger/seed_models
+
+train_file="${TRAIN_DATASET:-$TRAIN_FILE}"
+test_file="${TEST_DATASET:-$TEST_FILE}"
+value_model="${VALUE_MODEL:-$RM_MODEL_PATH}"
+policy_model="${POLICY_MODEL:-$SFT_MODEL_PATH}"
+
+role=${ARNOLD_ROLE^^}
+role_gpu_per_node_var_name="ARNOLD_${role}_GPU"
+role_nnode_var_name="ARNOLD_${role}_NUM"
+
+role_gpu_per_node=${!role_gpu_per_node_var_name:-8}
+role_nnode=${!role_nnode_var_name:-1}
 
 python3 tasks/main_ppo.py \
-    data.train_files=${TRAIN_FILE} \
-    data.val_files=${TEST_FILE} \
+    data.train_files=${train_file} \
+    data.val_files=${test_file} \
     data.prompt_key=prompt \
     data.answer_key=answer \
     data.use_ref_answer=${use_ref_answer} \
@@ -63,7 +75,7 @@ python3 tasks/main_ppo.py \
     data.val_batch_size=${val_batch_size} \
     data.truncation='left' \
     +data.chat_template=seed \
-    actor_rollout_ref.model.path=${SFT_MODEL_PATH} \
+    actor_rollout_ref.model.path=${policy_model} \
     actor_rollout_ref.model.external_lib=seed_models \
     +actor_rollout_ref.model.override_config.attention_dropout=0. \
     +actor_rollout_ref.model.override_config.embd_pdrop=0. \
@@ -85,7 +97,7 @@ python3 tasks/main_ppo.py \
     +actor_rollout_ref.ref.fsdp_config.mixed_precision.buffer_dtype=bf16 \
     critic.optim.lr=${critic_lr} \
     critic.optim.lr_warmup_steps_ratio=${lr_warmup_steps_ratio} \
-    critic.model.path=${RM_MODEL_PATH} \
+    critic.model.path=${value_model} \
     critic.model.enable_gradient_checkpointing=True \
     critic.ppo_micro_batch_size=${train_micro_batch_size} \
     critic.infer_micro_batch_size=${infer_micro_batch_size} \
@@ -95,7 +107,7 @@ python3 tasks/main_ppo.py \
     critic.model.external_lib=seed_models \
     reward_model.enable=True \
     reward_model.model.input_tokenizer=null \
-    reward_model.model.path=${RM_MODEL_PATH} \
+    reward_model.model.path=${value_model} \
     reward_model.micro_batch_size=${infer_micro_batch_size} \
     reward_model.mean=0.0 \
     reward_model.std=1.0 \
@@ -107,8 +119,8 @@ python3 tasks/main_ppo.py \
     trainer.logger=['console','tracking'] \
     trainer.project_name=${project_name} \
     trainer.experiment_name=${experiment_name} \
-    trainer.n_gpus_per_node=8 \
-    trainer.nnodes=1 \
+    trainer.n_gpus_per_node=${role_gpu_per_node} \
+    trainer.nnodes=${role_nnode} \
     trainer.default_hdfs_dir=${default_hdfs_dir} \
     trainer.save_freq=${save_freq} \
     trainer.test_freq=${test_freq} \
