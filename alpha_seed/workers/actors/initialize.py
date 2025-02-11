@@ -198,11 +198,20 @@ def parallel_load_safetensors(filepath):
     if filepath.startswith("hdfs://"):
         filepath = copy_local_path_from_hdfs(filepath)
 
-    index_file = os.path.join(filepath, "model.safetensors.index.json")
-    index = json.load(open(index_file, "rb"))
     safetensors2param = {}
-    for param_name, filename in index["weight_map"].items():
-        safetensors2param.setdefault(filename, []).append(param_name)
+    index_file = os.path.join(filepath, "model.safetensors.index.json")
+    if os.path.exists(index_file):
+        index = json.load(open(index_file, "rb"))
+        for param_name, filename in index["weight_map"].items():
+            safetensors2param.setdefault(filename, []).append(param_name)
+    else:
+        # in this case, the model is small and we can load it all at once
+        param_file = os.path.join(filepath, "model.safetensors")
+        assert os.path.exists(param_file), f"Cannot find {param_file}"
+        states = load_file(param_file)
+        for param_name in states:
+            safetensors2param.setdefault("model.safetensors", []).append(param_name)
+        del states
 
     total_files = len(safetensors2param)
     ckpt_chunks = sorted(safetensors2param.keys())
