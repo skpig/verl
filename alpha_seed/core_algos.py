@@ -214,6 +214,18 @@ def compute_rewards(token_level_scores, old_log_prob, ref_log_prob, kl_ratio):
     return token_level_scores - kl * kl_ratio
 
 
+def compute_lm_loss(log_prob, raw_scores, eos_ids):
+    eos_ids = eos_ids.unsqueeze(1)
+    scores = torch.gather(raw_scores, 1, eos_ids)
+    ids = torch.arange(log_prob.shape[1], device=eos_ids.device).unsqueeze(0).repeat(log_prob.shape[0], 1)
+    mask0 = ids <= eos_ids
+    mask1 = (scores > 0).repeat(1, log_prob.shape[1])
+    mask = mask0 & mask1
+    lm_loss = torch.masked_select(log_prob, mask)
+    lm_loss = -torch.sum(lm_loss) / max(lm_loss.numel(), 1)
+    return lm_loss
+
+
 def compute_policy_loss(old_log_prob, ref_log_prob, log_prob, advantages, upgo_advantages, eos_mask, cliprange,
                         cliprange2, scale_pg_by_kl, scale_pg_by_local_kl, upgo_loss_weight, use_ewma_loss,
                         kl_penalty_type, overlong_mask):

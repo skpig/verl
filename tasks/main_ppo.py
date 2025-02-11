@@ -232,6 +232,7 @@ class RewardManager():
         reward_tensor = torch.zeros_like(response_ids, dtype=torch.float32)
         raw_scores = torch.zeros_like(response_ids, dtype=torch.float32)
         len_scores = torch.zeros_like(response_ids, dtype=torch.float32)
+        idx_tensor = torch.zeros(response_ids.shape[0], dtype=torch.int64, device=response_ids.device)
         already_print_data_sources = {}
         save_to_hdfs = []
         rm_res_future_list = []
@@ -385,6 +386,7 @@ class RewardManager():
             if format_reward != 0:
                 score = format_reward
             reward_tensor[idx, valid_response_length - 1] = score
+            idx_tensor[idx] = valid_response_length - 1
 
             if is_divisible_by_0_point_1(score):
                 all_final_scores.append(score)
@@ -461,7 +463,7 @@ class RewardManager():
             print(f"reward_fn end hput: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
         if not is_validation:
-            return reward_tensor, raw_scores, len_scores
+            return reward_tensor, raw_scores, len_scores, idx_tensor
         else:
             return reward_tensor, log_table
 

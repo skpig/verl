@@ -47,6 +47,7 @@ actor_rollout_ref:
     upgo_loss_weight: 0.0
     upgo_loss_version: 1
     kl_loss_weight: 0.0
+    lm_loss_weight: 0.0
     kl_penalty: ${algorithm.kl_penalty}
     entropy_coeff: 0.001
     ppo_epochs: 1

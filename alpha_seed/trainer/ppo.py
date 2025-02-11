@@ -1400,9 +1400,11 @@ class RayPPOTrainer(object):
 
                     with Timer(name='reward_fn', logger=None) as timer:
                         # we combine with rule-based rm
-                        reward_tensor, raw_scores, length_scores = self.reward_fn(batch, global_step=self.global_step)
+                        reward_tensor, raw_scores, length_scores, eos_ids = self.reward_fn(batch,
+                                                                                           global_step=self.global_step)
                         batch.batch['token_level_scores'] = reward_tensor
                         batch.batch['raw_scores'] = raw_scores
+                        batch.batch['eos_ids'] = eos_ids
                         response_length = batch.batch['attention_mask'][:, -batch.batch['responses'].shape[1]:].sum(-1)
                         raw_scores_log = raw_scores.sum(-1)
                         length_ranges = [(None, 512), (512, 1024), (1024, 2048), (2048, 4096), (4096, 8192),

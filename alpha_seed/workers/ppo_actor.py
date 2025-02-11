@@ -321,6 +321,10 @@ class DataParallelPPOActor(BasePPOActor):
             select_keys.append('ref_log_prob')
         if 'overlong_mask' in data.batch.keys():
             select_keys.append('overlong_mask')
+        if 'eos_ids' in data.batch.keys():
+            select_keys.append('eos_ids')
+        if 'token_level_scores' in data.batch.keys():
+            select_keys.append('token_level_scores')
         batch = data.select(batch_keys=select_keys).batch
         dataloader = batch.split(self.config.ppo_mini_batch_size)
 
@@ -362,6 +366,7 @@ class DataParallelPPOActor(BasePPOActor):
                     entropy_coeff = self.config.entropy_coeff
                     upgo_loss_weight = self.config.upgo_loss_weight
                     kl_loss_weight = self.config.kl_loss_weight
+                    lm_loss_weight = self.config.lm_loss_weight
                     kl_penalty_type = self.config.kl_penalty
 
                     if entropy_coeff <= 0.:
@@ -398,12 +403,19 @@ class DataParallelPPOActor(BasePPOActor):
                     else:
                         kl_loss = torch.zeros((), device=pg_loss.device)
 
+                    if lm_loss_weight > 0.0:
+                        eos_ids = micro_data['eos_ids']
+                        raw_scores = micro_data['token_level_scores']
+                        lm_loss = core_algos.compute_lm_loss(log_prob, raw_scores, eos_ids)
+                    else:
+                        lm_loss = torch.zeros((), device=pg_loss.device)
+
                     if compute_entropy:
                         entropy_loss = verl_F.masked_mean(full_entropy, response_mask)
                     else:
                         entropy_loss = torch.zeros((), device=pg_loss.device)
 
-                    policy_loss = total_loss - entropy_loss * entropy_coeff + kl_loss_weight * kl_loss
+                    policy_loss = total_loss - entropy_loss * entropy_coeff + kl_loss_weight * kl_loss + lm_loss_weight * lm_loss
 
                     if self.config.use_dynamic_bsz:
                         loss = policy_loss * (len(micro_data) / self.config.ppo_mini_batch_size)
@@ -422,6 +434,7 @@ class DataParallelPPOActor(BasePPOActor):
                         'actor/ppo_kl_sum': ppo_kl_sum.detach().item(),
                         'actor/tokens_per_micro_batch_update': attention_mask.sum().detach().item(),
                         'actor/seqlen': seqlen,
+                        'actor/lm_loss': lm_loss.detach().item(),
                     }
 
                     if batch_idx == 0:
