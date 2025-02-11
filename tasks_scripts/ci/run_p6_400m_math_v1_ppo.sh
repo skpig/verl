@@ -1,5 +1,5 @@
 set -x
-
+ray stop --force
 NUM_STEPS="${NUM_STEPS:-240}"
 echo $NUM_STEPS
 
