@@ -25,7 +25,7 @@ import os
 from .test_parallel_init import DummyModel, tp_plan, MLP
 from alpha_seed.models.transformers.parallel.parallelize import parallelize_module
 import torch.distributed.checkpoint as dcp
-import tempfile
+from omnistore import RLFSDPCheckpointer
 
 os.environ['NCCL_DEBUG'] = '0'
 
@@ -171,6 +171,33 @@ def load_dcp(model, optimizer, folder):
     print_each_rank(f"finished loading checkpoint from {folder}.")
 
 
+def save_omnistore(model, optimizer, folder):
+    if dist.get_rank() == 0:
+        os.makedirs(folder, exist_ok=True)
+    dist.barrier()
+    rng = {
+        'cpu': torch.random.get_rng_state(),
+        'cuda': torch.cuda.get_rng_state(),
+        'numpy': np.random.get_state(),
+        'random': random.getstate(),
+    }
+    ckpt_dict = {"model": model, "optimizer": optimizer, "extra_state": {"rng_state": rng}}
+    RLFSDPCheckpointer.save(
+        folder,
+        ckpt_dict,
+    )
+
+
+def load_omnistore(model, optimizer, folder):
+    ckpt_dict = {"model": model, "optimizer": optimizer, "extra_state": {}}
+    RLFSDPCheckpointer.load(folder, ckpt_dict)
+    rng = ckpt_dict["extra_state"]["rng_state"]
+    torch.cuda.random.set_rng_state(rng['cuda'])
+    torch.random.set_rng_state(rng['cpu'])
+    np.random.set_state(rng['numpy'])
+    random.setstate(rng['random'])
+
+
 def model_save_load_fsdp_tp(fsdp_size: int, tp_size: int, version='v1'):
 
     # cannot use tempfile here because every rank gets a different one
@@ -185,6 +212,8 @@ def model_save_load_fsdp_tp(fsdp_size: int, tp_size: int, version='v1'):
         save_v1(model, optim, tmpdir)
     elif version == 'dcp':
         save_dcp(model, optim, tmpdir)
+    elif version == 'omnistore':
+        save_omnistore(model, optim, tmpdir)
     else:
         raise NotImplementedError()
     # train 2 steps
@@ -195,6 +224,8 @@ def model_save_load_fsdp_tp(fsdp_size: int, tp_size: int, version='v1'):
         load_v1(model, optim, tmpdir)
     elif version == 'dcp':
         load_dcp(model, optim, tmpdir)
+    elif version == 'omnistore':
+        load_omnistore(model, optim, tmpdir)
     else:
         raise NotImplementedError()
     # train 2 steps
@@ -218,3 +249,8 @@ test_model_save_load_fsdp_dcp = partial(torchrun, 4, model_save_load_fsdp_tp, 4,
 test_model_save_load_hsdp_dcp = partial(torchrun, 4, model_save_load_fsdp_tp, 2, 1, 'dcp')
 test_model_save_load_fsdp_tp_dcp = partial(torchrun, 4, model_save_load_fsdp_tp, 2, 2, 'dcp')
 test_model_save_load_hsdp_tp_dcp = partial(torchrun, 8, model_save_load_fsdp_tp, 2, 2, 'dcp')
+# omnistore test
+test_model_save_load_fsdp_omnistore = partial(torchrun, 4, model_save_load_fsdp_tp, 4, 1, 'omnistore')
+test_model_save_load_hsdp_omnistore = partial(torchrun, 4, model_save_load_fsdp_tp, 2, 1, 'omnistore')
+test_model_save_load_fsdp_tp_omnistore = partial(torchrun, 4, model_save_load_fsdp_tp, 2, 2, 'omnistore')
+test_model_save_load_hsdp_tp_omnistore = partial(torchrun, 8, model_save_load_fsdp_tp, 2, 2, 'omnistore')

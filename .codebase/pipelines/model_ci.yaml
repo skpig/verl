@@ -53,3 +53,4 @@ jobs:
           - pytest tests/parallelize/test_group_gemm_ep.py
           - pytest tests/parallelize/test_save_load.py
           - pytest tests/parallelize/test_train_memory_offload.py
+          - pytest tests/parallelize/test_omnistore_reshard.py
