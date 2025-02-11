@@ -736,8 +736,14 @@ class RayPPOTrainer(object):
             self.internal_wg_roles.append(list(class_dict.keys()))
 
         # init ckpt global uploader
+        uploader_tracker_role = 'actor'
+        if self.use_critic:
+            uploader_tracker_role = 'critic'
+        if self.config.actor_rollout_ref.ref.ema < 1:
+            # will save ref ckpt
+            uploader_tracker_role = 'ref'
         self.ckpt_global_uploader = CkptGlobalUploader.options(name=CkptGlobalUploader.name).remote(
-            use_critic=self.use_critic,
+            tracker_role=uploader_tracker_role,
             ckpt_version=self.config.trainer.ckpt_version,
             default_local_dir=self.config.trainer.default_local_dir,
             default_remote_dir=self.config.trainer.default_hdfs_dir,

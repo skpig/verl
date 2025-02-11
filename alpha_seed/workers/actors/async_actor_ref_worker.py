@@ -869,7 +869,7 @@ class AsyncActorRolloutRefWorker(Worker):
                                      local_path=local_path,
                                      hdfs_path=hdfs_path,
                                      device_mesh=self.actor_fsdp_mesh,
-                                     role='actor',
+                                     role=model,
                                      global_step=global_step,
                                      ckpt_global_uploader_ref=ckpt_global_uploader_ref,
                                      enable_flatten=enable_flatten,

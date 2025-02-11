@@ -15,7 +15,9 @@ import importlib.metadata
 
 from .checkpoint_manager import BaseCheckpointManager
 
-required_omnistore_version = '0.5.69'
+from ray.actor import ActorHandle
+
+required_omnistore_version = '0.7.5'
 try:
     omnistore_version = importlib.metadata.version('byted-omnistore')
     print(f'byted-omnistore version: {omnistore_version}')
@@ -28,8 +30,6 @@ except importlib.metadata.PackageNotFoundError as e:
     raise e
 
 from omnistore import RLFSDPCheckpointer
-
-from .uploader import CkptGlobalUploader
 
 
 def check_ckpt_is_omnistore(path):
@@ -96,8 +96,7 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
         print(f'[rank-{self.rank}]: finish loading checkpoint {hdfs_path}')
 
     def save_checkpoint(self, local_path: str, hdfs_path: str, role: str, global_step: int,
-                        ckpt_global_uploader_ref: CkptGlobalUploader, enable_flatten: bool, enable_shm: bool, *args,
-                        **kwargs):
+                        ckpt_global_uploader_ref: ActorHandle, enable_flatten: bool, enable_shm: bool, *args, **kwargs):
         path = os.path.abspath(local_path)
         print(f'[rank-{self.rank}]: start saving checkpoint {path}')
         # wait for previous upload to hdfs

@@ -15,7 +15,7 @@ from transformers import PreTrainedTokenizer
 from torch.distributed._tensor.api import DTensor, Shard, Replicate
 
 from .checkpoint_manager import BaseCheckpointManager
-from .uploader import CkptGlobalUploader
+from ray.actor import ActorHandle
 
 
 def remove_replicate_in_dtensor(state_dict, device_mesh: DeviceMesh):
@@ -98,7 +98,7 @@ class CheckpointManagerV2(BaseCheckpointManager):
         self.lr_scheduler.load_state_dict(lr_scheduler_state_dict)
 
     def save_checkpoint(self, local_path: str, hdfs_path: str, device_mesh: DeviceMesh, role: str, global_step: int,
-                        ckpt_global_uploader_ref: CkptGlobalUploader):
+                        ckpt_global_uploader_ref: ActorHandle):
         # wait for previous upload to hdfs
         self.wait_previous_upload(role, ckpt_global_uploader_ref)
         self.previous_global_step = global_step

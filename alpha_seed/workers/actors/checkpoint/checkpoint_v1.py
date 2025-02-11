@@ -13,7 +13,7 @@ from verl.utils.fs import copy_local_path_from_hdfs
 from transformers import PreTrainedTokenizer
 
 from .checkpoint_manager import BaseCheckpointManager
-from .uploader import CkptGlobalUploader
+from ray.actor import ActorHandle
 
 
 class CheckpointManagerV1(BaseCheckpointManager):
@@ -71,7 +71,7 @@ class CheckpointManagerV1(BaseCheckpointManager):
             self.lr_scheduler.load_state_dict(lr_scheduler_state_dict)
 
     def save_checkpoint(self, local_path: str, hdfs_path: str, role: str, global_step: int,
-                        ckpt_global_uploader_ref: CkptGlobalUploader, *args, **kwargs):
+                        ckpt_global_uploader_ref: ActorHandle, *args, **kwargs):
         # wait for previous upload to hdfs
         self.wait_previous_upload(role, ckpt_global_uploader_ref)
         self.previous_global_step = global_step

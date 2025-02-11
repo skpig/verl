@@ -9,10 +9,11 @@ class CkptGlobalUploader:
 
     name = "checkpoint_global_uploader"
 
-    def __init__(self, use_critic, ckpt_version, default_local_dir, default_remote_dir, upload_retry_count):
+    def __init__(self, tracker_role, ckpt_version, default_local_dir, default_remote_dir, upload_retry_count):
+        # use tracker_role to specify who is responsible for updating the tracker file
         self.upload_shard_future_map = {}
         self.upload_shard_task_map = {}
-        self.use_critic = use_critic
+        self.tracker_role = tracker_role
         self.ckpt_version = ckpt_version
         self.local_checkpoint_folder = os.path.join(default_local_dir, 'checkpoints')
         self.remote_checkpoint_folder = os.path.join(default_remote_dir, 'checkpoints')
@@ -20,14 +21,16 @@ class CkptGlobalUploader:
 
     def register_upload_task(self, role, global_step, node_id, local_path, remote_path):
         if global_step not in self.upload_shard_task_map:
-            self.upload_shard_task_map[global_step] = {'actor': [], 'critic': [], 'default': []}
+            self.upload_shard_task_map[global_step] = {}
+        if self.upload_shard_task_map[global_step].get(role) is None:
+            self.upload_shard_task_map[global_step][role] = []
         self.upload_shard_task_map[global_step][role].append((node_id, local_path, remote_path))
 
     def start_uploading(self, role, global_step=0):
         # only rank 0 should call this function
         print(f'checkpoint global uploader start to upload role {role} global step {global_step}', flush=True)
         if global_step not in self.upload_shard_future_map:
-            self.upload_shard_future_map[global_step] = {'actor': [], 'critic': [], 'default': []}
+            self.upload_shard_future_map[global_step] = {}
 
         self.prepare_remote_paths({item[2] for item in self.upload_shard_task_map[global_step][role]})
         for node_id, local_path, remote_path in self.upload_shard_task_map[global_step][role]:
@@ -35,9 +38,11 @@ class CkptGlobalUploader:
                 node_id=node_id,
                 soft=False,
             )).remote(local_path, remote_path, self.upload_retry_count)
+            if self.upload_shard_future_map[global_step].get(role) is None:
+                self.upload_shard_future_map[global_step][role] = []
             self.upload_shard_future_map[global_step][role].append(upload_shard_future)
 
-        if (self.use_critic and role != 'critic') or role == 'default':
+        if role != self.tracker_role:
             return
         self.write_tracker(global_step)
 
@@ -49,8 +54,10 @@ class CkptGlobalUploader:
 
     def wait_all(self, global_step, need_clear=True):
         results = []
-        for role in ['actor', 'critic', 'default']:
-            results.append(self.wait_by_role(role, global_step))
+        if global_step not in self.upload_shard_future_map:
+            return True
+        for role in self.upload_shard_future_map[global_step].keys():
+            results.append(all(ray.get(self.upload_shard_future_map[global_step][role])))
         if need_clear:
             self.clear_futures(global_step)
             self.clear_tasks(global_step)
