@@ -95,7 +95,7 @@ def post_process_solution_str(config, solution_str):
     return solution_str_post_proc
 
 
-@ray.remote(num_cpus=2)
+@ray.remote(num_cpus=1)
 class RemoteClient:
     """
     A centralized remote client that pipelines any function with generation at [EOS] 
@@ -117,7 +117,7 @@ class RemoteClient:
         """Return the number of outputs, whose result is not claimed"""
         return len(self.results)
 
-    def add_requests(self, req_id, input_ids, ground_truth, reward_style):
+    async def add_requests(self, req_id, input_ids, ground_truth, reward_style):
         solution_str = self.tokenizer.decode(input_ids, skip_special_tokens=True)
         solution_str_post_proc = post_process_solution_str(self.config, solution_str)
 
@@ -133,13 +133,13 @@ class RemoteClient:
         assert req_id not in self.results, f"{req_id} already exists"
         self.results[req_id] = result_future
 
-    def get_results(self, req_id):
+    async def get_results(self, req_id):
         if req_id not in self.results:
             return None
 
         assert req_id in self.results, f"{req_id} not found"
         result_future = self.results.pop(req_id)
-        return ray.get(result_future)
+        return await result_future
 
 
 try:
@@ -777,8 +777,7 @@ def config_to_trainer_kwargs(config):
         val_reward_fn = RewardManager(tokenizer=tokenizer, config=config, logger=logger, rm_name="val")
 
         # we will always start a remote client
-        kwargs['remote_client'] = RemoteClient.options(name='remote_client',
-                                                       max_concurrency=10).remote(config=config, tokenizer=tokenizer)
+        kwargs['remote_client'] = RemoteClient.options(name='remote_client').remote(config=config, tokenizer=tokenizer)
 
         kwargs['tokenizer'] = tokenizer
         kwargs['logger'] = logger
