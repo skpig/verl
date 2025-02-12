@@ -86,6 +86,7 @@ python3 tasks/main_ppo.py \
     +actor_rollout_ref.model.override_config.embd_pdrop=0. \
     +actor_rollout_ref.model.override_config.resid_pdrop=0. \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
+    actor_rollout_ref.model.use_ce_loss_fusion=True \
     actor_rollout_ref.actor.optim.lr=${actor_lr} \
     actor_rollout_ref.actor.optim.lr_warmup_steps=${lr_warmup_steps} \
     actor_rollout_ref.actor.ppo_mini_batch_size=${ppo_mini_batch_size} \

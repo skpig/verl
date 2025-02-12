@@ -14,7 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional, Tuple
+import os
+from typing import Optional, Tuple, Union, List
+from transformers.modeling_outputs import MoeCausalLMOutputWithPast
+from bumi.function.flash_cross_entropy import FlashCrossEntropy
 
 import seed_models
 from seed_models.models.m8.modeling_m8 import (
@@ -285,3 +288,132 @@ def _fused_moe_ep_forward(
 def release_m8_kv_mirror(self):
     KVMirrorManager.activations_dict.clear()
     KVMirrorManager.activations_grad_dict.clear()
+
+
+def m8_casual_lm_forward(
+    self,
+    input_ids: torch.LongTensor = None,
+    attention_mask: Optional[torch.Tensor] = None,
+    position_ids: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.IntTensor] = None,
+    past_key_values: Optional[List[torch.FloatTensor]] = None,
+    inputs_embeds: Optional[torch.FloatTensor] = None,
+    labels: Optional[torch.LongTensor] = None,
+    use_cache: Optional[bool] = None,
+    output_attentions: Optional[bool] = None,
+    output_hidden_states: Optional[bool] = None,
+    output_router_logits: Optional[bool] = None,
+    output_aux_losses: Optional[bool] = None,
+    return_dict: Optional[bool] = None,
+    fuse_lm_head_ce_loss: Optional[bool] = None,
+    temperature: Optional[float] = None,
+) -> Union[Tuple, MoeCausalLMOutputWithPast]:
+    r"""
+    Args:
+        labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
+            Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
+            config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
+            (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.
+        fuse_lm_head_ce_loss: (`bool`, *optional*):
+            Whether to fuse the loss computation of lm_head and cross entropy loss.
+        temperature: (`float`, *optional*):
+            Temperature for softmax CE loss. Only effective if fuse_lm_head_ce_loss is True.
+
+    Returns:
+
+    """
+
+    output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+    output_router_logits = (output_router_logits
+                            if output_router_logits is not None else self.config.output_router_logits)
+    output_aux_losses = output_aux_losses if output_aux_losses is not None else self.config.output_aux_losses
+
+    output_hidden_states = (output_hidden_states
+                            if output_hidden_states is not None else self.config.output_hidden_states)
+    return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+    # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
+    outputs = self.transformer(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        position_ids=position_ids,
+        cu_seqlens=cu_seqlens,
+        past_key_values=past_key_values,
+        inputs_embeds=inputs_embeds,
+        use_cache=use_cache,
+        output_attentions=output_attentions,
+        output_hidden_states=output_hidden_states,
+        output_router_logits=output_router_logits,
+        output_aux_losses=output_aux_losses,
+        return_dict=return_dict,
+    )
+
+    hidden_states = outputs[0]
+    if fuse_lm_head_ce_loss:
+        assert labels is not None
+        if temperature is not None:
+            hidden_states = hidden_states / temperature
+        # 2 means recompute the logits in the backward pass
+        recompute_level = 2
+        hidden_states_2d = hidden_states.reshape(-1, hidden_states.shape[-1])
+        # TODO(haibin.lin): accuracy metric is not necessarily needed, to be optimized further
+        compute_accuracy = True
+        # this gives better precision alignment with the torch implementation, with potentially lower precision with bf16 casts
+        align_precision = True
+        loss, _ = FlashCrossEntropy.apply(hidden_states_2d.bfloat16(), self.lm_head.weight, labels, recompute_level,
+                                          compute_accuracy, align_precision)
+        logits = None
+    else:
+        logits = self.lm_head(hidden_states)
+        assert temperature is None
+        loss = None
+        if labels is not None:
+            # Upcast to float if we need to compute the loss to avoid potential precision issues
+            logits = logits.float()
+            # Shift so that tokens < n predict n
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            # Flatten the tokens
+            shift_logits = shift_logits.view(-1, self.vocab_size)
+            shift_labels = shift_labels.view(-1)
+            if cu_seqlens is not None:
+                # Mask the last token of each sequence to torch.CrossEntropyLoss ignore_index, default is -100
+                shift_labels[cu_seqlens[1:-1] - 1] = -100
+            elif position_ids is not None and labels.dim() == 1:
+                position_ids_ = position_ids.flatten()
+                indices_q = torch.arange(position_ids_.size(0), device=position_ids_.device, dtype=torch.int32)
+                cu_seq_lens = torch.cat((
+                    indices_q[position_ids_ == 0],
+                    torch.tensor(position_ids_.size(), device=position_ids_.device, dtype=torch.int32),
+                ))
+                shift_labels[cu_seq_lens[1:-1] - 1] = -100
+
+            # Ensure tensors are on the same device
+            shift_labels = shift_labels.to(shift_logits.device)
+            loss = self.loss_fct(shift_logits, shift_labels)
+
+    aux_loss = None
+    if output_aux_losses:
+        # aux_loss: (Union[`torch.Tensor`, Tuple[torch.Tensor]), should be a tuple of model.config.num_hidden_layers tensors of aux_loss
+        aux_losses = outputs.aux_losses
+        compute_device = aux_losses[0].device
+        aux_loss = sum(layer_aux_loss.to(compute_device) for layer_aux_loss in aux_losses)
+
+        if labels is not None:
+            loss += self.router_aux_loss_coef * aux_loss.to(loss.device)  # make sure to reside in the same device
+
+    if not return_dict:
+        output = (logits,) + outputs[1:]
+        if output_aux_losses:
+            output = (aux_loss,) + output
+        return (loss,) + output if loss is not None else output
+
+    return MoeCausalLMOutputWithPast(
+        loss=loss,
+        aux_loss=aux_loss,
+        logits=logits,
+        past_key_values=outputs.past_key_values,
+        hidden_states=outputs.hidden_states,
+        attentions=outputs.attentions,
+        router_logits=outputs.router_logits,
+    )

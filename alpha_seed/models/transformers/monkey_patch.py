@@ -90,10 +90,11 @@ def apply_monkey_patch_to_p7():
 
 
 def apply_monkey_patch_to_m8():
-    from seed_models.models.m8.modeling_m8 import M8FlashAttention2, M8FusedMoeBlock, M8PreTrainedModel
-    from .modeling_m8 import flash_attn2_rmpad_forward, _fused_moe_ep_forward, release_m8_kv_mirror
+    from seed_models.models.m8.modeling_m8 import M8FlashAttention2, M8FusedMoeBlock, M8PreTrainedModel, M8ForCausalLM
+    from .modeling_m8 import flash_attn2_rmpad_forward, _fused_moe_ep_forward, release_m8_kv_mirror, m8_casual_lm_forward
     M8FlashAttention2.forward = flash_attn2_rmpad_forward
     M8FusedMoeBlock.forward = _fused_moe_ep_forward
+    M8ForCausalLM.forward = m8_casual_lm_forward
     from seed_models.integrations import apply_liger_kernel_to_m8
     apply_liger_kernel_to_m8()
     M8PreTrainedModel.release_act_memory = release_m8_kv_mirror
