@@ -41,6 +41,7 @@ from alpha_seed.utils.select_strategy.league_training_strategy import *
 from alpha_seed.utils.validator.validation_manager import *
 from alpha_seed.workers.streaming_service.streaming_utils import pad, process_output
 from alpha_seed.workers.actors.checkpoint import CkptGlobalUploader
+from alpha_seed.workers.actors.rollout_pool import RolloutPool
 from alpha_seed.utils.observility.pretty_print import pprint
 from alpha_seed.utils import ndtimeline
 from alpha_seed.utils.dataset.rl_dataset import RLHFDataset
@@ -688,6 +689,9 @@ class RayPPOTrainer(object):
             rm_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RewardModel], config=self.config.reward_model)
             self.resource_pool_to_cls[resource_pool]['rm'] = rm_cls
 
+        self.rollout_pool = RolloutPool.get_or_create_actor(self.config)
+        self.rollout_pool_warmup_step = self.config.actor_rollout_ref.rollout.rollout_pool.get("warmup_step", 0)
+
         server_client_split = self.config.server_client.role in ["server", "client"]
         # initialize WorkerGroup
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
@@ -1080,7 +1084,8 @@ class RayPPOTrainer(object):
         metrics.update(global_balance_stats)
         print_dataproto_size(batch, head='After Sequence Balancing')
 
-    def _generate(self, batch, resume_step, metrics, standalone_batch, pending_batch_queue, ready_batch_queue):
+    def _generate(self, batch, start_step, metrics, standalone_batch, pending_batch_queue):
+        ready_batch_queue = queue.Queue()
         # print the size of each data proto before training
         print_dataproto_size(batch, head='Before generation')
 
@@ -1089,6 +1094,7 @@ class RayPPOTrainer(object):
                                                split_keys=['input_ids', 'attention_mask', 'off_policy_steps'])
 
         # hybrid rollout
+        batch.non_tensor_batch['rollout_id'] = np.array([str(uuid.uuid4()) for _ in range(len(batch))], dtype=object)
         batch = batch.repeat(self.num_bon)
         # create a uid for each data inside the batch
         batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(batch))], dtype=object)
@@ -1096,7 +1102,7 @@ class RayPPOTrainer(object):
 
         gen_batch = batch.pop(batch_keys=['input_ids', 'attention_mask', 'off_policy_steps'])
         # assign the non_tensor_batch uid to the generator as well.
-        non_tensor_infos = ['uid', 'reward_model']
+        non_tensor_infos = ['rollout_id', 'uid', 'reward_model']
         for key in non_tensor_infos:
             gen_batch.non_tensor_batch[key] = batch.non_tensor_batch[key]
 
@@ -1104,10 +1110,16 @@ class RayPPOTrainer(object):
             'generation_kwargs':
                 self.config.actor_rollout_ref.rollout.train_generate_kwargs,
             'complete_ratio':
-                1.0 if self.global_step < resume_step + self.config.streaming_rollout.warmup_step else
+                1.0 if self.global_step < start_step + self.config.streaming_rollout.warmup_step else
                 self.config.actor_rollout_ref.rollout.get("complete_ratio", 1.0)
         })
         pprint(f'start hybrid rollout, input batches {len(gen_batch)}.')
+
+        if gen_batch.meta_info['complete_ratio'] == 0:
+            assert self.rollout_pool_warmup_step > 0, "rollout_pool_warmup_step must be greater than 0 when complete_ratio = 0"
+
+        if self.global_step < self.rollout_pool_warmup_step + start_step:
+            gen_batch.meta_info['complete_ratio'] = 1.0
 
         with Timer(name='gen', logger=None) as timer:
             with tensorcore_collection():
@@ -1198,7 +1210,7 @@ class RayPPOTrainer(object):
                     + f'ready_queue {ready_batch_queue.qsize()}, pending_queue {pending_batch_queue.qsize()}.')
             metrics['rollout/standalone_completed_batch'] = finished_num
             metrics['rollout/standalone_incompleted_batch'] = len(standalone_batch) - finished_num
-            metrics['timing/async_gen'] = timer.last
+        metrics['timing/async_gen'] = timer.last
 
         # update standalone rollout weights
         with Timer(name='update_standalone', logger=None) as timer:
@@ -1221,31 +1233,25 @@ class RayPPOTrainer(object):
         if len(standalone_batch) > 0:
             standalone_batch = DataProto.concat(standalone_batch)
             standalone_gen_batch = standalone_batch.pop(batch_keys=['input_ids', 'attention_mask', 'off_policy_steps'])
-            non_tensor_infos = ['uid', 'reward_model']
+            non_tensor_infos = ['rollout_id', 'uid', 'reward_model']
             for key in non_tensor_infos:
                 standalone_gen_batch.non_tensor_batch[key] = standalone_batch.non_tensor_batch[key]
 
             standalone_gen_batch.meta_info[
                 'generation_kwargs'] = self.config.actor_rollout_ref.rollout.train_generate_kwargs
-            standalone_gen_batch.meta_info['complete_ratio'] = 1
             self.standalone_rollout_wg.generate_sequences_put(standalone_gen_batch)
             pprint(f'start standalone rollout, input batches {len(standalone_gen_batch)}.')
         metrics['rollout/standalone_input_batch'] = len(standalone_batch)
+
         # get training batch from ready queue, make it stable by random pick
+        ray.get(self.rollout_pool.fill_rollout_pool.remote(list(ready_batch_queue.queue)))
+        if self.global_step < self.rollout_pool_warmup_step + start_step:
+            return None, standalone_batch
         return_batch_size = self.config.data.train_batch_size * \
             self.config.trainer.league_training_config.buffer_size * \
             self.num_bon
-        ready_batch = [ready_batch_queue.get() for _ in range(min(return_batch_size, ready_batch_queue.qsize()))]
-        real_bsz = len(ready_batch)
-        random_choise_batch = []
-        if len(ready_batch) < return_batch_size:
-            random_choise_batch.extend(
-                [random.choice(ready_batch) for _ in range(return_batch_size - len(ready_batch))])
-        fake_bsz = len(random_choise_batch)
-        ready_batch.extend(random_choise_batch)
-        metrics.update({"rollout/real_bsz": real_bsz, "rollout/fake_bsz": fake_bsz})
-
-        batch = DataProto.concat(ready_batch)
+        train_batch = ray.get(self.rollout_pool.get_train_batch.remote(return_batch_size))
+        batch = DataProto.concat(train_batch)
         if self.config.algorithm.force_append_eos:
             batch.batch["input_ids"][:, -1] = self.tokenizer.eos_token_id
             batch.batch["responses"][:, -1] = self.tokenizer.eos_token_id
@@ -1352,7 +1358,6 @@ class RayPPOTrainer(object):
         # TODO: add staleness
         standalone_batch = []
         pending_batch_queue = queue.Queue()
-        ready_batch_queue = queue.Queue()
         while True:
             for batch_dict in self.train_dataloader:
                 metrics = {}
@@ -1364,11 +1369,13 @@ class RayPPOTrainer(object):
                         self.get_mean_max_len_per_query(batch, metrics)
 
                         batch, standalone_batch = self._generate(batch=batch,
-                                                                 resume_step=resume_step,
+                                                                 start_step=start_step,
                                                                  metrics=metrics,
                                                                  standalone_batch=standalone_batch,
-                                                                 pending_batch_queue=pending_batch_queue,
-                                                                 ready_batch_queue=ready_batch_queue)
+                                                                 pending_batch_queue=pending_batch_queue)
+                        if self.global_step < self.rollout_pool_warmup_step + start_step:
+                            self.global_step += 1
+                            continue
                         if self.config.trainer.save_train_batch_dir is not None:
                             makedirs(self.config.trainer.save_train_batch_dir, exist_ok=True)
                             local_path = f'train_batch_{self.global_step}.pt'

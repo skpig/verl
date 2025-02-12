@@ -767,7 +767,7 @@ class AsyncActorRolloutRefWorker(Worker):
         meta_info = {'eos_token_id': self.tokenizer.eos_token_id, 'pad_token_id': self.tokenizer.pad_token_id}
         prompts.meta_info.update(meta_info)
         prompts = self.sharding_manager.preprocess_data(prompts)
-        prompts.meta_info["complete_ratio"] = 1
+        prompts.meta_info["complete_ratio"] = 0
         self.rollout_async = self.rollout.generate_sequences(prompts=prompts, is_async=True)
         next(self.rollout_async)
         return prompts

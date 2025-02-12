@@ -142,6 +142,9 @@ actor_rollout_ref:
       default_hdfs_dir: null
       upload_to_mlx: False
       enable: False
+    rollout_pool:
+      nnodes: 1
+      warmup_step: 0
   streaming_rollout_args: ${streaming_rollout}
   streaming_validator_args: ${streaming_validator}
   use_cuda_timer: False

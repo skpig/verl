@@ -96,6 +96,7 @@ class AsyncXPerfGPTRollout(object):
         else:
             self.profiler_context = nullcontext(NullProfileEnter())
         self.is_standalone = is_standalone
+        self.async_remain_warmup_step = self.config.rollout_pool.get("warmup_step", 0)
         # auto infer rollout running config
         # off-policy rollout should disable paged attention, for maintaining FIFO order
         use_vllm = self.config.get('enable_paged_attention', True) and not is_standalone
@@ -407,9 +408,12 @@ class AsyncXPerfGPTRollout(object):
         if is_async:
             yield
             # stop event
-            self.stop_event.set()
+            if self.async_remain_warmup_step <= 0:
+                self.stop_event.set()
             (response_outputs, is_finished, metrics) = self._get_output_from_queue()
-            self.stop_event.clear()
+            if self.async_remain_warmup_step <= 0:
+                self.stop_event.clear()
+            self.async_remain_warmup_step -= 1
         else:
             # complete_ratio or all prompts are finished
             (response_outputs, is_finished, metrics) = self._get_output_from_queue()
@@ -440,6 +444,6 @@ class AsyncXPerfGPTRollout(object):
         }
 
         out = DataProto.from_dict(batch)
-        metrics["max_off_policy_steps"] = off_policy_steps.max().item()
+        metrics["off_policy_steps"] = off_policy_steps.tolist()
         out.meta_info["xperf_metrics"] = metrics
         yield out
