@@ -18,7 +18,11 @@ THOUGHT_DELIMITER_START = "<think>"
 THOUGHT_DELIMITER_END = "</think>"
 
 import re
-from pylatexenc import latex2text
+try:
+    from pylatexenc import latex2text
+except ImportError:
+    print("Warning: deepscale verifier needs pip install pylatexenc")
+    latex2text = None
 import sympy
 from sympy.parsing import sympy_parser
 from typing import Optional
