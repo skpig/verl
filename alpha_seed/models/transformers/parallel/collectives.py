@@ -1,3 +1,4 @@
+from typing import Optional
 import torch
 import torch.distributed as dist
 
@@ -5,23 +6,24 @@ import torch.distributed as dist
 class AllReduceIdentity(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, itensor: torch.Tensor, group: dist.ProcessGroup):
+    def forward(ctx, itensor: torch.Tensor, group: dist.ProcessGroup, name: Optional[str] = None):
         dist.all_reduce(itensor, group=group)
         return itensor
 
     @staticmethod
     def backward(ctx, grad_output):
-        return grad_output, None
+        return grad_output, None, None
 
 
-def allreduce_identity(tensor: torch.Tensor, group: dist.ProcessGroup) -> torch.Tensor:
-    return AllReduceIdentity.apply(tensor, group)
+# wangchenyuan.99: add `name` for compability with timer's monkey patch
+def allreduce_identity(tensor: torch.Tensor, group: dist.ProcessGroup, name: Optional[str] = None) -> torch.Tensor:
+    return AllReduceIdentity.apply(tensor, group, name)
 
 
 class IdentityAllreduce(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, itensor: torch.Tensor, group: dist.ProcessGroup):
+    def forward(ctx, itensor: torch.Tensor, group: dist.ProcessGroup, name: Optional[str] = None):
         ctx._group = group
         return itensor
 
@@ -29,11 +31,12 @@ class IdentityAllreduce(torch.autograd.Function):
     def backward(ctx, grad: torch.Tensor):
         group = ctx._group
         dist.all_reduce(grad, group=group)
-        return grad, None
+        return grad, None, None
 
 
-def identity_allreduce(tensor: torch.Tensor, group: dist.ProcessGroup) -> torch.Tensor:
-    return IdentityAllreduce.apply(tensor, group)
+# wangchenyuan.99: add `name` for compability with timer's monkey patch
+def identity_allreduce(tensor: torch.Tensor, group: dist.ProcessGroup, name: Optional[str] = None) -> torch.Tensor:
+    return IdentityAllreduce.apply(tensor, group, name)
 
 
 def get_memory():

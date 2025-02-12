@@ -36,6 +36,7 @@ jobs:
         name: setup env
         commands:
           - pip3 install --upgrade byted-omnistore
+          - pip3 install --upgrade bytedance.ndtimeline
           - cd /opt/tiger
           - git clone git@code.byted.org:data/verl
           - git clone git@code.byted.org:seed/seed_models

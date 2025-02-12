@@ -4,11 +4,13 @@ import inspect
 from typing import Tuple, Union, List, Literal
 from packaging.version import Version
 
+from .timed_collectives import patch_coll_ops
+
 _USE_CUDA_TIMER = False
 
 
 def version_checker():
-    NDTIMELINE_BASE_VERSION = "2.2.5"
+    NDTIMELINE_BASE_VERSION = "2.2.11"
     NDTIMELINE_HIGH_VERSION = "3.0.0"
     try:
         from bytedance.ndtimeline import __version__
@@ -110,16 +112,34 @@ def flush():
     if not use_cuda_timer():
         return
     import bytedance.ndtimeline as nd
-    if nd.NDTimerManagerSingleton.is_initialized():
-        global_step = nd.NDTimerManagerSingleton().global_step
+    global_step = nd.NDTimerManagerSingleton().global_step
+    if nd.NDTimerManagerSingleton.is_initialized() and require_flush(global_step):
         next_step_enabled = enable_by_global_step(global_step + 1)
-        nd.flush(next_iter_enabled=next_step_enabled)
+        place_holder = range(0, 1)
+        nd.NDTimerManagerSingleton().async_flush(place_holder,
+                                                 next_iter_enabled=next_step_enabled,
+                                                 submit2handler=True,
+                                                 dynamic_calibrate=False,
+                                                 keep_timer_state=False,
+                                                 sequential_calibrate=True,
+                                                 force_calibrate=True)
 
 
 def init_ndtimers(mesh_shape: Union[Tuple[int, int], Tuple[int]], ray_class_instance: object):
     if not use_cuda_timer():
         return
     version_checker()
+
+    from bytedance.ndtimeline import DeviceTimerMeta
+
+    extra_timers = [
+        DeviceTimerMeta("ep-ar", is_cpu_op=False),
+        DeviceTimerMeta("tp-ari", is_cpu_op=False),
+        DeviceTimerMeta("tp-iar", is_cpu_op=False),
+        DeviceTimerMeta("ep-iar", is_cpu_op=False),
+        DeviceTimerMeta("ep-ari", is_cpu_op=False),
+    ]
+
     import bytedance.ndtimeline as nd
     # wangchenyuan.99: deliberately not compatable with ray in lower verison
     import ray
@@ -130,8 +150,10 @@ def init_ndtimers(mesh_shape: Union[Tuple[int, int], Tuple[int]], ray_class_inst
                          mesh_shape=mesh_shape,
                          enable_streamer=True,
                          report_to_merlin=False,
+                         user_spcified_timers=extra_timers,
                          actor_name=actor_name,
                          ray_timer_names=ray_timer_names)
+        patch_coll_ops()
         print("ndtimeline initialized")
     else:
         extend_timers(ray_timer_names)

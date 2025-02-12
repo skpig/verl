@@ -87,6 +87,9 @@ def compare_moe_expert_parallel():
     dist.barrier()
     # expert parallel result
 
+    from alpha_seed.utils.ndtimeline.timed_collectives import patch_coll_ops
+    patch_coll_ops()
+
     if dist.get_rank() == 0:
         print(f"start computing expert parallel...")
 

@@ -3,6 +3,8 @@ import torch.distributed as dist
 from seed_models.integrations.bpex_triton.kernel.group_gemm import group_gemm_same_mn, group_gemm_same_nk
 from seed_models.integrations.bpex_triton.kernel.moe import expert_histogram, moe_gather, moe_scatter
 
+from alpha_seed.models.transformers.parallel.timed_collectives import TimedDistOP
+
 
 class FusedMoeExpertFunctionEP(torch.autograd.Function):
     """
@@ -151,8 +153,9 @@ class FusedMoeExpertFunctionEP(torch.autograd.Function):
         output = expert_output.reshape(hidden_states.shape)
 
         handle = None
+
         if ep_size > 1:
-            handle = dist.all_reduce(output, group=ep_group, async_op=async_op)
+            handle = TimedDistOP.all_reduce(output, group=ep_group, async_op=async_op, name=TimedDistOP.EP_AR)
 
         ctx.num_experts = num_experts
         ctx.save_for_backward(
@@ -258,7 +261,10 @@ class FusedMoeExpertFunctionEP(torch.autograd.Function):
 
         # ==================== EP Region ====================
         if ep_size > 1:
-            grad_gate_handle = dist.all_reduce(grad_gate_weight, group=ep_group, async_op=True)
+            grad_gate_handle = TimedDistOP.all_reduce(grad_gate_weight,
+                                                      group=ep_group,
+                                                      async_op=True,
+                                                      name=TimedDistOP.EP_AR)
         # ==================== EP Region ====================
 
         # recompute during backward
@@ -345,7 +351,7 @@ class FusedMoeExpertFunctionEP(torch.autograd.Function):
         grad_hidden_states = moe_gather(grad_scatter_output, scatter_index)
 
         if ep_size > 1:
-            dist.all_reduce(grad_hidden_states, group=ep_group)
+            TimedDistOP.all_reduce(grad_hidden_states, group=ep_group, name=TimedDistOP.EP_AR)
 
         # MOE Step 3-2: no grad
         # MOE Step 3-1: no grad

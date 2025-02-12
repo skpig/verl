@@ -38,7 +38,6 @@ from .parallel.collectives import allreduce_identity, identity_allreduce
 from .ops.group_gemm_ep import FusedMoeExpertFunctionEP
 from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
 
-from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
 from dist_attn.ulysses.ops import gather_seq_scatter_heads, gather_heads_scatter_seq
 
 import logging
@@ -98,7 +97,7 @@ def flash_attn2_rmpad_forward(
 
     # ============== tensor parallel region ================
     if tp_size > 1:
-        hidden_states = identity_allreduce(hidden_states, tp_group)
+        hidden_states = identity_allreduce(hidden_states, tp_group, "tp-iar")
     # ============== tensor parallel region ================
 
     bsz, q_len, _ = hidden_states.size()
@@ -227,7 +226,7 @@ def flash_attn2_rmpad_forward(
     attn_output = self.o_proj(attn_output)
     # ============== tensor parallel region ================
     if tp_size > 1:
-        attn_output = allreduce_identity(attn_output, tp_group)
+        attn_output = allreduce_identity(attn_output, tp_group, "tp-ari")
     # ============== tensor parallel region ================
     attn_output = self.resid_dropout(attn_output)
     if not output_attentions:
@@ -271,12 +270,12 @@ def _fused_moe_ep_forward(
 
     # MOE Step 3: compute with shared experts
     if ep_size > 1:
-        hidden_states = identity_allreduce(hidden_states, group=ep_group)
+        hidden_states = identity_allreduce(hidden_states, group=ep_group, name="ep-iar")
 
     experts_share_states = self.experts_share(hidden_states)
 
     if ep_size > 1:
-        experts_share_states = allreduce_identity(experts_share_states, group=ep_group)
+        experts_share_states = allreduce_identity(experts_share_states, group=ep_group, name="ep-ari")
 
     final_hidden_states = final_hidden_states + experts_share_states
 

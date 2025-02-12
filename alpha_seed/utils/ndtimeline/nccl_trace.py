@@ -18,14 +18,14 @@ def use_nccl_trace():
 def set_nccl_trace_option():
     global _USE_NCCL_TRACE
 
-    if os.getenv("TRAINER_DISABLE_NCCL_TRACE", "false").lower() != "true" and version_checker():
+    if os.getenv("TRAINER_DISABLE_NCCL_TRACE", "false").lower() != "true" and version_checker_nccl_trace():
         _USE_NCCL_TRACE = True
         logging.info("nccl trace is enabled")
     else:
         _USE_NCCL_TRACE = False
 
 
-def version_checker():
+def version_checker_nccl_trace():
     NDTIMELINE_BASE_VERSION = "2.2.5"
     try:
         from bytedance.ndtimeline import EmergencyServer, FlightRecorderDumper
