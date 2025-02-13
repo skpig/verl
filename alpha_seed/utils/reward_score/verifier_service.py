@@ -32,6 +32,8 @@ def compute_score(solution_str, ground_truth, verifier_service_psm, **argv) -> f
     client = euler.Client(VerifyService, f'sd://{verifier_service_psm}')
     for i in range(3):
         try:
+            if solution_str.startswith("A conversation between user and assistant."):
+                solution_str = solution_str[400:]
             if isinstance(ground_truth, str):
                 ground_truth = json.loads(ground_truth)
             problem = ground_truth["problem"]

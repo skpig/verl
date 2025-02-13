@@ -339,8 +339,10 @@ class RewardManager():
 
         for i in range(len(data)):
             rm_res_future_list.append(self.rm_req_executor.submit(get_rm_score, i))
-        fail_cnt = 0
-        total_cnt = 0
+        oj_fail_cnt = 0
+        verifier_fail_cnt = 0
+        oj_total_cnt = 0
+        verifier_total_cnt = 0
         dup_cnt = 0
         dup_lens = []
         not_dup_lens = []
@@ -368,11 +370,16 @@ class RewardManager():
 
             all_ngram.extend(ngram)
             if reward_style == "code-sandbox":
-                total_cnt += 1
+                oj_total_cnt += 1
                 # 访问失败的score现在设置成-2，用来计数，但是训练的时候还是当做没做对来处理
                 if score == -2:
-                    score = 0
-                    fail_cnt += 1
+                    score = -1
+                    oj_fail_cnt += 1
+            if reward_style == "verifier_service":
+                verifier_total_cnt += 1
+                if score == -2:
+                    score = -1
+                    verifier_fail_cnt += 1
             # train的时候做这个norm，但是打点的时候恢复，打原始值
             # eval的时候不做这个norm
             if need_norm:
@@ -427,7 +434,8 @@ class RewardManager():
         all_final_scores_to_lens = {key: sum(value) / len(value) for key, value in all_final_scores_to_lens.items()}
         prefix = "" if not is_validation else "val/"
         log_data = {
-            prefix + "oj/fail_rate": fail_cnt / total_cnt if total_cnt > 0 else -1,
+            prefix + "oj/fail_rate": oj_fail_cnt / oj_total_cnt if oj_total_cnt > 0 else -1,
+            prefix + "verifier/fail_rate": verifier_fail_cnt / verifier_total_cnt if verifier_total_cnt > 0 else -1,
             prefix + "dup/para_dup": dup_cnt / len(data),
             prefix + "dup/dup_response_len": sum(dup_lens) / max(1, len(dup_lens)),
             prefix + "dup/not_dup_response_len": sum(not_dup_lens) / max(1, len(not_dup_lens)),
@@ -439,10 +447,14 @@ class RewardManager():
         log_data = {**log_data, **log_counter, **log_score_to_lens}
         self.logger.log(data=log_data, step=global_step)
 
-        if total_cnt > 0 and fail_cnt / total_cnt >= 0.01:
-            send_message_to_employee("alpha seed任务oj失败率过高", f"任务链接: {task_url}, 失败率: {round(fail_cnt/total_cnt, 2)}",
-                                     user_email)
+        if oj_total_cnt > 0 and oj_fail_cnt / oj_total_cnt >= 0.01:
+            send_message_to_employee("alpha seed任务oj失败率过高",
+                                     f"任务链接: {task_url}, 失败率: {round(oj_fail_cnt/oj_total_cnt * 100.0, 2)}", user_email)
 
+        if verifier_total_cnt > 0 and verifier_fail_cnt / verifier_total_cnt >= 0.01:
+            send_message_to_employee(
+                "alpha seed任务verifier失败率过高",
+                f"任务链接: {task_url}, 失败率: {round(verifier_fail_cnt/verifier_total_cnt * 100.0, 2)}", user_email)
         log_table = None
         if self.config.trainer.num_cases_to_wandb > 0:
             log_table = {
