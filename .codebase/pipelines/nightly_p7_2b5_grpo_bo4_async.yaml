@@ -44,8 +44,8 @@ jobs:
   merline_ci:
     name: Merlin ci
     manual: false
-    # v72
-    image: hub.byted.org/reckon/data.reckon.mlx.image_5940:71d942a7b58da1bf52ee434a235764d2
+    # v144
+    image: hub.byted.org/reckon/data.reckon.mlx.image_5940:36aebfdb72c17e002e016c4594c602c4
     runs-on:
       cluster: gpu-l20
     envs:

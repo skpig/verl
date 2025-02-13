@@ -4,7 +4,7 @@ trigger:
 jobs:
   e2e_runnable_tests:
     # Merlin - data.aml.verl:v85
-    image: hub.byted.org/reckon/data.reckon.mlx.image_5940:5d8d8b56cf680f0c733e63b516035223
+    image: hub.byted.org/reckon/data.reckon.mlx.image_5940:36aebfdb72c17e002e016c4594c602c4
     if: ${{ !contains(Event.Change.Title, "WIP") }}
     runs-on:
       cluster: gpu-l20-16

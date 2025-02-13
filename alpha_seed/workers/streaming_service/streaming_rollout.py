@@ -26,7 +26,7 @@ import json
 import queue
 import threading
 
-from xperf_gpt.inference.session import InferenceSession
+from alpha_seed.workers.xperf_rollout.session import InferenceSession
 
 from pathlib import Path
 import os
@@ -99,7 +99,7 @@ class AsyncXPerfGPTRollout(object):
         self.async_remain_warmup_step = self.config.rollout_pool.get("warmup_step", 0)
         # auto infer rollout running config
         # off-policy rollout should disable paged attention, for maintaining FIFO order
-        use_vllm = self.config.get('enable_paged_attention', True) and not is_standalone
+        enable_paged_attn = self.config.get('enable_paged_attention', True) and not is_standalone
         enable_cuda_graph = self.config.get('enable_cuda_graph', False)
         slot_block_size = self.config.get('slot_block_size', 1024)
 
@@ -115,7 +115,7 @@ class AsyncXPerfGPTRollout(object):
 
         xperf_prophet = XperfModelProphet(model_cfg, sched_cfg, tp_size)
         gpu_memory_utilization = self.config.get('gpu_memory_utilization', 0.7)
-        if use_vllm:
+        if enable_paged_attn:
             prophet_cfg = xperf_prophet.profile_available_vllm_cfg(gpu_memory_utilization=gpu_memory_utilization)
             max_batch_size = prophet_cfg["orca_max_batch_size"]
             max_ctx_batch_size = 8
@@ -140,7 +140,7 @@ class AsyncXPerfGPTRollout(object):
 
         print("initializing xperf gpt...")
         print(
-            f"use_vllm, enable_cuda_graph, sched_cfg, prophet_cfg, device {use_vllm}, {enable_cuda_graph}, {sched_cfg}, {prophet_cfg}, {enable_cuda_graph}, {os.getenv('CUDA_VISIBLE_DEVICES')}"
+            f"enable_paged_attn, enable_cuda_graph, sched_cfg, prophet_cfg, device {enable_paged_attn}, {enable_cuda_graph}, {sched_cfg}, {prophet_cfg}, {enable_cuda_graph}, {os.getenv('CUDA_VISIBLE_DEVICES')}"
         )
         torch.manual_seed(9898)
 
@@ -220,11 +220,12 @@ class AsyncXPerfGPTRollout(object):
                                           max_batch_size=max_batch_size,
                                           max_length=config.prompt_length + config.response_length,
                                           slot_block_size=slot_block_size,
-                                          use_vllm=use_vllm,
+                                          enable_paged_attn=enable_paged_attn,
                                           vocab_tp=config.get('vocab_tp', False),
                                           enable_truncation=False,
                                           context_limit_bs=max_ctx_batch_size,
-                                          enable_cuda_graph=enable_cuda_graph)
+                                          enable_cuda_graph=enable_cuda_graph,
+                                          standalone=is_standalone)
         inference_sess.max_off_policy_steps = self.config.get('max_off_policy_steps', 5)
         with tempfile.NamedTemporaryFile(mode='w', suffix=".json") as f:
             json.dump(model_cfg, f)
@@ -274,7 +275,8 @@ class AsyncXPerfGPTRollout(object):
                                                                  rank0_split=False,
                                                                  mp_size=tp_size,
                                                                  enable_metrics=True,
-                                                                 use_ep=use_ep)
+                                                                 use_ep=use_ep,
+                                                                 tokenizer_path=tokenizer.name_or_path)
                     if dist.is_initialized() and tp_size > 1:
                         dist.barrier()
                         if tp_rank == 0:
@@ -331,7 +333,6 @@ class AsyncXPerfGPTRollout(object):
                         global_rank = 0 if not dist.is_initialized() else dist.get_rank()
                         tp_rank = 0 if self.device_mesh is None else self.device_mesh['tp'].get_local_rank()
                         tp_size = 1 if self.device_mesh is None else self.device_mesh['tp'].size()
-
                         save_model_name = f"{global_rank}_{tp_rank}_{tp_size}"
                         print("saving... inference engine ... ", f"{save_model_name}_model_engine")
                         torch.save(self.inference_engine.engine.module.layers_weight,
@@ -368,9 +369,9 @@ class AsyncXPerfGPTRollout(object):
                 is_finished.append(v.is_finished)
             is_finished = torch.Tensor(is_finished)
             metrics = {}
-            if hasattr(self.inference_engine.pp_scheduler,
-                       "init_metrics") and self.inference_engine.pp_scheduler.enable_metrics:
-                metrics = self.inference_engine.pp_scheduler.metrics
+            if hasattr(self.inference_engine.infer_scheduler,
+                       "init_metrics") and self.inference_engine.infer_scheduler.enable_metrics:
+                metrics = self.inference_engine.infer_scheduler.metrics
             self.inference_engine.empty_cache()
             self.output_queue.put((response_outputs, is_finished, metrics))
 
