@@ -124,7 +124,9 @@ class RemoteClient:
 
     async def add_requests(self, req_id, input_ids, ground_truth, reward_style):
         solution_str = self.tokenizer.decode(input_ids, skip_special_tokens=True)
-        solution_str_post_proc = post_process_solution_str(self.config, solution_str)
+        solution_str_post_proc = post_process_solution_str(self.config,
+                                                           solution_str,
+                                                           eos_token=self.tokenizer.eos_token)
 
         if reward_style == 'code-sandbox':
             result_future = self.call_oj.remote(solution_str_post_proc, ground_truth,
