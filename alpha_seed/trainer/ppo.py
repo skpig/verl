@@ -131,6 +131,8 @@ def calculate_score_in_length_ranges(raw_scores_log, response_length, ranges):
 
 
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty='kl'):
+    rollout_log_probs = data.batch['rollout_log_probs']
+    old_log_probs = data.batch['old_log_probs']
     responses = data.batch['responses']
     response_length = responses.size(1)
     token_level_scores = data.batch['token_level_scores']
@@ -140,7 +142,7 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
 
     # compute kl between ref_policy and current policy
     if 'ref_log_prob' in data.batch.keys():
-        kld = core_algos.kl_penalty(data.batch['old_log_probs'], data.batch['ref_log_prob'],
+        kld = core_algos.kl_penalty(old_log_probs, data.batch['ref_log_prob'],
                                     kl_penalty_type=kl_penalty)  # (batch_size, response_length)
         kld = kld * response_mask
         beta = kl_ctrl.value
@@ -161,6 +163,38 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
 
     metrics = {'critic/kl': current_kl, 'critic/kl_coeff': beta, 'critic/kl_sum': current_kl_sum}
 
+    # track KL divergence changes in model outputs, xperf logprobs versus seedmodels old logprobs
+    kl_diff = (rollout_log_probs - old_log_probs) * response_mask
+    kl_diff[:, -1] = 0
+    kl_diff_mean = (kl_diff.sum() / response_mask.sum()).item()
+    metrics.update({'rollout/kl_diff_mean': kl_diff_mean})
+
+    kl_diff_max = kl_diff.max().item()
+    idx = torch.nonzero(kl_diff_max == kl_diff)
+    rollout_log_probs_max = rollout_log_probs[idx[0][0], idx[0][1]].item()
+    old_log_probs_max = old_log_probs[idx[0][0], idx[0][1]].item()
+    metrics.update({
+        'rollout/kl_diff_max': kl_diff_max,
+        'rollout/kl_diff_max_rollout_log_probs': rollout_log_probs_max,
+        'rollout/kl_diff_max_old_log_probs': old_log_probs_max
+    })
+
+    kl_diff_min = kl_diff.min().item()
+    idx = torch.nonzero(kl_diff_min == kl_diff)
+    rollout_log_probs_min = rollout_log_probs[idx[0][0], idx[0][1]].item()
+    old_log_probs_min = old_log_probs[idx[0][0], idx[0][1]].item()
+    metrics.update({
+        'rollout/kl_diff_min': kl_diff_min,
+        'rollout/kl_diff_min_rollout_log_probs': rollout_log_probs_min,
+        'rollout/kl_diff_min_old_log_probs': old_log_probs_min
+    })
+
+    # kl_diff_p90 = torch.quantile(kl_diff.view(-1), 0.9, dim=-1).item()
+    # kl_diff_p99 = torch.quantile(kl_diff.view(-1), 0.99, dim=-1).item()
+    # metrics.update({'rollout/kl_diff_p90': kl_diff_p90, 'rollout/kl_diff_p99': kl_diff_p99})
+
+    kl_diff_sum = torch.mean(torch.sum(kl_diff, dim=-1), dim=0).item()
+    metrics.update({'rollout/kl_diff_sum': kl_diff_sum})
     return data, metrics
 
 
@@ -1089,9 +1123,16 @@ class RayPPOTrainer(object):
         # print the size of each data proto before training
         print_dataproto_size(batch, head='Before generation')
 
+        if 'rollout_log_probs' not in batch:
+            batch.batch['rollout_log_probs'] = torch.zeros(batch.batch['input_ids'].shape[0],
+                                                           self.config.data.max_response_length,
+                                                           dtype=torch.bfloat16,
+                                                           device=batch.batch['input_ids'].device).fill_(-1)
+
         if self.config.data.num_prompts_per_data > 1:
-            batch = batch.unfold_column_chunks(self.config.data.num_prompts_per_data,
-                                               split_keys=['input_ids', 'attention_mask', 'off_policy_steps'])
+            batch = batch.unfold_column_chunks(
+                self.config.data.num_prompts_per_data,
+                split_keys=['input_ids', 'attention_mask', 'off_policy_steps', 'rollout_log_probs'])
 
         # hybrid rollout
         batch.non_tensor_batch['rollout_id'] = np.array([str(uuid.uuid4()) for _ in range(len(batch))], dtype=object)
@@ -1100,7 +1141,7 @@ class RayPPOTrainer(object):
         batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(batch))], dtype=object)
         batch.check_consistency()
 
-        gen_batch = batch.pop(batch_keys=['input_ids', 'attention_mask', 'off_policy_steps'])
+        gen_batch = batch.pop(batch_keys=['input_ids', 'attention_mask', 'off_policy_steps', 'rollout_log_probs'])
         # assign the non_tensor_batch uid to the generator as well.
         non_tensor_infos = ['rollout_id', 'uid', 'reward_model']
         for key in non_tensor_infos:
@@ -1232,7 +1273,8 @@ class RayPPOTrainer(object):
             standalone_batch[i] = pad(standalone_batch[i], max_standalone_len, self.tokenizer)
         if len(standalone_batch) > 0:
             standalone_batch = DataProto.concat(standalone_batch)
-            standalone_gen_batch = standalone_batch.pop(batch_keys=['input_ids', 'attention_mask', 'off_policy_steps'])
+            standalone_gen_batch = standalone_batch.pop(
+                batch_keys=['input_ids', 'attention_mask', 'off_policy_steps', 'rollout_log_probs'])
             non_tensor_infos = ['rollout_id', 'uid', 'reward_model']
             for key in non_tensor_infos:
                 standalone_gen_batch.non_tensor_batch[key] = standalone_batch.non_tensor_batch[key]

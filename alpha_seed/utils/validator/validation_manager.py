@@ -112,7 +112,12 @@ class ValidateManager(object):
         for val_epoch_idx in range(val_epoch):
             for val_idx, test_data in enumerate(self.val_dataloader):
                 test_batch = DataProto.from_single_dict(test_data)
-
+                if 'rollout_log_probs' not in test_batch:
+                    test_batch.batch['rollout_log_probs'] = torch.zeros(
+                        test_batch.batch['input_ids'].shape[0],
+                        self.config.data.max_response_length,
+                        dtype=torch.bfloat16,
+                        device=test_batch.batch['input_ids'].device).fill_(-1)
                 prompt_names = test_batch.non_tensor_batch['prompt_names'][0]
                 num_prompts_per_data = len(prompt_names)
 
@@ -127,7 +132,8 @@ class ValidateManager(object):
                 test_batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(test_batch))],
                                                               dtype=object)
 
-                test_gen_batch = test_batch.pop(['input_ids', 'attention_mask', 'off_policy_steps'])
+                test_gen_batch = test_batch.pop(
+                    ['input_ids', 'attention_mask', 'off_policy_steps', 'rollout_log_probs'])
                 # copy relevant non-tensor info
                 non_tensor_infos = ['uid', 'reward_model']
                 for key in non_tensor_infos:
