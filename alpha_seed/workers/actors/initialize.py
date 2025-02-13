@@ -83,7 +83,10 @@ def create_mesh(fsdp_size: int, tp_size: int, sp_size: int):
     remain_size = world_size // tp_size
     if fsdp_size > remain_size:
         fsdp_size = remain_size
-    assert remain_size % fsdp_size == 0
+    if remain_size % fsdp_size != 0:
+        warnings.warn(f"parallelism config is not compatible: {world_size=}, {fsdp_size=}, {tp_size=}. "
+                      f"Ingore this warning if this is creating standalone rollout.")
+        fsdp_size = remain_size
     dp_size = remain_size // fsdp_size
     if dp_size == 1:
         train_mesh = init_device_mesh("cuda", (fsdp_size, tp_size), mesh_dim_names=("fsdp", "tp"))
