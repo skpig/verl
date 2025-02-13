@@ -47,6 +47,7 @@ from alpha_seed.workers.streaming_service.xperf_model_prophet import XperfModelP
 from alpha_seed.workers.xperf_rollout.utils.logits_manipulate import logits_manipulate_fn_core, logits_manipulate_fn_eta, logits_manipulate_fn_minp, logits_manipulate_fn_clip
 from alpha_seed.utils.observility import get_profiler_context_wrapped, profile_step
 from functools import partial
+import omegaconf
 
 import ray
 
@@ -73,6 +74,15 @@ def remove_nccl_files():
     for p in Path(cwd).glob("xperf_gpt_nccl_file*"):
         print(f'Removing file {p.name}')
         p.unlink(missing_ok=True)
+
+
+def omegaconf_config_to_py_obj(config):
+    if isinstance(config, omegaconf.DictConfig):
+        return {k: omegaconf_config_to_py_obj(v) for k, v in config.items()}
+    elif isinstance(config, omegaconf.ListConfig):
+        return [omegaconf_config_to_py_obj(item) for item in config]
+    else:
+        return config
 
 
 class AsyncXPerfGPTRollout(object):
@@ -339,6 +349,9 @@ class AsyncXPerfGPTRollout(object):
         while True:
             (query_pool, complete_ratio, generation_kwargs, prompt_meta_info) = self.input_queue.get(block=True)
             original_query_pool = copy.deepcopy(query_pool)
+
+            # convert omegaconf config to py obj to prevent performance issue
+            generation_kwargs = omegaconf_config_to_py_obj(generation_kwargs)
             self.inference_engine.set_generator_strategy(**generation_kwargs)
             with logging_set_level(self.config.get('logging_level', 'WARN')), self.profiler_context as p:
                 try:
