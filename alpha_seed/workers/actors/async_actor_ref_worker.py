@@ -904,15 +904,15 @@ class AsyncActorRolloutRefWorker(Worker):
                 # Note (zhangchi.usc1992) this may be running on CPU and potentially slow
                 param_ema.copy_(param.to(param_ema.device) * (1 - beta) + beta * param_ema)
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def upload_process_group(self, trigger_timestamp):
         ndtimeline.upload_process_group(trigger_timestamp, ndtimeline.DumpType.initial.value)
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def do_ndtimeline_action(self, action, *args, **kwargs):
         ndtimeline.do_ndtimeline_action(action, *args, **kwargs)
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_ndtimeline(self):
         if self._is_actor or self._is_rollout:
             mocked_fsdp_shape = list(self.actor_fsdp_mesh.shape)

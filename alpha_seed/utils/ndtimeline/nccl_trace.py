@@ -18,7 +18,7 @@ def use_nccl_trace():
 def set_nccl_trace_option():
     global _USE_NCCL_TRACE
 
-    if os.getenv("TRAINER_DISABLE_NCCL_TRACE", "true").lower() != "true" and version_checker():
+    if os.getenv("TRAINER_DISABLE_NCCL_TRACE", "false").lower() != "true" and version_checker():
         _USE_NCCL_TRACE = True
         logging.info("nccl trace is enabled")
     else:

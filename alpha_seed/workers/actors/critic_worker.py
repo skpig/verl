@@ -402,7 +402,7 @@ class CriticWorker(Worker):
         if self.config.train_memory_offload:
             self.to("cpu")
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def do_ndtimeline_action(self, action, *args, **kwargs):
         ndtimeline.do_ndtimeline_action(action, *args, **kwargs)
 

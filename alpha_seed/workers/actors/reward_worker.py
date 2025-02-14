@@ -455,11 +455,11 @@ class RewardModelWorker(Worker):
         })
         return output
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def upload_process_group(self, trigger_timestamp):
         ndtimeline.upload_process_group(trigger_timestamp, ndtimeline.DumpType.initial.value)
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def do_ndtimeline_action(self, action, *args, **kwargs):
         ndtimeline.do_ndtimeline_action(action, *args, **kwargs)
 
