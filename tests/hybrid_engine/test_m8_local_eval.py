@@ -9,6 +9,9 @@ from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRe
 from alpha_seed.utils.validator.validation_manager import ValidateManager
 from tasks.main_ppo import RewardManager
 from single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
+import os
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 default_conf = OmegaConf.load("/opt/tiger/alpha-seed/tasks/config/ppo_trainer.yaml")
 config = OmegaConf.create({
@@ -20,9 +23,7 @@ config = OmegaConf.create({
         'path': "hdfs://haruna/home/byte_data_seed/ssd_wlcb/user/liuxin.ai/rl/bs4k_merge_op_async_step80"
     },
     "data": {
-        "val_files": [
-            "hdfs://haruna/home/byte_data_seed/ssd_hldy/user/jiangchengquan/rl/datasets/codeforces_sample_32.parquet"
-        ],
+        "val_files": ["hdfs://haruna/home/byte_data_seed/ssd_hldy/user/jiangchengquan/rl/datasets/MBPP_eval.parquet"],
         "prompt_key": "prompt",
         "answer_key": "answer",
         "use_ref_answer": True,

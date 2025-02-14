@@ -29,6 +29,15 @@ config = OmegaConf.create({
         'train_generate_kwargs': {
             'stop_sequence_tokens': [[959, 39440, 157], [959, 35733, 157], [959, 2642, 26128, 1742, 157]]
         },
+        'schedule_strategy': 'fifo',
+        'profile': {
+            'filename': "rollout",
+            'profile_at_ranks': [0, 4],
+            'profile_at_steps': [0, 500, 1000],
+            'profile_first_n_execs': 3,
+            'enable': True,
+            'upload_to_mlx': True
+        }
     },
 })
 

@@ -26,7 +26,7 @@ import json
 import queue
 import threading
 
-from alpha_seed.workers.xperf_rollout.session import InferenceSession
+from alpha_seed.workers.xperf_rollout.session import InferenceSession, StepProfiler
 
 from pathlib import Path
 import os
@@ -226,6 +226,7 @@ class AsyncXPerfGPTRollout(object):
                                top_p=config.train_generate_kwargs.top_p,
                                temperature=config.train_generate_kwargs.temperature,
                                logits_manipulate_fn=logits_manipulate_fn)
+        step_profiler = StepProfiler(config.profile)
         inference_sess = InferenceSession(num_slots=num_slots,
                                           max_batch_size=max_batch_size,
                                           max_length=config.prompt_length + config.response_length,
@@ -235,7 +236,8 @@ class AsyncXPerfGPTRollout(object):
                                           enable_truncation=False,
                                           context_limit_bs=max_ctx_batch_size,
                                           enable_cuda_graph=enable_cuda_graph,
-                                          standalone=is_standalone)
+                                          standalone=is_standalone,
+                                          step_profiler=step_profiler)
         inference_sess.max_off_policy_steps = self.config.get('max_off_policy_steps', 5)
         with tempfile.NamedTemporaryFile(mode='w', suffix=".json") as f:
             json.dump(model_cfg, f)

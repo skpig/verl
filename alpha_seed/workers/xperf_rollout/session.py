@@ -14,6 +14,7 @@ from alpha_seed.workers.xperf_rollout.component.cache_manager import CacheManage
 from alpha_seed.workers.xperf_rollout.component.infer_scheduler import InferScheduler
 from alpha_seed.workers.xperf_rollout.component.sampling_manager import Sampler
 from alpha_seed.workers.xperf_rollout.component.query import Query
+from alpha_seed.utils.observility import get_profiler_context_wrapped
 from xperf_gpt.utils import (logging_rank, logging_rank_only)
 from typing import List, Dict
 import logging
@@ -26,6 +27,48 @@ from transformers import AutoTokenizer
 # Constants
 BLOCK_SIZE_ALIGNMENT = 256
 DEFAULT_LOGGING_LEVEL = logging.INFO
+
+
+class StepProfiler:
+
+    def __init__(self, config):
+        self.profile_at_steps = set([i for i in config.profile_at_steps])
+        self.profile_first_n_execs = config.profile_first_n_execs
+        self.global_rank = torch.distributed.get_rank()
+
+        def _create_context(step: int, ctx_tokens: int, dec_tokens: int):
+            return get_profiler_context_wrapped(
+                filename=f"{config.filename}_rank_{self.global_rank}_step_{step}_ctx_{ctx_tokens}_dec{dec_tokens}",
+                profile_on_ranks=config.profile_on_ranks,
+                upload_to_mlx=config.upload_to_mlx,
+                enable=config.enable,
+                wait=0,
+                warmup=0,
+                active=1,
+                repeat=1)
+
+        self.create_context = _create_context
+
+        self.step = 0
+        self.exec_count = 0
+        self.profiler = None
+
+    def reset_exec(self):
+        self.step = 0
+        self.exec_count += 1
+        self.profiler = None
+
+    def record_step(self, ctx_tokens: int, dec_tokens: int):
+        if self.exec_count >= self.profile_first_n_execs:
+            return
+        if self.step in self.profile_at_steps:
+            if self.profiler is not None:
+                self.profiler.__exit__(None, None, None)
+            self.profiler = self.create_context(self.step, ctx_tokens, dec_tokens)
+            self.profiler.__enter__()
+        elif self.profiler is not None and hasattr(self.profiler, 'step'):
+            self.profiler.step()
+        self.step += 1
 
 
 class InferenceSession:
@@ -42,26 +85,29 @@ class InferenceSession:
         multi_stream (bool): Use separate streams for context and decoding
     """
 
-    def __init__(self,
-                 num_slots,
-                 max_batch_size,
-                 max_length=4096,
-                 enable_paged_attn=False,
-                 context_split_len=4 * 1024,
-                 max_prompt_length=None,
-                 context_limit_bs=1,
-                 max_context_shift=0,
-                 slot_block_size=1,
-                 vocab_tp=False,
-                 enable_truncation=True,
-                 ctx_shift_intra_micro_batch=True,
-                 is_prefill_decode_split=False,
-                 enable_ngrams_decoding=False,
-                 enable_ngrams_when_bs_below=32,
-                 max_ngram_size=3,
-                 num_pred_tokens=6,
-                 enable_cuda_graph=False,
-                 standalone=False):
+    def __init__(
+        self,
+        num_slots,
+        max_batch_size,
+        max_length=4096,
+        enable_paged_attn=False,
+        context_split_len=4 * 1024,
+        max_prompt_length=None,
+        context_limit_bs=1,
+        max_context_shift=0,
+        slot_block_size=1,
+        vocab_tp=False,
+        enable_truncation=True,
+        ctx_shift_intra_micro_batch=True,
+        is_prefill_decode_split=False,
+        enable_ngrams_decoding=False,
+        enable_ngrams_when_bs_below=32,
+        max_ngram_size=3,
+        num_pred_tokens=6,
+        enable_cuda_graph=False,
+        standalone=False,
+        step_profiler: StepProfiler = None,
+    ):
         """Initialize inference session with hardware/performance parameters"""
         # Memory management
         self.enable_paged_attn = enable_paged_attn
@@ -81,6 +127,8 @@ class InferenceSession:
         self.enable_cuda_graph = enable_cuda_graph
         self.is_prefill_decode_split = is_prefill_decode_split
         self.enable_ngrams_decoding = enable_ngrams_decoding
+        self.step_profiler = step_profiler
+
         self.record_input_prompt = True
         self.tokenizer = None
         self.max_off_policy_steps = 5
@@ -589,6 +637,8 @@ class InferenceSession:
         self.finished_num = 0
         tokens_len = None
         accepted_len = None
+        if self.step_profiler is not None:
+            self.step_profiler.reset_exec()
         while (not self._should_terminate(prompts, complete_ratio, stop_event)):
             self.current_steps += 1
             self.running, self.waiting = self._select_running_queries()
@@ -614,6 +664,10 @@ class InferenceSession:
                                        accepted_len=accepted_len,
                                        log_probs=log_probs)
             self.infer_scheduler.next_step()
+            if self.step_profiler is not None:
+                ctx_tokens = context_input.shape[0] if context_input is not None else 0
+                dec_tokens = decode_input.shape[0] if decode_input is not None else 0
+                self.step_profiler.record_step(ctx_tokens=ctx_tokens, dec_tokens=dec_tokens)
         torch.cuda.synchronize()
         self.infer_scheduler.record("cur_steps", [self.current_steps])
 

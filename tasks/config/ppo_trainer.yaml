@@ -139,6 +139,9 @@ actor_rollout_ref:
       filename: p6_400m_ppo_rollout
       profile_on_ranks:
         - 0
+      profile_at_steps:
+        - 0
+      profile_first_n_execs: 3
       default_hdfs_dir: null
       upload_to_mlx: False
       enable: False
