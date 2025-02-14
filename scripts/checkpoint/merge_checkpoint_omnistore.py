@@ -20,9 +20,10 @@ if __name__ == '__main__':
     # for compatibility with merlin auto eval
     parser.add_argument('--cruise-config', required=False)
     parser.add_argument('--dtype', required=False)
+    parser.add_argument('--save_hf', action='store_true')
     args = parser.parse_args()
 
-    if not args.load_dir.endswith('actor'):
+    if not args.load_dir.endswith('actor') and not args.load_dir.endswith('critic'):
         args.load_dir = os.path.join(args.load_dir, 'actor')
 
     if not args.save_path:
@@ -72,6 +73,10 @@ if __name__ == '__main__':
 
     del state_dict
     del model
+
+    if args.save_hf:
+        print(f'Upload huggingface model from {hf_path} to {args.load_dir}')
+        hdfs_io.copy(hf_path, args.load_dir)
 
     # upload back to hdfs
     print(f'Step4: convert model to xperf format and upload to {args.save_path}')
