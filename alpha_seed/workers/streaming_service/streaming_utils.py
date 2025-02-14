@@ -95,6 +95,13 @@ def record_xperf_metrics(batch_info, metrics, logger, global_step, prefix=''):
                 'page_swap_out_token']
             metrics[f'rollout/{prefix}/max_off_policy_steps'] = max(
                 batch_info.meta_info['xperf_metrics']['off_policy_steps'])
+            per_token_latency = batch_info.meta_info['xperf_metrics']['per_token_latency']
+            tokens_num = batch_info.meta_info['xperf_metrics']['tokens_num']
+            total_tokens = sum(tokens_num)
+            metrics[f'rollout/{prefix}/per_token_latency_avg'] = 0 if len(per_token_latency) == 0 else (
+                sum(per_token_latency) / len(per_token_latency))
+            metrics[f'rollout/{prefix}/tps'] = total_tokens / (sum(per_token_latency) + 1e-6) * 1000
+            metrics[f'rollout/{prefix}/bs_avg'] = 0 if len(tokens_num) == 0 else (total_tokens / len(tokens_num))
         except Exception as e:
             # some xperf metrics is not ready on lower version
             pass
