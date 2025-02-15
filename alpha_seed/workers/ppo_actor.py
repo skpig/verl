@@ -266,7 +266,7 @@ class DataParallelPPOActor(BasePPOActor):
                 micro_batches, num_micro_batches, indices = rearrange_micro_batches(batch=mini_batch,
                                                                                     max_token_len=max_token_len)
             else:
-                micro_batches = batch.split(micro_batch_size)
+                micro_batches = mini_batch.split(micro_batch_size)
                 num_micro_batches = len(micro_batches)
 
             mini_batch_entropy = []
