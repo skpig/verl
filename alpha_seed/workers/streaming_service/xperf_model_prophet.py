@@ -34,6 +34,9 @@ class XperfModelProphet:
         self.num_heads = model_cfg["num_heads"]
         self.num_kv_heads = model_cfg.get("num_kv_heads", self.num_heads)
         self.num_layers = model_cfg["num_layers"]
+        self.kv_num_layers = self.num_layers
+        if "kv_mirror_imitated_layers" in model_cfg:
+            self.kv_num_layers -= len(model_cfg["kv_mirror_imitated_layers"])
         self.head_dim = self.hidden_size // self.num_heads
         self.intermediate_size = model_cfg.get("ffn_internal_dim",
                                                self.hidden_size * 5 - self.num_kv_heads * self.head_dim)
@@ -223,11 +226,11 @@ class XperfModelProphet:
             QuantOption.W4_ChannelGroupAsymm: 2,
             QuantOption.W4C8_ChannelGroupAsymm: 1,
             QuantOption.W8A8_PerChannelSymm: 1,
-            QuantOption.FP8_W8_PerTensor: 1,
+            QuantOption.FP8_W8_PerTensor: 2,
         }
         kv_cache_element_sz = kv_cache_element_size_map[self.quant_type]
         num_kv_heads_per_card = self.num_kv_heads // self.mp_size if self.num_kv_heads > self.mp_size else 1
-        kv_cache_size_per_token = self.num_layers * num_kv_heads_per_card * 2 * kv_cache_element_sz * self.head_dim
+        kv_cache_size_per_token = self.kv_num_layers * num_kv_heads_per_card * 2 * kv_cache_element_sz * self.head_dim
         logging.info(
             f"XperfModelProphet profile_kv_cache_size_per_token got {kv_cache_size_per_token/1024**3}GB per card.")
         return kv_cache_size_per_token

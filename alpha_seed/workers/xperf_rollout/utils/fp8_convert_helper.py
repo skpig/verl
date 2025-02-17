@@ -7,11 +7,19 @@ from transformers import PretrainedConfig
 
 from torch.distributed._tensor import DTensor, Replicate, Shard
 from torch.distributed.device_mesh import DeviceMesh
-from seed_models import P6Config
+from seed_models import P6Config, P6DenseConfig, M8Config
 from alpha_seed.workers.xperf_rollout.utils.layout_convert_helper import _fix_qkv_ordering, _fix_o_ordering, load_to_cuda
+from alpha_seed.workers.xperf_rollout.utils.bf16_convert_helper import assert_not_nan
 
 
-def convert_fp8_weights_from_bf16(qkv_proj_weight, attention_proj_weight, FFN0_weight, FFN1_weight, experts_num=32):
+def convert_fp8_weights_from_bf16(qkv_proj_weight,
+                                  attention_proj_weight,
+                                  FFN0_weight,
+                                  FFN1_weight,
+                                  experts_num=32,
+                                  FFN0_share_weight=None,
+                                  FFN1_share_weight=None,
+                                  use_ep=False):
     # qkv w
     fp8_qkv_scale_converted = 1 / torch.classes.XGPT.Fp8GemmTestOp().GetPerTensorScale(qkv_proj_weight, 0)
     fp8_qkvw_converted = torch.classes.XGPT.Fp8GemmTestOp().Quant(qkv_proj_weight, 1 / fp8_qkv_scale_converted)
@@ -52,7 +60,26 @@ def convert_fp8_weights_from_bf16(qkv_proj_weight, attention_proj_weight, FFN0_w
     fp8_FFN1_weight_scale_converted_all = torch.cat(fp8_FFN1_weight_scale_converted_all)
     fp8_FFN1_weight_converted_all = torch.cat(fp8_FFN1_weight_converted_all).cuda()
 
-    return fp8_qkv_scale_converted, fp8_qkvw_converted, fp8_attention_proj_weight_scale_converted, fp8_attention_proj_weight_converted, fp8_FFN0_weight_scale_converted_all, fp8_FFN0_weight_converted_all, fp8_FFN1_weight_scale_converted_all, fp8_FFN1_weight_converted_all
+    fp8_FFN0_share_weight_scale_converted_all = None
+    fp8_FFN0_share_weight_converted_all = None
+    fp8_FFN1_share_weight_scale_converted_all = None
+    fp8_FFN1_share_weight_converted_all = None
+    if use_ep:
+        assert FFN0_share_weight is not None and FFN1_share_weight is not None, "FFN0_share_weight and FFN1_share_weight must be provided when use_ep is True"
+        fp8_FFN0_share_weight_scale_converted_all = 1 / torch.classes.XGPT.Fp8GemmTestOp().GetPerTensorScale(
+            FFN0_share_weight, 0)
+        fp8_FFN0_share_weight_converted_all = torch.classes.XGPT.Fp8GemmTestOp().Quant(
+            FFN0_share_weight, 1 / fp8_FFN0_share_weight_scale_converted_all)
+        fp8_FFN1_share_weight_scale_converted_all = 1 / torch.classes.XGPT.Fp8GemmTestOp().GetPerTensorScale(
+            FFN1_share_weight, 0)
+        fp8_FFN1_share_weight_converted_all = torch.classes.XGPT.Fp8GemmTestOp().Quant(
+            FFN1_share_weight, 1 / fp8_FFN1_share_weight_scale_converted_all)
+
+    return (fp8_qkv_scale_converted, fp8_qkvw_converted, fp8_attention_proj_weight_scale_converted,
+            fp8_attention_proj_weight_converted, fp8_FFN0_weight_scale_converted_all, fp8_FFN0_weight_converted_all,
+            fp8_FFN1_weight_scale_converted_all, fp8_FFN1_weight_converted_all,
+            fp8_FFN0_share_weight_scale_converted_all, fp8_FFN0_share_weight_converted_all,
+            fp8_FFN1_share_weight_scale_converted_all, fp8_FFN1_share_weight_converted_all)
 
 
 def _reshard_fsdp_state_dict_to_xperf_p6_fp8(tp_model, state_dict, device_mesh: DeviceMesh, model_config: P6Config):
@@ -276,7 +303,7 @@ def _reshard_fsdp_state_dict_to_xperf_p6_fp8(tp_model, state_dict, device_mesh: 
 
         # (num_experts, intermediate_size // tp, hidden_size)
         # breakpoint()
-        fp8_qkv_scale_converted, fp8_qkvw_converted, fp8_attention_proj_weight_scale_converted, fp8_attention_proj_weight_converted, fp8_FFN0_weight_scale_converted_all, fp8_FFN0_weight_converted_all, fp8_FFN1_weight_scale_converted_all, fp8_FFN1_weight_converted_all = convert_fp8_weights_from_bf16(
+        fp8_qkv_scale_converted, fp8_qkvw_converted, fp8_attention_proj_weight_scale_converted, fp8_attention_proj_weight_converted, fp8_FFN0_weight_scale_converted_all, fp8_FFN0_weight_converted_all, fp8_FFN1_weight_scale_converted_all, fp8_FFN1_weight_converted_all, _, _, _, _ = convert_fp8_weights_from_bf16(
             qkv_weight, o_proj_weight, fc1_weight, fc2_weight)
         qkv_proj_weight.data = fp8_qkvw_converted  # FP8
         qkv_proj_weight_inv_scale.data = fp8_qkv_scale_converted
@@ -299,4 +326,463 @@ def _reshard_fsdp_state_dict_to_xperf_p6_fp8(tp_model, state_dict, device_mesh: 
 
     # assert len(state_dict) == 0
 
+    torch.cuda.empty_cache()
+
+
+def _reshard_fsdp_state_dict_to_xperf_p6dense_fp8(tp_model, state_dict, device_mesh: DeviceMesh,
+                                                  model_config: P6DenseConfig):
+    assert isinstance(model_config, P6DenseConfig)
+
+    # checking
+    if device_mesh is not None:
+        tp_size = device_mesh['tp'].size()
+        tp_rank = device_mesh['tp'].get_local_rank()
+        assert tp_size <= model_config.num_key_value_heads
+        assert model_config.num_key_value_heads % tp_size == 0
+    else:
+        tp_size = 1
+        tp_rank = 0
+
+    head_dim = model_config.hidden_size // model_config.num_attention_heads
+    hidden_size = model_config.hidden_size
+    num_heads = model_config.num_attention_heads
+    mqa_kv_heads = model_config.num_key_value_heads
+
+    norm = state_dict.pop('model.norm.weight').full_tensor().to(torch.bfloat16).unsqueeze(0)
+    assert norm.shape == tp_model.layernorm_weight.shape
+    tp_model.layernorm_weight.data = norm
+
+    wte_weight = state_dict.pop('model.embed_tokens.weight').full_tensor().to(torch.bfloat16)
+    lm_head = state_dict.pop('lm_head.weight').full_tensor().to(torch.bfloat16)
+
+    if device_mesh is not None and tp_model.wte_weight.data.shape != wte_weight.shape:
+        # TODO: we may need to do full first
+        wte_weight = DTensor.from_local(wte_weight, device_mesh=device_mesh, placements=[Replicate(), Replicate()])
+        wte_weight_tp = wte_weight.redistribute(device_mesh=device_mesh, placements=[Replicate(),
+                                                                                     Shard(1)])._local_tensor
+
+        lm_head = DTensor.from_local(lm_head, device_mesh=device_mesh, placements=[Replicate(), Replicate()])
+        lm_head_tp = wte_weight.redistribute(device_mesh=device_mesh, placements=[Replicate(), Shard(0)])._local_tensor
+    else:
+        wte_weight_tp = wte_weight
+        lm_head_tp = lm_head
+
+    wte_weight_tp = wte_weight_tp.contiguous()
+    lm_head_tp = lm_head_tp.contiguous()
+
+    assert tp_model.wte_weight.data.shape == wte_weight_tp.shape
+    assert tp_model.lm_head_weight.data.shape == lm_head_tp.shape
+
+    tp_model.wte_weight.data = wte_weight_tp
+    tp_model.lm_head_weight.data = lm_head_tp
+
+    for layer_index, (pre_gamma_beta, qkv_proj_weight, qkv_proj_bias, attention_proj_weight, attention_proj_bias,
+                      ffn_gamma_beta, FFN0_weight, FFN0_bias, FFN1_weight, FFN1_bias, norm0_out_scale,
+                      qkv_proj_in_inv_scale, qkv_proj_weight_inv_scale, attn_out_scale, attn_proj_in_inv_scale,
+                      attn_proj_weight_inv_scale, norm1_out_scale, FFN0_in_inv_scale, FFN0_weight_inv_scale,
+                      FFN0_out_scale, FFN1_in_inv_scale, FFN1_weight_inv_scale,
+                      *_) in enumerate(tp_model.layers_weight):
+        ln_1_weight = state_dict.pop(f'model.layers.{layer_index}.input_layernorm.weight').full_tensor()
+        ln_1_weight = torch.unsqueeze(ln_1_weight, dim=0).to(torch.bfloat16)
+        assert pre_gamma_beta.data.shape == ln_1_weight.shape
+        pre_gamma_beta.data = ln_1_weight.contiguous()
+
+        ln_2_weight = state_dict.pop(f'model.layers.{layer_index}.post_attention_layernorm.weight').full_tensor()
+        ln_2_weight = torch.unsqueeze(ln_2_weight, dim=0).to(torch.bfloat16)
+        assert ffn_gamma_beta.data.shape == ln_2_weight.shape
+        ffn_gamma_beta.data = ln_2_weight.contiguous()
+
+        q_proj_weight = state_dict.pop(f'model.layers.{layer_index}.self_attn.q_proj.weight').full_tensor().to(
+            torch.bfloat16)  # (num_q_head, head_dim, hidden_size)
+        k_proj_weight = state_dict.pop(f'model.layers.{layer_index}.self_attn.k_proj.weight').full_tensor().to(
+            torch.bfloat16)  # (num_kv_head, head_dim, hidden_size)
+        v_proj_weight = state_dict.pop(f'model.layers.{layer_index}.self_attn.v_proj.weight').full_tensor().to(
+            torch.bfloat16)  # (num_kv_head, head_dim, hidden_size)
+
+        qkv_weight = torch.cat((q_proj_weight, k_proj_weight, v_proj_weight), dim=0)
+        if device_mesh is not None:
+            qkv_weight, q_heads_list = _fix_qkv_ordering(qkv_weight,
+                                                         tp_size=tp_size,
+                                                         num_heads=num_heads,
+                                                         mqa_kv_heads=mqa_kv_heads,
+                                                         interleaved_kv_shared=False)
+            qkv_weight = qkv_weight[tp_rank]
+
+        assert qkv_weight.shape == qkv_proj_weight.shape
+        qkv_proj_weight.data = qkv_weight.contiguous()
+
+        o_proj_weight = state_dict.pop(f'model.layers.{layer_index}.self_attn.o_proj.weight').full_tensor().to(
+            torch.bfloat16)
+        if device_mesh is not None:
+            o_proj_weight = _fix_o_ordering(o_proj_weight, num_heads=num_heads, q_heads_list=q_heads_list)[tp_rank]
+
+        assert o_proj_weight.shape == attention_proj_weight.shape
+        attention_proj_weight.data = o_proj_weight.contiguous()
+
+        # model.layers.0.mlp.gate_proj.weight
+        gate_proj_weight = state_dict.pop(f'model.layers.{layer_index}.mlp.gate_proj.weight').full_tensor().to(
+            torch.bfloat16)
+
+        if device_mesh is not None:
+            gate_proj_weight = DTensor.from_local(gate_proj_weight,
+                                                  device_mesh=device_mesh,
+                                                  placements=[Replicate(), Replicate()])
+            gate_proj_weight = gate_proj_weight.redistribute(device_mesh=device_mesh,
+                                                             placements=[Replicate(), Shard(0)])._local_tensor
+
+        gate_proj_weight = gate_proj_weight.contiguous()
+
+        # model.layers.0.mlp.up_proj.weight
+        up_proj_weight = state_dict.pop(f'model.layers.{layer_index}.mlp.up_proj.weight').full_tensor().to(
+            torch.bfloat16)
+
+        if device_mesh is not None:
+            up_proj_weight = DTensor.from_local(up_proj_weight,
+                                                device_mesh=device_mesh,
+                                                placements=[Replicate(), Replicate()])
+            up_proj_weight = up_proj_weight.redistribute(device_mesh=device_mesh, placements=[Replicate(),
+                                                                                              Shard(0)])._local_tensor
+
+        up_proj_weight = up_proj_weight.contiguous()
+
+        gate_up_proj_weight = torch.cat((gate_proj_weight, up_proj_weight), dim=0).contiguous()
+
+        assert FFN0_weight.data.shape == gate_up_proj_weight.shape
+        FFN0_weight.data = gate_up_proj_weight.contiguous()
+
+        # model.layers.0.mlp.down_proj.weight
+        down_proj_weight = state_dict.pop(f'model.layers.{layer_index}.mlp.down_proj.weight').full_tensor().to(
+            torch.bfloat16)
+
+        if device_mesh is not None:
+            down_proj_weight = DTensor.from_local(down_proj_weight,
+                                                  device_mesh=device_mesh,
+                                                  placements=[Replicate(), Replicate()])
+            down_proj_weight = down_proj_weight.redistribute(device_mesh=device_mesh,
+                                                             placements=[Replicate(), Shard(1)])._local_tensor
+
+        down_proj_weight = down_proj_weight.contiguous()
+
+        assert FFN1_weight.data.shape == down_proj_weight.shape
+        FFN1_weight.data = down_proj_weight.contiguous()
+
+        fp8_qkv_scale_converted, fp8_qkvw_converted, fp8_attention_proj_weight_scale_converted, fp8_attention_proj_weight_converted, fp8_FFN0_weight_scale_converted_all, fp8_FFN0_weight_converted_all, fp8_FFN1_weight_scale_converted_all, fp8_FFN1_weight_converted_all, _, _, _, _ = convert_fp8_weights_from_bf16(
+            qkv_proj_weight, attention_proj_weight, FFN0_weight, FFN1_weight, experts_num=0)
+        qkv_proj_weight.data = fp8_qkvw_converted  # FP8
+        qkv_proj_weight_inv_scale.data = fp8_qkv_scale_converted
+        attention_proj_weight.data = fp8_attention_proj_weight_converted  # FP8
+        attn_proj_weight_inv_scale.data = fp8_attention_proj_weight_scale_converted
+        FFN0_weight.data = fp8_FFN0_weight_converted_all  # FP8
+        FFN0_weight_inv_scale.data = fp8_FFN0_weight_scale_converted_all
+        FFN1_weight.data = fp8_FFN1_weight_converted_all  # FP8
+        FFN1_weight_inv_scale.data = fp8_FFN1_weight_scale_converted_all
+        norm0_out_scale.fill_(1.0)
+        qkv_proj_in_inv_scale.fill_(1.0)
+        attn_out_scale.fill_(1.0)
+        attn_proj_in_inv_scale.fill_(1.0)
+        norm1_out_scale.fill_(1.0)
+        FFN0_in_inv_scale.fill_(1.0)
+        FFN0_out_scale.fill_(1.0)
+        FFN1_in_inv_scale.fill_(1.0)
+
+    load_to_cuda(tp_model=tp_model)
+
+    assert len(state_dict) == 0
+
+    torch.cuda.empty_cache()
+
+
+def _reshard_fsdp_state_dict_to_xperf_m8_fp8(tp_model, state_dict, device_mesh: DeviceMesh, model_config):
+    assert isinstance(model_config, M8Config)
+
+    # checking
+    if device_mesh is not None:
+        tp_size = device_mesh['tp'].size()
+        tp_rank = device_mesh['tp'].get_local_rank()
+        # assert tp_size <= model_config.num_key_value_heads
+        assert model_config.num_key_value_heads % tp_size == 0 or tp_size % model_config.num_key_value_heads == 0
+    else:
+        tp_size = 1
+        tp_rank = 0
+
+    # assert tp_size == model_config.num_key_value_heads or tp_size == 1
+
+    head_dim = model_config.hidden_size // model_config.num_attention_heads
+    hidden_size = model_config.hidden_size
+    num_kv_heads = model_config.num_key_value_heads
+
+    ln_f_weight = state_dict.pop('transformer.norm.weight').full_tensor().to(torch.bfloat16)
+    ln_f_weight = ln_f_weight.reshape(1, ln_f_weight.shape[-1])
+    tp_model.layernorm_weight.data = ln_f_weight.contiguous()
+    del ln_f_weight
+
+    # TODO: use xperf vocab_tp
+    wte: DTensor = state_dict.pop('transformer.wte.weight').to(torch.bfloat16)
+    state_dict.pop('lm_head.weight')
+
+    wte_weight = wte.full_tensor()
+
+    if device_mesh is not None and tp_model.wte_weight.data.shape != wte_weight.shape:
+        # TODO: we may need to do full first
+        wte_weight = DTensor.from_local(wte_weight, device_mesh=device_mesh, placements=[Replicate(), Replicate()])
+        wte_weight_tp = wte_weight.redistribute(device_mesh=device_mesh, placements=[Replicate(),
+                                                                                     Shard(1)])._local_tensor
+        lm_head_tp = wte_weight.redistribute(device_mesh=device_mesh, placements=[Replicate(), Shard(0)])._local_tensor
+        # del wte
+    else:
+        wte_weight_tp = wte_weight
+        lm_head_tp = wte_weight
+
+    assert wte_weight_tp.shape == tp_model.wte_weight.data.shape
+    assert lm_head_tp.shape == tp_model.lm_head_weight.data.shape
+
+    tp_model.wte_weight.data = wte_weight_tp.contiguous()
+    tp_model.lm_head_weight.data = lm_head_tp.contiguous()  # tied weights
+
+    for layer_index, (ln_1, key_norm, context_norm, qkv_w, qkv_b, dense_w, dense_b, ln_2, gate_w, _, fc1_w, _, fc2_w, _,
+                      share_fc1_w, share_fc2_w, norm0_out_scale, qkv_proj_in_inv_scale, qkv_proj_weight_inv_scale,
+                      attn_out_scale, attn_proj_in_inv_scale, attn_proj_weight_inv_scale, norm1_out_scale,
+                      FFN0_in_inv_scale, FFN0_weight_inv_scale, FFN0_out_scale, FFN1_in_inv_scale,
+                      FFN1_weight_inv_scale, FFN0_share_weight_inv_scale, FFN1_share_weight_inv_scale,
+                      *_) in enumerate(tp_model.layers_weight):
+        ln_1_weight = state_dict.pop(f'transformer.h.{layer_index}.input_layernorm.weight').full_tensor()
+        ln_1_weight = torch.stack((ln_1_weight,), dim=0).to(torch.bfloat16).reshape(1, ln_1_weight.shape[-1])
+        assert ln_1.data.shape == ln_1_weight.shape
+        ln_1.data = ln_1_weight.contiguous()
+
+        key_norm_weight = state_dict[f'transformer.h.{layer_index}.attn.key_layernorm.weight'].full_tensor()
+        key_norm_weight = torch.stack((key_norm_weight,),
+                                      dim=0).to(torch.bfloat16).reshape(1, key_norm_weight.shape[-1])
+        assert key_norm.data.shape == key_norm_weight.shape
+        key_norm.data = key_norm_weight.contiguous()
+
+        context_norm_weight = state_dict[f'transformer.h.{layer_index}.attn.context_norm.weight'].full_tensor()
+        context_norm_weight = torch.stack((context_norm_weight,),
+                                          dim=0).to(torch.bfloat16).reshape(1, context_norm_weight.shape[-1])
+        assert context_norm.data.shape == context_norm_weight.shape
+        context_norm.data = context_norm_weight.contiguous()
+
+        q_proj_weight = state_dict.pop(f'transformer.h.{layer_index}.attn.q_proj.weight').full_tensor().to(
+            torch.bfloat16)
+        q_proj_weight = q_proj_weight.view(num_kv_heads, -1, head_dim, hidden_size).transpose(0, 1).contiguous()
+        k_proj_weight = state_dict.pop(f'transformer.h.{layer_index}.attn.k_proj.weight').full_tensor().to(
+            torch.bfloat16)
+        k_proj_weight = k_proj_weight.view(1, num_kv_heads, head_dim, hidden_size)
+        v_proj_weight = state_dict.pop(f'transformer.h.{layer_index}.attn.v_proj.weight').full_tensor().to(
+            torch.bfloat16)
+        v_proj_weight = v_proj_weight.view(1, num_kv_heads, head_dim, hidden_size)
+
+        kv_replicate = tp_size // model_config.num_key_value_heads
+        # duplicate kv
+        if kv_replicate > 1:
+            q_proj_weight = q_proj_weight.view(-1, tp_size, head_dim, hidden_size).contiguous()
+            k_proj_weight = torch.tile(k_proj_weight, (1, kv_replicate, 1, 1))
+            v_proj_weight = torch.tile(v_proj_weight, (1, kv_replicate, 1, 1))
+
+        # shard qkv and concat
+        if device_mesh is not None:
+            q_proj_weight = DTensor.from_local(q_proj_weight,
+                                               device_mesh=device_mesh,
+                                               placements=[Replicate(), Replicate()])
+            q_proj_weight = q_proj_weight.redistribute(device_mesh=device_mesh, placements=[Replicate(),
+                                                                                            Shard(1)])._local_tensor
+
+            k_proj_weight = DTensor.from_local(k_proj_weight,
+                                               device_mesh=device_mesh,
+                                               placements=[Replicate(), Replicate()])
+            k_proj_weight = k_proj_weight.redistribute(device_mesh=device_mesh, placements=[Replicate(),
+                                                                                            Shard(1)])._local_tensor
+
+            v_proj_weight = DTensor.from_local(v_proj_weight,
+                                               device_mesh=device_mesh,
+                                               placements=[Replicate(), Replicate()])
+            v_proj_weight = v_proj_weight.redistribute(device_mesh=device_mesh, placements=[Replicate(),
+                                                                                            Shard(1)])._local_tensor
+
+        qkv_weight = torch.cat((q_proj_weight, k_proj_weight, v_proj_weight), dim=0).contiguous().view(-1, hidden_size)
+
+        assert qkv_w.data.shape == qkv_weight.shape
+        qkv_w.data = qkv_weight.contiguous()
+
+        o_proj_weight = state_dict.pop(f'transformer.h.{layer_index}.attn.o_proj.weight').full_tensor().to(
+            torch.bfloat16)
+
+        # the XPerfGPT has different ordering
+        o_proj_weight = o_proj_weight.view(hidden_size, num_kv_heads, -1, head_dim).transpose(
+            1, 2).contiguous()  # (hidden_size, -1, num_kv_heads, head_dim)
+
+        if kv_replicate > 1:
+            o_proj_weight = o_proj_weight.view(hidden_size, -1, tp_size, head_dim)
+
+        if device_mesh is not None:
+            o_proj_weight = DTensor.from_local(o_proj_weight,
+                                               device_mesh=device_mesh,
+                                               placements=[Replicate(), Replicate()])
+            o_proj_weight = o_proj_weight.redistribute(device_mesh=device_mesh, placements=[Replicate(),
+                                                                                            Shard(2)])._local_tensor
+
+        o_proj_weight = o_proj_weight.contiguous().view(hidden_size, -1).contiguous()
+
+        assert o_proj_weight.shape == dense_w.shape
+        dense_w.data = o_proj_weight.contiguous()
+
+        ln_2_weight = state_dict.pop(f'transformer.h.{layer_index}.post_attention_layernorm.weight').full_tensor().to(
+            torch.bfloat16)
+        ln_2_weight = torch.stack((ln_2_weight,), dim=0).reshape(1, ln_2_weight.shape[-1])
+        assert ln_2_weight.shape == ln_2.shape
+        ln_2.data = ln_2_weight.contiguous()
+
+        gate_wg = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.gate.wg').full_tensor().T.contiguous().float()
+        gate_wg_ema = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.gate.wg_ema').T.contiguous().float()
+
+        gate_wg = (gate_wg + gate_wg_ema) * 0.5
+
+        assert gate_wg.shape == gate_w.shape
+        gate_w.data = gate_wg.contiguous()
+
+        # use_grouped_gemm_weight = getattr(model_config, '_moe_implementation', 'eager') == 'fused'
+        # assert model_config._moe_implementation == fused
+        # assert use_grouped_gemm_weight
+        fc1_1_weight = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts.fc1_1').to(
+            torch.bfloat16).full_tensor()
+
+        if device_mesh is not None:
+            fc1_1_weight = DTensor.from_local(fc1_1_weight,
+                                              device_mesh=device_mesh,
+                                              placements=[Replicate(), Replicate()])
+            fc1_1_weight = fc1_1_weight.redistribute(device_mesh=device_mesh,
+                                                     placements=[Replicate(),
+                                                                 Shard(0 if tp_model.use_ep else 1)])._local_tensor
+
+        fc1_2_weight = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts.fc1_2').to(
+            torch.bfloat16).full_tensor()
+
+        if device_mesh is not None:
+            fc1_2_weight = DTensor.from_local(fc1_2_weight,
+                                              device_mesh=device_mesh,
+                                              placements=[Replicate(), Replicate()])
+            fc1_2_weight = fc1_2_weight.redistribute(device_mesh=device_mesh,
+                                                     placements=[Replicate(),
+                                                                 Shard(0 if tp_model.use_ep else 1)])._local_tensor
+
+        base_fc1_weight = torch.cat((fc1_1_weight, fc1_2_weight), dim=1)
+        del fc1_1_weight
+        del fc1_2_weight
+
+        share_fc1_1_weight = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts_share.fc1_1').to(
+            torch.bfloat16).full_tensor()
+        share_fc1_1_weight = share_fc1_1_weight.reshape(2, -1, share_fc1_1_weight.shape[-1])  ##
+        if device_mesh is not None:
+            share_fc1_1_weight = DTensor.from_local(share_fc1_1_weight,
+                                                    device_mesh=device_mesh,
+                                                    placements=[Replicate(), Replicate()])
+            share_fc1_1_weight = share_fc1_1_weight.redistribute(device_mesh=device_mesh,
+                                                                 placements=[Replicate(), Shard(1)])._local_tensor
+
+        share_fc1_2_weight = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts_share.fc1_2').to(
+            torch.bfloat16).full_tensor()
+        share_fc1_2_weight = share_fc1_2_weight.reshape(2, -1, share_fc1_2_weight.shape[-1])
+
+        if device_mesh is not None:
+            share_fc1_2_weight = DTensor.from_local(share_fc1_2_weight,
+                                                    device_mesh=device_mesh,
+                                                    placements=[Replicate(), Replicate()])
+            share_fc1_2_weight = share_fc1_2_weight.redistribute(device_mesh=device_mesh,
+                                                                 placements=[Replicate(), Shard(1)])._local_tensor
+        share_fc1_weight = torch.cat((share_fc1_1_weight, share_fc1_2_weight), dim=1)
+        del share_fc1_1_weight
+        del share_fc1_2_weight
+
+        if tp_model.use_ep:
+            fc1_weight = base_fc1_weight.contiguous().flatten()
+            s_fc1_weight = share_fc1_weight.reshape(share_fc1_weight.shape[0], 2, -1,
+                                                    share_fc1_weight.shape[-1]).transpose(0, 1).reshape(
+                                                        -1, share_fc1_weight.shape[-1])
+        else:
+            fc1_weight = torch.cat((base_fc1_weight, share_fc1_weight), dim=0).contiguous().flatten()
+        del base_fc1_weight
+        del share_fc1_weight
+
+        assert fc1_weight.shape == fc1_w.shape, f'{fc1_weight.shape=}, {fc1_w.shape=}'
+        fc1_w.data = fc1_weight.contiguous()
+        if tp_model.use_ep:
+            assert s_fc1_weight.shape == share_fc1_w.shape, f'{s_fc1_weight.shape=}, {share_fc1_w.shape=}'
+            share_fc1_w.data = s_fc1_weight.contiguous()
+
+        fc2_weight = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts.fc2').to(torch.bfloat16).full_tensor()
+        if device_mesh is not None:
+            fc2_weight = DTensor.from_local(fc2_weight, device_mesh=device_mesh, placements=[Replicate(), Replicate()])
+            fc2_weight = fc2_weight.redistribute(device_mesh=device_mesh,
+                                                 placements=[Replicate(),
+                                                             Shard(0 if tp_model.use_ep else 2)])._local_tensor
+
+        share_fc2_weight = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts_share.fc2').to(
+            torch.bfloat16).full_tensor()
+        share_fc2_weight = share_fc2_weight.reshape(share_fc2_weight.shape[-2], 2, -1).transpose(0, 1)
+        if device_mesh is not None:
+
+            share_fc2_weight = DTensor.from_local(share_fc2_weight,
+                                                  device_mesh=device_mesh,
+                                                  placements=[Replicate(), Replicate()])
+            share_fc2_weight = share_fc2_weight.redistribute(device_mesh=device_mesh,
+                                                             placements=[Replicate(), Shard(2)])._local_tensor
+
+        if tp_model.use_ep:
+            fc2_weight_merge = fc2_weight.contiguous().flatten()
+            s_fc2_weight_merge = share_fc2_weight.transpose(0, 1).reshape(share_fc2_weight.shape[1], -1)
+        else:
+            fc2_weight_merge = torch.cat((fc2_weight, share_fc2_weight), dim=0).contiguous().flatten()
+        del fc2_weight
+        del share_fc2_weight
+
+        # (num_experts, intermediate_size // tp, hidden_size)
+        assert fc2_weight_merge.shape == fc2_w.shape, f'{fc2_weight_merge.shape=}, {fc2_w.shape=}'
+        fc2_w.data = fc2_weight_merge.contiguous()
+        if tp_model.use_ep:
+            assert s_fc2_weight_merge.shape == share_fc2_w.shape, f'{s_fc2_weight_merge.shape=}, {share_fc2_w.shape=}'
+            share_fc2_w.data = s_fc2_weight_merge.contiguous()
+
+        (fp8_qkv_scale_converted, fp8_qkvw_converted, fp8_attention_proj_weight_scale_converted,
+         fp8_attention_proj_weight_converted, fp8_FFN0_weight_scale_converted_all, fp8_FFN0_weight_converted_all,
+         fp8_FFN1_weight_scale_converted_all, fp8_FFN1_weight_converted_all, fp8_FFN0_share_weight_scale_converted_all,
+         fp8_FFN0_share_weight_converted_all, fp8_FFN1_share_weight_scale_converted_all,
+         fp8_FFN1_share_weight_converted_all) = convert_fp8_weights_from_bf16(
+             qkv_w, dense_w, fc1_w, fc2_w, 130 if not tp_model.use_ep else 128 // tp_size, share_fc1_w, share_fc2_w,
+             tp_model.use_ep)
+        qkv_w.data = fp8_qkvw_converted  # FP8
+        qkv_proj_weight_inv_scale.data = fp8_qkv_scale_converted
+        dense_w.data = fp8_attention_proj_weight_converted  # FP8
+        attn_proj_weight_inv_scale.data = fp8_attention_proj_weight_scale_converted
+        fc1_w.data = fp8_FFN0_weight_converted_all  # FP8
+        FFN0_weight_inv_scale.data = fp8_FFN0_weight_scale_converted_all
+        fc2_w.data = fp8_FFN1_weight_converted_all  # FP8
+        FFN1_weight_inv_scale.data = fp8_FFN1_weight_scale_converted_all
+        if tp_model.use_ep:
+            share_fc1_w.data = fp8_FFN0_share_weight_converted_all  # FP8
+            FFN0_share_weight_inv_scale.data = fp8_FFN0_share_weight_scale_converted_all
+            share_fc2_w.data = fp8_FFN1_share_weight_converted_all  # FP8
+            FFN1_share_weight_inv_scale.data = fp8_FFN1_share_weight_scale_converted_all
+        else:
+            FFN0_share_weight_inv_scale.fill_(1.0)
+            FFN1_share_weight_inv_scale.fill_(1.0)
+        norm0_out_scale.fill_(1.0)
+        qkv_proj_in_inv_scale.fill_(1.0)
+        attn_out_scale.fill_(1.0)
+        attn_proj_in_inv_scale.fill_(1.0)
+        norm1_out_scale.fill_(1.0)
+        FFN0_in_inv_scale.fill_(1.0)
+        FFN0_out_scale.fill_(1.0)
+        FFN1_in_inv_scale.fill_(1.0)
+
+    # enforce check nan
+    assert_not_nan(tp_model.layernorm_weight.data)
+    assert_not_nan(tp_model.wte_weight.data)
+    assert_not_nan(tp_model.lm_head_weight.data)
+
+    for layer_index, weights in enumerate(tp_model.layers_weight):
+        for weight in weights:
+            if isinstance(weight, torch.Tensor):
+                assert_not_nan(weight)
+
+    load_to_cuda(tp_model=tp_model)
     torch.cuda.empty_cache()

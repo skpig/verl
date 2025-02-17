@@ -111,6 +111,8 @@ class FSDPXPerfGPTShardingManager(BaseShardingManager):
                 'LOCAL_WORLD_SIZE': str(min(8, comm_info["world_size"])),
                 'MASTER_ADDR': str(comm_info["master_address"]),
                 'MASTER_PORT': str(comm_info["master_port"]),  # find a free port
+                # need to disable custom ar for global connection
+                'XPERF_CUSTOM_ALL_REDUCE': "0",
             }):
             comm_info["nccl_layer"] = torch.classes.XGPT.NCCLPrimitive()
             comm_info["nccl_layer"].init(f"standalone_{int(port)}", comm_info["world_size"], comm_info["rank"], "tcp",
@@ -225,12 +227,13 @@ class FSDPXPerfGPTShardingManager(BaseShardingManager):
                         origin_dtype = weight.dtype
                         if origin_dtype == torch.float8_e4m3fn or origin_dtype == torch.uint8:
                             # use int8 to communicate
-                            weight = weight.to(torch.int8)
+                            weight = weight.view(torch.int8)
                             if (self.inference_engine.engine.module.quant_mode == "WFP8"):
                                 origin_dtype = torch.float8_e4m3fn
                         weight = weight.cuda()
                         comm_fn(weight, comm_rank)
-                        self.inference_engine.engine.module.layers_weight[layer][i] = weight.to(origin_dtype)
+                        self.inference_engine.engine.module.layers_weight[layer][i].data = weight.view(
+                            origin_dtype).data
             self.inference_engine.current_steps = 0
 
         comm_info = getattr(self, f"{role}_comm_info")

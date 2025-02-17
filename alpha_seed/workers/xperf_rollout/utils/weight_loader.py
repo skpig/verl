@@ -33,13 +33,21 @@ from alpha_seed.workers.xperf_rollout.utils.bf16_convert_helper import (_reshard
                                                                         _reshard_fsdp_state_dict_to_xperf_p6dense,
                                                                         _reshard_fsdp_state_dict_to_xperf_p7,
                                                                         _reshard_fsdp_state_dict_to_xperf_m8)
-from alpha_seed.workers.xperf_rollout.utils.fp8_convert_helper import _reshard_fsdp_state_dict_to_xperf_p6_fp8
+from alpha_seed.workers.xperf_rollout.utils.fp8_convert_helper import (_reshard_fsdp_state_dict_to_xperf_p6_fp8,
+                                                                       _reshard_fsdp_state_dict_to_xperf_p6dense_fp8,
+                                                                       _reshard_fsdp_state_dict_to_xperf_m8_fp8)
 
 
 def get_xperf_gpt_weight_bind_fn(model_config: PretrainedConfig, quant_mode: str = "NO_QUANT"):
     if quant_mode == "WFP8":
-        assert (model_config.model_type == 'seed_p6', "only support fp8+p6 for now")
-        return partial(_reshard_fsdp_state_dict_to_xperf_p6_fp8, model_config=model_config)
+        if model_config.model_type == 'seed_p6':
+            return partial(_reshard_fsdp_state_dict_to_xperf_p6_fp8, model_config=model_config)
+        elif model_config.model_type == 'seed_p6dense':
+            return partial(_reshard_fsdp_state_dict_to_xperf_p6dense_fp8, model_config=model_config)
+        elif model_config.model_type == 'seed_m8':
+            return partial(_reshard_fsdp_state_dict_to_xperf_m8_fp8, model_config=model_config)
+        else:
+            raise NotImplementedError(f'Unsupported model type {model_config.model_type} in WFP8 quant mode')
     if model_config.model_type == 'seed_p4':
         return partial(_reshard_fsdp_state_dict_to_xperf_p4, model_config=model_config)
     elif model_config.model_type == 'seed_p5':

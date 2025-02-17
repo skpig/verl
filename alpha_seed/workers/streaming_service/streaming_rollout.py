@@ -108,8 +108,7 @@ class AsyncXPerfGPTRollout(object):
         self.is_standalone = is_standalone
         self.async_remain_warmup_step = self.config.rollout_pool.get("warmup_step", 0)
         # auto infer rollout running config
-        # off-policy rollout should disable paged attention, for maintaining FIFO order
-        enable_paged_attn = self.config.get('enable_paged_attention', True) and not is_standalone
+        enable_paged_attn = self.config.get('enable_paged_attention', True)
         enable_cuda_graph = self.config.get('enable_cuda_graph', False)
         slot_block_size = self.config.get('slot_block_size', 1024)
 
@@ -306,8 +305,38 @@ class AsyncXPerfGPTRollout(object):
         init_meta(self.inference_engine.engine.module)
         torch.cuda.empty_cache()
 
-    def __init_sub_process(self):
+    def _set_tuner_config(self):
         os.environ["USE_SESSION_CACHE"] = "0"
+        if self.config.get("quant_mode", "NO_QUANT") == "WFP8":
+            model_type = self.config.get('model_type', "")
+            assert model_type in ["dense_70b", "m8_2b5", "m8_14b", "m8_20b"], f"model_type {model_type} not supported"
+            model_type = "m8_14b" if model_type == "m8_20b" else model_type
+            # set environment variables for tuner
+            os.environ["XGPT_TUNER_ENABLE"] = "1"
+            os.environ["XPERF_TUNER_ONLINE_PRIORITY"] = "1"
+
+            # fp8 must use offline tuning config
+            base_dir = os.path.normpath(os.path.dirname(os.path.dirname(__file__)))
+            device_name = torch.cuda.get_device_name().split(' ')[-1].lower()
+
+            if model_type == "dense_70b":
+                os.environ["XPERF_TUNER_ONLINE_VERSION"] = "1.9.7a1+xgpt"
+            else:
+                os.environ["XPERF_TUNER_ONLINE_VERSION"] = "1.9.7a3+xgpt"
+
+            use_ep = self.config.get('use_ep', False)
+            parallel = ("tp" if not use_ep else "ep") + str(self.config.get('tensor_model_parallel_size', 1))
+            fp8_fast_accum = "fastacc" if self.config.get('fp8_fast_accum', False) else "nofastacc"
+            config_path = os.path.join(base_dir, "xperf_rollout", "tuner_config",
+                                       f"{device_name}_{model_type}_{parallel}_{fp8_fast_accum}_gemm_config")
+            if os.path.exists(config_path):
+                os.environ["XPERF_TUNER_CONFIG_LOAD_PATH"] = config_path
+                print(f"use tuner config in {config_path}")
+            else:
+                print(f"tuner config not found in {config_path}")
+
+    def __init_sub_process(self):
+        self._set_tuner_config()
         self.input_queue = queue.Queue()
         self.output_queue = queue.Queue()
         self.stop_event = threading.Event()
@@ -365,6 +394,11 @@ class AsyncXPerfGPTRollout(object):
                     profile_step(p, None)
                 except Exception as e:
                     if os.getenv('XPERF_DUMP_NAN', '1') == '1':
+                        from hdfs_io.hdfs_io import hcopy, hmkdir
+                        dump_nan_dir = self.config.get("dump_nan", None)
+                        if dump_nan_dir is None:
+                            print("dump_nan config is not set, skip")
+                            raise (e)
                         global_rank = 0 if not dist.is_initialized() else dist.get_rank()
                         tp_rank = 0 if self.device_mesh is None else self.device_mesh['tp'].get_local_rank()
                         tp_size = 1 if self.device_mesh is None else self.device_mesh['tp'].size()
@@ -380,12 +414,6 @@ class AsyncXPerfGPTRollout(object):
                                    f"{save_model_name}_model_engine_layernorm_weight.pt")
                         torch.save(query_pool, f"{save_model_name}_query_pool.pt")
                         torch.save(self.inference_engine.get_inorder_responses(), f"{save_model_name}_output.pt")
-
-                        from hdfs_io.hdfs_io import hcopy, hmkdir
-                        dump_nan_dir = self.config.get("dump_nan", None)
-                        if dump_nan_dir is None:
-                            print("dump_nan config is not set, skip")
-                            raise (e)
                         print(f"dump weights/tensors to {dump_nan_dir}")
                         hmkdir(self.config.get("dump_nan", None))
                         hcopy(f"{save_model_name}_model_engine_layers_weight.pt", self.config.get("dump_nan", None))
