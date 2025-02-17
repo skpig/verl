@@ -155,7 +155,7 @@ def flash_attn2_rmpad_forward(
             "The current flash attention version does not support sliding window attention, for a more memory"
             " efficient implementation make sure to upgrade flash-attn library.")
 
-    key_states, value_states = KVMirrorManagerHook.apply(
+    args = [
         key_states,
         value_states,
         self.layer_idx,
@@ -163,7 +163,16 @@ def flash_attn2_rmpad_forward(
         self.kv_mirror_imitated_layers,
         query_states.device,
         gradient_checkpointing,
-    )
+    ]
+
+    is_recent_seed_models = hasattr(self, "is_first_forward_in_recompute")
+    if is_recent_seed_models:
+        args.append(self.is_first_forward_in_recompute)
+
+    key_states, value_states = KVMirrorManagerHook.apply(*args)
+
+    if is_recent_seed_models and gradient_checkpointing:
+        self.is_first_forward_in_recompute = not self.is_first_forward_in_recompute
 
     dropout_rate = 0.0 if not self.training else self.attention_dropout
 
