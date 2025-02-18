@@ -18,24 +18,18 @@ def pad(item, max_standalone_len, tokenizer):
     return item
 
 
-def process_output(input_batch,
-                   output_batch,
-                   tokenizer,
-                   ready_batch_queue,
-                   pending_batch_queue,
-                   config,
-                   standalone=False):
+def process_output(input_batch, output_batch, tokenizer, ready_batch, pending_batch, config, standalone=False):
     is_finished = output_batch.pop(batch_keys=['is_finished']).batch['is_finished']
     finished_num = is_finished.sum().int().item()
     if not standalone:
         output_batch.union(input_batch)
         for i, item in enumerate(output_batch.chunk(len(output_batch))):
             if is_finished[i]:
-                ready_batch_queue.put(item)
+                ready_batch.append(item)
             else:
                 item.batch['off_policy_steps'] += 1
                 item.pop(batch_keys=['responses'])
-                pending_batch_queue.put(rmpad(item))
+                pending_batch.append(rmpad(item))
     else:
         if config.streaming_rollout.force_eos:
             need_eos = is_finished == 0
@@ -68,11 +62,11 @@ def process_output(input_batch,
                                             config.data.max_response_length else gen_len] = tokenizer.eos_token_id
                     item.batch['attention_mask'][:, -1 if item.batch['prompts'].shape[1] +
                                                  gen_len >= total_len else item.batch['prompts'].shape[1] + gen_len] = 1
-                ready_batch_queue.put(item)
+                ready_batch.append(item)
             else:
                 item.batch['off_policy_steps'] += 1
-                pending_batch_queue.put(rmpad(item))
-    return finished_num, ready_batch_queue, pending_batch_queue
+                pending_batch.append(rmpad(item))
+    return finished_num, ready_batch, pending_batch
 
 
 def record_xperf_metrics(batch_info, metrics, logger, global_step, prefix=''):

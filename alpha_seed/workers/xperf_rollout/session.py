@@ -106,6 +106,7 @@ class InferenceSession:
         num_pred_tokens=6,
         enable_cuda_graph=False,
         standalone=False,
+        schedule_strategy="default", # ['default','fifo']
         step_profiler: StepProfiler = None,
     ):
         """Initialize inference session with hardware/performance parameters"""
@@ -127,6 +128,7 @@ class InferenceSession:
         self.enable_cuda_graph = enable_cuda_graph
         self.is_prefill_decode_split = is_prefill_decode_split
         self.enable_ngrams_decoding = enable_ngrams_decoding
+        self.schedule_strategy = schedule_strategy
         self.step_profiler = step_profiler
 
         self.record_input_prompt = True
@@ -265,7 +267,8 @@ class InferenceSession:
                                           context_batchsize_limit=self.context_limit_bs,
                                           enable_ngrams_decoding=self.enable_ngrams_decoding,
                                           num_pred_tokens=self.num_pred_tokens,
-                                          moving_avg_length=self.max_length)
+                                          moving_avg_length=self.max_length,
+                                          schedule_strategy=self.schedule_strategy)
         self.infer_scheduler = InferScheduler(
             cache_manager=self.cache_manager,
             engine=self.engine,

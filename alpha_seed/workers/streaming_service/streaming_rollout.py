@@ -236,6 +236,7 @@ class AsyncXPerfGPTRollout(object):
                                           context_limit_bs=max_ctx_batch_size,
                                           enable_cuda_graph=enable_cuda_graph,
                                           standalone=is_standalone,
+                                          schedule_strategy=config.schedule_strategy,
                                           step_profiler=step_profiler)
         inference_sess.max_off_policy_steps = self.config.get('max_off_policy_steps', 5)
         with tempfile.NamedTemporaryFile(mode='w', suffix=".json") as f:

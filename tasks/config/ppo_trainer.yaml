@@ -122,6 +122,7 @@ actor_rollout_ref:
     bon_strategy: "best"
     quant_mode: "NO_QUANT"
     gpu_memory_utilization: 0.7
+    schedule_strategy: default # [default,fifo]
     train_generate_kwargs:
       top_k: -1 # 0 for hf rollout, -1 for vllm rollout
       top_p: 1.0

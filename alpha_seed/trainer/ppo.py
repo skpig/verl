@@ -1130,8 +1130,8 @@ class RayPPOTrainer(object):
         metrics.update(global_balance_stats)
         print_dataproto_size(batch, head='After Sequence Balancing')
 
-    def _generate(self, batch, start_step, metrics, standalone_batch, pending_batch_queue):
-        ready_batch_queue = queue.Queue()
+    def _generate(self, batch, start_step, metrics, standalone_batch, pending_batch):
+        ready_batch = []
         # print the size of each data proto before training
         print_dataproto_size(batch, head='Before generation')
 
@@ -1221,11 +1221,10 @@ class RayPPOTrainer(object):
         record_xperf_metrics(gen_batch_output, metrics, self.logger, self.global_step, prefix='hybrid')
 
         # stop hybrid rollout
-        finished_num, ready_batch_queue, pending_batch_queue = process_output(batch, gen_batch_output, self.tokenizer,
-                                                                              ready_batch_queue, pending_batch_queue,
-                                                                              self.config)
+        finished_num, ready_batch, pending_batch = process_output(batch, gen_batch_output, self.tokenizer, ready_batch,
+                                                                  pending_batch, self.config)
         pprint(f'stop hybrid rollout, completed_batch {finished_num}, incompleted_batch {len(batch) - finished_num} ' +
-               f'ready_queue {ready_batch_queue.qsize()}, pending_queue {pending_batch_queue.qsize()}.')
+               f'ready_queue {len(ready_batch)}, pending_queue {len(pending_batch)}.')
         metrics['rollout/hybrid_completed_batch'] = finished_num
         metrics['rollout/hybrid_incompleted_batch'] = len(batch) - finished_num
 
@@ -1251,16 +1250,16 @@ class RayPPOTrainer(object):
                     save_dataproto(standalone_batch, path=save_path, prefix='standalone_batch')
                 # only report metrics from one generation replica
                 record_xperf_metrics(gen_batch_output, metrics, self.logger, self.global_step, prefix='standalone')
-                finished_num, ready_batch_queue, pending_batch_queue = process_output(standalone_batch,
-                                                                                      gen_batch_output,
-                                                                                      self.tokenizer,
-                                                                                      ready_batch_queue,
-                                                                                      pending_batch_queue,
-                                                                                      self.config,
-                                                                                      standalone=True)
+                finished_num, ready_batch, pending_batch = process_output(standalone_batch,
+                                                                          gen_batch_output,
+                                                                          self.tokenizer,
+                                                                          ready_batch,
+                                                                          pending_batch,
+                                                                          self.config,
+                                                                          standalone=True)
                 pprint(
                     f'stop standalone rollout, completed_batch {finished_num}, incompleted_batch {len(standalone_batch) - finished_num}'
-                    + f'ready_queue {ready_batch_queue.qsize()}, pending_queue {pending_batch_queue.qsize()}.')
+                    + f'ready_queue {len(ready_batch)}, pending_queue {len(pending_batch)}.')
             metrics['rollout/standalone_completed_batch'] = finished_num
             metrics['rollout/standalone_incompleted_batch'] = len(standalone_batch) - finished_num
         metrics['timing/async_gen'] = timer.last
@@ -1276,14 +1275,24 @@ class RayPPOTrainer(object):
         # standalone generate (off policy)
         standalone_batch = []
         max_standalone_len = 0
-        while self.standalone_rollout_wg is not None and pending_batch_queue.qsize(
-        ) >= self.standalone_rollout_wg.world_size:
+        # sort by staleness, put items with larger off_policy_steps at the end of the list so they can be popped early
+        pending_batch = sorted(pending_batch, key=lambda item: item.batch['off_policy_steps'].item())
+        while self.standalone_rollout_wg is not None and len(pending_batch) >= self.standalone_rollout_wg.world_size:
             for _ in range(self.standalone_rollout_wg.world_size):
-                standalone_batch.append(pending_batch_queue.get())
+                standalone_batch.append(pending_batch.pop())
                 max_standalone_len = max(max_standalone_len, standalone_batch[-1].batch['attention_mask'].sum(-1))
         for i in range(len(standalone_batch)):
             standalone_batch[i] = pad(standalone_batch[i], max_standalone_len, self.tokenizer)
         if len(standalone_batch) > 0:
+
+            def make_interleave(batch: list, mp_size: int):
+                assert len(batch) % mp_size == 0
+                indices = sum([list(range(start, len(batch), mp_size)) for start in range(mp_size)], [])
+                return [batch[i] for i in indices]
+
+            # interleave standalone batch so that the data is still in FIFO order after dp compute dispatch
+            standalone_batch = make_interleave(standalone_batch, self.standalone_rollout_wg.world_size)
+
             standalone_batch = DataProto.concat(standalone_batch)
             standalone_gen_batch = standalone_batch.pop(
                 batch_keys=['input_ids', 'attention_mask', 'off_policy_steps', 'rollout_log_probs'])
@@ -1298,7 +1307,7 @@ class RayPPOTrainer(object):
         metrics['rollout/standalone_input_batch'] = len(standalone_batch)
 
         # get training batch from ready queue, make it stable by random pick
-        ray.get(self.rollout_pool.fill_rollout_pool.remote(list(ready_batch_queue.queue)))
+        ray.get(self.rollout_pool.fill_rollout_pool.remote(ready_batch))
         if self.global_step < self.rollout_pool_warmup_step + start_step:
             return None, standalone_batch
         return_batch_size = self.config.data.train_batch_size * \
@@ -1314,7 +1323,7 @@ class RayPPOTrainer(object):
         metrics['rollout/training_batch'] = len(batch)
         pprint(f'training batches {len(batch)}.')
 
-        return batch, standalone_batch
+        return batch, standalone_batch, pending_batch
 
     def get_mean_max_len_per_query(self, batch, metrics):
         if self.config.trainer.per_query_max_length is True:
@@ -1411,7 +1420,7 @@ class RayPPOTrainer(object):
 
         # TODO: add staleness
         standalone_batch = []
-        pending_batch_queue = queue.Queue()
+        pending_batch = []
         while True:
             for batch_dict in self.train_dataloader:
                 metrics = {}
@@ -1422,11 +1431,11 @@ class RayPPOTrainer(object):
 
                         self.get_mean_max_len_per_query(batch, metrics)
 
-                        batch, standalone_batch = self._generate(batch=batch,
-                                                                 start_step=start_step,
-                                                                 metrics=metrics,
-                                                                 standalone_batch=standalone_batch,
-                                                                 pending_batch_queue=pending_batch_queue)
+                        batch, standalone_batch, pending_batch = self._generate(batch=batch,
+                                                                                start_step=start_step,
+                                                                                metrics=metrics,
+                                                                                standalone_batch=standalone_batch,
+                                                                                pending_batch=pending_batch)
                         if self.global_step < self.rollout_pool_warmup_step + start_step:
                             self.global_step += 1
                             continue
