@@ -82,6 +82,7 @@ actor_rollout_ref:
       active: 2
       mem_enable: False
   ref:
+    strategy: fsdp
     fsdp_config:
       param_offload: True
       use_orig_params: ${trainer.ckpt_enable_flatten}

@@ -700,6 +700,10 @@ def validate_config(config):
             config.reward_model.max_token_len = min_required_seq_len
             print(f"Warning: config.reward_model.max_token_len is set to {config.reward_model.max_token_len}")
 
+    assert config.actor_rollout_ref.actor.strategy in ['fsdp', 'megatron']
+    assert config.actor_rollout_ref.ref.strategy in ['fsdp', 'megatron']
+    assert config.critic.strategy in ['fsdp', 'megatron']
+
 
 def config_to_trainer_kwargs(config):
     from verl.utils.fs import copy_local_path_from_hdfs

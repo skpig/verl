@@ -105,41 +105,57 @@ class AsyncActorRolloutRefWorker(Worker):
         self._is_ref = self.role in ['ref', 'actor_rollout_ref']
         self._is_standalone_validator = self.role in ['standalone_validator']
 
+        self.actor_strategy = config.actor.strategy
+        self.ref_strategy = config.ref.strategy
+
         # actor model
-        actor_fsdp_size = config.actor.fsdp_size
-        actor_sp_size = config.actor.ulysses_sequence_parallel_size
-        actor_tp_size = config.actor.tp_size
-        actor_meshes = create_mesh(fsdp_size=actor_fsdp_size, tp_size=actor_tp_size, sp_size=actor_sp_size)
-        self.actor_fsdp_mesh = actor_meshes[0]
-        self.actor_tp_mesh = actor_meshes[1]  # shared for both train and inference
-        self.actor_sp_mesh = actor_meshes[2]
-        self.actor_gather_mesh = actor_meshes[3]
-        self.actor_gather_manager = DataGatherManager(self.actor_gather_mesh, self.actor_sp_mesh)
-        if torch.distributed.get_rank():
-            print(f"Created actor with fsdp_size={self.actor_fsdp_mesh.shape}, tp_size={self.actor_tp_mesh.size()}, "
-                  f"actor sp_size={self.actor_sp_mesh.size()}")
-        if actor_tp_size > 1:
-            if not config.actor.fsdp_config.use_orig_params:
-                raise ValueError("enable tensor / expert parallelism must set actor.fsdp_config.use_orig_params=True")
+        if self.actor_strategy == 'fsdp':
+            actor_fsdp_size = config.actor.fsdp_size
+            actor_sp_size = config.actor.ulysses_sequence_parallel_size
+            actor_tp_size = config.actor.tp_size
+            actor_meshes = create_mesh(fsdp_size=actor_fsdp_size, tp_size=actor_tp_size, sp_size=actor_sp_size)
+            self.actor_fsdp_mesh = actor_meshes[0]
+            self.actor_tp_mesh = actor_meshes[1]  # shared for both train and inference
+            self.actor_sp_mesh = actor_meshes[2]
+            self.actor_gather_mesh = actor_meshes[3]
+            self.actor_gather_manager = DataGatherManager(self.actor_gather_mesh, self.actor_sp_mesh)
+            if torch.distributed.get_rank():
+                print(
+                    f"Created actor with fsdp_size={self.actor_fsdp_mesh.shape}, tp_size={self.actor_tp_mesh.size()}, "
+                    f"actor sp_size={self.actor_sp_mesh.size()}")
+            if actor_tp_size > 1:
+                if not config.actor.fsdp_config.use_orig_params:
+                    raise ValueError(
+                        "enable tensor / expert parallelism must set actor.fsdp_config.use_orig_params=True")
+        elif self.actor_strategyy == 'megatron':
+            # implement 3D parallel self.actor_gather_manager. We still assume that data is chunked in data parallel.
+            # We first need to perform allgather in model parallel group so that data in each tp/pp/cp group is identical.
+            # Then, we chunk data according to context parallel rank
+            # In this way, the API of FSDP and Megatron can be identical
+            raise NotImplementedError
 
         # reference model
         if self._is_ref:
-            ref_fsdp_size = config.ref.fsdp_size
-            ref_sp_size = config.ref.ulysses_sequence_parallel_size
-            ref_tp_size = config.ref.tp_size
-            ref_meshes = create_mesh(fsdp_size=ref_fsdp_size, tp_size=ref_tp_size, sp_size=ref_sp_size)
-            self.ref_fsdp_mesh = ref_meshes[0]
-            self.ref_tp_mesh = ref_meshes[1]
-            self.ref_sp_mesh = ref_meshes[2]
-            self.ref_gather_mesh = ref_meshes[3]
-            self.ref_gather_manager = DataGatherManager(self.ref_gather_mesh, self.ref_sp_mesh)
-            if torch.distributed.get_rank():
-                print(
-                    f"Created reference with fsdp_size={self.ref_fsdp_mesh.shape}, tp_size={self.ref_tp_mesh.size()}, "
-                    f"infer sp_size={self.ref_sp_mesh.size()}")
-            if ref_tp_size > 1:
-                if not config.ref.fsdp_config.use_orig_params:
-                    raise ValueError("enable tensor / expert parallelism must set ref.fsdp_config.use_orig_params=True")
+            if self.ref_strategy == 'fsdp':
+                ref_fsdp_size = config.ref.fsdp_size
+                ref_sp_size = config.ref.ulysses_sequence_parallel_size
+                ref_tp_size = config.ref.tp_size
+                ref_meshes = create_mesh(fsdp_size=ref_fsdp_size, tp_size=ref_tp_size, sp_size=ref_sp_size)
+                self.ref_fsdp_mesh = ref_meshes[0]
+                self.ref_tp_mesh = ref_meshes[1]
+                self.ref_sp_mesh = ref_meshes[2]
+                self.ref_gather_mesh = ref_meshes[3]
+                self.ref_gather_manager = DataGatherManager(self.ref_gather_mesh, self.ref_sp_mesh)
+                if torch.distributed.get_rank():
+                    print(
+                        f"Created reference with fsdp_size={self.ref_fsdp_mesh.shape}, tp_size={self.ref_tp_mesh.size()}, "
+                        f"infer sp_size={self.ref_sp_mesh.size()}")
+                if ref_tp_size > 1:
+                    if not config.ref.fsdp_config.use_orig_params:
+                        raise ValueError(
+                            "enable tensor / expert parallelism must set ref.fsdp_config.use_orig_params=True")
+            elif self.ref_strategy == 'megatron':
+                raise NotImplementedError
 
         profile_fname = f"trace_{self.role}_rank{self.rank}.json"
 
@@ -155,38 +171,29 @@ class AsyncActorRolloutRefWorker(Worker):
 
         # normalize config
         if self._is_actor:
-            sp_size = config.actor.ulysses_sequence_parallel_size
-            self.config.actor.ppo_mini_batch_size //= (world_size // sp_size // actor_tp_size)
-            self.config.actor.ppo_micro_batch_size //= (world_size // sp_size // actor_tp_size)
+            if self.actor_strategy == 'fsdp':
+                sp_size = config.actor.ulysses_sequence_parallel_size
+                self.config.actor.ppo_mini_batch_size //= (world_size // sp_size // actor_tp_size)
+                self.config.actor.ppo_micro_batch_size //= (world_size // sp_size // actor_tp_size)
+            elif self.actor_strategy == 'megatron':
+                raise NotImplementedError
+
         if self._is_rollout or self._is_standalone_rollout:
-            sp_size = config.actor.ulysses_sequence_parallel_size
-            self.config.rollout.micro_batch_size //= world_size  # for xperf-gpt
-            self.config.rollout.log_prob_micro_batch_size //= (world_size // sp_size // actor_tp_size)
+            if self.actor_strategy == 'fsdp':
+                sp_size = config.actor.ulysses_sequence_parallel_size
+                self.config.rollout.micro_batch_size //= world_size  # for xperf-gpt
+                self.config.rollout.log_prob_micro_batch_size //= (world_size // sp_size // actor_tp_size)
+            elif self.actor_strategy == 'megatron':
+                raise NotImplementedError
+
         if self._is_ref:
-            sp_size = config.ref.ulysses_sequence_parallel_size
-            self.config.ref.log_prob_micro_batch_size //= (world_size // sp_size // ref_tp_size)
-        self.save_sequences = self.config.rollout.get('save_sequences', None)
-        self.load_sequences = self.config.rollout.get('load_sequences', None)
+            if self.ref_strategy == 'fsdp':
+                sp_size = config.ref.ulysses_sequence_parallel_size
+                self.config.ref.log_prob_micro_batch_size //= (world_size // sp_size // ref_tp_size)
+            elif self.ref_strategy == 'megatron':
+                raise NotImplementedError
 
         self._model_initialized = False
-
-    def _sequence_uuid(self):
-        """Encode model ckpt, seqlen info for sequence generation, used for performance profiling
-
-        TODO(haibin.lin): encode dataset info into uuid"""
-        model_path = self.config.model.path.split('/')[-1]
-        num_bon = self.config.rollout.num_bon
-        max_token_len = self.config.rollout.max_token_len
-        response_length = self.config.rollout.response_length
-        prompt_length = self.config.rollout.prompt_length
-        my_rank = torch.distributed.get_rank()
-        world_size = torch.distributed.get_world_size()
-        fields = [
-            model_path, 'num_bon', num_bon, 'max_token_len', max_token_len, 'response_length', response_length,
-            'prompt_length', prompt_length, 'rank', my_rank, world_size
-        ]
-        uuid = '_'.join([str(x) for x in fields])
-        return uuid
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def set_rollout_callback_function(self, eos_callback_fn):
@@ -435,13 +442,18 @@ class AsyncActorRolloutRefWorker(Worker):
                                        model_hf_config=self.actor_model_config,
                                        is_standalone=self._is_standalone_rollout)
         log_gpu_memory_usage('After AsyncXPerfGPTRollout init', logger=logger)
-        sharding_manager = FSDPXPerfGPTShardingManager(module=self.actor_module_fsdp,
-                                                       model_config=self.actor_model_config,
-                                                       inference_engine=rollout.inference_engine,
-                                                       device_mesh=rollout.device_mesh,
-                                                       standalone=self._is_standalone_rollout or
-                                                       self._is_standalone_validator,
-                                                       only_bind_once=self.role == "rollout")
+
+        if self.actor_strategy == 'fsdp':
+            sharding_manager = FSDPXPerfGPTShardingManager(module=self.actor_module_fsdp,
+                                                           model_config=self.actor_model_config,
+                                                           inference_engine=rollout.inference_engine,
+                                                           device_mesh=rollout.device_mesh,
+                                                           standalone=self._is_standalone_rollout or
+                                                           self._is_standalone_validator,
+                                                           only_bind_once=self.role == "rollout")
+        elif self.actor_strategy == 'megatron':
+            raise NotImplementedError
+
         sharding_manager.release_param_and_cache()
         log_gpu_memory_usage('After AsyncXPerfGPTRollout release parameter and kv cache', logger=logger)
         return rollout, sharding_manager
@@ -452,24 +464,38 @@ class AsyncActorRolloutRefWorker(Worker):
         if device == "cuda":
             device = torch.cuda.current_device()
             if self._is_actor or self._is_standalone_rollout or self._is_standalone_validator:
-                if not self.config.actor.fsdp_config.param_offload:
-                    if model:
-                        load_fsdp_model_to_gpu(self.actor_module_fsdp)
-                    if optimizer and self.actor_optimizer is not None:
-                        load_fsdp_optimizer(self.actor_optimizer, device)
+                if self.actor_strategy == 'fsdp':
+                    if not self.config.actor.fsdp_config.param_offload:
+                        if model:
+                            load_fsdp_model_to_gpu(self.actor_module_fsdp)
+                        if optimizer and self.actor_optimizer is not None:
+                            load_fsdp_optimizer(self.actor_optimizer, device)
+                elif self.actor_strategy == 'megatron':
+                    raise NotImplementedError
+
             if self._is_ref:
-                if model and not self.config.ref.fsdp_config.param_offload:
-                    load_fsdp_model_to_gpu(self.ref_module_fsdp)
+                if self.ref_strategy == 'fsdp':
+                    if model and not self.config.ref.fsdp_config.param_offload:
+                        load_fsdp_model_to_gpu(self.ref_module_fsdp)
+                elif self.ref_strategy == 'megatron':
+                    raise NotImplementedError
+
         elif device == "cpu":
             if self._is_actor or self._is_standalone_rollout or self._is_standalone_validator:
-                if not self.config.actor.fsdp_config.param_offload:
-                    if model:
-                        offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-                    if optimizer and self.actor_optimizer is not None:
-                        offload_fsdp_optimizer(self.actor_optimizer)
+                if self.actor_strategy == 'fsdp':
+                    if not self.config.actor.fsdp_config.param_offload:
+                        if model:
+                            offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+                        if optimizer and self.actor_optimizer is not None:
+                            offload_fsdp_optimizer(self.actor_optimizer)
+                elif self.actor_strategy == 'megatron':
+                    raise NotImplementedError
             if self._is_ref:
-                if model and not self.config.ref.fsdp_config.param_offload:
-                    offload_fsdp_model_to_cpu(self.ref_module_fsdp)
+                if self.ref_strategy == 'fsdp':
+                    if model and not self.config.ref.fsdp_config.param_offload:
+                        offload_fsdp_model_to_cpu(self.ref_module_fsdp)
+                elif self.ref_strategy == 'megatron':
+                    raise NotImplementedError
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def init_model(self):
@@ -501,53 +527,67 @@ class AsyncActorRolloutRefWorker(Worker):
             else:
                 optim_config = None
                 fsdp_config = OmegaConf.create()
-            self.actor_module_fsdp, self.actor_optimizer, self.actor_lr_scheduler, self.actor_model_config, self.metrics_context = self._build_model_optimizer(
-                model_path=self.config.model.path,
-                fsdp_config=fsdp_config,
-                optim_config=optim_config,
-                override_model_config=override_model_config,
-                enable_gradient_checkpointing=self.config.model.get('enable_gradient_checkpointing', False),
-                use_rmpad=use_rmpad,
-                trust_remote_code=self.config.model.get('trust_remote_code', False),
-                role='actor' if self._is_actor else 'rollout')
 
-            # get the original unwrapped module
-            self.actor_module = self.actor_module_fsdp._fsdp_wrapped_module
-            assert self.actor_module.config.num_attention_heads % self.config.actor.ulysses_sequence_parallel_size == 0, \
-                f'invalid ulysses sequence parallel size: {self.actor_module.config.num_attention_heads=} % {self.config.actor.ulysses_sequence_parallel_size=} != 0'
+            if self.actor_strategy == 'fsdp':
+                self.actor_module_fsdp, self.actor_optimizer, self.actor_lr_scheduler, self.actor_model_config, self.metrics_context = self._build_model_optimizer(
+                    model_path=self.config.model.path,
+                    fsdp_config=fsdp_config,
+                    optim_config=optim_config,
+                    override_model_config=override_model_config,
+                    enable_gradient_checkpointing=self.config.model.get('enable_gradient_checkpointing', False),
+                    use_rmpad=use_rmpad,
+                    trust_remote_code=self.config.model.get('trust_remote_code', False),
+                    role='actor' if self._is_actor else 'rollout')
+
+                # get the original unwrapped module
+                self.actor_module = self.actor_module_fsdp._fsdp_wrapped_module
+                assert self.actor_module.config.num_attention_heads % self.config.actor.ulysses_sequence_parallel_size == 0, \
+                    f'invalid ulysses sequence parallel size: {self.actor_module.config.num_attention_heads=} % {self.config.actor.ulysses_sequence_parallel_size=} != 0'
+
+            elif self.actor_strategy == 'megatron':
+                # TODO: build megatron model
+                raise NotImplementedError
 
         # load from checkpoint
         if self._is_actor:
             OmegaConf.set_struct(self.config.actor, True)
-            with open_dict(self.config.actor):
-                self.config.actor.use_rmpad = use_rmpad
-                self.config.actor.use_ce_loss_fusion = use_ce_loss_fusion
-            enable_non_reentrant_recompute = self.config.model.get('enable_gradient_checkpointing',
-                                                                   False) and not self.config.actor.act_offload
-            self.actor = DataParallelPPOActor(config=self.config.actor,
-                                              actor_module=self.actor_module_fsdp,
-                                              actor_optimizer=self.actor_optimizer,
-                                              actor_model_config=self.actor_model_config,
-                                              enable_non_reentrant_recompute=enable_non_reentrant_recompute,
-                                              metrics_context=self.metrics_context)
+            if self.actor_strategy == 'fsdp':
+                with open_dict(self.config.actor):
+                    self.config.actor.use_rmpad = use_rmpad
+                    self.config.actor.use_ce_loss_fusion = use_ce_loss_fusion
+                enable_non_reentrant_recompute = self.config.model.get('enable_gradient_checkpointing',
+                                                                       False) and not self.config.actor.act_offload
+                self.actor = DataParallelPPOActor(config=self.config.actor,
+                                                  actor_module=self.actor_module_fsdp,
+                                                  actor_optimizer=self.actor_optimizer,
+                                                  actor_model_config=self.actor_model_config,
+                                                  enable_non_reentrant_recompute=enable_non_reentrant_recompute,
+                                                  metrics_context=self.metrics_context)
+            elif self.actor_strategy == 'megatron':
+                # TODO: build megatron actor
+                raise NotImplementedError
 
         if self._is_ref:
-            self.ref_module_fsdp = self._build_model_optimizer(
-                model_path=self.config.model.path,
-                fsdp_config=self.config.ref.fsdp_config,
-                optim_config=None,
-                use_rmpad=use_rmpad,
-                override_model_config=override_model_config,
-                enable_gradient_checkpointing=self.config.model.get('enable_gradient_checkpointing', False),
-                trust_remote_code=self.config.model.get('trust_remote_code', False),
-                role='ref')[0]
-            self.ref_module_fsdp.eval()
+            if self.ref_strategy == 'fsdp':
+                self.ref_module_fsdp = self._build_model_optimizer(
+                    model_path=self.config.model.path,
+                    fsdp_config=self.config.ref.fsdp_config,
+                    optim_config=None,
+                    use_rmpad=use_rmpad,
+                    override_model_config=override_model_config,
+                    enable_gradient_checkpointing=self.config.model.get('enable_gradient_checkpointing', False),
+                    trust_remote_code=self.config.model.get('trust_remote_code', False),
+                    role='ref')[0]
+                self.ref_module_fsdp.eval()
 
-            OmegaConf.set_struct(self.config.ref, True)
-            with open_dict(self.config.ref):
-                self.config.ref.use_rmpad = use_rmpad
-                self.config.ref.use_ce_loss_fusion = use_ce_loss_fusion
-            self.ref_policy = DataParallelPPOActor(config=self.config.ref, actor_module=self.ref_module_fsdp)
+                OmegaConf.set_struct(self.config.ref, True)
+                with open_dict(self.config.ref):
+                    self.config.ref.use_rmpad = use_rmpad
+                    self.config.ref.use_ce_loss_fusion = use_ce_loss_fusion
+                self.ref_policy = DataParallelPPOActor(config=self.config.ref, actor_module=self.ref_module_fsdp)
+            elif self.ref_strategy == 'megatron':
+                # TODO: build megatron actor
+                raise NotImplementedError
 
         if self._is_rollout or self._is_standalone_rollout or self._is_standalone_validator:
             self.rollout, self.sharding_manager = self._build_rollout()
@@ -555,16 +595,24 @@ class AsyncActorRolloutRefWorker(Worker):
 
         if self._is_actor:
             self.flops_counter = FlopsCounter(self.actor_model_config)
-            self.checkpoint_manager = CheckpointManagerWrapper(model=self.actor.actor_module,
-                                                               optimizer=self.actor.actor_optimizer,
-                                                               lr_scheduler=self.actor_lr_scheduler,
-                                                               tokenizer=self.tokenizer)
+            if self.actor_strategy == 'fsdp':
+                self.checkpoint_manager = CheckpointManagerWrapper(model=self.actor.actor_module,
+                                                                   optimizer=self.actor.actor_optimizer,
+                                                                   lr_scheduler=self.actor_lr_scheduler,
+                                                                   tokenizer=self.tokenizer)
+            elif self.actor_strategy == 'megatron':
+                # TODO: build megatron checkpoint manager
+                raise NotImplementedError
 
         if self._is_ref:
-            self.checkpoint_manager_ref = CheckpointManagerWrapper(model=self.ref_policy.actor_module,
-                                                                   optimizer=None,
-                                                                   lr_scheduler=None,
-                                                                   tokenizer=self.tokenizer)
+            if self.ref_strategy == 'fsdp':
+                self.checkpoint_manager_ref = CheckpointManagerWrapper(model=self.ref_policy.actor_module,
+                                                                       optimizer=None,
+                                                                       lr_scheduler=None,
+                                                                       tokenizer=self.tokenizer)
+            elif self.ref_strategy == 'megatron':
+                # TODO: build megatron checkpoint manager
+                raise NotImplementedError
 
         torch.cuda.empty_cache()
 
@@ -679,38 +727,6 @@ class AsyncActorRolloutRefWorker(Worker):
         log_gpu_memory_usage('After recompute log prob', logger=logger)
         return output
 
-    def _load_sequences_offline(self):
-        """load pre-generated sequences from hdfs"""
-        uuid = self._sequence_uuid()
-        fname = f'{uuid}.pt'
-        from hdfs_io.hdfs_io import hcopy
-        if not os.path.exists(fname):
-            hcopy(f'{self.load_sequences}/{fname}', fname)
-        data = torch.load(fname, map_location='cpu')
-        output = DataProto(**data)
-        if self.rank == 0:
-            print("loaded pre-generated sequences", flush=True)
-        return output
-
-    def _save_sequences_offline(self, output):
-        # TODO(haibin.lin): save to hdfs with hdfs_io
-        uuid = self._sequence_uuid()
-        output_to_save = {
-            'batch': output.batch,
-            'non_tensor_batch': output.non_tensor_batch,
-            'meta_info': output.meta_info
-        }
-        fname = f'{uuid}.pt'
-        torch.save(output_to_save, fname)
-        from hdfs_io.hdfs_io import hcopy, hmkdir
-        hmkdir(self.save_sequences)
-        hcopy(fname, f'{self.save_sequences}/{fname}')
-        print('Saved sequences and shutting down... Summary:', summerize_data(output.batch), uuid, flush=True)
-        torch.distributed.barrier()
-        # TODO(haibin.lin): typically we should throw an exception instead,
-        # for perf tuning we directly quit from here
-        exit()
-
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def generate_sequences(self, prompts: DataProto):
         torch.cuda.reset_peak_memory_stats()
@@ -735,14 +751,8 @@ class AsyncActorRolloutRefWorker(Worker):
             log_gpu_memory_usage('After entering sharding manager', logger=logger)
             prompts = self.sharding_manager.preprocess_data(prompts)
 
-            if self.load_sequences:
-                output = self._load_sequences_offline()
-            else:
-                generator = self.rollout.generate_sequences(prompts=prompts)
-                output = next(generator)
-
-                if self.save_sequences:
-                    self._save_sequences_offline(output)
+            generator = self.rollout.generate_sequences(prompts=prompts)
+            output = next(generator)
 
             output = self.sharding_manager.postprocess_data(output)
 
@@ -823,6 +833,11 @@ class AsyncActorRolloutRefWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, hdfs_path=None, version='v1', enable_flatten=False, enable_shm=False, model='actor'):
+        # TODO: remove the following line once megatron ckpt manager is implemented
+        if self.actor_strategy in ['megatron']:
+            # TODO(fix me)
+            return
+
         if model == 'actor':
             assert self._is_actor
             ckpt_manager = self.checkpoint_manager
@@ -853,6 +868,11 @@ class AsyncActorRolloutRefWorker(Worker):
                         enable_flatten=False,
                         enable_shm=False,
                         model='actor'):
+        # TODO: remove the following line once megatron ckpt manager is implemented
+        if self.actor_strategy in ['megatron']:
+            # TODO(fix me)
+            return
+
         # TODO: support omnistore
         if model == 'actor':
             assert self._is_actor
@@ -887,6 +907,10 @@ class AsyncActorRolloutRefWorker(Worker):
         """
         Update the reference policy via ema
         """
+        if self.actor_strategy in ['megatron']:
+            # TODO(fix me)
+            return
+
         assert self._is_actor and self._is_ref
 
         beta = self.config.ref.ema
@@ -906,14 +930,24 @@ class AsyncActorRolloutRefWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def upload_process_group(self, trigger_timestamp):
+        if self.actor_strategy in ['megatron']:
+            # TODO(fix me)
+            return
         ndtimeline.upload_process_group(trigger_timestamp, ndtimeline.DumpType.initial.value)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def do_ndtimeline_action(self, action, *args, **kwargs):
+        if self.actor_strategy in ['megatron']:
+            # TODO(fix me)
+            return
         ndtimeline.do_ndtimeline_action(action, *args, **kwargs)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_ndtimeline(self):
+        if self.actor_strategy in ['megatron']:
+            # TODO(fix me)
+            return
+
         if self._is_actor or self._is_rollout:
             mocked_fsdp_shape = list(self.actor_fsdp_mesh.shape)
             mocked_fsdp_shape[-1] *= self.actor_tp_mesh.size()
