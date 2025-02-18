@@ -36,9 +36,8 @@ from alpha_seed.models.transformers.parallel.collectives import get_memory
 from .initialize import create_mesh
 from .initialize import parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init
 from .checkpoint.extensions import register_dtensor_save_hook
-from verl.utils.fsdp_utils import offload_fsdp_optimizer, load_fsdp_optimizer
 from .offload import offload_fsdp_model_to_cpu, load_fsdp_model_to_gpu
-from verl.utils.fsdp_utils import offload_fsdp_optimizer, load_fsdp_optimizer
+from alpha_seed.workers.actors.offload import offload_fsdp_optimizer, load_fsdp_optimizer
 from verl.utils.import_utils import import_external_libs
 from verl.utils.debug import log_gpu_memory_usage
 

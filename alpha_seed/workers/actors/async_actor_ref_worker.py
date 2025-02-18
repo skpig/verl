@@ -39,7 +39,7 @@ from verl.utils.model import compute_position_id_with_mask
 from verl.utils.fs import copy_local_path_from_hdfs
 from verl.utils.fsdp_utils import get_fsdp_wrap_policy
 from .offload import offload_fsdp_model_to_cpu, load_fsdp_model_to_gpu
-from verl.utils.fsdp_utils import offload_fsdp_optimizer, load_fsdp_optimizer
+from alpha_seed.workers.actors.offload import offload_fsdp_optimizer, load_fsdp_optimizer
 from verl.utils.import_utils import import_external_libs
 from verl.utils.debug import log_gpu_memory_usage
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
