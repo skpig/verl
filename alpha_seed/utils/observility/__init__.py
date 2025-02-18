@@ -1,1 +1,2 @@
+from .line_profiler import TracerContextManager
 from .torch_profiler import get_profiler_context_wrapped, profile_step

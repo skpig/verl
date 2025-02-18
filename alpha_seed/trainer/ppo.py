@@ -45,6 +45,7 @@ from alpha_seed.workers.actors.rollout_pool import RolloutPool
 from alpha_seed.utils.observility.pretty_print import pprint
 from alpha_seed.utils import ndtimeline
 from alpha_seed.utils.dataset.rl_dataset import RLHFDataset
+from alpha_seed.utils.multithreads import ThreadPoolManager
 
 from single_controller.base import Worker
 from single_controller.ray import RayResourcePool, RayWorkerGroup, RayClassWithInitArgs
@@ -811,12 +812,6 @@ class RayPPOTrainer(object):
             self.standalone_rollout_wg.init_ndtimeline()
             standalone_rollout_address = self.standalone_rollout_wg.get_master_addr()
             init_futures.append(self.standalone_rollout_wg.init_model())
-            self.actor_rollout_wg.setup_standalone_worker_comm(hybrid_master_address, standalone_rollout_address,
-                                                               "12345", "standalone_rollout")
-            self.standalone_rollout_wg.setup_standalone_worker_comm(hybrid_master_address, standalone_rollout_address,
-                                                                    "12345", "standalone_rollout")
-            # offload standalone_rollout_wg FSDP GPU memory
-            self.standalone_rollout_wg.to('cpu')
         else:
             self.standalone_rollout_wg = None
 
@@ -825,13 +820,30 @@ class RayPPOTrainer(object):
             self.standalone_validator_wg.init_ndtimeline()
             standalone_validator_address = self.standalone_validator_wg.get_master_addr()
             init_futures.append(self.standalone_validator_wg.init_model())
+
+        tasks_mgr = ThreadPoolManager()
+
+        if self.use_standalone_rollout:
+            self.actor_rollout_wg.setup_standalone_worker_comm(hybrid_master_address, standalone_rollout_address,
+                                                               "12345", "standalone_rollout")
+            self.standalone_rollout_wg.setup_standalone_worker_comm(hybrid_master_address, standalone_rollout_address,
+                                                                    "12345", "standalone_rollout")
+            # offload standalone_rollout_wg FSDP GPU memory
+            tasks_mgr.submit_task(self.standalone_rollout_wg.to, 'cpu')
+
+        if self.use_standalone_validator:
             self.actor_rollout_wg.setup_standalone_worker_comm(hybrid_master_address, standalone_validator_address,
                                                                "14567", "standalone_validator")
             self.standalone_validator_wg.setup_standalone_worker_comm(hybrid_master_address,
                                                                       standalone_validator_address, "14567",
                                                                       "standalone_validator")
             # offload standalone_validator_wg FSDP GPU memory
-            self.standalone_validator_wg.to('cpu')
+            tasks_mgr.submit_task(self.standalone_validator_wg.to, 'cpu')
+
+        try:
+            tasks_mgr.wait_for_completion()  # Wait for tasks to complete
+        except Exception as e:
+            raise e
 
         if self.config.actor_rollout_ref.actor.kl_loss_weight >= 1e-10:
             # 两种情况下使用kl loss，一种是grpo，另一种是在rewards里不加kl惩罚

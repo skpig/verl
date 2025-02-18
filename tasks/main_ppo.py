@@ -39,6 +39,8 @@ from alpha_seed.utils.duplicate import para_dup
 from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRefWorker
 from alpha_seed.workers.actors.critic_worker import CriticWorker
 from alpha_seed.utils.alarm.lark_util import send_message_to_employee
+from alpha_seed.utils.observility import TracerContextManager
+
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
 try:
@@ -831,7 +833,6 @@ def check_all_workers_alive(workers):
 
 
 def main_task(config):
-
     metric_collection_context = MegavisionMetricsCtx().collect_setup_trainer_duration() \
         if MegavisionMetricsCtx else contextlib.nullcontext()
 
