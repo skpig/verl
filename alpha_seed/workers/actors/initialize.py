@@ -66,6 +66,32 @@ def calculate_device_mesh_shape(parallel_size):
         return (world_size,)
 
 
+def singleton(class_):
+    instances = {}
+
+    def getinstance(*args, **kwargs):
+        if class_ not in instances:
+            instances[class_] = class_(*args, **kwargs)
+        return instances[class_]
+
+    return getinstance
+
+
+@singleton
+class DeviceMeshManager:
+
+    def __init__(self):
+
+        self.device_meshes = {}
+
+    def init_device_mesh(self, device_type, mesh_shape, *, mesh_dim_names=None):
+        args = (device_type, tuple(mesh_shape), tuple(mesh_dim_names) if mesh_dim_names is not None else mesh_dim_names)
+        if args not in self.device_meshes:
+            device_mesh = init_device_mesh(device_type, mesh_shape, mesh_dim_names=mesh_dim_names)
+            self.device_meshes[args] = device_mesh
+        return self.device_meshes[args]
+
+
 def create_mesh(fsdp_size: int, tp_size: int, sp_size: int):
     """
     Create device meshes for fsdp, tp, and sp.
@@ -89,11 +115,12 @@ def create_mesh(fsdp_size: int, tp_size: int, sp_size: int):
         fsdp_size = remain_size
     dp_size = remain_size // fsdp_size
     if dp_size == 1:
-        train_mesh = init_device_mesh("cuda", (fsdp_size, tp_size), mesh_dim_names=("fsdp", "tp"))
+        train_mesh = DeviceMeshManager().init_device_mesh("cuda", (fsdp_size, tp_size), mesh_dim_names=("fsdp", "tp"))
         fsdp_mesh = train_mesh["fsdp"]
         tp_mesh = train_mesh["tp"]
     else:
-        train_mesh = init_device_mesh("cuda", (dp_size, fsdp_size, tp_size), mesh_dim_names=("dp", "fsdp", "tp"))
+        train_mesh = DeviceMeshManager().init_device_mesh("cuda", (dp_size, fsdp_size, tp_size),
+                                                          mesh_dim_names=("dp", "fsdp", "tp"))
         fsdp_mesh = train_mesh["dp", "fsdp"]
         tp_mesh = train_mesh["tp"]
     assert fsdp_mesh.size() == fsdp_size * dp_size
@@ -101,11 +128,13 @@ def create_mesh(fsdp_size: int, tp_size: int, sp_size: int):
     # sp mesh
     gather_size = tp_size * sp_size
     data_dp_size = world_size // gather_size
-    data_mesh = init_device_mesh("cuda", (data_dp_size, sp_size, tp_size), mesh_dim_names=("dp", "sp", "tp"))
+    data_mesh = DeviceMeshManager().init_device_mesh("cuda", (data_dp_size, sp_size, tp_size),
+                                                     mesh_dim_names=("dp", "sp", "tp"))
     sp_mesh = data_mesh["sp"]
     assert sp_mesh.size() == sp_size
     # data gather mesh
-    gather_mesh = init_device_mesh("cuda", (data_dp_size, gather_size), mesh_dim_names=("dp", "replicate"))
+    gather_mesh = DeviceMeshManager().init_device_mesh("cuda", (data_dp_size, gather_size),
+                                                       mesh_dim_names=("dp", "replicate"))
     gather_mesh = gather_mesh["replicate"]
     assert gather_mesh.size() == gather_size
     return fsdp_mesh, tp_mesh, sp_mesh, gather_mesh
