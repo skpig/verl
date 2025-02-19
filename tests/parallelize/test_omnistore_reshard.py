@@ -77,8 +77,7 @@ def model_save_load_fsdp_hsdp_tp_omnistore_reshard(fsdp_size_save: int, tp_size_
 
     train_one_step(model_save, optim_save)
     model_load, optim_load, meshes = build_model(fsdp_size=fsdp_size_load, tp_size=tp_size_load)
-    for planner in RLFSDPCheckpointer.save_planner_map.values():
-        planner.clear_cache()
+    RLFSDPCheckpointer._RLFSDPCheckpointer__cleanup()
     # load
     load_omnistore(model_load, optim_load, f"/tmp/ckpt/fsdp_{fsdp_size_save}_tp_{tp_size_save}")
     # save again
