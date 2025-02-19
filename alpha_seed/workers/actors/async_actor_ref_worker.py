@@ -847,7 +847,7 @@ class AsyncActorRolloutRefWorker(Worker):
         return output
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def load_checkpoint(self, hdfs_path=None, version='v1', enable_flatten=False, enable_shm=False, model='actor'):
+    def load_checkpoint(self, hdfs_path=None, version='v1', enable_shm=False, model='actor'):
         # TODO: remove the following line once megatron ckpt manager is implemented
         if self.actor_strategy in ['megatron']:
             # TODO(fix me)
@@ -868,7 +868,6 @@ class AsyncActorRolloutRefWorker(Worker):
                                      hdfs_path=hdfs_path,
                                      device_mesh=self.actor_fsdp_mesh,
                                      role='actor',
-                                     enable_flatten=enable_flatten,
                                      enable_shm=enable_shm)
         if self.config.actor.train_memory_offload:
             self.to("cpu")
@@ -880,7 +879,6 @@ class AsyncActorRolloutRefWorker(Worker):
                         version='v1',
                         global_step=0,
                         ckpt_global_uploader_ref=None,
-                        enable_flatten=False,
                         enable_shm=False,
                         model='actor'):
         # TODO: remove the following line once megatron ckpt manager is implemented
@@ -908,7 +906,6 @@ class AsyncActorRolloutRefWorker(Worker):
                                      role=model,
                                      global_step=global_step,
                                      ckpt_global_uploader_ref=ckpt_global_uploader_ref,
-                                     enable_flatten=enable_flatten,
                                      enable_shm=enable_shm)
         if self.config.actor.train_memory_offload:
             self.to("cpu")

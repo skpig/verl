@@ -21,7 +21,7 @@ actor_rollout_ref:
         # transformer_layer_cls_to_wrap: None
         min_num_params: 0
       param_offload: False
-      use_orig_params: ${trainer.ckpt_enable_flatten}
+      use_orig_params: True
   ref:
     fsdp_config:
       param_offload: True
@@ -64,7 +64,7 @@ critic:
       wrap_policy:
         # transformer_layer_cls_to_wrap: None
         min_num_params: 0
-      use_orig_params: ${trainer.ckpt_enable_flatten}
+      use_orig_params: True
   ulysses_sequence_parallel_size: 1
   fsdp_size: -1
   NO_DEVICE_MESH: False # handle old critic ckpt stored as ShardedTensor
@@ -82,7 +82,7 @@ reward_model:
     fsdp_config:
       min_num_params: 0
       param_offload: True
-      use_orig_params: ${trainer.ckpt_enable_flatten}
+      use_orig_params: True
   ulysses_sequence_parallel_size: 1
   fsdp_size: -1
   use_dynamic_bsz: True
@@ -96,7 +96,6 @@ reward_model:
 trainer:
   nnodes: 1
   n_gpus_per_node: 8
-  ckpt_enable_flatten: False
 
 streaming_rollout:
   n_gpus_per_node: 0
