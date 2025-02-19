@@ -62,7 +62,7 @@ fsdp_size=8
 xperf_tp_size=2
 offload=True
 offload_train_memory=True
-act_offload=True
+act_offload=False  # temporally disable it
 
 python3 tasks/main_ppo.py \
     data.train_files=${TRAIN_FILE} \

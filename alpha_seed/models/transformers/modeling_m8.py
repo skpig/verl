@@ -27,6 +27,7 @@ from seed_models.models.m8.modeling_m8 import (
     KVMirrorManager,
     Cache,
     M8FusedMoeBlock,
+    M8DecoderLayer,
 )
 from .modeling_flash_attention_utils import _flash_attention_forward, _flash_supports_window_size
 
@@ -291,6 +292,177 @@ def _fused_moe_ep_forward(
     # reshape output to input shape
     final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
     return final_hidden_states, router_logits, aux_loss
+
+
+def _fused_moe_ep_forward_without_gate(self: M8FusedMoeBlock, hidden_states: torch.Tensor,
+                                       routing_weights: torch.Tensor, selected_experts: torch.Tensor):
+    """Patched moe forward function to support EP"""
+
+    ep_mesh: DeviceMesh = self._tp_mesh
+    ep_group = None if ep_mesh is None else ep_mesh.get_group()
+    ep_size = 1 if ep_mesh is None else ep_mesh.size()
+
+    batch_size, sequence_length, hidden_dim = hidden_states.shape
+    hidden_states = hidden_states.view(-1, hidden_dim)
+
+    # MOE Step 2: compute experts with group gemm.
+    routing_weights = routing_weights.bfloat16()
+    hidden_states = hidden_states.bfloat16()
+    final_hidden_states, handle = FusedMoeExpertFunctionEP.apply(
+        self.num_experts,
+        routing_weights,
+        selected_experts,
+        hidden_states,
+        self.experts.fc1_1,
+        self.experts.fc1_2,
+        self.experts.fc2,
+        ep_group,
+    )
+
+    # MOE Step 3: compute with shared experts
+    if ep_size > 1:
+        hidden_states = identity_allreduce(hidden_states, group=ep_group)
+
+    experts_share_states = self.experts_share(hidden_states)
+
+    if ep_size > 1:
+        # handle.wait()  # wait until final_hidden_states finished
+        experts_share_states = allreduce_identity(experts_share_states, group=ep_group)
+
+    final_hidden_states = final_hidden_states + experts_share_states
+
+    # reshape output to input shape
+    final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
+    return final_hidden_states
+
+
+def decoder_layer_forward(
+    self: M8DecoderLayer,
+    hidden_states: torch.Tensor,
+    attention_mask: Optional[torch.Tensor] = None,
+    position_ids: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.IntTensor] = None,
+    past_key_value: Optional[Tuple[torch.Tensor]] = None,
+    output_attentions: Optional[bool] = False,
+    output_router_logits: Optional[bool] = False,
+    output_aux_losses: Optional[bool] = None,
+    use_cache: Optional[bool] = False,
+    position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.45
+    max_seqlen: Optional[int] = None,
+    gradient_checkpointing: Optional[bool] = False,
+    **kwargs,
+) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+    """
+    Args:
+        hidden_states (`torch.FloatTensor`): input to the layer of shape `(batch, seq_len, embed_dim)`
+        attention_mask (`torch.FloatTensor`, *optional*): attention mask of size
+            `(batch, sequence_length)` where padding elements are indicated by 0.
+        output_attentions (`bool`, *optional*):
+            Whether or not to return the attentions tensors of all attention layers. See `attentions` under
+            returned tensors for more detail.
+        output_router_logits (`bool`, *optional*):
+            Whether or not to return the logits of all the routers. They are useful for computing the router loss, and
+            should not be returned during inference.
+        use_cache (`bool`, *optional*):
+            If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding
+            (see `past_key_values`).
+        position_embeddings (`Tuple[torch.FloatTensor, torch.FloatTensor]`, *optional*):
+            Tuple containing the cosine and sine positional embeddings of shape `(batch_size, seq_len, head_dim)`,
+            with `head_dim` being the embedding dimension of each attention head.
+        past_key_value (`Tuple(torch.FloatTensor)`, *optional*): cached past key and value projection states
+    """
+
+    def pre_gate_forward(
+        layer,
+        hidden_states,
+        attention_mask,
+        position_ids,
+        cu_seqlens,
+        past_key_value,
+        output_attentions,
+        use_cache,
+        position_embeddings,
+        max_seqlen,
+        gradient_checkpointing,
+    ):
+        layernorm_output = layer.input_layernorm(hidden_states)
+
+        if layer.layer_idx in layer.pre_post_layernorm_layers:
+            residual = layernorm_output
+        else:
+            residual = hidden_states
+
+        # Self Attention
+        hidden_states, self_attn_weights, present_key_value = layer.attn(
+            hidden_states=layernorm_output,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            cu_seqlens=cu_seqlens,
+            past_key_value=past_key_value,
+            output_attentions=output_attentions,
+            use_cache=use_cache,
+            position_embeddings=position_embeddings,
+            max_seqlen=max_seqlen,
+            gradient_checkpointing=gradient_checkpointing,
+        )
+
+        hidden_states = residual + hidden_states
+
+        # Fully Connected
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        return hidden_states, self_attn_weights, present_key_value, residual
+
+    hidden_states, self_attn_weights, present_key_value, residual = self._gradient_checkpointing_func(
+        pre_gate_forward,
+        self,
+        hidden_states,
+        attention_mask,
+        position_ids,
+        cu_seqlens,
+        past_key_value,
+        output_attentions,
+        use_cache,
+        position_embeddings,
+        max_seqlen,
+        True,
+    )
+
+    # MOE Step 1: compute each token's weight for all experts.
+    # router_logits shape (batch_size * sequence_len, num_experts)
+    batch_size, sequence_length, hidden_dim = hidden_states.shape
+
+    def post_attn_forward(layer, hidden_states, output_aux_losses, residual):
+        routing_weights, router_logits, aux_loss, _, selected_experts = self.mlp.moe.gate(
+            hidden_states.view(-1, hidden_dim), output_aux_losses)
+        hidden_states = layer.mlp.moe(hidden_states, routing_weights, selected_experts)
+        hidden_states = layer.mlp.dropout(hidden_states)
+        hidden_states = residual + hidden_states
+        return hidden_states, router_logits, aux_loss
+
+    hidden_states, router_logits, aux_loss = self._gradient_checkpointing_func(
+        post_attn_forward,
+        self,
+        hidden_states,
+        output_aux_losses,
+        residual,
+    )
+
+    outputs = (hidden_states,)
+
+    if output_attentions:
+        outputs += (self_attn_weights,)
+
+    if use_cache:
+        outputs += (present_key_value,)
+
+    if output_router_logits:
+        outputs += (router_logits,)
+
+    if output_aux_losses:
+        outputs += (aux_loss,)
+
+    return outputs
 
 
 def release_m8_kv_mirror(self):

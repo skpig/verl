@@ -194,7 +194,12 @@ class CheckpointFunction(torch.autograd.Function):
 
         # patch code, remove the extra allgather with use_reentrant + ckpt
         if not isinstance(ctx.run_function, torch.nn.Module):
-            ctx.patch_module = ctx.run_function.__self__
+            # for nn.Module.__call__, get back its instance
+            if hasattr(ctx.run_function, "__self__"):
+                ctx.patch_module = ctx.run_function.__self__
+            # for other non-class instance function, use it directly
+            else:
+                ctx.patch_module = ctx.run_function
         else:
             ctx.patch_module = ctx.run_function
         state = _get_module_fsdp_state_if_fully_sharded_module(ctx.patch_module)
