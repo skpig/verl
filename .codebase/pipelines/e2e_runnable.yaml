@@ -46,6 +46,12 @@ jobs:
           - pip3 install bytedance.ndtimeline==2.2.11
           - pip3 install byted-omnistore==0.7.5
           - pip3 install pylatexenc
+          - cd /opt/tiger
+          - git clone git@code.byted.org:data/byted_optimizer.git
+          - cd byted_optimizer
+          - pip3 install -r requirements.txt
+          - pip3 install -v --disable-pip-version-check --no-cache-dir --no-build-isolation -e ./ --user
+          
 
       - name: math v1 ppo async and grpo
         commands:

@@ -1,3 +1,10 @@
 {
-    
+    "aml/mlsys/byted_optimizer_cu124": {
+        "version": "1.0.0.22",
+        "mnt": "/opt/tiger/byted_optimizer",
+
+        "URL": "git@code.byted.org:data/byted_optimizer.git",
+        "branch": "master",
+        "commit": "96b9b47c4237881f7b132e459f5fbf6bc58c33b1"
+    }
 }

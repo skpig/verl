@@ -56,6 +56,7 @@ actor_rollout_ref:
     act_offload: False
     train_memory_offload: ${trainer.offload_train_memory}
     optim:
+      type: adam
       lr: 1e-5
       betas: [0.9, 0.95]
       eps: 1e-08
@@ -65,6 +66,7 @@ actor_rollout_ref:
       min_lr_ratio: null   # only useful for warmup with cosine
       warmup_style: constant  # select from constant/cosine
       total_training_steps: -1  # must be override by program
+      force_bfloat16_state: False  # wether to compress optimizer states to bf16
     fsdp_config:
       wrap_policy:
         # transformer_layer_cls_to_wrap: None
@@ -159,6 +161,7 @@ critic:
   load_score_head: True
   strategy: fsdp
   optim:
+    type: adam
     lr: 1e-5
     betas: [0.9, 0.95]
     eps: 1e-08
@@ -168,6 +171,7 @@ critic:
     min_lr_ratio: null   # only useful for warmup with cosine
     warmup_style: constant  # select from constant/cosine
     total_training_steps: -1  # must be override by program
+    force_bfloat16_state: False  # wether to compress optimizer states to bf16
   model:
     path: hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/models/deepseek-llm-7b-chat
     tokenizer_path: ${actor_rollout_ref.model.path}
