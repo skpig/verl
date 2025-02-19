@@ -1309,7 +1309,7 @@ class RayPPOTrainer(object):
         # get training batch from ready queue, make it stable by random pick
         ray.get(self.rollout_pool.fill_rollout_pool.remote(ready_batch))
         if self.global_step < self.rollout_pool_warmup_step + start_step:
-            return None, standalone_batch
+            return None, standalone_batch, pending_batch
         return_batch_size = self.config.data.train_batch_size * \
             self.config.trainer.league_training_config.buffer_size * \
             self.num_bon
