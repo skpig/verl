@@ -31,6 +31,8 @@ def process_output(input_batch, output_batch, tokenizer, ready_batch, pending_ba
                 item.pop(batch_keys=['responses'])
                 pending_batch.append(rmpad(item))
     else:
+        max_new_tokens = output_batch.meta_info.get('generation_kwargs').get('max_new_tokens',
+                                                                             config.data.max_response_length)
         if config.streaming_rollout.force_eos:
             need_eos = is_finished == 0
             is_finished = torch.ones_like(is_finished)
@@ -45,7 +47,7 @@ def process_output(input_batch, output_batch, tokenizer, ready_batch, pending_ba
                 left_pad_len = (item.batch['prompts'] != tokenizer.pad_token_id).int().argmax(dim=1)
                 start_idx = torch.nonzero(item.batch['attention_mask'].flatten())[0]
                 real_len = item.batch['attention_mask'].sum(-1)
-                total_len = config.data.max_prompt_length + config.data.max_response_length
+                total_len = config.data.max_prompt_length + max_new_tokens
                 right_pad_len = total_len - left_pad_len - real_len
                 item.batch['attention_mask'] = F.pad(item.batch['attention_mask'][:, start_idx:start_idx + real_len],
                                                      (left_pad_len, right_pad_len),

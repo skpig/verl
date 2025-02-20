@@ -132,12 +132,14 @@ actor_rollout_ref:
       min_p: -1 # 0.01 to open
       eta_epsilon: -1 # 1e-6 to open
       logits_clamp: ${actor_rollout_ref.actor.logits_clamp}
+      max_new_tokens: ${data.max_response_length}
     val_generate_kwargs:
       # for validation
       top_k: -1 # 0 for hf rollout, -1 for vllm rollout
       top_p: 0.7
       temperature: 1.0
       do_sample: True
+      max_new_tokens: ${data.max_response_length}
     profile:
       filename: p6_400m_ppo_rollout
       profile_on_ranks:

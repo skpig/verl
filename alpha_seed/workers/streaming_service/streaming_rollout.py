@@ -453,6 +453,8 @@ class AsyncXPerfGPTRollout(object):
 
         complete_ratio = prompts.meta_info.get('complete_ratio', 1)
 
+        max_new_tokens = prompts.meta_info.get('generation_kwargs').get('max_new_tokens', self.config.response_length)
+
         prompt_ids = prompts.batch['input_ids']  # (bs, prompt_length)
         batch_size = prompt_ids.shape[0]
         # left-padded attention_mask
@@ -493,10 +495,10 @@ class AsyncXPerfGPTRollout(object):
         with patch.object(tokenizer, "padding_side", "right"):
             response_outputs = tokenizer.pad(dict(input_ids=response_outputs),
                                              padding="max_length",
-                                             max_length=self.config.response_length,
+                                             max_length=max_new_tokens,
                                              return_tensors="pt")
         response_log_probs = self._postprocess_log_probs(off_policy_response_log_probs, response_log_probs,
-                                                         self.config.response_length)
+                                                         max_new_tokens)
         response_ids = response_outputs["input_ids"].cuda().to(torch.int32)
         response_attention_mask = response_outputs["attention_mask"].cuda().to(torch.int8)
         attention_mask = torch.hstack((attention_mask, response_attention_mask))
