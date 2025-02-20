@@ -19,36 +19,33 @@ import time
 import warnings
 import contextlib
 import json
-
-import ray
-from alpha_seed.utils.reward_score.extra_reward import add_length_reward, punish_format
-from verl import DataProto
-import torch
-from verl.utils.tracking import Tracking
-import wandb
-import os
-import time
-import pandas as pd
-import hdfs_io
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import defaultdict, Counter
 from datetime import datetime
 from multiprocessing import Process
-from collections import Counter
-# rule-based reward score
-from alpha_seed.utils.reward_score import math_v1, verifier_service, gsm8k, math_v2, model_score_fn, logic_puzzle, oj_utils, math_verifier, response_post_proc, gpqa_verifier, math_deepscale, code_local_verifier
-from alpha_seed.utils.duplicate import para_dup
-from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRefWorker
-from alpha_seed.workers.actors.critic_worker import CriticWorker
-from alpha_seed.utils.alarm.lark_util import send_message_to_employee
-from alpha_seed.utils.observility import TracerContextManager
+import os
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from collections import defaultdict
+import ray
+from verl import DataProto
+from verl.utils.tracking import Tracking
+import torch
+import wandb
+import pandas as pd
+import hdfs_io
 try:
     from bytedance.trainingmetrics.rl_metrics_client_context_manager import RLMetricsClientContextManager as MegavisionMetricsCtx
 except ImportError:
     MegavisionMetricsCtx = None
 
+# rule-based reward score
+from alpha_seed.utils.reward_score.extra_reward import add_length_reward, punish_format
+from alpha_seed.utils.reward_score import math_v1, verifier_service, gsm8k, math_v2, model_score_fn, logic_puzzle, oj_utils, math_verifier, response_post_proc, gpqa_verifier, math_deepscale, code_local_verifier
+from alpha_seed.utils.duplicate import para_dup
+from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRefWorker
+from alpha_seed.workers.actors.critic_worker import CriticWorker
+from alpha_seed.utils.alarm.lark_util import send_message_to_employee
 from alpha_seed.utils.server_client import validate_client_config, KVStore, ServerHealthCheck, TaskRunner, ClientTaskRunner, check_all_workers_alive, recreate_actor
+from alpha_seed.utils.ndtimeline import version_checker, set_cuda_timer_option
 
 user_email = os.getenv('ARNOLD_LARK_RECEIVER', '')
 task_url = os.getenv('ARNOLD_ORIGIN_PLATFORM_URL', '')
@@ -669,8 +666,13 @@ def validate_config(config):
             not config.actor_rollout_ref.use_cuda_timer and not config.critic.use_cuda_timer), \
     "Error: config.critic.use_cuda_timer and config.actor_rollout_ref.use_cuda_timer must be the same"
 
-    if config.actor_rollout_ref.use_cuda_timer or config.reward_model.use_cuda_timer:
-        from alpha_seed.utils.ndtimeline import version_checker, set_cuda_timer_option
+    # wangchenyuan.99: new method for ndtimeline init, cmdline option will be dropped
+    if config.actor_rollout_ref.use_cuda_timer or config.reward_model.use_cuda_timer or os.getenv(
+            "ALPHASEED_USE_NDTIMELINE", "0") == "1":
+        if os.getenv("ALPHASEED_USE_NDTIMELINE", "0") != "1":
+            print(
+                "Warning: `use_cuda_timer` option in commandline will be ignored, use env `ALPHASEED_USE_NDTIMELINE=1` instead"
+            )
         version_checker()
         set_cuda_timer_option(True)
 

@@ -71,6 +71,7 @@ class CriticWorker(Worker):
             torch.distributed.init_process_group(backend="nccl", timeout=timeout)
 
         self.config = config
+        self.role = "critic"
 
         world_size = torch.distributed.get_world_size()
 
@@ -305,7 +306,9 @@ class CriticWorker(Worker):
         if self.config.train_memory_offload:
             self.to("cpu")
         torch.cuda.empty_cache()
-
+        # tmp method, which will be refactored after `use_cuda_timer` deleted from config
+        is_ndtimeline_enabled = self.config.get("use_cuda_timer", False) or ndtimeline.use_cuda_timer()
+        ndtimeline.init_with_ray(is_ndtimeline_enabled, self)
         self._model_initialized = True
         if remove_safetensors_after_init:
             cleanup_local_tmp_folder_safetensors_files(self.critic_model_config._name_or_path)
@@ -424,10 +427,3 @@ class CriticWorker(Worker):
         gc.collect()
         torch.cuda.empty_cache()
         self.__init__(config)
-
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def init_ndtimeline(self):
-        mocked_fsdp_shape = list(self.fsdp_mesh.shape)
-        mocked_fsdp_shape[-1] *= self.tp_mesh.size()
-        mocked_fsdp_shape = tuple(mocked_fsdp_shape)
-        ndtimeline.init_with_ray(self.config.get("use_cuda_timer", False), mocked_fsdp_shape, self)

@@ -532,6 +532,8 @@ class RayPPOTrainer(object):
 
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
+        self._global_step = 0
+        self._timeline_futures = []
 
         self.use_standalone_reference_policy = Role.RefPolicy in role_worker_mapping
         self.use_colocate_reference_policy = Role.ActorRolloutRef in role_worker_mapping
@@ -805,7 +807,6 @@ class RayPPOTrainer(object):
 
         init_futures = []
 
-        self.actor_rollout_wg.init_ndtimeline()
         hybrid_master_address = self.actor_rollout_wg.get_master_addr()
 
         init_futures.append(
@@ -814,7 +815,6 @@ class RayPPOTrainer(object):
 
         if self.use_standalone_rollout:
             self.standalone_rollout_wg = self.all_wg['standalone_rollout']
-            self.standalone_rollout_wg.init_ndtimeline()
             standalone_rollout_address = self.standalone_rollout_wg.get_master_addr()
             init_futures.append(
                 self.standalone_rollout_wg.init_model(
@@ -824,7 +824,6 @@ class RayPPOTrainer(object):
 
         if self.use_standalone_validator:
             self.standalone_validator_wg = self.all_wg['standalone_validator']
-            self.standalone_validator_wg.init_ndtimeline()
             standalone_validator_address = self.standalone_validator_wg.get_master_addr()
             init_futures.append(
                 self.standalone_validator_wg.init_model(
@@ -860,7 +859,6 @@ class RayPPOTrainer(object):
 
         if self.use_critic:
             self.critic_wg = self.all_wg['critic']
-            self.critic_wg.init_ndtimeline()
             self.critic_wg.init_model(
                 remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init)  # blocking
 
@@ -874,7 +872,6 @@ class RayPPOTrainer(object):
 
         if self.use_rm:
             self.rm_wg = self.all_wg['rm']
-            self.rm_wg.init_ndtimeline()
             self.rm_wg.init_model(
                 remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init)  # blocking
 
@@ -1554,9 +1551,6 @@ class RayPPOTrainer(object):
         self.global_step += 1
         start_step = self.global_step
 
-        if ndtimeline.use_cuda_timer():
-            self.call_once_on_each_ray_actor("do_ndtimeline_action", "set_global_step", global_step=self.global_step)
-
         # TODO: add staleness
         standalone_batch = []
         pending_batch = []
@@ -1886,17 +1880,7 @@ class RayPPOTrainer(object):
                 # TODO: make a canonical logger that supports various backend
                 self.logger.log(data=metrics, step=self.global_step)
 
-                if ndtimeline.use_cuda_timer():
-                    # Always be the last op before increasing global_step by 1
-                    print(f"flush ndtimeline at {self.global_step}")
-                    self.call_once_on_each_ray_actor("do_ndtimeline_action", "flush_and_inc")
-
                 self.global_step += 1
-                if ndtimeline.use_nccl_trace() and start_step + 1 == self.global_step:
-                    now = int(time.time())
-                    self.call_once_on_each_ray_actor("upload_process_group", now)
-                    pprint(f'start upload process group at {now}')
-
                 if self.global_step >= self.total_training_steps:
 
                     # perform validation after training
@@ -1915,10 +1899,12 @@ class RayPPOTrainer(object):
         """
         assert len(self.internal_wgs) == len(self.internal_wg_roles)
         assert len(self.internal_wgs) > 0
+        results = []
         for i, wg in enumerate(self.internal_wgs):
             prefix = self.internal_wg_roles[i][0]  # first role name
             f = getattr(wg, f"{prefix}_{func_name}")
-            f(*args, **kwargs)
+            results.append(f(*args, **kwargs))
+        return results
 
     def convert_ckpt_to_omnistore(self):
         self.global_step = 0
@@ -1928,3 +1914,21 @@ class RayPPOTrainer(object):
         # save omnistore ckpt
         self.save_checkpoint(specified_ckpt_version='omnistore')
         ray.get(self.ckpt_global_uploader.wait_all.remote(self.global_step, False))
+
+    @property
+    def global_step(self):
+        return self._global_step
+
+    @global_step.setter
+    def global_step(self, step: int):
+        if self._global_step == step:
+            return
+        if ndtimeline.use_cuda_timer() and self._global_step + 1 == step:
+            for fut in self._timeline_futures:
+                ray.get(fut)
+            futs = self.call_once_on_each_ray_actor("do_ndtimeline_action",
+                                                    "flush_set_upload",
+                                                    global_step=step,
+                                                    ts=int(time.time()))
+            self._timeline_futures = futs
+        self._global_step = step

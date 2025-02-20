@@ -66,6 +66,7 @@ class RewardModelWorker(Worker):
             torch.distributed.init_process_group(backend="nccl", timeout=timeout)
 
         self.config = config
+        self.role = "rm"
 
         fsdp_size = config.fsdp_size
         sp_size = config.ulysses_sequence_parallel_size
@@ -178,6 +179,9 @@ class RewardModelWorker(Worker):
         self.reward_module = self._build_model(config=self.config)
         self.reward_module.eval()
         torch.cuda.empty_cache()
+        # tmp method, which will be refactored after `use_cuda_timer` deleted from config
+        is_ndtimeline_enabled = self.config.get("use_cuda_timer", False) or ndtimeline.use_cuda_timer()
+        ndtimeline.init_with_ray(is_ndtimeline_enabled, self)
         self._model_initialized = True
         if remove_safetensors_after_init:
             cleanup_local_tmp_folder_safetensors_files(self.reward_model_config._name_or_path)
@@ -439,10 +443,6 @@ class RewardModelWorker(Worker):
         return output
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    def upload_process_group(self, trigger_timestamp):
-        ndtimeline.upload_process_group(trigger_timestamp, ndtimeline.DumpType.initial.value)
-
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def do_ndtimeline_action(self, action, *args, **kwargs):
         ndtimeline.do_ndtimeline_action(action, *args, **kwargs)
 
@@ -454,8 +454,3 @@ class RewardModelWorker(Worker):
         gc.collect()
         torch.cuda.empty_cache()
         self.__init__(config)
-
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def init_ndtimeline(self):
-        mocked_fsdp_shape = tuple(self.device_mesh.shape)
-        ndtimeline.init_with_ray(self.config.get("use_cuda_timer", False), mocked_fsdp_shape, self)

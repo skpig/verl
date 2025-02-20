@@ -5,24 +5,25 @@ from typing import Tuple, Union, List, Literal
 from packaging.version import Version
 
 from .timed_collectives import patch_coll_ops
+from .nccl_trace import upload_process_group, DumpType
 
 _USE_CUDA_TIMER = False
 
 
 def version_checker():
-    NDTIMELINE_BASE_VERSION = "2.2.11"
+    NDTIMELINE_BASE_VERSION = "2.2.14"
     NDTIMELINE_HIGH_VERSION = "3.0.0"
+    err_msg = f"bytedance.ndtimeline is not installed or not proper. Try to " + \
+    "set use_cuda_timer=False in config file to disable it or install bytedance.ndtimeline >={NDTIMELINE_BASE_VERSION} <{NDTIMELINE_HIGH_VERSION}"
     try:
         from bytedance.ndtimeline import __version__
         if Version(__version__) < Version(NDTIMELINE_BASE_VERSION) or Version(__version__) >= Version(
                 NDTIMELINE_HIGH_VERSION):
-            raise RuntimeError(
-                f"bytedance.ndtimeline's version should be >={NDTIMELINE_BASE_VERSION} <{NDTIMELINE_HIGH_VERSION},"
-                f"but {__version__} found, set use_cuda_timer=False in config file to disable it or install bytedance.ndtimeline properly"
-            )
-    except ImportError:
-        raise RuntimeError(
-            f"bytedance.ndtimeline's version should be >={NDTIMELINE_BASE_VERSION} <{NDTIMELINE_HIGH_VERSION}")
+            raise RuntimeError(err_msg)
+        return
+    except (ImportError, ModuleNotFoundError):
+        pass
+    raise RuntimeError(err_msg)
 
 
 def get_cuda_timer_hires_persist_predicate():
@@ -55,20 +56,21 @@ enable_by_global_step = get_cuda_timer_hires_persist_predicate()
 
 def use_cuda_timer():
     global _USE_CUDA_TIMER
-    return _USE_CUDA_TIMER
+    # original init method will be dropped, use ENV here
+    return _USE_CUDA_TIMER or os.getenv("ALPHASEED_USE_NDTIMELINE", "0") == "1"
 
 
 def set_cuda_timer_option(turn_on):
     global _USE_CUDA_TIMER
     if turn_on:
-        version_checker()
         # use warning level log in alpha seed
         if "NDTIMELINE_LOG_LEVEL" not in os.environ:
             os.environ["NDTIMELINE_LOG_LEVEL"] = "WARNING"
+        version_checker()
     _USE_CUDA_TIMER = turn_on
 
 
-def get_all_actor_functions(instance: "verl.single_controller.base.worker.WorkerHelper"):
+def get_all_actor_functions(instance: "WorkerHelper"):
     class_name = instance._get_ray_actor_cls_name()
     method_prefix = instance._get_ray_method_prefix()
     method_names = [name for name, _ in inspect.getmembers(instance, predicate=inspect.ismethod)]
@@ -167,7 +169,12 @@ def extend_timers(names: List[str]):
     nd.extend_timers(names)
 
 
-def do_ndtimeline_action(action: Literal["flush", "inc_step", "set_global_step", "flush_and_inc"], *args, **kwargs):
+COUNT_INC_ONE = 0
+UPLOADED = False
+
+
+def do_ndtimeline_action(action: Literal["flush", "inc_step", "set_global_step", "flush_and_inc", "flush_set_upload"],
+                         *args, **kwargs):
     if not use_cuda_timer():
         return
     import bytedance.ndtimeline as nd
@@ -180,6 +187,18 @@ def do_ndtimeline_action(action: Literal["flush", "inc_step", "set_global_step",
     elif action == "flush_and_inc":
         flush()
         nd.inc_step()
+    elif action == "flush_set_upload":
+        if not nd.NDTimerManagerSingleton.is_initialized():
+            return
+        global COUNT_INC_ONE, UPLOADED
+        inc = kwargs["global_step"] - nd.NDTimerManagerSingleton().global_step
+        if inc == 1:
+            flush()
+            COUNT_INC_ONE += 1
+        nd.set_global_step(kwargs["global_step"])
+        if not UPLOADED and COUNT_INC_ONE >= 2:
+            upload_process_group(kwargs["ts"], DumpType.initial.value)
+            UPLOADED = True
     else:
         raise ValueError(f"Unknown action {action}")
 

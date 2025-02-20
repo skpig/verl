@@ -619,7 +619,9 @@ class AsyncActorRolloutRefWorker(Worker):
             elif self.ref_strategy == 'megatron':
                 # TODO: build megatron checkpoint manager
                 raise NotImplementedError
-
+        # tmp method, which will be refactored after `use_cuda_timer` deleted from config
+        is_ndtimeline_enabled = self.config.get("use_cuda_timer", False) or ndtimeline.use_cuda_timer()
+        ndtimeline.init_with_ray(is_ndtimeline_enabled, self)
         torch.cuda.empty_cache()
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
@@ -932,42 +934,11 @@ class AsyncActorRolloutRefWorker(Worker):
                 param_ema.copy_(param.to(param_ema.device) * (1 - beta) + beta * param_ema)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    def upload_process_group(self, trigger_timestamp):
-        if self.actor_strategy in ['megatron']:
-            # TODO(fix me)
-            return
-        ndtimeline.upload_process_group(trigger_timestamp, ndtimeline.DumpType.initial.value)
-
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def do_ndtimeline_action(self, action, *args, **kwargs):
         if self.actor_strategy in ['megatron']:
             # TODO(fix me)
             return
         ndtimeline.do_ndtimeline_action(action, *args, **kwargs)
-
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def init_ndtimeline(self):
-        if self.actor_strategy in ['megatron']:
-            # TODO(fix me)
-            return
-
-        if self._is_actor or self._is_rollout:
-            mocked_fsdp_shape = list(self.actor_fsdp_mesh.shape)
-            mocked_fsdp_shape[-1] *= self.actor_tp_mesh.size()
-            mocked_fsdp_shape = tuple(mocked_fsdp_shape)
-        elif self._is_ref:
-            mocked_fsdp_shape = list(self.ref_fsdp_mesh.shape)
-            mocked_fsdp_shape[-1] *= self.ref_tp_mesh.size()
-            mocked_fsdp_shape = tuple(mocked_fsdp_shape)
-        elif self._is_standalone_rollout:
-            mocked_fsdp_shape = (self.config.streaming_rollout_args.n_gpus_per_node *
-                                 self.config.streaming_rollout_args.nnodes,)
-        elif self._is_standalone_validator:
-            mocked_fsdp_shape = (self.config.streaming_validator_args.n_gpus_per_node *
-                                 self.config.streaming_validator_args.nnodes,)
-        else:
-            mocked_fsdp_shape = (-1,)
-        ndtimeline.init_with_ray(self.config.get("use_cuda_timer", False), mocked_fsdp_shape, self)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def reinit(self, config: DictConfig, role: str):
