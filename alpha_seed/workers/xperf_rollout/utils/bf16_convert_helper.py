@@ -365,7 +365,11 @@ def _reshard_fsdp_state_dict_to_xperf_p5(tp_model, state_dict, device_mesh: Devi
     torch.cuda.empty_cache()
 
 
-def _reshard_fsdp_state_dict_to_xperf_p6(tp_model, state_dict, device_mesh: DeviceMesh, model_config: P6Config):
+def _reshard_fsdp_state_dict_to_xperf_p6(tp_model,
+                                         state_dict,
+                                         device_mesh: DeviceMesh,
+                                         model_config: P6Config,
+                                         prefix=""):
     assert isinstance(model_config, P6Config)
 
     # checking
@@ -378,8 +382,8 @@ def _reshard_fsdp_state_dict_to_xperf_p6(tp_model, state_dict, device_mesh: Devi
 
     head_dim = model_config.hidden_size // model_config.num_attention_heads
 
-    ln_f_weight = state_dict.pop('transformer.ln_f.weight').full_tensor().to(torch.bfloat16)
-    ln_f_bias = state_dict.pop('transformer.ln_f.bias').full_tensor().to(torch.bfloat16)
+    ln_f_weight = state_dict.pop(prefix + 'transformer.ln_f.weight').full_tensor().to(torch.bfloat16)
+    ln_f_bias = state_dict.pop(prefix + 'transformer.ln_f.bias').full_tensor().to(torch.bfloat16)
     ln_f = torch.stack((ln_f_weight, ln_f_bias)).contiguous()
 
     tp_model.layernorm_weight.data = ln_f
@@ -389,8 +393,8 @@ def _reshard_fsdp_state_dict_to_xperf_p6(tp_model, state_dict, device_mesh: Devi
     del ln_f_weight, ln_f_bias
 
     # TODO: use xperf vocab_tp
-    wte: DTensor = state_dict.pop('transformer.wte.weight').to(torch.bfloat16)
-    state_dict.pop('lm_head.weight')
+    wte: DTensor = state_dict.pop(prefix + 'transformer.wte.weight').to(torch.bfloat16)
+    state_dict.pop(prefix + 'lm_head.weight')
 
     wte_weight = wte.full_tensor()
 
@@ -417,8 +421,8 @@ def _reshard_fsdp_state_dict_to_xperf_p6(tp_model, state_dict, device_mesh: Devi
     for layer_index, (ln_1, key_norm, context_norm, qkv_w, qkv_b, dense_w, dense_b, ln_2, gate_w, _, fc1_w, _, fc2_w, _,
                       *_) in enumerate(tp_model.layers_weight):
         # torch.distributed.breakpoint()
-        ln_1_weight = state_dict.pop(f'transformer.h.{layer_index}.ln_1.weight').full_tensor()
-        ln_1_bias = state_dict.pop(f'transformer.h.{layer_index}.ln_1.bias').full_tensor()
+        ln_1_weight = state_dict.pop(prefix + f'transformer.h.{layer_index}.ln_1.weight').full_tensor()
+        ln_1_bias = state_dict.pop(prefix + f'transformer.h.{layer_index}.ln_1.bias').full_tensor()
         ln_1_weight = torch.stack((ln_1_weight, ln_1_bias), dim=0).to(torch.bfloat16)
         assert ln_1.data.shape == ln_1_weight.shape
         ln_1.data = ln_1_weight.contiguous()
@@ -427,8 +431,8 @@ def _reshard_fsdp_state_dict_to_xperf_p6(tp_model, state_dict, device_mesh: Devi
 
         del ln_1_bias
 
-        key_norm_weight = state_dict[f'transformer.h.{layer_index}.attn.key_layernorm.weight'].full_tensor()
-        key_norm_bias = state_dict[f'transformer.h.{layer_index}.attn.key_layernorm.bias'].full_tensor()
+        key_norm_weight = state_dict[prefix + f'transformer.h.{layer_index}.attn.key_layernorm.weight'].full_tensor()
+        key_norm_bias = state_dict[prefix + f'transformer.h.{layer_index}.attn.key_layernorm.bias'].full_tensor()
         key_norm_weight = torch.stack((key_norm_weight, key_norm_bias), dim=0).to(torch.bfloat16)
         assert key_norm.data.shape == key_norm_weight.shape
         key_norm.data = key_norm_weight.contiguous()
@@ -437,8 +441,8 @@ def _reshard_fsdp_state_dict_to_xperf_p6(tp_model, state_dict, device_mesh: Devi
 
         del key_norm_bias
 
-        context_norm_weight = state_dict[f'transformer.h.{layer_index}.attn.context_norm.weight'].full_tensor()
-        context_norm_bias = state_dict[f'transformer.h.{layer_index}.attn.context_norm.bias'].full_tensor()
+        context_norm_weight = state_dict[prefix + f'transformer.h.{layer_index}.attn.context_norm.weight'].full_tensor()
+        context_norm_bias = state_dict[prefix + f'transformer.h.{layer_index}.attn.context_norm.bias'].full_tensor()
         context_norm_weight = torch.stack((context_norm_weight, context_norm_bias), dim=0).to(torch.bfloat16)
         assert context_norm.data.shape == context_norm_weight.shape
         context_norm.data = context_norm_weight.contiguous()
@@ -447,11 +451,11 @@ def _reshard_fsdp_state_dict_to_xperf_p6(tp_model, state_dict, device_mesh: Devi
 
         del context_norm_bias
 
-        q_proj_weight = state_dict.pop(f'transformer.h.{layer_index}.attn.q_proj.weight').full_tensor().to(
+        q_proj_weight = state_dict.pop(prefix + f'transformer.h.{layer_index}.attn.q_proj.weight').full_tensor().to(
             torch.bfloat16)  # (num_q_head, head_dim, hidden_size)
-        k_proj_weight = state_dict.pop(f'transformer.h.{layer_index}.attn.k_proj.weight').full_tensor().to(
+        k_proj_weight = state_dict.pop(prefix + f'transformer.h.{layer_index}.attn.k_proj.weight').full_tensor().to(
             torch.bfloat16)  # (num_kv_head, head_dim, hidden_size)
-        v_proj_weight = state_dict.pop(f'transformer.h.{layer_index}.attn.v_proj.weight').full_tensor().to(
+        v_proj_weight = state_dict.pop(prefix + f'transformer.h.{layer_index}.attn.v_proj.weight').full_tensor().to(
             torch.bfloat16)  # (num_kv_head, head_dim, hidden_size)
 
         num_heads = q_proj_weight.shape[0] // head_dim
@@ -472,9 +476,12 @@ def _reshard_fsdp_state_dict_to_xperf_p6(tp_model, state_dict, device_mesh: Devi
         # check nan
         assert_not_nan(qkv_w.data)
 
-        q_proj_bias = state_dict.pop(f'transformer.h.{layer_index}.attn.q_proj.bias').full_tensor().to(torch.bfloat16)
-        k_proj_bias = state_dict.pop(f'transformer.h.{layer_index}.attn.k_proj.bias').full_tensor().to(torch.bfloat16)
-        v_proj_bias = state_dict.pop(f'transformer.h.{layer_index}.attn.v_proj.bias').full_tensor().to(torch.bfloat16)
+        q_proj_bias = state_dict.pop(prefix + f'transformer.h.{layer_index}.attn.q_proj.bias').full_tensor().to(
+            torch.bfloat16)
+        k_proj_bias = state_dict.pop(prefix + f'transformer.h.{layer_index}.attn.k_proj.bias').full_tensor().to(
+            torch.bfloat16)
+        v_proj_bias = state_dict.pop(prefix + f'transformer.h.{layer_index}.attn.v_proj.bias').full_tensor().to(
+            torch.bfloat16)
 
         qkv_bias = torch.cat((q_proj_bias, k_proj_bias, v_proj_bias), dim=0)
         if device_mesh is not None:
@@ -490,7 +497,7 @@ def _reshard_fsdp_state_dict_to_xperf_p6(tp_model, state_dict, device_mesh: Devi
 
         assert_not_nan(qkv_b.data)
 
-        o_proj_weight = state_dict.pop(f'transformer.h.{layer_index}.attn.o_proj.weight').full_tensor().to(
+        o_proj_weight = state_dict.pop(prefix + f'transformer.h.{layer_index}.attn.o_proj.weight').full_tensor().to(
             torch.bfloat16)
         if device_mesh is not None:
             o_proj_weight = _fix_o_ordering(o_proj_weight, num_heads=num_heads, q_heads_list=q_heads_list)[tp_rank]
@@ -500,14 +507,16 @@ def _reshard_fsdp_state_dict_to_xperf_p6(tp_model, state_dict, device_mesh: Devi
 
         assert_not_nan(dense_w.data)
 
-        o_proj_bias = state_dict.pop(f'transformer.h.{layer_index}.attn.o_proj.bias').full_tensor().to(torch.bfloat16)
+        o_proj_bias = state_dict.pop(prefix + f'transformer.h.{layer_index}.attn.o_proj.bias').full_tensor().to(
+            torch.bfloat16)
         assert o_proj_bias.shape == dense_b.shape
         dense_b.data = o_proj_bias.contiguous()
 
         assert_not_nan(dense_b.data)
 
-        ln_2_weight = state_dict.pop(f'transformer.h.{layer_index}.ln_2.weight').full_tensor().to(torch.bfloat16)
-        ln_2_bias = state_dict.pop(f'transformer.h.{layer_index}.ln_2.bias').full_tensor().to(torch.bfloat16)
+        ln_2_weight = state_dict.pop(prefix + f'transformer.h.{layer_index}.ln_2.weight').full_tensor().to(
+            torch.bfloat16)
+        ln_2_bias = state_dict.pop(prefix + f'transformer.h.{layer_index}.ln_2.bias').full_tensor().to(torch.bfloat16)
         ln_2_weight = torch.stack((ln_2_weight, ln_2_bias), dim=0)
         assert ln_2_weight.shape == ln_2.shape
         ln_2.data = ln_2_weight.contiguous()
@@ -516,8 +525,9 @@ def _reshard_fsdp_state_dict_to_xperf_p6(tp_model, state_dict, device_mesh: Devi
 
         del ln_2_bias
 
-        gate_wg = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.gate.wg').full_tensor().T.contiguous().float()
-        gate_wg_ema = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.gate.wg_ema').T.contiguous().float()
+        gate_wg = state_dict.pop(prefix +
+                                 f'transformer.h.{layer_index}.mlp.moe.gate.wg').full_tensor().T.contiguous().float()
+        gate_wg_ema = state_dict.pop(prefix + f'transformer.h.{layer_index}.mlp.moe.gate.wg_ema').T.contiguous().float()
 
         gate_wg = (gate_wg + gate_wg_ema) * 0.5
 
@@ -528,12 +538,12 @@ def _reshard_fsdp_state_dict_to_xperf_p6(tp_model, state_dict, device_mesh: Devi
 
         use_grouped_gemm_weight = getattr(model_config, '_moe_implementation', 'eager') == 'fused'
 
-        if f'transformer.h.{layer_index}.mlp.moe.experts.fc1_1_weight' in state_dict:
+        if prefix + f'transformer.h.{layer_index}.mlp.moe.experts.fc1_1_weight' in state_dict:
             raise ValueError(
                 '请使用最新的依赖。并根据文档 https://bytedance.larkoffice.com/docx/SBuXdoDpgoCwiDxV4Hwco1ahnug 重新转p6 checkpoint')
 
         if use_grouped_gemm_weight:
-            fc1_1_weight = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts.fc1_1').to(
+            fc1_1_weight = state_dict.pop(prefix + f'transformer.h.{layer_index}.mlp.moe.experts.fc1_1').to(
                 torch.bfloat16).full_tensor()
             if device_mesh is not None:
                 fc1_1_weight = DTensor.from_local(fc1_1_weight,
@@ -542,7 +552,7 @@ def _reshard_fsdp_state_dict_to_xperf_p6(tp_model, state_dict, device_mesh: Devi
                 fc1_1_weight = fc1_1_weight.redistribute(device_mesh=device_mesh, placements=[Replicate(),
                                                                                               Shard(1)])._local_tensor
 
-            fc1_2_weight = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts.fc1_2').to(
+            fc1_2_weight = state_dict.pop(prefix + f'transformer.h.{layer_index}.mlp.moe.experts.fc1_2').to(
                 torch.bfloat16).full_tensor()
 
             if device_mesh is not None:
@@ -556,10 +566,12 @@ def _reshard_fsdp_state_dict_to_xperf_p6(tp_model, state_dict, device_mesh: Devi
             fc1_2_list = []
             # breakpoint()
             for expert_index in range(model_config.moe_num_expert):
-                fc1_1 = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts.{expert_index}.fc1_1.weight').to(
-                    torch.bfloat16).full_tensor()
-                fc1_2 = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts.{expert_index}.fc1_2.weight').to(
-                    torch.bfloat16).full_tensor()
+                fc1_1 = state_dict.pop(prefix +
+                                       f'transformer.h.{layer_index}.mlp.moe.experts.{expert_index}.fc1_1.weight').to(
+                                           torch.bfloat16).full_tensor()
+                fc1_2 = state_dict.pop(prefix +
+                                       f'transformer.h.{layer_index}.mlp.moe.experts.{expert_index}.fc1_2.weight').to(
+                                           torch.bfloat16).full_tensor()
 
                 if device_mesh is not None:
                     fc1_1 = DTensor.from_local(fc1_1, device_mesh=device_mesh, placements=[Replicate(), Replicate()])
@@ -587,7 +599,7 @@ def _reshard_fsdp_state_dict_to_xperf_p6(tp_model, state_dict, device_mesh: Devi
         assert_not_nan(fc1_w.data)
 
         if use_grouped_gemm_weight:
-            fc2_weight = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts.fc2').to(
+            fc2_weight = state_dict.pop(prefix + f'transformer.h.{layer_index}.mlp.moe.experts.fc2').to(
                 torch.bfloat16).full_tensor()
             if device_mesh is not None:
                 fc2_weight = DTensor.from_local(fc2_weight,
@@ -599,8 +611,9 @@ def _reshard_fsdp_state_dict_to_xperf_p6(tp_model, state_dict, device_mesh: Devi
         else:
             fc2_list = []
             for expert_index in range(model_config.moe_num_expert):
-                fc2 = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts.{expert_index}.fc2.weight').to(
-                    torch.bfloat16).full_tensor()
+                fc2 = state_dict.pop(prefix +
+                                     f'transformer.h.{layer_index}.mlp.moe.experts.{expert_index}.fc2.weight').to(
+                                         torch.bfloat16).full_tensor()
                 if device_mesh is not None:
                     fc2 = DTensor.from_local(fc2, device_mesh=device_mesh, placements=[Replicate(), Replicate()])
                     fc2 = fc2.redistribute(device_mesh=device_mesh, placements=[Replicate(), Shard(1)])._local_tensor
@@ -1107,7 +1120,7 @@ def _reshard_fsdp_state_dict_to_xperf_p7(tp_model, state_dict, device_mesh: Devi
     torch.cuda.empty_cache()
 
 
-def _reshard_fsdp_state_dict_to_xperf_m8(tp_model, state_dict, device_mesh: DeviceMesh, model_config):
+def _reshard_fsdp_state_dict_to_xperf_m8(tp_model, state_dict, device_mesh: DeviceMesh, model_config, prefix=''):
     from seed_models import M8Config
     assert isinstance(model_config, M8Config)
 
@@ -1127,14 +1140,14 @@ def _reshard_fsdp_state_dict_to_xperf_m8(tp_model, state_dict, device_mesh: Devi
     hidden_size = model_config.hidden_size
     num_kv_heads = model_config.num_key_value_heads
 
-    ln_f_weight = state_dict.pop('transformer.norm.weight').full_tensor().to(torch.bfloat16)
+    ln_f_weight = state_dict.pop(prefix + 'transformer.norm.weight').full_tensor().to(torch.bfloat16)
     ln_f_weight = ln_f_weight.reshape(1, ln_f_weight.shape[-1])
     tp_model.layernorm_weight.data = ln_f_weight.contiguous()
     del ln_f_weight
 
     # TODO: use xperf vocab_tp
-    wte: DTensor = state_dict.pop('transformer.wte.weight').to(torch.bfloat16)
-    state_dict.pop('lm_head.weight')
+    wte: DTensor = state_dict.pop(prefix + 'transformer.wte.weight').to(torch.bfloat16)
+    state_dict.pop(prefix + 'lm_head.weight')
 
     wte_weight = wte.full_tensor()
 
@@ -1157,30 +1170,30 @@ def _reshard_fsdp_state_dict_to_xperf_m8(tp_model, state_dict, device_mesh: Devi
 
     for layer_index, (ln_1, key_norm, context_norm, qkv_w, qkv_b, dense_w, dense_b, ln_2, gate_w, _, fc1_w, _, fc2_w, _,
                       share_fc1_w, share_fc2_w, *_) in enumerate(tp_model.layers_weight):
-        ln_1_weight = state_dict.pop(f'transformer.h.{layer_index}.input_layernorm.weight').full_tensor()
+        ln_1_weight = state_dict.pop(prefix + f'transformer.h.{layer_index}.input_layernorm.weight').full_tensor()
         ln_1_weight = torch.stack((ln_1_weight,), dim=0).to(torch.bfloat16).reshape(1, ln_1_weight.shape[-1])
         assert ln_1.data.shape == ln_1_weight.shape
         ln_1.data = ln_1_weight.contiguous()
 
-        key_norm_weight = state_dict[f'transformer.h.{layer_index}.attn.key_layernorm.weight'].full_tensor()
+        key_norm_weight = state_dict[prefix + f'transformer.h.{layer_index}.attn.key_layernorm.weight'].full_tensor()
         key_norm_weight = torch.stack((key_norm_weight,),
                                       dim=0).to(torch.bfloat16).reshape(1, key_norm_weight.shape[-1])
         assert key_norm.data.shape == key_norm_weight.shape
         key_norm.data = key_norm_weight.contiguous()
 
-        context_norm_weight = state_dict[f'transformer.h.{layer_index}.attn.context_norm.weight'].full_tensor()
+        context_norm_weight = state_dict[prefix + f'transformer.h.{layer_index}.attn.context_norm.weight'].full_tensor()
         context_norm_weight = torch.stack((context_norm_weight,),
                                           dim=0).to(torch.bfloat16).reshape(1, context_norm_weight.shape[-1])
         assert context_norm.data.shape == context_norm_weight.shape
         context_norm.data = context_norm_weight.contiguous()
 
-        q_proj_weight = state_dict.pop(f'transformer.h.{layer_index}.attn.q_proj.weight').full_tensor().to(
+        q_proj_weight = state_dict.pop(prefix + f'transformer.h.{layer_index}.attn.q_proj.weight').full_tensor().to(
             torch.bfloat16)
         q_proj_weight = q_proj_weight.view(num_kv_heads, -1, head_dim, hidden_size).transpose(0, 1).contiguous()
-        k_proj_weight = state_dict.pop(f'transformer.h.{layer_index}.attn.k_proj.weight').full_tensor().to(
+        k_proj_weight = state_dict.pop(prefix + f'transformer.h.{layer_index}.attn.k_proj.weight').full_tensor().to(
             torch.bfloat16)
         k_proj_weight = k_proj_weight.view(1, num_kv_heads, head_dim, hidden_size)
-        v_proj_weight = state_dict.pop(f'transformer.h.{layer_index}.attn.v_proj.weight').full_tensor().to(
+        v_proj_weight = state_dict.pop(prefix + f'transformer.h.{layer_index}.attn.v_proj.weight').full_tensor().to(
             torch.bfloat16)
         v_proj_weight = v_proj_weight.view(1, num_kv_heads, head_dim, hidden_size)
 
@@ -1216,7 +1229,7 @@ def _reshard_fsdp_state_dict_to_xperf_m8(tp_model, state_dict, device_mesh: Devi
         assert qkv_w.data.shape == qkv_weight.shape
         qkv_w.data = qkv_weight.contiguous()
 
-        o_proj_weight = state_dict.pop(f'transformer.h.{layer_index}.attn.o_proj.weight').full_tensor().to(
+        o_proj_weight = state_dict.pop(prefix + f'transformer.h.{layer_index}.attn.o_proj.weight').full_tensor().to(
             torch.bfloat16)
 
         # the XPerfGPT has different ordering
@@ -1238,14 +1251,16 @@ def _reshard_fsdp_state_dict_to_xperf_m8(tp_model, state_dict, device_mesh: Devi
         assert o_proj_weight.shape == dense_w.shape
         dense_w.data = o_proj_weight.contiguous()
 
-        ln_2_weight = state_dict.pop(f'transformer.h.{layer_index}.post_attention_layernorm.weight').full_tensor().to(
-            torch.bfloat16)
+        ln_2_weight = state_dict.pop(prefix +
+                                     f'transformer.h.{layer_index}.post_attention_layernorm.weight').full_tensor().to(
+                                         torch.bfloat16)
         ln_2_weight = torch.stack((ln_2_weight,), dim=0).reshape(1, ln_2_weight.shape[-1])
         assert ln_2_weight.shape == ln_2.shape
         ln_2.data = ln_2_weight.contiguous()
 
-        gate_wg = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.gate.wg').full_tensor().T.contiguous().float()
-        gate_wg_ema = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.gate.wg_ema').T.contiguous().float()
+        gate_wg = state_dict.pop(prefix +
+                                 f'transformer.h.{layer_index}.mlp.moe.gate.wg').full_tensor().T.contiguous().float()
+        gate_wg_ema = state_dict.pop(prefix + f'transformer.h.{layer_index}.mlp.moe.gate.wg_ema').T.contiguous().float()
 
         gate_wg = (gate_wg + gate_wg_ema) * 0.5
 
@@ -1255,7 +1270,7 @@ def _reshard_fsdp_state_dict_to_xperf_m8(tp_model, state_dict, device_mesh: Devi
         # use_grouped_gemm_weight = getattr(model_config, '_moe_implementation', 'eager') == 'fused'
         # assert model_config._moe_implementation == fused
         # assert use_grouped_gemm_weight
-        fc1_1_weight = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts.fc1_1').to(
+        fc1_1_weight = state_dict.pop(prefix + f'transformer.h.{layer_index}.mlp.moe.experts.fc1_1').to(
             torch.bfloat16).full_tensor()
 
         if device_mesh is not None:
@@ -1266,7 +1281,7 @@ def _reshard_fsdp_state_dict_to_xperf_m8(tp_model, state_dict, device_mesh: Devi
                                                      placements=[Replicate(),
                                                                  Shard(0 if tp_model.use_ep else 1)])._local_tensor
 
-        fc1_2_weight = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts.fc1_2').to(
+        fc1_2_weight = state_dict.pop(prefix + f'transformer.h.{layer_index}.mlp.moe.experts.fc1_2').to(
             torch.bfloat16).full_tensor()
 
         if device_mesh is not None:
@@ -1281,7 +1296,7 @@ def _reshard_fsdp_state_dict_to_xperf_m8(tp_model, state_dict, device_mesh: Devi
         del fc1_1_weight
         del fc1_2_weight
 
-        share_fc1_1_weight = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts_share.fc1_1').to(
+        share_fc1_1_weight = state_dict.pop(prefix + f'transformer.h.{layer_index}.mlp.moe.experts_share.fc1_1').to(
             torch.bfloat16).full_tensor()
         share_fc1_1_weight = share_fc1_1_weight.reshape(2, -1, share_fc1_1_weight.shape[-1])  ##
         if device_mesh is not None:
@@ -1291,7 +1306,7 @@ def _reshard_fsdp_state_dict_to_xperf_m8(tp_model, state_dict, device_mesh: Devi
             share_fc1_1_weight = share_fc1_1_weight.redistribute(device_mesh=device_mesh,
                                                                  placements=[Replicate(), Shard(1)])._local_tensor
 
-        share_fc1_2_weight = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts_share.fc1_2').to(
+        share_fc1_2_weight = state_dict.pop(prefix + f'transformer.h.{layer_index}.mlp.moe.experts_share.fc1_2').to(
             torch.bfloat16).full_tensor()
         share_fc1_2_weight = share_fc1_2_weight.reshape(2, -1, share_fc1_2_weight.shape[-1])
 
@@ -1321,14 +1336,15 @@ def _reshard_fsdp_state_dict_to_xperf_m8(tp_model, state_dict, device_mesh: Devi
             assert s_fc1_weight.shape == share_fc1_w.shape, f'{s_fc1_weight.shape=}, {share_fc1_w.shape=}'
             share_fc1_w.data = s_fc1_weight.contiguous()
 
-        fc2_weight = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts.fc2').to(torch.bfloat16).full_tensor()
+        fc2_weight = state_dict.pop(prefix + f'transformer.h.{layer_index}.mlp.moe.experts.fc2').to(
+            torch.bfloat16).full_tensor()
         if device_mesh is not None:
             fc2_weight = DTensor.from_local(fc2_weight, device_mesh=device_mesh, placements=[Replicate(), Replicate()])
             fc2_weight = fc2_weight.redistribute(device_mesh=device_mesh,
                                                  placements=[Replicate(),
                                                              Shard(0 if tp_model.use_ep else 2)])._local_tensor
 
-        share_fc2_weight = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts_share.fc2').to(
+        share_fc2_weight = state_dict.pop(prefix + f'transformer.h.{layer_index}.mlp.moe.experts_share.fc2').to(
             torch.bfloat16).full_tensor()
         share_fc2_weight = share_fc2_weight.reshape(share_fc2_weight.shape[-2], 2, -1).transpose(0, 1)
         if device_mesh is not None:
@@ -1366,3 +1382,206 @@ def _reshard_fsdp_state_dict_to_xperf_m8(tp_model, state_dict, device_mesh: Devi
 
     load_to_cuda(tp_model=tp_model)
     torch.cuda.empty_cache()
+
+
+def _reshard_fsdp_state_dict_to_xperf_m8_vision(tp_model, state_dict, device_mesh: DeviceMesh, model_config):
+    from functools import reduce
+
+    def get_attr(obj, attr_path):
+        return reduce(getattr, attr_path.split('.'), obj)
+
+    def assign_data(param_in_tp_model, key):
+        if isinstance(key, str):
+            param_in_state_dict = state_dict.pop(key).to(torch.bfloat16).full_tensor()
+        else:
+            param_in_state_dict = key
+        assert param_in_tp_model.shape == param_in_state_dict.shape
+        param_in_tp_model.data = param_in_state_dict.contiguous()
+        assert_not_nan(param_in_tp_model.data)
+
+    for layer_index, layer in enumerate(tp_model.visual_encoder.module.custom_decoder.layers):
+        prefix = f'vision_encoder.blocks.{layer_index}.'
+        assign_data(layer.norm1.weight, prefix + 'norm1.weight')
+        assign_data(layer.norm1.bias, prefix + 'norm1.bias')
+        assign_data(layer.norm2.weight, prefix + 'norm2.weight')
+        assign_data(layer.norm2.bias, prefix + 'norm2.bias')
+        assign_data(layer.mlp.fc1.weight, prefix + 'mlp.fc1.weight')
+        assign_data(layer.mlp.fc1.bias, prefix + 'mlp.fc1.bias')
+        assign_data(layer.mlp.fc2.weight, prefix + 'mlp.fc2.weight')
+        assign_data(layer.mlp.fc2.bias, prefix + 'mlp.fc2.bias')
+        assign_data(layer.attn.proj.weight, prefix + 'attn.proj.weight')
+        assign_data(layer.attn.proj.bias, prefix + 'attn.proj.bias')
+        assign_data(layer.attn.qkv.weight, prefix + 'attn.qkv.weight')
+        assign_data(layer.attn.q_bias, prefix + 'attn.q_bias')
+        assign_data(layer.attn.v_bias, prefix + 'attn.v_bias')
+
+    assign_data(tp_model.visual_encoder.module.custom_decoder.patch_embed.proj.weight,
+                'vision_encoder.patch_embed.proj.weight')
+    assign_data(tp_model.visual_encoder.module.custom_decoder.patch_embed.proj.bias,
+                'vision_encoder.patch_embed.proj.bias')
+
+    def parameter_pack(t):
+        return torch.nn.Parameter(t, requires_grad=False)
+
+    assign_data(tp_model.visual_encoder.module.weights['ln_vision'][0], 'ln_vision.weight')
+    assign_data(tp_model.visual_encoder.module.weights['ln_vision'][1], 'ln_vision.bias')
+    tp_model.ln_vision.weight = parameter_pack(tp_model.visual_encoder.module.weights['ln_vision'][0])
+    tp_model.ln_vision.bias = parameter_pack(tp_model.visual_encoder.module.weights['ln_vision'][1])
+    assign_data(tp_model.visual_encoder.module.weights['seed_proj'][0], 'multi_modal_projector.0.weight')
+    assign_data(tp_model.visual_encoder.module.weights['seed_proj'][1], 'multi_modal_projector.0.bias')
+    assign_data(tp_model.visual_encoder.module.weights['seed_proj'][2], 'multi_modal_projector.2.weight')
+    assign_data(tp_model.visual_encoder.module.weights['seed_proj'][3], 'multi_modal_projector.2.bias')
+
+    tp_model.seed_proj[0].weight = parameter_pack(tp_model.visual_encoder.module.weights['seed_proj'][0])
+    tp_model.seed_proj[0].bias = parameter_pack(tp_model.visual_encoder.module.weights['seed_proj'][1])
+    tp_model.seed_proj[2].weight = parameter_pack(tp_model.visual_encoder.module.weights['seed_proj'][2])
+    tp_model.seed_proj[2].bias = parameter_pack(tp_model.visual_encoder.module.weights['seed_proj'][3])
+    # load_to_cuda(tp_model=tp_model)
+    torch.cuda.empty_cache()
+
+
+def _reshard_fsdp_state_dict_to_xperf_m8_vision_tp(tp_model, state_dict, device_mesh: DeviceMesh, model_config):
+    if device_mesh is not None:
+        tp_size = device_mesh['tp'].size()
+        tp_rank = device_mesh['tp'].get_local_rank()
+    else:
+        tp_size = 1
+        tp_rank = 0
+
+    def assign_data(param_in_tp_model, param_in_state_dict):
+        assert param_in_tp_model.shape == param_in_state_dict.shape
+        param_in_tp_model.data = param_in_state_dict.contiguous()
+
+    for layer_index, (norm1_wb, qkv_w, qkv_b, out_w, out_b, norm2_wb, fc1_w, fc1_b, fc2_w, fc2_b,
+                      *_) in enumerate(tp_model.visual_encoder.module.layers_weight):
+        prefix = f'vision_encoder.blocks.{layer_index}.'
+        norm1_weight = state_dict.pop(prefix + 'norm1.weight').full_tensor()
+        norm1_bias = state_dict.pop(prefix + 'norm1.bias').full_tensor()
+        state_norm1_wb = torch.stack((norm1_weight, norm1_bias), dim=0).to(torch.bfloat16)
+        assign_data(norm1_wb, state_norm1_wb)
+        assert_not_nan(norm1_wb.data)
+        # del norm1_weight
+        # del norm1_bias
+
+        norm2_weight = state_dict.pop(prefix + 'norm2.weight').full_tensor()
+        norm2_bias = state_dict.pop(prefix + 'norm2.bias').full_tensor()
+        state_norm2_wb = torch.stack((norm2_weight, norm2_bias), dim=0).to(torch.bfloat16)
+        assign_data(norm2_wb, state_norm2_wb)
+        assert_not_nan(norm2_wb.data)
+        # del norm2_weight
+        # del norm2_bias
+
+        fc1_weight = state_dict.pop(prefix + 'mlp.fc1.weight').to(torch.bfloat16).full_tensor()
+
+        if device_mesh is not None:
+            fc1_weight = DTensor.from_local(fc1_weight, device_mesh=device_mesh, placements=[Replicate(), Replicate()])
+            fc1_weight = fc1_weight.redistribute(device_mesh=device_mesh, placements=[Replicate(),
+                                                                                      Shard(0)])._local_tensor
+        assign_data(fc1_w, fc1_weight)
+
+        fc1_bias = state_dict.pop(prefix + 'mlp.fc1.bias').to(torch.bfloat16).full_tensor()
+
+        if device_mesh is not None:
+            fc1_bias = DTensor.from_local(fc1_bias, device_mesh=device_mesh, placements=[Replicate(), Replicate()])
+            fc1_bias = fc1_bias.redistribute(device_mesh=device_mesh, placements=[Replicate(), Shard(0)])._local_tensor
+        assign_data(fc1_b, fc1_bias)
+
+        fc2_weight = state_dict.pop(prefix + 'mlp.fc2.weight').to(torch.bfloat16).full_tensor()
+
+        if device_mesh is not None:
+            fc2_weight = DTensor.from_local(fc2_weight, device_mesh=device_mesh, placements=[Replicate(), Replicate()])
+            fc2_weight = fc2_weight.redistribute(device_mesh=device_mesh, placements=[Replicate(),
+                                                                                      Shard(1)])._local_tensor
+        assign_data(fc2_w, fc2_weight)
+
+        fc2_bias = state_dict.pop(prefix + 'mlp.fc2.bias').to(torch.bfloat16).full_tensor()
+        assign_data(fc2_b, fc2_bias)
+
+        attn_proj_weight = state_dict.pop(prefix + 'attn.proj.weight').to(torch.bfloat16).full_tensor()
+        if device_mesh is not None:
+            attn_proj_weight = DTensor.from_local(attn_proj_weight,
+                                                  device_mesh=device_mesh,
+                                                  placements=[Replicate(), Replicate()])
+            attn_proj_weight = attn_proj_weight.redistribute(device_mesh=device_mesh,
+                                                             placements=[Replicate(), Shard(1)])._local_tensor
+        assign_data(out_w, attn_proj_weight)
+
+        attn_proj_bias = state_dict.pop(prefix + 'attn.proj.bias').to(torch.bfloat16).full_tensor()
+        assign_data(out_b, attn_proj_bias)
+
+        def qkv_split(src, dim, tp_size):
+            src_split = torch.split(src.data, src.shape[dim] // 3, dim=dim)
+            qkv_split = [torch.split(src_s, src_s.shape[dim] // tp_size, dim=dim) for src_s in src_split]
+            qkv_cat = [torch.cat([qkv_s[i] for qkv_s in qkv_split], axis=dim) for i in range(len(qkv_split[0]))]
+            return qkv_cat
+
+        qkv_weight = state_dict.pop(prefix + 'attn.qkv.weight').full_tensor().to(torch.bfloat16)
+        qkv_weight = qkv_split(qkv_weight, 0, tp_size)[tp_rank]
+        assign_data(qkv_w, qkv_weight)
+
+        q_bias = state_dict.pop(prefix + 'attn.q_bias').full_tensor().to(torch.bfloat16)
+        v_bias = state_dict.pop(prefix + 'attn.v_bias').full_tensor().to(torch.bfloat16)
+        qkv_bias = torch.cat((q_bias, torch.zeros_like(q_bias), v_bias))
+        qkv_bias = qkv_split(qkv_bias, 0, tp_size)[tp_rank]
+        assign_data(qkv_b, qkv_bias)
+
+    patch_emb_proj_weight = state_dict.pop('vision_encoder.patch_embed.proj.weight').to(torch.bfloat16).full_tensor()
+    assign_data(tp_model.visual_encoder.module.patch_embed.proj.weight, patch_emb_proj_weight)
+    patch_emb_proj_bias = state_dict.pop('vision_encoder.patch_embed.proj.bias').to(torch.bfloat16).full_tensor()
+    assign_data(tp_model.visual_encoder.module.patch_embed.proj.bias, patch_emb_proj_bias)
+
+    def parameter_pack(t):
+        return torch.nn.Parameter(t, requires_grad=False)
+
+    ln_vision_weight = state_dict.pop('ln_vision.weight').to(torch.bfloat16).full_tensor()
+    assign_data(tp_model.visual_encoder.module.weights['ln_vision'][0], ln_vision_weight)
+    ln_vision_bias = state_dict.pop('ln_vision.bias').to(torch.bfloat16).full_tensor()
+    assign_data(tp_model.visual_encoder.module.weights['ln_vision'][1], ln_vision_bias)
+    tp_model.ln_vision.weight = parameter_pack(tp_model.visual_encoder.module.weights['ln_vision'][0])
+    tp_model.ln_vision.bias = parameter_pack(tp_model.visual_encoder.module.weights['ln_vision'][1])
+
+    seed_proj0_weight = state_dict.pop('multi_modal_projector.0.weight').to(torch.bfloat16).full_tensor()
+    assign_data(tp_model.visual_encoder.module.weights['seed_proj'][0], seed_proj0_weight)
+    seed_proj0_bias = state_dict.pop('multi_modal_projector.0.bias').to(torch.bfloat16).full_tensor()
+    assign_data(tp_model.visual_encoder.module.weights['seed_proj'][1], seed_proj0_bias)
+
+    seed_proj2_weight = state_dict.pop('multi_modal_projector.2.weight').to(torch.bfloat16).full_tensor()
+    assign_data(tp_model.visual_encoder.module.weights['seed_proj'][2], seed_proj2_weight)
+    seed_proj2_bias = state_dict.pop('multi_modal_projector.2.bias').to(torch.bfloat16).full_tensor()
+    assign_data(tp_model.visual_encoder.module.weights['seed_proj'][3], seed_proj2_bias)
+
+    tp_model.seed_proj[0].weight = parameter_pack(tp_model.visual_encoder.module.weights['seed_proj'][0])
+    tp_model.seed_proj[0].bias = parameter_pack(tp_model.visual_encoder.module.weights['seed_proj'][1])
+    tp_model.seed_proj[2].weight = parameter_pack(tp_model.visual_encoder.module.weights['seed_proj'][2])
+    tp_model.seed_proj[2].bias = parameter_pack(tp_model.visual_encoder.module.weights['seed_proj'][3])
+    # seed_proj[0] -> 'multi_modal_projector.0'
+    load_to_cuda(tp_model=tp_model)
+    torch.cuda.empty_cache()
+
+
+def _reshard_fsdp_state_dict_to_xperf_p6_vision(tp_model, state_dict, device_mesh: DeviceMesh, model_config):
+    raise NotImplementedError
+
+
+def _reshard_fsdp_state_dict_to_xperf_vl(tp_model, vit_tp_model, state_dict, device_mesh: DeviceMesh, model_config):
+    if model_config.text_config.architectures[0] == "M8ForCausalLM":
+        _reshard_fsdp_state_dict_to_xperf_m8(tp_model,
+                                             state_dict,
+                                             device_mesh,
+                                             model_config.text_config,
+                                             prefix="language_model.")
+        if hasattr(vit_tp_model.visual_encoder.module, "layers_weight"):
+            _reshard_fsdp_state_dict_to_xperf_m8_vision_tp(vit_tp_model, state_dict, device_mesh,
+                                                           model_config.vision_config)
+        else:
+            _reshard_fsdp_state_dict_to_xperf_m8_vision(vit_tp_model, state_dict, device_mesh,
+                                                        model_config.vision_config)
+    elif model_config.text_config.architectures[0] == "P6ForCausalLM":
+        _reshard_fsdp_state_dict_to_xperf_p6(tp_model,
+                                             state_dict,
+                                             device_mesh,
+                                             model_config.text_config,
+                                             prefix="language_model.")
+        _reshard_fsdp_state_dict_to_xperf_p6_vision(vit_tp_model, state_dict, device_mesh, model_config.vision_config)
+    else:
+        raise NotImplementedError(f"{model_config.text_config.architectures[0]} is not supported")

@@ -50,8 +50,14 @@ def offload_to_cpu(tp_model):
 
 
 def load_to_cuda(tp_model):
-    param_list = [tp_model.layernorm_weight, tp_model.wte_weight, tp_model.lm_head_weight] + \
-                    [p for layer in tp_model.layers_weight for p in layer if isinstance(p, torch.Tensor)]
+    if hasattr(tp_model, 'layers_weight'):
+        layers_weight = tp_model.layers_weight
+        param_list_other = [tp_model.layernorm_weight, tp_model.wte_weight, tp_model.lm_head_weight]
+    else:
+        layers_weight = tp_model.visual_encoder.module.layers_weight
+        param_list_other = [tp_model.visual_encoder.module.rotary_pos_emb._buffers['inv_freq']]
+    param_list = [p for layer in layers_weight for p in layer if isinstance(p, torch.Tensor)]
+    param_list = param_list + param_list_other
     if hasattr(tp_model, 'wpe'):
         param_list.append(tp_model.wpe.weight)
     for param in param_list:

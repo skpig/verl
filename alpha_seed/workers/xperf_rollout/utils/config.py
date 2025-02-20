@@ -34,6 +34,8 @@ def get_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
         return _get_p7_xperf_gpt_config(model_config, tokenizer)
     elif model_config.model_type == 'seed_m8':
         return _get_m8_xperf_gpt_config(model_config, tokenizer)
+    elif model_config.model_type == 'seed_vl':
+        return _get_vl_xperf_gpt_config(model_config, tokenizer)
     else:
         raise NotImplementedError(f'Unsupported model {model_config.model_type}')
 
@@ -306,3 +308,88 @@ def _get_m8_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
     }
 
     return xperf_config
+
+
+def _get_vl_p6_xperf_vision_config(vision_config):
+    assert vision_config.model_type == 'seed_vision_model'
+    xperf_config = {
+        "drop_path_rate":
+            0,
+        "freeze_vit":
+            True,
+        "img_size":
+            448,
+        "navit_anyres":
+            True,
+        "min_pixels":
+            3136,
+        "max_pixels":
+            4014080,
+        "multicrop_anyres":
+            False,
+        "num_img_token":
+            256,
+        "use_cls_token":
+            False,
+        "use_grad_checkpoint":
+            True,
+        "vit_model":
+            "seed_vit_2b",
+        "vit_precision":
+            "bf16",
+        "vit_pth":
+            "hdfs://haruna/home/byte_data_seed/ssd_lq/iccv/vit/seed_vit_2b_stage0_448.pt",
+        "vit_model_path":
+            "/opt/tiger/test_m8_vl_xperf/7cf6546654e84dbbde5ec5e59510419f/megatron_ckpt/visual_megatron_states.pt",
+        "projector_hidden_dim":
+            3072,
+        "projector_embed_dim":
+            3072,
+        "patch_size":
+            14
+    }
+    same_keys = []
+    for key in xperf_config:
+        if hasattr(vision_config, key):
+            same_keys.append(key)
+        else:
+            print(f'====== "{key}":{xperf_config[key]} not exists in vision config')
+    import torch
+    xperf_vision_config = {"vit_model": "seed_vit_2b", "navit_anyres": True, "vit_precision": "bf16"}
+    vision_keys = [
+        'drop_path_rate', 'freeze_vit', 'img_size', 'min_pixels', 'max_pixels', 'multicrop_anyres', 'num_img_token',
+        'use_cls_token', 'use_grad_checkpoint', 'projector_hidden_dim', 'projector_embed_dim', 'patch_size'
+    ]
+    for key in vision_keys:
+        xperf_vision_config[key] = getattr(vision_config, key)
+    return xperf_vision_config
+
+
+def _get_vl_m8_xperf_vision_config(vision_config):
+    assert vision_config.model_type == 'seed_vision_model'
+    vision_keys = [
+        "drop_path_rate", "freeze_vit", "img_size", "max_pixels", "min_pixels", "num_img_token", "use_cls_token",
+        "use_grad_checkpoint", "use_navit", "projector_hidden_dim", "projector_embed_dim", 'patch_size', "qkv_bias"
+    ]
+    xperf_vision_config = {"vit_precision": "bf16"}
+    xperf_vision_config['vit_model'] = getattr(vision_config, 'vit_model') if hasattr(vision_config,
+                                                                                      'vit_model') else 'eva_clip_g'
+    for key in vision_keys:
+        xperf_vision_config[key] = getattr(vision_config, key)
+    # avoid init fail in xperf_gpt
+    xperf_vision_config["vit_model_path"] = None
+    return xperf_vision_config
+
+
+def _get_vl_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
+    from seed_models import SeedVLConfig
+    assert isinstance(model_config, SeedVLConfig)
+    if model_config.text_config.architectures[0] == "M8ForCausalLM":
+        llm_config = _get_m8_xperf_gpt_config(model_config.text_config, tokenizer)
+        vision_config = _get_vl_m8_xperf_vision_config(model_config.vision_config)
+    elif model_config.text_config.architectures[0] == "P6ForCausalLM":
+        llm_config = _get_p6_xperf_gpt_config(model_config.text_config, tokenizer)
+        vision_config = _get_vl_p6_xperf_vision_config(model_config.vision_config)
+    else:
+        raise RuntimeError(f"Unsupported model type {model_config.text_config.architectures[0]}")
+    return llm_config, vision_config

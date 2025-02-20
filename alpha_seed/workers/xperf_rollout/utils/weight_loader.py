@@ -27,12 +27,10 @@ from torch.distributed.device_mesh import DeviceMesh
 
 from seed_models import P4Config, P5Config, P6Config
 
-from alpha_seed.workers.xperf_rollout.utils.bf16_convert_helper import (_reshard_fsdp_state_dict_to_xperf_p4,
-                                                                        _reshard_fsdp_state_dict_to_xperf_p5,
-                                                                        _reshard_fsdp_state_dict_to_xperf_p6,
-                                                                        _reshard_fsdp_state_dict_to_xperf_p6dense,
-                                                                        _reshard_fsdp_state_dict_to_xperf_p7,
-                                                                        _reshard_fsdp_state_dict_to_xperf_m8)
+from alpha_seed.workers.xperf_rollout.utils.bf16_convert_helper import (
+    _reshard_fsdp_state_dict_to_xperf_p4, _reshard_fsdp_state_dict_to_xperf_p5, _reshard_fsdp_state_dict_to_xperf_p6,
+    _reshard_fsdp_state_dict_to_xperf_p6dense, _reshard_fsdp_state_dict_to_xperf_p7,
+    _reshard_fsdp_state_dict_to_xperf_m8, _reshard_fsdp_state_dict_to_xperf_vl)
 from alpha_seed.workers.xperf_rollout.utils.fp8_convert_helper import (_reshard_fsdp_state_dict_to_xperf_p6_fp8,
                                                                        _reshard_fsdp_state_dict_to_xperf_p6dense_fp8,
                                                                        _reshard_fsdp_state_dict_to_xperf_m8_fp8)
@@ -60,5 +58,7 @@ def get_xperf_gpt_weight_bind_fn(model_config: PretrainedConfig, quant_mode: str
         return partial(_reshard_fsdp_state_dict_to_xperf_p7, model_config=model_config)
     elif model_config.model_type == 'seed_m8':
         return partial(_reshard_fsdp_state_dict_to_xperf_m8, model_config=model_config)
+    elif model_config.model_type == 'seed_vl':
+        return partial(_reshard_fsdp_state_dict_to_xperf_vl, model_config=model_config)
     else:
         raise NotImplementedError(f'Unsupported model type {model_config.model_type}')
