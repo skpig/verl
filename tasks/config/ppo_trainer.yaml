@@ -20,6 +20,7 @@ data:
 
 
 actor_rollout_ref:
+  remove_o_bias: False
   update_gate_ema: False
   hybrid_engine: True
   model:
@@ -155,6 +156,7 @@ actor_rollout_ref:
   use_cuda_timer: False
 
 critic:
+  remove_o_bias: False
   update_gate_ema: False
   load_score_head: True
   strategy: fsdp

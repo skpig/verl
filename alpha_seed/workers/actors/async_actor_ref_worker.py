@@ -268,6 +268,13 @@ class AsyncActorRolloutRefWorker(Worker):
             # some parameters may not in torch_dtype. TODO(zhangchi.usc1992) remove this after we switch to fsdp2
             actor_module.to(torch_dtype)
 
+            if self.config.remove_o_bias:
+                from seed_models import P6DenseForCausalLM
+                if isinstance(actor_module, P6DenseForCausalLM):
+                    for layer in actor_module.model.layers:
+                        if layer.self_attn.o_proj.bias is not None:
+                            layer.self_attn.o_proj.bias.requires_grad = False
+
             enable_training_stats = self.config.actor.enable_training_stats
             metrics_context = MetricsTorchDispatchMode() if enable_training_stats else nullcontext()
 
