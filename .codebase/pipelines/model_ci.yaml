@@ -7,7 +7,7 @@ jobs:
     image: hub.byted.org/reckon/data.reckon.mlx.image_5940:36aebfdb72c17e002e016c4594c602c4
     if: ${{ !contains(Event.Change.Title, "WIP") }}
     runs-on:
-      cluster: gpu-l20
+      cluster: gpu-l20-16
       docker:
         shared-memory: 1024
     envs:
