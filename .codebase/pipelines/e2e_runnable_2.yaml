@@ -49,7 +49,7 @@ jobs:
       - name: math v1 ppo async and grpo
         commands:
           - cd -
-          - export NUM_STEPS=2
+          - export NUM_STEPS=4
           - export N_GPUS_PER_NODE=8
           - export NCCL_SHM_DISABLE=1
           - wandb offline

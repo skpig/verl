@@ -19,15 +19,15 @@ TEST_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlh
 default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/test/p6_400m_omnistore_test_1
 
 # 训练长度
-max_prompt_length=128 # 16384
-max_response_length=128 # 16384
+max_prompt_length=512 # 16384
+max_response_length=512 # 16384
 # batch size && 训练epoch
-train_batch_size=512
+train_batch_size=64
 val_batch_size=5000
-ppo_mini_batch_size=128
-ppo_micro_batch_size=64
+ppo_mini_batch_size=8
+ppo_micro_batch_size=4
 total_epochs=100
-test_freq=1
+test_freq=5
 save_freq=-1
 # 算法相关的参数
 actor_lr=1e-6

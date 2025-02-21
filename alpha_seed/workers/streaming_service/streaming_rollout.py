@@ -518,4 +518,5 @@ class AsyncXPerfGPTRollout(object):
         out = DataProto.from_dict(batch)
         metrics["off_policy_steps"] = off_policy_steps.tolist()
         out.meta_info["xperf_metrics"] = metrics
+        out.meta_info["generation_kwargs"] = prompts.meta_info['generation_kwargs']
         yield out
