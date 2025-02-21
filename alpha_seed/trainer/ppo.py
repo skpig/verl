@@ -805,13 +805,17 @@ class RayPPOTrainer(object):
         self.actor_rollout_wg.init_ndtimeline()
         hybrid_master_address = self.actor_rollout_wg.get_master_addr()
 
-        init_futures.append(self.actor_rollout_wg.init_model())
+        init_futures.append(
+            self.actor_rollout_wg.init_model(
+                remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init))
 
         if self.use_standalone_rollout:
             self.standalone_rollout_wg = self.all_wg['standalone_rollout']
             self.standalone_rollout_wg.init_ndtimeline()
             standalone_rollout_address = self.standalone_rollout_wg.get_master_addr()
-            init_futures.append(self.standalone_rollout_wg.init_model())
+            init_futures.append(
+                self.standalone_rollout_wg.init_model(
+                    remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init))
         else:
             self.standalone_rollout_wg = None
 
@@ -819,7 +823,9 @@ class RayPPOTrainer(object):
             self.standalone_validator_wg = self.all_wg['standalone_validator']
             self.standalone_validator_wg.init_ndtimeline()
             standalone_validator_address = self.standalone_validator_wg.get_master_addr()
-            init_futures.append(self.standalone_validator_wg.init_model())
+            init_futures.append(
+                self.standalone_validator_wg.init_model(
+                    remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init))
 
         tasks_mgr = ThreadPoolManager()
 
@@ -852,26 +858,22 @@ class RayPPOTrainer(object):
         if self.use_critic:
             self.critic_wg = self.all_wg['critic']
             self.critic_wg.init_ndtimeline()
-            self.critic_wg.init_model()  # blocking
+            self.critic_wg.init_model(
+                remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init)  # blocking
 
         if self.use_standalone_reference_policy:
             self.ref_policy_wg = self.all_wg['ref']
-            init_futures.append(self.ref_policy_wg.init_model())
+            init_futures.append(
+                self.ref_policy_wg.init_model(
+                    remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init))
         elif self.use_colocate_reference_policy:
             self.ref_policy_wg = self.all_wg['actor_rollout_ref']
 
         if self.use_rm:
             self.rm_wg = self.all_wg['rm']
             self.rm_wg.init_ndtimeline()
-            self.rm_wg.init_model()  # blocking
-
-        # remove local tmp safetensors files used for init
-        if self.config.trainer.remove_safetensors_after_init:
-            self.actor_rollout_wg.delete_local_tmp_folder_safetensors_files()
-            if self.use_critic:
-                self.critic_wg.delete_local_tmp_folder_safetensors_files()
-            if self.use_rm:
-                self.rm_wg.delete_local_tmp_folder_safetensors_files()
+            self.rm_wg.init_model(
+                remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init)  # blocking
 
         remote_reward_style = []
         if self.config.trainer.use_remote_sandbox:

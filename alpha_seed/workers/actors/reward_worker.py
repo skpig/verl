@@ -39,7 +39,7 @@ from alpha_seed.models.transformers.parallel import apply_parallel_plan
 from verl.utils.seqlen_balancing import rearrange_micro_batches
 from alpha_seed.utils import ndtimeline
 from alpha_seed.models.transformers.parallel.collectives import get_memory
-from .initialize import create_mesh, parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init
+from .initialize import create_mesh, parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init, cleanup_local_tmp_folder_safetensors_files
 from .checkpoint.extensions import register_dtensor_save_hook
 from dist_attn.ulysses.ops import gather_outputs
 from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
@@ -169,27 +169,8 @@ class RewardModelWorker(Worker):
 
         return reward_module, model_config
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    def delete_local_tmp_folder_safetensors_files(self):
-        if int(os.getenv("RAY_LOCAL_RANK", "0")) != 0:
-            return
-
-        # get local tmp folder from actor model config
-        folder_path = self.reward_model_config._name_or_path
-        if not os.path.isdir(folder_path):
-            return
-
-        for root, dirs, files in os.walk(folder_path):
-            for file in files:
-                if file.endswith('.safetensors'):
-                    file_path = os.path.join(root, file)
-                    try:
-                        os.remove(file_path)
-                    except Exception as e:
-                        print(f'failed to remove safetensors file {file_path}, exception {e} will be ignored')
-
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def init_model(self):
+    def init_model(self, remove_safetensors_after_init=False):
         if self._model_initialized:
             return
         # This is used to import external_lib into the huggingface systems
@@ -198,6 +179,8 @@ class RewardModelWorker(Worker):
         self.reward_module.eval()
         torch.cuda.empty_cache()
         self._model_initialized = True
+        if remove_safetensors_after_init:
+            cleanup_local_tmp_folder_safetensors_files(self.reward_model_config._name_or_path)
 
     def _forward_micro_batch(self, micro_batch):
         from flash_attn.bert_padding import pad_input, unpad_input, index_first_axis, rearrange

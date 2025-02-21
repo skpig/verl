@@ -361,3 +361,20 @@ def parallel_init_fsdp_fn(module: torch.nn.Module, shard_states: Dict[str, torch
         return sub_mod
 
     return init_fn
+
+
+def cleanup_local_tmp_folder_safetensors_files(folder_path):
+    if int(os.getenv("RAY_LOCAL_RANK", "0")) != 0:
+        return
+
+    if not folder_path or not os.path.isdir(folder_path):
+        return
+
+    for root, dirs, files in os.walk(folder_path):
+        for file in files:
+            if file.endswith('.safetensors'):
+                file_path = os.path.join(root, file)
+                try:
+                    os.remove(file_path)
+                except Exception as e:
+                    print(f'failed to remove safetensors file {file_path}, exception {e} will be ignored')

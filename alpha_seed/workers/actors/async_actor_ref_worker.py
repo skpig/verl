@@ -49,7 +49,8 @@ import numpy as np
 from alpha_seed.utils import ndtimeline
 from alpha_seed.workers.hybrid_engine.fsdp_gather import DataGatherManager
 from alpha_seed.models.transformers.parallel import apply_parallel_plan
-from .initialize import create_mesh, parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init
+from .initialize import (create_mesh, parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init,
+                         cleanup_local_tmp_folder_safetensors_files)
 from .checkpoint.extensions import register_dtensor_save_hook
 from alpha_seed.workers.ppo_actor import DataParallelPPOActor
 from alpha_seed.utils.kernels.persist_gemm import deploy_persist_gemm, undelopy_persist_gemm
@@ -430,25 +431,6 @@ class AsyncActorRolloutRefWorker(Worker):
 
         return actor_module_fsdp, actor_optimizer, actor_lr_scheduler, actor_model_config, metrics_context
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    def delete_local_tmp_folder_safetensors_files(self):
-        if int(os.getenv("RAY_LOCAL_RANK", "0")) != 0:
-            return
-
-        # get local tmp folder from actor model config
-        folder_path = self.actor_model_config._name_or_path
-        if not os.path.isdir(folder_path):
-            return
-
-        for root, dirs, files in os.walk(folder_path):
-            for file in files:
-                if file.endswith('.safetensors'):
-                    file_path = os.path.join(root, file)
-                    try:
-                        os.remove(file_path)
-                    except Exception as e:
-                        print(f'failed to remove safetensors file {file_path}, exception {e} will be ignored')
-
     def _build_rollout(self):
         assert self.config.rollout.name == 'xperf_gpt'
 
@@ -520,12 +502,14 @@ class AsyncActorRolloutRefWorker(Worker):
                     raise NotImplementedError
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    def init_model(self):
+    def init_model(self, remove_safetensors_after_init=False):
         if self._model_initialized:
             return
         with self.profiler_context:
             self._init_model()
         self._model_initialized = True
+        if remove_safetensors_after_init:
+            cleanup_local_tmp_folder_safetensors_files(self.actor_model_config._name_or_path)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def setup_standalone_worker_comm(self, hybrid_master_address, standalone_master_address, port, role):

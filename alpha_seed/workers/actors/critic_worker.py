@@ -35,7 +35,7 @@ from verl.utils.fsdp_utils import get_fsdp_wrap_policy
 from alpha_seed.models.transformers.parallel import apply_parallel_plan
 from alpha_seed.models.transformers.parallel.collectives import get_memory
 from .initialize import create_mesh
-from .initialize import parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init
+from .initialize import parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init, cleanup_local_tmp_folder_safetensors_files
 from .checkpoint.extensions import register_dtensor_save_hook
 from .offload import offload_fsdp_model_to_cpu, load_fsdp_model_to_gpu
 from alpha_seed.workers.actors.offload import offload_fsdp_optimizer, load_fsdp_optimizer
@@ -280,7 +280,7 @@ class CriticWorker(Worker):
                 offload_fsdp_optimizer(self.critic_optimizer)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def init_model(self):
+    def init_model(self, remove_safetensors_after_init=False):
         if self._model_initialized:
             return
         # This is used to import external_lib into the huggingface systems
@@ -307,6 +307,8 @@ class CriticWorker(Worker):
         torch.cuda.empty_cache()
 
         self._model_initialized = True
+        if remove_safetensors_after_init:
+            cleanup_local_tmp_folder_safetensors_files(self.critic_model_config._name_or_path)
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_values(self, data: DataProto):
