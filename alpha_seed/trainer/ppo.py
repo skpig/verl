@@ -30,6 +30,7 @@ import queue
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Type, Tuple, Union
+import pandas as pd
 
 from omegaconf import OmegaConf, open_dict
 import numpy as np
@@ -549,6 +550,8 @@ class RayPPOTrainer(object):
         self.megavision_metrics_collector = MegavisionMetricsCtx() if MegavisionMetricsCtx else None
 
         self.data_len_per_query = None
+        self.acc_per_query = {}  # moving avg acc
+        self.sample_acc_dir = config.trainer.default_hdfs_dir + "/sample_acc"
 
     def _create_dataloader(self):
         from torch.utils.data import DataLoader
@@ -975,6 +978,17 @@ class RayPPOTrainer(object):
                                                                       ray.get_runtime_context().get_node_id(),
                                                                       len_ema_local_path, remote_global_step_folder))
 
+        # save acc_per_query
+        acc_per_query_local_path = os.path.join(local_global_step_folder, 'acc_per_query.pkl')
+        if len(self.acc_per_query) != 0:
+            with open(acc_per_query_local_path, 'wb') as fout:
+                pkl.dump(self.acc_per_query, fout)
+            ray.get(
+                self.ckpt_global_uploader.register_upload_task.remote("default", self.global_step,
+                                                                      ray.get_runtime_context().get_node_id(),
+                                                                      acc_per_query_local_path,
+                                                                      remote_global_step_folder))
+
         # save dataloader
         dataloader_local_path = os.path.join(local_global_step_folder, 'data.pt')
         import dill
@@ -1095,6 +1109,14 @@ class RayPPOTrainer(object):
                 self.reward_fn.len_ema = pkl.load(fin)
                 print("LEN_EMA RESUMED!!!!!!")
 
+        # resume acc_per_query
+        acc_per_query_remote_path = os.path.join(remote_global_step_folder, 'acc_per_query.pkl')
+        if hexists(acc_per_query_remote_path):
+            acc_per_query_local_path = copy_local_path_from_hdfs(acc_per_query_remote_path)
+            with open(acc_per_query_local_path, 'rb') as fin:
+                self.acc_per_query = pkl.load(fin)
+                print("acc_per_query RESUMED!!!!!!")
+
         # async resume
         if hexists(f"{remote_global_step_folder}/standalone_gen_batch_output.batch.pt"):
             pprint('resume standalone rollout.')
@@ -1144,8 +1166,35 @@ class RayPPOTrainer(object):
                 split_keys=['input_ids', 'attention_mask', 'off_policy_steps', 'rollout_log_probs'])
 
         # hybrid rollout
-        batch.non_tensor_batch['rollout_id'] = np.array([str(uuid.uuid4()) for _ in range(len(batch))], dtype=object)
-        batch = batch.repeat(self.num_bon)
+        if self.config.algorithm.prior_sampling.enable:
+            repeat_num = self.compute_repeat_num_per_query(batch)
+            save_repeat_num = pd.DataFrame({
+                'index': batch.non_tensor_batch['index'],
+                'repeat_num': repeat_num,
+                'acc': [self.acc_per_query.get(idx, None) for idx in batch.non_tensor_batch['index']]
+            })
+            if self.global_step == 1:
+                makedirs(self.sample_acc_dir)
+
+            save_repeat_num.to_parquet(f"sample_acc.{self.global_step}.parquet")
+            hcopy(f"sample_acc.{self.global_step}.parquet", self.sample_acc_dir)
+
+            repeat_num = repeat_num if repeat_num != None else [self.num_bon] * len(batch)
+            batch = batch.sample_level_repeat(repeat_num)
+
+            metrics.update({
+                'repeat_num/max': max(repeat_num),
+                'repeat_num/min': min(repeat_num),
+                'repeat_num/std': np.std(repeat_num),
+                'repeat_num/median': np.median(repeat_num),
+            })
+            batch.non_tensor_batch['rollout_id'] = np.array([str(uuid.uuid4()) for _ in range(len(batch))],
+                                                            dtype=object)
+        else:
+            batch.non_tensor_batch['rollout_id'] = np.array([str(uuid.uuid4()) for _ in range(len(batch))],
+                                                            dtype=object)
+            batch = batch.repeat(self.num_bon)
+
         # create a uid for each data inside the batch
         batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(batch))], dtype=object)
         batch.check_consistency()
@@ -1385,6 +1434,99 @@ class RayPPOTrainer(object):
             "max_len_per_query/overlonged_frac": overlonged_frac,
         })
 
+    def update_acc_per_query(self, id2acc):
+        for k, v in id2acc.items():
+            if k not in self.acc_per_query:
+                self.acc_per_query[k] = v
+            else:
+                self.acc_per_query[k] = (
+                    1 - self.config.algorithm.prior_sampling.prior_sampling_ema
+                ) * self.acc_per_query[k] + self.config.algorithm.prior_sampling.prior_sampling_ema * v
+
+    def compute_repeat_num_per_query(self, batch):
+        """
+        return: list of allocations (length == len(weights))
+        """
+        N = len(batch) * self.num_bon  # total sample num
+        M = self.num_bon  # mean sample num
+        acc_list = [self.acc_per_query.get(index, None) for index in batch.non_tensor_batch['index']
+                   ]  # [0, 1], None for no weights
+        weights = []
+        for acc in acc_list:
+            if acc is None:
+                weights.append(None)
+            elif acc > self.config.algorithm.prior_sampling.no_sample_threshold:  # no weight for samples with acc > threshold
+                weights.append(0)
+            else:  # weight reverse to acc
+                weights.append(1 - acc)
+
+        B = len(weights)
+
+        weighted_indices = []
+        unweighted_indices = []
+        for i, w in enumerate(weights):
+            if w is None:
+                unweighted_indices.append(i)
+            else:
+                weighted_indices.append(i)
+
+        # Allocate M repeats to each unweighted sample (samples with no acc)
+        allocation = [0] * B
+        for i in unweighted_indices:
+            allocation[i] = M
+
+        # Compute quota remained after unweighted students
+        allocated_unweighted = len(unweighted_indices) * M
+        R0 = N - allocated_unweighted
+        if R0 < 0:
+            raise ValueError(f"Not enough samples (N={N}) to give M={M} each "
+                             f"to {len(unweighted_indices)} unweighted samples!")
+
+        # Allocate at least 0 repeats to each weighted sample
+        for i in weighted_indices:
+            allocation[i] = 0
+
+        # Distribute the final remainder R0 among the weighted samples proportionally based on their weights.
+        # Sum of all valid weights
+        sum_weights = sum(weights[i] for i in weighted_indices if weights[i] is not None)
+        # Calculate fractional allocations and integer floors
+        fractional_allocations = []
+        for i in weighted_indices:
+            w = weights[i]
+            frac = (w / sum_weights) * R0 if sum_weights > 0 else 0
+            fractional_allocations.append((i, frac))
+
+        base_allocations = []
+        for i, frac in fractional_allocations:
+            base_allocations.append((i, int(frac)))  # floor
+
+        # Sum of base allocations
+        base_sum = sum(x[1] for x in base_allocations)
+        leftover = R0 - base_sum
+
+        # Sort by fractional remainder, descending
+        # remainder_i = frac - floor(frac)
+        remainders = [(i, frac - int(frac)) for (i, frac) in fractional_allocations]
+        remainders.sort(key=lambda x: x[1], reverse=True)
+
+        # Assign leftover repeats, one by one, to the top fractional remainders
+        for k in range(leftover):
+            idx = remainders[k][0]
+            # Increase that base allocation by 1
+            for bi in range(len(base_allocations)):
+                if base_allocations[bi][0] == idx:
+                    base_allocations[bi] = (idx, base_allocations[bi][1] + 1)
+                    break
+
+        for i, val in base_allocations:
+            allocation[i] += val
+
+        # Sanity-check: The total must be exactly N
+        if sum(allocation) != N:
+            raise RuntimeError("Allocation does not sum to N; check logic.")
+
+        return allocation
+
     def fit(self):
         self._create_kl_control()
         self._create_dataloader()
@@ -1518,6 +1660,7 @@ class RayPPOTrainer(object):
                                     config=self.config)
                         metrics['timing/select_league_training_prompts'] = timer.last
 
+                    id2acc = defaultdict(list)
                     # bon策略，筛选prompt内部的response，有不同策略，all、best、best_mix_random、best_worst
                     if self.num_bon > 1:
                         with Timer(name='select_bon_samples', logger=None) as timer:
@@ -1528,6 +1671,16 @@ class RayPPOTrainer(object):
                             if use_async_gen:
                                 metrics.update(bon_metrics)
                         metrics['timing/select_bon_samples'] = timer.last
+
+                    # update acc_per_query
+                    if len(id2acc) == 0:
+                        for idx, score in zip(batch.non_tensor_batch['index'],
+                                              batch.batch['token_level_scores'].sum(-1)):
+                            score = score.item()
+                            id2acc[idx].append(score)
+                        for k, v in id2acc.items():
+                            id2acc[k] = sum([1 for i in v if i == 1]) / len(v)
+                    self.update_acc_per_query(id2acc)
 
                     # perform sequence balancing.
                     # Very important: Note that this reorders data globally.

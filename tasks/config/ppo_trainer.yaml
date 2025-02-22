@@ -253,6 +253,11 @@ reward_model:
   length_ema_method: mean
 
 algorithm:
+  prior_sampling: 
+    enable: False
+    prior_sampling_ema: 0.9
+    no_sample_threshold: 0.99
+
   mask_overlong: False
   overlong_punish: v0
   overlong_punish_cache: 8192
