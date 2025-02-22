@@ -17,17 +17,24 @@ from .checkpoint_manager import BaseCheckpointManager
 
 from ray.actor import ActorHandle
 
-required_omnistore_version = '0.7.5'
-try:
-    omnistore_version = importlib.metadata.version('byted-omnistore')
-    print(f'byted-omnistore version: {omnistore_version}')
-    assert omnistore_version >= required_omnistore_version, \
-        f'byted-omnistore version {omnistore_version} is too old. Please upgrade to version ' \
-        f'{required_omnistore_version} or higher. Example command: pip3 install --upgrade byted-omnistore.'
-except importlib.metadata.PackageNotFoundError as e:
-    print(f'byted-omnistore not installed. Please install it and upgrade to version {required_omnistore_version} '
-          'or higher. Example command: pip3 install --upgrade byted-omnistore.')
-    raise e
+REQUIRED_OMNISTORE_VERSION = '0.7.5'
+ACTUAL_OMNISTORE_VERSION = None
+
+
+def check_omnistore_version():
+    try:
+        global ACTUAL_OMNISTORE_VERSION
+        ACTUAL_OMNISTORE_VERSION = importlib.metadata.version('byted-omnistore')
+        assert ACTUAL_OMNISTORE_VERSION >= REQUIRED_OMNISTORE_VERSION, \
+            f'byted-omnistore version {ACTUAL_OMNISTORE_VERSION} is too old. Please upgrade to version ' \
+            f'{REQUIRED_OMNISTORE_VERSION} or higher. Example command: pip3 install --upgrade byted-omnistore.'
+    except importlib.metadata.PackageNotFoundError as e:
+        print(f'byted-omnistore not installed. Please install it and upgrade to version {REQUIRED_OMNISTORE_VERSION} '
+              'or higher. Example command: pip3 install --upgrade byted-omnistore.')
+        raise e
+
+
+check_omnistore_version()
 
 from omnistore import RLFSDPCheckpointer
 
@@ -59,6 +66,8 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
     def __init__(self, model: FSDP, optimizer: torch.optim.Optimizer,
                  lr_scheduler: torch.optim.lr_scheduler.LRScheduler, tokenizer: PreTrainedTokenizer):
         super().__init__(model, optimizer, lr_scheduler, tokenizer)
+        if self.rank == 0:
+            print(f'OmniStore ckpt manager initialized, byted-omnistore version: {ACTUAL_OMNISTORE_VERSION}')
 
     def load_checkpoint(self, hdfs_path=None, role: str = 'actor', enable_shm: bool = False, *args, **kwargs):
         if hdfs_path is None:
