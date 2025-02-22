@@ -101,11 +101,20 @@ def apply_monkey_patch_to_m8():
     M8PreTrainedModel.release_act_memory = release_m8_kv_mirror
 
 
+def apply_monkey_patch_to_ds3():
+    from seed_models.models.deepseek_v3.modeling_deepseek import DeepseekV3FlashAttention2
+    from seed_models.integrations import apply_liger_kernel_to_deepseek_v3
+    from .modeling_ds import flash_attn2_forward
+    DeepseekV3FlashAttention2.forward = flash_attn2_forward
+    apply_liger_kernel_to_deepseek_v3()
+
+
 _PATCH_NAME_TO_FUNC = {
     'seed_p6': apply_monkey_patch_to_p6,
     'seed_p6dense': apply_monkey_patch_to_p6_dense,
     'seed_p7': apply_monkey_patch_to_p7,
-    'seed_m8': apply_monkey_patch_to_m8
+    'seed_m8': apply_monkey_patch_to_m8,
+    'deepseek_v3': apply_monkey_patch_to_ds3,
 }
 
 from transformers import PretrainedConfig
