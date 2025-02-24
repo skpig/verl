@@ -425,7 +425,7 @@ def decoder_layer_forward(
         use_cache,
         position_embeddings,
         max_seqlen,
-        True,
+        self.training,
     )
 
     # MOE Step 1: compute each token's weight for all experts.
