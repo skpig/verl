@@ -19,28 +19,86 @@ data:
   BITWISE_RESUME: True  # this enables by default. If you seed checkpoint load fails, set to false
 
 
+# Note that the current megatron config has to be global as it has to be identical for every model
+# We may switch to per-model megatron config later when we separate models into different processes.
+# During that time, the megatron config will be copied to the namespace under each model
+megatron:
+  tensor_parallel_size: 4
+  pipeline_parallel_size: 1
+  virtual_pipeline_parallel_size: 0
+  distributed_sequence_parallel_size: 1
+  expert_parallel_size: ${megatron.tensor_parallel_size}  # hardcode for now
+  micro_batch_size: 1
+  global_batch_size: -1
+  sequence_parallel: true
+  recompute_granularity: ''
+  use_flash_attention: true
+  recompute_method: uniform
+  recompute_num_layers: 1
+  distribute_saved_activations: false
+  enable_distributed_optimizer: true
+  use_multi_precision_ddp: false
+  enable_initial_jit_warmup: false
+  disable_gradient_accumulation_fusion: true
+  switch_pp_and_dp: false
+  force_fp32_embed: false
+  ddp_impl: local
+  bf16_qt: false
+  empty_cache_level: 0
+  grad_norm_skip: -1.0
+  strict_align_diff_with_ds: false
+  strict_align_row_para: false
+  overlap_data_parallel_communication: false
+  mem_efficient_column_parallel: true
+  overlap_dp_grad_comm: false
+  overlap_dp_param_comm: false
+  sequence_data_parallel_size: -1
+  vocab_parallel_embedding_fusion: false
+  bias_gelu_fusion: false
+  use_non_sequential_block: false
+  timing_log_level: 0
+  timing_log_option: all
+  no_load_rng: false
+  no_load_optim: false
+  overlap_data_parallel_allgather: false
+  deallocate_pipeline_outputs: true
+  deterministic_flash_attn: false
+  early_prefetch_dp_allgather: false
+  embedding_reduce_scatter_for_sp: true
+  gather_params_use_alltoall: false
+  gradient_accumulation_fusion: true
+  bias_dropout_fusion: true
+  accumulate_allreduce_grads_in_fp32: true
+  masked_softmax_fusion: true
+  no_save_rng: false
+  num_layers_for_pipeline_stages: []
+  num_layers_per_virtual_pipeline_stage: 0
+  optimizer_offload_main_param: false
+  overlap_attn_grad_input_comm: false
+  overlap_p2p_comm: false
+  parallel_linear_force_weight_contiguous: false
+  scale_gradient_after_allreduce: false
+  scale_loss_in_gradient: false
+  pipeline_strategy: ''
+  param_alignment_in_bytes: 16  # this is necessary for H20/H800
+
+
+# this set of config determines how the mariana model is implemented. The model structure is defined by huggingface config
+model_implementation:
+  noop_transformer_layers: []
+
 actor_rollout_ref:
-  remove_o_bias: False
-  update_gate_ema: False
   hybrid_engine: True
   model:
-    path: hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/models/deepseek-llm-7b-chat
+    path: hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/M8_680m_SFT_hf
     external_lib: null
     override_config: {}
     enable_gradient_checkpointing: False
-    use_ce_loss_fusion: False
-
-  # note that this is only a placeholder. It will be overriden to global mariana config at runtime
-  mariana: null  
-
   actor:
-    early_stop_by_kl: 0.0
-    logits_clamp: 0.0
     strategy: fsdp  # This is for backward-compatibility
     ppo_mini_batch_size: 512
     ulysses_sequence_parallel_size: 1
     fsdp_size: -1
-    tp_size: 1
     ppo_micro_batch_size: 64
     use_dynamic_bsz: True
     ppo_max_token_len: -1
@@ -48,18 +106,14 @@ actor_rollout_ref:
     clip_ratio: 0.2
     clip_ratio2: 10.0
     scale_pg_by_kl: False
-    scale_pg_by_local_kl: False
     upgo_loss_weight: 0.0
     upgo_loss_version: 1
     kl_loss_weight: 0.0
-    lm_loss_weight: 0.0
     kl_penalty: ${algorithm.kl_penalty}
     entropy_coeff: 0.001
     ppo_epochs: 1
     shuffle: True
     use_ewma_loss: False
-    act_offload: False
-    train_memory_offload: ${trainer.offload_train_memory}
     optim:
       lr: 1e-5
       betas: [0.9, 0.95]
@@ -75,35 +129,27 @@ actor_rollout_ref:
         # transformer_layer_cls_to_wrap: None
         min_num_params: 0
       param_offload: False
-      use_orig_params: True
-    enable_training_stats: False
+      use_orig_params: ${trainer.ckpt_enable_flatten}
     profile:
       filename: p6_400m_ppo_actor
-      profile_on_ranks: null
+      profile_on_ranks:
+        - 0
+      default_hdfs_dir: null
       upload_to_mlx: False
       enable: False
-      warmup: 5
-      wait: 10
-      active: 2
-      mem_enable: False
   ref:
-    strategy: fsdp
     fsdp_config:
       param_offload: True
-      use_orig_params: True
       wrap_policy:
         # transformer_layer_cls_to_wrap: None
         min_num_params: 0
-    ppo_mini_batch_size: ${actor_rollout_ref.actor.ppo_mini_batch_size}
     log_prob_micro_batch_size: 128
     ulysses_sequence_parallel_size: 1
     fsdp_size: -1
-    tp_size: 1
     use_dynamic_bsz: True
     max_token_len: -1
     ema: 1.0
   rollout:
-    ban_eos: v0
     name: xperf_gpt
     prompt_length: ${data.max_prompt_length}  # for xperf_gpt
     response_length: ${data.max_response_length}
@@ -113,7 +159,7 @@ actor_rollout_ref:
     enforce_eager: True
     free_cache_engine: True
     load_format: dummy_dtensor
-    tensor_model_parallel_size: 1
+    tensor_model_parallel_size: 2
     max_num_batched_tokens: 8192
     max_num_seqs: 1024
     use_dynamic_bsz: True
@@ -127,7 +173,6 @@ actor_rollout_ref:
     bon_strategy: "best"
     quant_mode: "NO_QUANT"
     gpu_memory_utilization: 0.7
-    schedule_strategy: default # [default,fifo]
     train_generate_kwargs:
       top_k: -1 # 0 for hf rollout, -1 for vllm rollout
       top_p: 1.0
@@ -135,39 +180,24 @@ actor_rollout_ref:
       do_sample: True
       min_p: -1 # 0.01 to open
       eta_epsilon: -1 # 1e-6 to open
-      logits_clamp: ${actor_rollout_ref.actor.logits_clamp}
-      max_new_tokens: ${data.max_response_length}
     val_generate_kwargs:
       # for validation
       top_k: -1 # 0 for hf rollout, -1 for vllm rollout
       top_p: 0.7
       temperature: 1.0
       do_sample: True
-      max_new_tokens: ${data.max_response_length}
     profile:
       filename: p6_400m_ppo_rollout
       profile_on_ranks:
         - 0
-      profile_at_steps:
-        - 0
-      profile_first_n_execs: 3
       default_hdfs_dir: null
       upload_to_mlx: False
       enable: False
-    rollout_pool:
-      nnodes: 1
-      warmup_step: 0
-  streaming_rollout_args: ${streaming_rollout}
-  streaming_validator_args: ${streaming_validator}
-  use_cuda_timer: False # deprecated
+  use_cuda_timer: False
 
 critic:
-  remove_o_bias: False
-  update_gate_ema: False
   load_score_head: True
   strategy: fsdp
-  # note that this is only a placeholder. It will be overriden to global mariana config at runtime
-  mariana: null  
   optim:
     lr: 1e-5
     betas: [0.9, 0.95]
@@ -189,10 +219,9 @@ critic:
       wrap_policy:
         # transformer_layer_cls_to_wrap: None
         min_num_params: 0
-      use_orig_params: True
+      use_orig_params: ${trainer.ckpt_enable_flatten}
   ulysses_sequence_parallel_size: 1
   fsdp_size: -1
-  tp_size: 1
   NO_DEVICE_MESH: False # handle old critic ckpt stored as ShardedTensor
   ppo_mini_batch_size: ${actor_rollout_ref.actor.ppo_mini_batch_size}
   ppo_micro_batch_size: 64
@@ -204,22 +233,16 @@ critic:
   shuffle: ${actor_rollout_ref.actor.shuffle}
   grad_clip: 1.0
   cliprange_value: 0.5
-  act_offload: False
-  train_memory_offload: ${trainer.offload_train_memory}
   profile:
     filename: p6_400m_ppo_critic
-    profile_on_ranks: null
+    profile_on_ranks:
+      - 0
     default_hdfs_dir: null
     upload_to_mlx: False
     enable: False
-    warmup: 5
-    wait: 10
-    active: 2
-    mem_enable: False
-  use_cuda_timer: False # deprecated
+  use_cuda_timer: False
 
 reward_model:
-  len_ema_json: null
   enable: False
   model:
     input_tokenizer: ${actor_rollout_ref.model.path}  # set this to null if the chat template is identical
@@ -228,10 +251,9 @@ reward_model:
     fsdp_config:
       min_num_params: 0
       param_offload: True
-      use_orig_params: True
+      use_orig_params: ${trainer.ckpt_enable_flatten}
   ulysses_sequence_parallel_size: 1
   fsdp_size: -1
-  tp_size: 1
   micro_batch_size: 64
   use_dynamic_bsz: True
   max_token_len: -1
@@ -245,7 +267,6 @@ reward_model:
   reward_executor_maxnum: 128
   last_response_sep: ['<summarize>', '</summarize>']
   reward_0_for_overlong_rsp: False
-  len_ema_lambda: 1.0
   add_int_verify: False
   punish_no_answer: v0
   need_punish_duplicate: False
@@ -253,39 +274,20 @@ reward_model:
   need_punish_trunc: False
   trunc_punish_score: -5
   strict_box_verify: False
-  punish_format: False
-  format_punish_score: -5
-  use_cuda_timer: False # deprecated
-  length_ema_method: mean
+  use_cuda_timer: False
 
 algorithm:
-  prior_sampling: 
-    enable: False
-    prior_sampling_ema: 0.9
-    no_sample_threshold: 0.99
-
-  mask_overlong: False
-  overlong_punish: v0
-  overlong_punish_cache: 8192
-  inference_scaling: v0
-  inference_scaling_slope: 0.1
-
-  no_length_reward: v0
-
   force_append_eos: False
   phasic_critic_interval: 0
   gamma: 1.0
   lam: 0.95
-  use_separate_critic_lam: False
-  critic_lam: 1.0
   adv_estimator: gae
   adv_whiten: True
-  kl_penalty: low_var_kl  # how to estimate kl divergence
+  kl_penalty: kl  # how to estimate kl divergence
   kl_ctrl:
     type: fixed
     kl_coef: 0.001
   bon_filter_high_acc_data: False
-  group_mode: "normal"
 
 trainer:
   total_epochs: 30
@@ -309,17 +311,12 @@ trainer:
   num_cases_to_wandb: 10 # number of samples log to wandb each step
   logger_step_interval: 5 # how many steps to log to wandb
   code_sandbox_psm: ""
-  verifier_service_psm: ""
   use_remote_sandbox: False
-  use_remote_verifier: False
   save_cases_to_hdfs: True # save all cases to hdfs each step
   # auto: find the last ckpt to resume. If can't find, start from scratch
   resume_steps: auto
-  auto_over_others: False
   ckpt_version: v1
-  ckpt_enable_shm: False
-  ckpt_upload_retry_count: 3
-  remove_safetensors_after_init: False
+  ckpt_enable_flatten: False
   set_fake_attention_mask: False
   fake_seqlen_ratio: 0.5
   league_training_config: 
@@ -329,10 +326,6 @@ trainer:
     min_score: -1.0
     max_score: 1.0
   offload_train_memory: False
-  load_train_batch_path: null
-  save_train_batch_dir: null
-  per_query_max_length: False
-  per_query_max_length_init: ${data.max_response_length}
 
 streaming_rollout:
   n_gpus_per_node: 0
@@ -346,81 +339,3 @@ streaming_validator:
 
 convert_ckpt_to_omnistore_task:
   enable: False
-
-recipe: null
-
-server_client:
-  role: null # [server,client]
-  ray_address: null
-  reset_server: False # for client
-
-
-mariana:
-# Note that the current megatron config has to be global as it has to be identical for every model
-# We may switch to per-model megatron config later when we separate models into different processes.
-# During that time, the megatron config will be copied to the namespace under each model
-  megatron:
-    tensor_parallel_size: 2
-    pipeline_parallel_size: 1
-    virtual_pipeline_parallel_size: 0
-    distributed_sequence_parallel_size: 1
-    expert_parallel_size: ${mariana.megatron.tensor_parallel_size}  # hardcode for now
-    micro_batch_size: 1
-    global_batch_size: -1
-    sequence_parallel: true
-    recompute_granularity: ''
-    use_flash_attention: true
-    recompute_method: uniform
-    recompute_num_layers: 1
-    distribute_saved_activations: false
-    enable_distributed_optimizer: true
-    use_multi_precision_ddp: false
-    enable_initial_jit_warmup: false
-    disable_gradient_accumulation_fusion: true
-    switch_pp_and_dp: false
-    force_fp32_embed: false
-    ddp_impl: local
-    bf16_qt: false
-    empty_cache_level: 0
-    grad_norm_skip: -1.0
-    strict_align_diff_with_ds: false
-    strict_align_row_para: false
-    overlap_data_parallel_communication: false
-    mem_efficient_column_parallel: true
-    overlap_dp_grad_comm: false
-    overlap_dp_param_comm: false
-    sequence_data_parallel_size: -1
-    vocab_parallel_embedding_fusion: false
-    bias_gelu_fusion: false
-    use_non_sequential_block: false
-    timing_log_level: 0
-    timing_log_option: all
-    no_load_rng: false
-    no_load_optim: false
-    overlap_data_parallel_allgather: false
-    deallocate_pipeline_outputs: true
-    deterministic_flash_attn: false
-    early_prefetch_dp_allgather: false
-    embedding_reduce_scatter_for_sp: true
-    gather_params_use_alltoall: false
-    gradient_accumulation_fusion: true
-    bias_dropout_fusion: true
-    accumulate_allreduce_grads_in_fp32: true
-    masked_softmax_fusion: true
-    no_save_rng: false
-    num_layers_for_pipeline_stages: []
-    num_layers_per_virtual_pipeline_stage: 0
-    optimizer_offload_main_param: false
-    overlap_attn_grad_input_comm: false
-    overlap_p2p_comm: false
-    parallel_linear_force_weight_contiguous: false
-    scale_gradient_after_allreduce: false
-    scale_loss_in_gradient: false
-    pipeline_strategy: ''
-    param_alignment_in_bytes: 16  # this is necessary for H20/H800
-
-
-  # this set of config determines how the mariana model is implemented. The model structure is defined by huggingface config
-  model_implementation:
-    noop_transformer_layers: []
-

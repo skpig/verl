@@ -1,1 +1,1 @@
-from .fsdp_xperfgpt import FSDPXPerfGPTShardingManager
+from .fsdp_xperfgpt import FSDPXPerfGPTShardingManager, MegatronXPerfGPTShardingManager

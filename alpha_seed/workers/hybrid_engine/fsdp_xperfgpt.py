@@ -45,7 +45,7 @@ import logging
 logger = logging.getLogger(__file__)
 
 
-class FSDPXPerfGPTShardingManager(BaseShardingManager):
+class ActorXPerfGPTShardingManager(BaseShardingManager):
 
     def __init__(self,
                  module: FSDP,
@@ -53,7 +53,8 @@ class FSDPXPerfGPTShardingManager(BaseShardingManager):
                  inference_engine: InferenceSession,
                  device_mesh: DeviceMesh,
                  standalone=False,
-                 only_bind_once=False):
+                 only_bind_once=False,
+                 backend='fsdp'):
         super().__init__()
         self.module = module
         self.inference_engine = inference_engine
@@ -61,7 +62,9 @@ class FSDPXPerfGPTShardingManager(BaseShardingManager):
         self.model_config = model_config
         self.standalone = standalone
 
-        self.bind_fn = get_xperf_gpt_weight_bind_fn(model_config, self.inference_engine.engine.module.quant_mode)
+        self.bind_fn = get_xperf_gpt_weight_bind_fn(model_config,
+                                                    self.inference_engine.engine.module.quant_mode,
+                                                    backend=backend)
         # will be set when calling to `setup_standalone_rollout_comm`
         self.has_standalone_workers = False
 
@@ -125,22 +128,16 @@ class FSDPXPerfGPTShardingManager(BaseShardingManager):
         torch.cuda.empty_cache()
         log_gpu_memory_usage('After release_param_and_cache', logger=logger)
 
+    def _get_actor_state_dict(self):
+        raise NotImplementedError
+
     def __enter__(self):
         # standalone worker does not need to do this
         if self.standalone:
             return
         # gather full state_dict in CPU
-        from torch.distributed.fsdp import ShardedStateDictConfig, StateDictType
-
         if (not self.only_bind_once) or (not self._bind_fn_called):
-            # TODO: optimize this. Since state_dict is a copy, there are actually two copies in the GPU memory
-            # We need to switch to FSDP2 to handle this.
-            cfg = ShardedStateDictConfig(offload_to_cpu=False)
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                with FSDP.state_dict_type(self.module, StateDictType.SHARDED_STATE_DICT, cfg):
-                    state_dict = self.module.state_dict()
-
+            state_dict = self._get_actor_state_dict()
             # prepare the state_dict into a format for xperf_gpt
             self.bind_fn(self.inference_engine.engine.module, state_dict=state_dict, device_mesh=self.device_mesh)
             self._bind_fn_called = True
@@ -255,11 +252,37 @@ class FSDPXPerfGPTShardingManager(BaseShardingManager):
         if not self.standalone:
             # offload to CPU
             offload_to_cpu(tp_model=self.inference_engine.engine.module)
-            # set to train
-            self.module.train()
+            # set to train, (zhangchi.usc1992) may not be necessary because it will be set before training
+            # self.module.train()
         else:
             # restore random states
             if self.device_mesh is not None:
                 torch.cuda.set_rng_state(self.gen_random_states)
 
         log_gpu_memory_usage(f'After {role} update', logger=logger)
+
+
+class FSDPXPerfGPTShardingManager(ActorXPerfGPTShardingManager):
+
+    def _get_actor_state_dict(self):
+        # TODO: optimize this. Since state_dict is a copy, there are actually two copies in the GPU memory
+        # We need to switch to FSDP2 to handle this.
+        cfg = ShardedStateDictConfig(offload_to_cpu=False)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with FSDP.state_dict_type(self.module, StateDictType.SHARDED_STATE_DICT, cfg):
+                state_dict = self.module.state_dict()
+        return state_dict
+
+
+class MegatronXPerfGPTShardingManager(ActorXPerfGPTShardingManager):
+
+    def _get_actor_state_dict(self):
+        from verl.utils.model import normalize_pp_vpp_params
+        module = self.module
+        # convert the state dict
+
+        # module should be a list of module chunk in this tp/pp stage
+        # currently, we only support tp
+        state_dict = module[0].state_dict()
+        return state_dict

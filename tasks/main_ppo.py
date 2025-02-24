@@ -609,7 +609,8 @@ def init_ray(config: DictConfig):
             'env_vars': {
                 'TOKENIZERS_PARALLELISM': 'true',
                 'BPEX_NO_WARN_ON_UNTUNED_CASE': '1',
-                'WANDB_IGNORE_STEP_ORDER': '1'
+                'WANDB_IGNORE_STEP_ORDER': '1',
+                # 'NCCL_DEBUG': 'WARN'
             }
         }
         if ENABLE_REDIS_TRITON_CACHE:
@@ -704,9 +705,14 @@ def validate_config(config):
             config.reward_model.max_token_len = min_required_seq_len
             print(f"Warning: config.reward_model.max_token_len is set to {config.reward_model.max_token_len}")
 
-    assert config.actor_rollout_ref.actor.strategy in ['fsdp', 'megatron']
-    assert config.actor_rollout_ref.ref.strategy in ['fsdp', 'megatron']
-    assert config.critic.strategy in ['fsdp', 'megatron']
+    assert config.actor_rollout_ref.actor.strategy in ['fsdp',
+                                                       'megatron'], f'Got {config.actor_rollout_ref.actor.strategy}'
+    assert config.actor_rollout_ref.ref.strategy in ['fsdp', 'megatron'], f'Got {config.actor_rollout_ref.ref.strategy}'
+    assert config.critic.strategy in ['fsdp', 'megatron'], f'Got {config.critic.strategy}'
+
+    # override each role mariana config with global mariana config
+    config.actor_rollout_ref.mariana = config.mariana
+    config.critic.mariana = config.mariana
 
 
 def config_to_trainer_kwargs(config):
@@ -729,7 +735,7 @@ def config_to_trainer_kwargs(config):
         tokenizer.chat_template = CHAT_TEMPLATE
 
     # define worker classes
-    if config.actor_rollout_ref.actor.strategy == 'fsdp':
+    if config.actor_rollout_ref.actor.strategy in ['fsdp', 'megatron']:
         assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
         from single_controller.ray import RayWorkerGroup
         ray_worker_group_cls = RayWorkerGroup
