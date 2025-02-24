@@ -1888,6 +1888,8 @@ class RayPPOTrainer(object):
                         val_metrics = self.validation_manager.validate(is_async=False, global_step=self.global_step)
                         pprint(f'Final validation metrics: {val_metrics}')
 
+                    # wait for the last ckpt to finish uploading if there are any
+                    ray.get(self.ckpt_global_uploader.final_wait_all_steps.remote())
                     return
 
     def call_once_on_each_ray_actor(self, func_name: str, *args, **kwargs):

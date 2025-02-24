@@ -52,6 +52,12 @@ class CkptGlobalUploader:
         for remote_path in remote_path_set:
             hdfs_io.makedirs(remote_path, exist_ok=True)
 
+    def final_wait_all_steps(self):
+        results = []
+        for global_step in self.upload_shard_future_map.keys():
+            results.append(self.wait_all(global_step, need_clear=False))
+        return all(results)
+
     def wait_all(self, global_step, need_clear=True):
         results = []
         if global_step not in self.upload_shard_future_map:
