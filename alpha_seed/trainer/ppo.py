@@ -200,8 +200,9 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
     return data, metrics
 
 
-def compute_advantage(data: DataProto, gamma, lam, adv_estimator, upgo_loss_version, num_bon, adv_whiten, use_async_gen,
-                      use_separate_critic_lam, critic_lam, group_mode):
+def compute_advantage(data: DataProto, gamma, lam, use_variable_lambda, variable_lambda_scalar, adv_estimator,
+                      upgo_loss_version, num_bon, adv_whiten, use_async_gen, use_separate_critic_lam, critic_lam,
+                      group_mode):
     # TODO: add other ways to estimate advantages
     token_level_rewards = data.batch['token_level_rewards']
     responses = data.batch['responses']
@@ -216,6 +217,8 @@ def compute_advantage(data: DataProto, gamma, lam, adv_estimator, upgo_loss_vers
             eos_mask=response_mask,
             gamma=gamma,
             lam=lam,
+            use_variable_lambda=use_variable_lambda,
+            variable_lambda_scalar=variable_lambda_scalar,
             adv_whiten=adv_whiten,
             use_separate_critic_lam=use_separate_critic_lam,
             critic_lam=critic_lam)
@@ -1725,6 +1728,8 @@ class RayPPOTrainer(object):
                             batch,
                             self.config.algorithm.gamma,
                             self.config.algorithm.lam,
+                            self.config.algorithm.use_variable_lambda,
+                            self.config.algorithm.variable_lambda_scalar,
                             adv_estimator=self.config.algorithm.adv_estimator,
                             upgo_loss_version=self.config.actor_rollout_ref.actor.upgo_loss_version,
                             num_bon=self.config.actor_rollout_ref.rollout.num_bon,

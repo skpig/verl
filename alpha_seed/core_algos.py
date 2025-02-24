@@ -67,8 +67,9 @@ def get_kl_controller(config):
 
 
 def compute_gae_advantage_return(token_level_rewards: torch.Tensor, values: torch.Tensor, eos_mask: torch.Tensor,
-                                 gamma: torch.Tensor, lam: torch.Tensor, adv_whiten: bool,
-                                 use_separate_critic_lam: bool, critic_lam: torch.Tensor):
+                                 gamma: torch.Tensor, lam: torch.Tensor, use_variable_lambda: torch.Tensor,
+                                 variable_lambda_scalar: torch.Tensor, adv_whiten: bool, use_separate_critic_lam: bool,
+                                 critic_lam: torch.Tensor):
     """Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py
 
     Args:
@@ -92,6 +93,9 @@ def compute_gae_advantage_return(token_level_rewards: torch.Tensor, values: torc
     """
     token_level_rewards = token_level_rewards * eos_mask
     values = values * eos_mask
+    if use_variable_lambda:
+        seq_len_per_sample = torch.clamp(torch.sum(eos_mask, dim=1), min=1.0)
+        lam = torch.clamp(1 - 1 / (variable_lambda_scalar * seq_len_per_sample), min=lam)
     with torch.no_grad():
         lastgaelam = 0
         advantages_reversed = []

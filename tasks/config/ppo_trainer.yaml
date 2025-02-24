@@ -276,6 +276,8 @@ algorithm:
   phasic_critic_interval: 0
   gamma: 1.0
   lam: 0.95
+  use_variable_lambda: false
+  variable_lambda_scalar: 0.2
   use_separate_critic_lam: False
   critic_lam: 1.0
   adv_estimator: gae
