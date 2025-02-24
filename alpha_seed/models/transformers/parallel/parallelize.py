@@ -30,6 +30,9 @@ def apply_parallel_plan(model: torch.nn.Module, config, tp_mesh: DeviceMesh) -> 
     if config.model_type == 'seed_m8':
         from ..modeling_m8 import make_m8_plan
         make_plan_fn = make_m8_plan
+    if config.model_type == "deepseek_v3":
+        from ..modeling_ds import make_dsv3_plan
+        make_plan_fn = make_dsv3_plan
 
     if make_plan_fn is None:
         assert tp_mesh.size() == 1, f"tensor parallelism is not support for model: {config.model_type}"

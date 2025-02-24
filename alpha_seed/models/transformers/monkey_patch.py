@@ -102,10 +102,13 @@ def apply_monkey_patch_to_m8():
 
 
 def apply_monkey_patch_to_ds3():
-    from seed_models.models.deepseek_v3.modeling_deepseek import DeepseekV3FlashAttention2
+    from seed_models.models.deepseek_v3.modeling_deepseek import DeepseekV3FlashAttention2, DeepseekV3MLP, DeepseekV3FusedMoE, DeepseekV3ForCausalLM
     from seed_models.integrations import apply_liger_kernel_to_deepseek_v3
-    from .modeling_ds import flash_attn2_forward
+    from .modeling_ds import flash_attn2_forward, moe_ep_forward, mlp_tp_forward, deepseek_v3_casual_lm_forward
     DeepseekV3FlashAttention2.forward = flash_attn2_forward
+    DeepseekV3FusedMoE.forward = moe_ep_forward
+    DeepseekV3MLP.forward = mlp_tp_forward
+    DeepseekV3ForCausalLM.forward = deepseek_v3_casual_lm_forward
     apply_liger_kernel_to_deepseek_v3()
 
 
