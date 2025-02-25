@@ -49,10 +49,10 @@ def prepare_inputs():
     return (fc1_1, fc1_2, fc2), (num_experts, gate_weights, expert_index, hidden_states)
 
 
-def compare_moe_expert_parallel():
+def compare_moe_expert_parallel(ep_size: int):
 
     world_size = dist.get_world_size()
-    tp_mesh = init_device_mesh("cuda", (world_size,))
+    tp_mesh = init_device_mesh("cuda", (world_size // ep_size, ep_size), mesh_dim_names=("dp", "ep"))["ep"]
     tp_group = tp_mesh.get_group()
     tp_size = tp_mesh.size()
     tp_rank = tp_mesh.get_local_rank()
@@ -111,9 +111,9 @@ def compare_moe_expert_parallel():
     # handle.wait()
     output.sum().backward()
 
-    dist.all_reduce(fc1_1.grad)
-    dist.all_reduce(fc1_2.grad)
-    dist.all_reduce(fc2.grad)
+    dist.all_reduce(fc1_1.grad, group=tp_group)
+    dist.all_reduce(fc1_2.grad, group=tp_group)
+    dist.all_reduce(fc2.grad, group=tp_group)
     grads = [
         fc1_1.grad,
         fc1_2.grad,
@@ -137,7 +137,9 @@ def compare_moe_expert_parallel():
         print(f"bitwise test passed")
 
 
-test_group_gemm_ep = functools.partial(torchrun, 4, compare_moe_expert_parallel)
+test_group_gemm_no_ep = functools.partial(torchrun, 4, compare_moe_expert_parallel, 1)
+test_group_gemm_partial_ep = functools.partial(torchrun, 4, compare_moe_expert_parallel, 2)
+test_group_gemm_full_ep = functools.partial(torchrun, 4, compare_moe_expert_parallel, 4)
 
 if __name__ == '__main__':
     dist.init_process_group("nccl")
