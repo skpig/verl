@@ -43,7 +43,7 @@ jobs:
           - git clone git@code.byted.org:data/verl
           - cd verl
           - pip3 install -e . --user
-          - pip3 install bytedance.ndtimeline==2.2.11
+          - pip3 install bytedance.ndtimeline --upgrade
           - pip3 install byted-omnistore==0.7.5
           - pip3 install pylatexenc
       - name: math v1 ppo async and grpo
@@ -52,6 +52,7 @@ jobs:
           - export NUM_STEPS=4
           - export N_GPUS_PER_NODE=8
           - export NCCL_SHM_DISABLE=1
+          - export ALPHASEED_USE_NDTIMELINE=1
           - wandb offline
           - ray stop --force
           - ray start --num-cpus=100 --head
