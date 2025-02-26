@@ -116,7 +116,7 @@ class MegatronPPOActor(BasePPOActor):
         batches = batch.split(self.config.ppo_micro_batch_size)
         response_length = data['responses'].size(-1)
 
-        def loss_func(output, data, meta_info):
+        def loss_func(output, data):
             # compute logprobs and entropy here. We only compute entropy when forward_only=True
             attention_mask = data['attention_mask']
             response_mask = attention_mask[:, -response_length:]
@@ -135,9 +135,7 @@ class MegatronPPOActor(BasePPOActor):
 
             old_log_prob = data['old_log_probs']
             advantages = data['advantages']
-            clip_ratio = meta_info['clip_ratio']
             ref_log_prob = data.get('ref_log_prob', None)
-            # entropy_coeff = meta_info['entropy_coeff']
             upgo_advantages = data['upgo_advantages']
             overlong_mask = data.get('overlong_mask', None)
 
@@ -232,32 +230,32 @@ class MegatronPPOActor(BasePPOActor):
 
             output = model(batch=forward_batch)
 
-            logits = output['logits']
-            logits = tensor_parallel.gather_from_tensor_model_parallel_region(
-                logits)  # (total_nnz_padded, 1, vocab_size)
+            if mpu.is_pipeline_last_stage():
+                logits = output['logits']
+                logits = tensor_parallel.gather_from_tensor_model_parallel_region(
+                    logits)  # (total_nnz_padded, 1, vocab_size)
 
-            # from IPython import embed
-            # if dist.get_rank() == 0:
-            #     embed()
-            # dist.barrier()
+                # from IPython import embed
+                # if dist.get_rank() == 0:
+                #     embed()
+                # dist.barrier()
 
-            # all gather from sequence parallel region. This makes replicate on each tp rank
-            logits = logits[:total_s]  # (total_nnz_padded)
+                # all gather from sequence parallel region. This makes replicate on each tp rank
+                logits = logits[:total_s]  # (total_nnz_padded)
 
-            logits = torch.squeeze(logits, dim=1)  # remove the artificial batch dimension
-            # add removed padding back
-            logits = pad_input(logits, indices, batch_size,
-                               seqlen=sequence_length)  # (batch_size, sequence_length, vocab_size)
+                logits = torch.squeeze(logits, dim=1)  # remove the artificial batch dimension
+                # add removed padding back
+                logits = pad_input(logits, indices, batch_size,
+                                   seqlen=sequence_length)  # (batch_size, sequence_length, vocab_size)
 
-            # TODO(zhangchi.usc1992)
-            # currently, we allgather from sequence parallel region of logits and remove padding from tp here
-            # in fact, we can first perform reduction and then directly outputs logprobs and
+                # TODO(zhangchi.usc1992)
+                # currently, we allgather from sequence parallel region of logits and remove padding from tp here
+                # in fact, we can first perform reduction and then directly outputs logprobs and
 
-            if forward_only:
-                meta_info = None
+                return logits, partial(loss_func, data=batch)
             else:
-                meta_info = {'clip_ratio': self.config.clip_ratio, 'entropy_coeff': self.config.entropy_coeff}
-            return logits, partial(loss_func, data=batch, meta_info=meta_info)
+                hidden_states = output['hidden_states']
+                return hidden_states, partial(loss_func, data=batch)
 
         from verl.utils.megatron.pipeline_parallel import make_batch_generator, compute_transformers_input_shapes
         batch_generator = make_batch_generator(batches, vpp_size=len(self.actor_module))

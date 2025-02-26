@@ -21,11 +21,17 @@ def get_profiler_context_wrapped(filename,
     try:
         from verl.utils.debug import MerlinLineageUploader
 
+        # adapt for torchrun
+        if ray.is_initialized():
+            actor_name = ray.get_runtime_context().get_actor_name()
+        else:
+            actor_name = 'local'
+
         merlin_lineage_uploader = MerlinLineageUploader(
             rank=torch.distributed.get_rank(),
             profile_max_preview_rank=0,
             asset_type="perfetto",
-            actor_name=ray.get_runtime_context().get_actor_name(),
+            actor_name=actor_name,
         )
         profiler_context = get_profiler_context(filename=filename,
                                                 profile_on_ranks=profile_on_ranks,

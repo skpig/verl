@@ -473,12 +473,24 @@ class AsyncActorRolloutRefWorker(Worker):
 
         # load checkpoint. Note that we should load ckpt before optimizer. Otherwise, the fp32 params will be wrong.
         # we assume the megatron_merge_state.pt in the same folder as hf
-        ckpt_path = 'hdfs://haruna/home/byte_data_seed/ssd_hldy/user/tiantianfan1/sft/M8_680m_SFT/checkpoints/global_epoch_2/megatron_merge_states.pt'
-        ckpt_local_path = copy_local_path_from_hdfs(ckpt_path)
-        load_partial_pretrain(models,
-                              partial_pretrain=ckpt_local_path,
-                              model_config=model_config,
-                              download_in_shards=True)
+        # ckpt_path = 'hdfs://haruna/home/byte_data_seed/ssd_hldy/user/tiantianfan1/sft/M8_680m_SFT/checkpoints/global_epoch_2/megatron_merge_states.pt'
+        # ckpt_local_path = copy_local_path_from_hdfs(ckpt_path)
+        # load_partial_pretrain(models,
+        #                       partial_pretrain=ckpt_local_path,
+        #                       model_config=model_config,
+        #                       download_in_shards=True)
+
+        # switch to use omnistore
+        ckpt_path = 'hdfs://haruna/home/byte_data_seed/ssd_hldy/user/tiantianfan1/sft/M8_680m_SFT/checkpoints/global_step_2198'
+        import omnistore
+        ckpt_state = {"model": models}
+        # load model and optimizer
+        omnistore.MegatronCheckpointer.load(
+            path=ckpt_path,
+            enable_shm_download_ckpt_tmp=False,
+            checkpoint_state=ckpt_state,
+            loader_in_split_mode=False,
+        )
 
         if role == 'actor':
             # build optimizer
@@ -503,6 +515,11 @@ class AsyncActorRolloutRefWorker(Worker):
                 adam_eps=optim_config.eps,
                 weight_decay=optim_config.weight_decay,
             )
+
+            # If resume_optimizer is false, copy bf16 weights in model to optimizer
+            # to avoid loss error issues.
+            optimizers[0].reload_model_params()
+
         else:
             optimizers = None
             lr_schedulers = None

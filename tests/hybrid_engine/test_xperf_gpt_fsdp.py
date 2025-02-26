@@ -2,7 +2,11 @@
 We instantiate a mariana models. Wrap it using FSDP with FULL_SHARD. Then, feed the weights from FSDP model to XPerfGPT and perform generation
 using TP
 
-torchrun --nproc-per-node=2 --standalone tests/hybrid_engine/test_xperf_gpt_fsdp.py
+torchrun --nproc-per-node=8 --standalone tests/hybrid_engine/test_xperf_gpt_fsdp.py \
+    actor_rollout_ref.actor.strategy=megatron \
+    mariana.megatron.tensor_parallel_size=2 \
+    mariana.megatron.pipeline_parallel_size=4 \
+    mariana.megatron.virtual_pipeline_parallel_size=7 \
 
 """
 
@@ -11,6 +15,7 @@ import numpy as np
 
 os.environ['NCCL_DEBUG'] = 'WARN'
 os.environ['USE_SESSION_CACHE'] = '0'
+os.environ['MARIANA_DISABLE_ROPE_REGISTER_INV_FREQ'] = '1'
 
 import seed_models  # noqa
 
@@ -135,12 +140,23 @@ def main(global_config):
 
         # load checkpoint. Note that we should load ckpt before optimizer. Otherwise, the fp32 params will be wrong.
         # we assume the megatron_merge_state.pt in the same folder as hf
-        ckpt_path = 'hdfs://haruna/home/byte_data_seed/ssd_hldy/user/tiantianfan1/sft/M8_680m_SFT/checkpoints/global_epoch_2/megatron_merge_states.pt'
-        ckpt_local_path = copy_local_path_from_hdfs(ckpt_path)
-        load_partial_pretrain(models,
-                              partial_pretrain=ckpt_local_path,
-                              model_config=model_config,
-                              download_in_shards=True)
+        # ckpt_path = 'hdfs://haruna/home/byte_data_seed/ssd_hldy/user/tiantianfan1/sft/M8_680m_SFT/checkpoints/global_epoch_2/megatron_merge_states.pt'
+        # ckpt_local_path = copy_local_path_from_hdfs(ckpt_path)
+        # load_partial_pretrain(models,
+        #                       partial_pretrain=ckpt_local_path,
+        #                       model_config=model_config,
+        #                       download_in_shards=True)
+
+        ckpt_path = 'hdfs://haruna/home/byte_data_seed/ssd_hldy/user/tiantianfan1/sft/M8_680m_SFT/checkpoints/global_step_2198'
+        import omnistore
+        ckpt_state = {"model": models}
+        # load model and optimizer
+        omnistore.MegatronCheckpointer.load(
+            path=ckpt_path,
+            enable_shm_download_ckpt_tmp=False,
+            checkpoint_state=ckpt_state,
+            loader_in_split_mode=False,
+        )
 
     from alpha_seed.workers.streaming_service.streaming_rollout import AsyncXPerfGPTRollout
 

@@ -23,9 +23,9 @@ data:
 # We may switch to per-model megatron config later when we separate models into different processes.
 # During that time, the megatron config will be copied to the namespace under each model
 megatron:
-  tensor_parallel_size: 4
-  pipeline_parallel_size: 1
-  virtual_pipeline_parallel_size: 0
+  tensor_parallel_size: 2
+  pipeline_parallel_size: 4
+  virtual_pipeline_parallel_size: 7
   distributed_sequence_parallel_size: 1
   expert_parallel_size: ${megatron.tensor_parallel_size}  # hardcode for now
   micro_batch_size: 1
@@ -99,13 +99,15 @@ actor_rollout_ref:
     ppo_mini_batch_size: 512
     ulysses_sequence_parallel_size: 1
     fsdp_size: -1
-    ppo_micro_batch_size: 64
+    ppo_micro_batch_size: 1
     use_dynamic_bsz: True
     ppo_max_token_len: -1
     grad_clip: 1.0
     clip_ratio: 0.2
     clip_ratio2: 10.0
     scale_pg_by_kl: False
+    scale_pg_by_local_kl: False
+    lm_loss_weight: 0.
     upgo_loss_weight: 0.0
     upgo_loss_version: 1
     kl_loss_weight: 0.0
@@ -224,7 +226,7 @@ critic:
   fsdp_size: -1
   NO_DEVICE_MESH: False # handle old critic ckpt stored as ShardedTensor
   ppo_mini_batch_size: ${actor_rollout_ref.actor.ppo_mini_batch_size}
-  ppo_micro_batch_size: 64
+  ppo_micro_batch_size: 1
   use_dynamic_bsz: True
   ppo_max_token_len: -1
   infer_micro_batch_size: 128

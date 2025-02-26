@@ -104,7 +104,7 @@ class MarianaForCausalLM(PretrainMegatronGPT2LMHeadModel):
         else:
             hidden_states = hidden_states * 1.0  # ?
             out = {
-                'output': hidden_states,
+                'hidden_states': hidden_states,
             }
 
         return out

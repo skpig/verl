@@ -275,14 +275,60 @@ class FSDPXPerfGPTShardingManager(ActorXPerfGPTShardingManager):
         return state_dict
 
 
+def normalize_key(name, layer_name, layer_offset):
+    """
+    name is the param name. layer_name is typically "layer", 
+    """
+    if layer_name in name:  # belong to an intermediate layer
+        split_name = name.split('.')
+        # find the num next to split_name
+        for i, name in enumerate(split_name):
+            if name == layer_name:
+                break
+        layer_num_idx = i + 1
+        # check the name
+        assert len(split_name) >= layer_num_idx + 1, f'split_name = {split_name}'
+        assert split_name[layer_num_idx].isdigit(), f'split_name = {split_name}'
+        # increment layer_num_idx by layer_offset
+        split_name[layer_num_idx] = str(int(split_name[layer_num_idx]) + layer_offset)
+        name = '.'.join(split_name)  # weight name in inference_tp_model
+
+    return name
+
+
 class MegatronXPerfGPTShardingManager(ActorXPerfGPTShardingManager):
 
     def _get_actor_state_dict(self):
-        from verl.utils.model import normalize_pp_vpp_params
-        module = self.module
-        # convert the state dict
+        # from verl.utils.model import normalize_pp_vpp_params
+        from megatron.training import unwrap_model
+        from megatron.model import DistributedDataParallel, Float16Module
 
-        # module should be a list of module chunk in this tp/pp stage
-        # currently, we only support tp
-        state_dict = module[0].state_dict()
-        return state_dict
+        all_state_dict = {}
+
+        valid_start_str = ['transformer.ln_f', 'transformer.h', 'transformer.wte.weight']
+        # module = self.module
+        # convert the state dict
+        for module in self.module:
+            # normalize names
+            state_dict = module.state_dict()
+            # remove duplicate keys
+            keys = list(state_dict.keys())
+            for key in keys:
+                is_valid = False
+                for start_str in valid_start_str:
+                    if key.startswith(start_str):
+                        is_valid = True
+                        break
+
+                if not is_valid:
+                    state_dict.pop(key)
+
+            unwrapped_module = unwrap_model(module, module_instances=(DistributedDataParallel, Float16Module))
+            start_layer_idx = unwrapped_module.transformer.h.layers[0].layer_number - 1
+
+            for key, param in state_dict.items():
+                normalized_key = normalize_key(key, 'layers', start_layer_idx)
+                assert normalized_key not in all_state_dict
+                all_state_dict[normalized_key] = param
+
+        return all_state_dict
