@@ -577,25 +577,33 @@ class RayPPOTrainer(object):
         if self.config.trainer.league_training_config.enable:
             train_batch_size = train_batch_size * self.config.trainer.league_training_config.buffer_size
         kwargs = {"processor": self.processor, 'image_key': self.config.data.image_key} if self.is_vlm else {}
-        self.train_dataset = RLHFDataset(parquet_files=self.config.data.train_files,
-                                         tokenizer=self.tokenizer,
-                                         prompt_key=self.config.data.prompt_key,
-                                         answer_key=self.config.data.answer_key,
-                                         use_ref_answer=self.config.data.use_ref_answer,
-                                         max_prompt_length=self.config.data.max_prompt_length,
-                                         filter_prompts=True,
-                                         return_raw_chat=self.config.data.get('return_raw_chat', False),
-                                         truncation=self.config.data.get('truncation', 'error'),
-                                         multi_prompts=self.config.data.get("multi_prompts", "none"),
-                                         num_prompts_per_data=self.config.data.get("num_prompts_per_data", 1),
-                                         **kwargs)
+
+        data_auto_repeat = self.config.data.get('data_auto_repeat', False)
+        self.train_dataset = RLHFDataset(
+            parquet_files=self.config.data.train_files,
+            tokenizer=self.tokenizer,
+            prompt_key=self.config.data.prompt_key,
+            answer_key=self.config.data.answer_key,
+            use_ref_answer=self.config.data.use_ref_answer,
+            max_prompt_length=self.config.data.max_prompt_length,
+            filter_prompts=True,
+            return_raw_chat=self.config.data.get('return_raw_chat', False),
+            truncation=self.config.data.get('truncation', 'error'),
+            multi_prompts=self.config.data.get("multi_prompts", "none"),
+            num_prompts_per_data=self.config.data.get("num_prompts_per_data", 1),
+            # Repeat dataset by total_epochs times, and shuffle each epoch if needed
+            total_epochs=self.config.trainer.total_epochs,
+            shuffle_per_epoch=self.config.data.shuffle,
+            data_auto_repeat=data_auto_repeat,
+            **kwargs)
 
         if self.config.data.BITWISE_RESUME:
             from alpha_seed.utils.dataset.sampler import RandomSampler, SequentialSampler
         else:
             from torch.utils.data import RandomSampler, SequentialSampler
 
-        if self.config.data.shuffle:
+        if self.config.data.shuffle and not data_auto_repeat:
+            # No need for random sampler if data_auto_repeat is on
             train_dataloader_generator = torch.Generator()
             train_dataloader_generator.manual_seed(self.config.data.get('seed', 1))
             sampler = RandomSampler(data_source=self.train_dataset, generator=train_dataloader_generator)

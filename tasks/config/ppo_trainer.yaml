@@ -18,6 +18,7 @@ data:
   multi_prompts: none
   num_prompts_per_data: 1
   BITWISE_RESUME: True  # this enables by default. If you seed checkpoint load fails, set to false
+  data_auto_repeat: False # Set to true and automatically repeat the dataset by total_epochs times, mainly for no drop_last
 
 
 actor_rollout_ref:

@@ -83,7 +83,10 @@ class RLHFDataset(Dataset):
                  truncation='error',
                  multi_prompts="none",
                  num_prompts_per_data=1,
-                 is_eval=False):
+                 is_eval=False,
+                 total_epochs=1,
+                 shuffle_per_epoch=False,
+                 data_auto_repeat=False):
 
         if not isinstance(parquet_files, (List, ListConfig)):
             parquet_files = [parquet_files]
@@ -107,6 +110,11 @@ class RLHFDataset(Dataset):
         self.num_prompts_per_data = num_prompts_per_data
         self.is_eval = is_eval
         self.new_dataset_flag = True
+
+        # New parameters for epoch replication
+        self.total_epochs = total_epochs
+        self.shuffle_per_epoch = shuffle_per_epoch
+        self.data_auto_repeat = data_auto_repeat
 
         self._download()
         self._read_files_and_tokenize()
@@ -144,6 +152,33 @@ class RLHFDataset(Dataset):
         #                                                      axis=1)]
 
         print(f'filter dataset len: {len(self.dataframe)}')
+
+        # Apply epoch replication if needed
+        if self.data_auto_repeat:
+            self._replicate_for_epochs()
+
+    def _replicate_for_epochs(self):
+        """
+        Replicates the dataset for the specified number of epochs.
+        If shuffle_per_epoch is True, each epoch's data will be shuffled before concatenation.
+        """
+        original_df = self.dataframe.copy()
+        all_dataframes = [original_df]
+
+        for i in range(1, self.total_epochs):
+            if self.shuffle_per_epoch:
+                # Shuffle the dataframe
+                epoch_df = original_df.sample(frac=1.0).reset_index(drop=True)
+            else:
+                epoch_df = original_df.copy()
+
+            # Add an epoch identifier for easier tracking if needed
+            epoch_df['_epoch_id'] = i
+            all_dataframes.append(epoch_df)
+
+        # Concatenate all dataframes
+        self.dataframe = pd.concat(all_dataframes, ignore_index=True)
+        print(f'Dataset replicated for {self.total_epochs} epochs, new len: {len(self.dataframe)}')
 
     def resume_dataset_state(self):
         self.new_dataset_flag = True if hasattr(self, 'original_parquet_files') else False
