@@ -139,12 +139,20 @@ class ActorXPerfGPTShardingManager(BaseShardingManager):
         if (not self.only_bind_once) or (not self._bind_fn_called):
             state_dict = self._get_actor_state_dict()
             # prepare the state_dict into a format for xperf_gpt
-            self.bind_fn(self.inference_engine.engine.module, state_dict=state_dict, device_mesh=self.device_mesh)
+            if self.model_config.model_type == 'seed_vl':
+                self.bind_fn(self.inference_engine.engine.module,
+                             self.inference_engine.vit_engine,
+                             state_dict=state_dict,
+                             device_mesh=self.device_mesh)
+            else:
+                self.bind_fn(self.inference_engine.engine.module, state_dict=state_dict, device_mesh=self.device_mesh)
+
             self._bind_fn_called = True
         else:
             load_to_cuda(tp_model=self.inference_engine.engine.module)
 
-        if hasattr(self.inference_engine.infer_scheduler, "init_cuda_graph"):
+        if hasattr(self.inference_engine, "infer_scheduler") and hasattr(self.inference_engine.infer_scheduler,
+                                                                         "init_cuda_graph"):
             self.inference_engine.infer_scheduler.init_cuda_graph()
         # important: need to manually set the random states of each tp to be identical. Otherwise, xperf_gpt will hang
         if self.device_mesh is not None:

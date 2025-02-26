@@ -717,7 +717,7 @@ def validate_config(config):
 
 def config_to_trainer_kwargs(config):
     from verl.utils.fs import copy_local_path_from_hdfs
-    from transformers import AutoTokenizer
+    from transformers import AutoTokenizer, AutoProcessor
 
     # print initial config
     from pprint import pprint
@@ -733,6 +733,10 @@ def config_to_trainer_kwargs(config):
     if config.data.get('chat_template', None) == 'seed':
         from verl.utils.seed import CHAT_TEMPLATE
         tokenizer.chat_template = CHAT_TEMPLATE
+
+    if config.data.image_key:
+        processor = AutoProcessor.from_pretrained(local_path)
+        processor.tokenizer.add_special_tokens({"additional_special_tokens": ["<ImageHere>"]})
 
     # define worker classes
     if config.actor_rollout_ref.actor.strategy in ['fsdp', 'megatron']:
@@ -791,6 +795,8 @@ def config_to_trainer_kwargs(config):
         "tokenizer": tokenizer,
         "remote_client": None,
     }
+    if config.data.image_key:
+        kwargs['processor'] = processor
 
     trainer_config_actor = None
     if config.server_client.role == "server":

@@ -27,6 +27,7 @@ class ValidateManager(object):
 
     def __init__(self, config, logger, val_dataloader, tokenizer, use_rm, val_reward_fn) -> None:
         self.config = config
+        self.is_vlm = self.config.data['image_key'] is not None
         self.logger = logger
         self.val_dataloader = val_dataloader
         self.tokenizer = tokenizer

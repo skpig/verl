@@ -57,7 +57,7 @@ from alpha_seed.utils.kernels.persist_gemm import deploy_persist_gemm, undelopy_
 from alpha_seed.models.transformers.parallel.collectives import get_memory
 from alpha_seed.utils.observility.training_stats import MetricsTorchDispatchMode, metrics_context_fn
 from alpha_seed.utils.observility import get_profiler_context_wrapped
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig, AutoModelForVision2Seq
 
 from seed_models.utils.count_flops import FlopsCounter
 
@@ -246,10 +246,13 @@ class AsyncActorRolloutRefWorker(Worker):
 
         with meta_device_init(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            actor_module = AutoModelForCausalLM.from_config(actor_model_config,
-                                                            torch_dtype=torch_dtype,
-                                                            attn_implementation='flash_attention_2',
-                                                            trust_remote_code=trust_remote_code)
+            AutoModel = AutoModelForVision2Seq if actor_model_config.model_type == 'seed_vl' else AutoModelForCausalLM
+            actor_module = AutoModel.from_config(actor_model_config,
+                                                 torch_dtype=torch_dtype,
+                                                 attn_implementation='flash_attention_2',
+                                                 trust_remote_code=trust_remote_code)
+            if hasattr(actor_model_config, "vision_config") and actor_model_config.vision_config.freeze_vit:
+                actor_module.vision_encoder.requires_grad_(False)
             # some parameters may not in torch_dtype. TODO(zhangchi.usc1992) remove this after we switch to fsdp2
             actor_module.to(torch_dtype)
 
@@ -839,7 +842,7 @@ class AsyncActorRolloutRefWorker(Worker):
         with self.actor_gather_manager:
             data = self.actor_gather_manager.preprocess_data(data)
 
-            with Timer(name='update_critic', logger=None) as timer:
+            with Timer(name='update_policy', logger=None) as timer:
                 metrics = self.actor.update_policy(data=data)
             delta_time = timer.last
             global_num_tokens = data.meta_info['global_token_num']

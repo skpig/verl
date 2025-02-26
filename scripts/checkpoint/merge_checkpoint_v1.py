@@ -5,7 +5,7 @@ import os
 import torch
 import argparse
 import seed_models
-from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForTokenClassification
+from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForTokenClassification, AutoModelForVision2Seq
 from concurrent.futures import ThreadPoolExecutor
 import hdfs_io
 from tqdm.auto import trange
@@ -158,6 +158,8 @@ if __name__ == '__main__':
         auto_model = AutoModelForTokenClassification
     elif 'ForCausalLM' in config.architectures[0]:
         auto_model = AutoModelForCausalLM
+    elif 'ForConditionalGeneration' in config.architectures[0]:
+        auto_model = AutoModelForVision2Seq
     else:
         raise NotImplementedError(f'Unknown architecture {config["architectures"]}')
 

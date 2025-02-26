@@ -146,7 +146,8 @@ def sync_training_stats(
         training_stats.update(
             sync_params_and_grads_stats(actor_module.module.lm_head.weight, "lm_head",
                                         model_config.hidden_size * model_config.vocab_size, fsdp_size))
-    elif model_config.model_type == "seed_m8":
+    elif model_config.model_type == "seed_m8" or \
+            (hasattr(model_config, "text_config") and model_config.text_config.model_type == "seed_m8"):
         for layer_idx in range(model_config.num_hidden_layers):
             attn = actor_module.module.transformer.h[layer_idx].module.attn
 

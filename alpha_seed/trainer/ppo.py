@@ -508,6 +508,7 @@ class RayPPOTrainer(object):
                  reward_fn=None,
                  val_reward_fn=None,
                  logger=None,
+                 processor=None,
                  remote_client=None):
         # assert torch.cuda.is_available(), 'cuda must be available on driver'
 
@@ -517,6 +518,7 @@ class RayPPOTrainer(object):
         self.all_meta = {}
         self.remote_client = remote_client
         self.tokenizer = tokenizer
+        self.processor = processor
         self.config = config
         self.reward_fn = reward_fn
         self.val_reward_fn = val_reward_fn
@@ -557,15 +559,24 @@ class RayPPOTrainer(object):
         self.data_len_per_query = None
         self.acc_per_query = {}  # moving avg acc
         self.sample_acc_dir = config.trainer.default_hdfs_dir + "/sample_acc"
+        self.is_vlm = config.data['image_key'] is not None
 
     def _create_dataloader(self):
         from torch.utils.data import DataLoader
         version = self.config.data.get('version', 'v1')
         # TODO: we have to make sure the batch size is divisible by the dp size
-        from alpha_seed.utils.dataset.rl_dataset import RLHFDataset, collate_fn
+        if self.is_vlm:
+            from alpha_seed.utils.dataset.vlm_rl_dataset import collate_fn
+            if self.config.data.get('task_type') == 'VLM_GUI':
+                from alpha_seed.utils.dataset.vlm_rl_dataset import RLHFDatasetGUI as RLHFDataset
+            else:
+                from alpha_seed.utils.dataset.vlm_rl_dataset import RLHFDatasetVL as RLHFDataset
+        else:
+            from alpha_seed.utils.dataset.rl_dataset import RLHFDataset, collate_fn
         train_batch_size = self.config.data.train_batch_size
         if self.config.trainer.league_training_config.enable:
             train_batch_size = train_batch_size * self.config.trainer.league_training_config.buffer_size
+        kwargs = {"processor": self.processor, 'image_key': self.config.data.image_key} if self.is_vlm else {}
         self.train_dataset = RLHFDataset(parquet_files=self.config.data.train_files,
                                          tokenizer=self.tokenizer,
                                          prompt_key=self.config.data.prompt_key,
@@ -576,7 +587,8 @@ class RayPPOTrainer(object):
                                          return_raw_chat=self.config.data.get('return_raw_chat', False),
                                          truncation=self.config.data.get('truncation', 'error'),
                                          multi_prompts=self.config.data.get("multi_prompts", "none"),
-                                         num_prompts_per_data=self.config.data.get("num_prompts_per_data", 1))
+                                         num_prompts_per_data=self.config.data.get("num_prompts_per_data", 1),
+                                         **kwargs)
 
         if self.config.data.BITWISE_RESUME:
             from alpha_seed.utils.dataset.sampler import RandomSampler, SequentialSampler
@@ -608,7 +620,8 @@ class RayPPOTrainer(object):
                                        truncation=self.config.data.get('truncation', 'error'),
                                        multi_prompts=self.config.data.get("multi_prompts", "none"),
                                        num_prompts_per_data=1,
-                                       is_eval=True)
+                                       is_eval=True,
+                                       **kwargs)
 
         self.val_dataloader = DataLoader(dataset=self.val_dataset,
                                          batch_size=len(self.val_dataset),

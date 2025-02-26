@@ -124,12 +124,15 @@ from transformers import PretrainedConfig
 
 
 def apply_monkey_patch(config: PretrainedConfig, verbose=True):
+    model_type = config.model_type
+    if model_type == 'seed_vl':
+        model_type = config.text_config.model_type
     success_apply_monkey_patch = False
-    if config.model_type in _PATCH_NAME_TO_FUNC:
-        _PATCH_NAME_TO_FUNC[config.model_type]()
+    if model_type in _PATCH_NAME_TO_FUNC:
+        _PATCH_NAME_TO_FUNC[model_type]()
         success_apply_monkey_patch = True
 
     if success_apply_monkey_patch and verbose:
-        print(f'Applying monkey patch to model {config.model_type}')
+        print(f'Applying monkey patch to model {model_type}')
 
     return success_apply_monkey_patch

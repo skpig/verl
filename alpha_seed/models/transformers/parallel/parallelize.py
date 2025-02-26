@@ -27,7 +27,8 @@ def apply_parallel_plan(model: torch.nn.Module, config, tp_mesh: DeviceMesh) -> 
     Apply tensor parallelism to the model.
     """
     make_plan_fn = None
-    if config.model_type == 'seed_m8':
+    if config.model_type == 'seed_m8' or \
+            (hasattr(config, "text_config") and config.text_config.model_type == 'seed_m8'):
         from ..modeling_m8 import make_m8_plan
         make_plan_fn = make_m8_plan
     if config.model_type == "deepseek_v3":

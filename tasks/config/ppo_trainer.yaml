@@ -4,6 +4,7 @@ data:
   val_files: hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/gsm8k/test_with_ans_new.parquet
   prompt_key: prompt
   answer_key: answer
+  image_key: null
   use_ref_answer: False
   max_prompt_length: 512
   max_response_length: 512
