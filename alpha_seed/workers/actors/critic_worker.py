@@ -78,7 +78,7 @@ class CriticWorker(Worker):
         fsdp_size = config.fsdp_size
         sp_size = config.ulysses_sequence_parallel_size
         tp_size = config.tp_size
-        meshes = create_mesh(fsdp_size=fsdp_size, tp_size=tp_size, sp_size=sp_size)
+        meshes = create_mesh(fsdp_size=fsdp_size, tp_size=tp_size, sp_size=sp_size, tp_outside=config.tp_outside)
         # Deprecated case: critic model is saved as ShardedTensor
         # we will always use full FSDP
         self.fsdp_mesh = None
@@ -239,7 +239,7 @@ class CriticWorker(Worker):
                              sync_module_states=False,
                              cpu_offload=cpu_offload)
 
-        register_dtensor_save_hook(critic_module, shard_plan)
+        register_dtensor_save_hook(critic_module, shard_plan, self.config.tp_outside)
 
         log_gpu_memory_usage('After critic FSDP', logger=logger)
 

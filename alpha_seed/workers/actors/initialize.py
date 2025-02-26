@@ -92,7 +92,7 @@ class DeviceMeshManager:
         return self.device_meshes[args]
 
 
-def create_mesh(fsdp_size: int, tp_size: int, sp_size: int):
+def create_mesh(fsdp_size: int, tp_size: int, sp_size: int, tp_outside: bool = False):
     """
     Create device meshes for fsdp, tp, and sp.
 
@@ -115,12 +115,21 @@ def create_mesh(fsdp_size: int, tp_size: int, sp_size: int):
         fsdp_size = remain_size
     dp_size = remain_size // fsdp_size
     if dp_size == 1:
-        train_mesh = DeviceMeshManager().init_device_mesh("cuda", (fsdp_size, tp_size), mesh_dim_names=("fsdp", "tp"))
+        if tp_outside:
+            train_mesh = DeviceMeshManager().init_device_mesh("cuda", (tp_size, fsdp_size),
+                                                              mesh_dim_names=("tp", "fsdp"))
+        else:
+            train_mesh = DeviceMeshManager().init_device_mesh("cuda", (fsdp_size, tp_size),
+                                                              mesh_dim_names=("fsdp", "tp"))
         fsdp_mesh = train_mesh["fsdp"]
         tp_mesh = train_mesh["tp"]
     else:
-        train_mesh = DeviceMeshManager().init_device_mesh("cuda", (dp_size, fsdp_size, tp_size),
-                                                          mesh_dim_names=("dp", "fsdp", "tp"))
+        if tp_outside:
+            train_mesh = DeviceMeshManager().init_device_mesh("cuda", (tp_size, dp_size, fsdp_size),
+                                                              mesh_dim_names=("tp", "dp", "fsdp"))
+        else:
+            train_mesh = DeviceMeshManager().init_device_mesh("cuda", (dp_size, fsdp_size, tp_size),
+                                                              mesh_dim_names=("dp", "fsdp", "tp"))
         fsdp_mesh = train_mesh["dp", "fsdp"]
         tp_mesh = train_mesh["tp"]
     assert fsdp_mesh.size() == fsdp_size * dp_size
@@ -128,13 +137,21 @@ def create_mesh(fsdp_size: int, tp_size: int, sp_size: int):
     # sp mesh
     gather_size = tp_size * sp_size
     data_dp_size = world_size // gather_size
-    data_mesh = DeviceMeshManager().init_device_mesh("cuda", (data_dp_size, sp_size, tp_size),
-                                                     mesh_dim_names=("dp", "sp", "tp"))
+    if tp_outside:
+        data_mesh = DeviceMeshManager().init_device_mesh("cuda", (tp_size, sp_size, data_dp_size),
+                                                         mesh_dim_names=("tp", "sp", "dp"))
+    else:
+        data_mesh = DeviceMeshManager().init_device_mesh("cuda", (data_dp_size, sp_size, tp_size),
+                                                         mesh_dim_names=("dp", "sp", "tp"))
     sp_mesh = data_mesh["sp"]
     assert sp_mesh.size() == sp_size
     # data gather mesh
-    gather_mesh = DeviceMeshManager().init_device_mesh("cuda", (data_dp_size, gather_size),
-                                                       mesh_dim_names=("dp", "replicate"))
+    if tp_outside:
+        gather_mesh = DeviceMeshManager().init_device_mesh("cuda", (gather_size, data_dp_size),
+                                                           mesh_dim_names=("replicate", "dp"))
+    else:
+        gather_mesh = DeviceMeshManager().init_device_mesh("cuda", (data_dp_size, gather_size),
+                                                           mesh_dim_names=("dp", "replicate"))
     gather_mesh = gather_mesh["replicate"]
     assert gather_mesh.size() == gather_size
     return fsdp_mesh, tp_mesh, sp_mesh, gather_mesh

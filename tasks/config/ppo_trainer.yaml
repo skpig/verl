@@ -42,6 +42,7 @@ actor_rollout_ref:
     ulysses_sequence_parallel_size: 1
     fsdp_size: -1
     tp_size: 1
+    tp_outside: false
     ppo_micro_batch_size: 64
     use_dynamic_bsz: True
     ppo_max_token_len: -1
@@ -102,6 +103,7 @@ actor_rollout_ref:
     ulysses_sequence_parallel_size: 1
     fsdp_size: -1
     tp_size: 1
+    tp_outside: false
     use_dynamic_bsz: True
     max_token_len: -1
     ema: 1.0
@@ -198,6 +200,7 @@ critic:
   ulysses_sequence_parallel_size: 1
   fsdp_size: -1
   tp_size: 1
+  tp_outside: false
   NO_DEVICE_MESH: False # handle old critic ckpt stored as ShardedTensor
   ppo_mini_batch_size: ${actor_rollout_ref.actor.ppo_mini_batch_size}
   ppo_micro_batch_size: 64
@@ -237,6 +240,7 @@ reward_model:
   ulysses_sequence_parallel_size: 1
   fsdp_size: -1
   tp_size: 1
+  tp_outside: false
   micro_batch_size: 64
   use_dynamic_bsz: True
   max_token_len: -1

@@ -121,13 +121,16 @@ class AsyncActorRolloutRefWorker(Worker):
             actor_fsdp_size = config.actor.fsdp_size
             actor_sp_size = config.actor.ulysses_sequence_parallel_size
             actor_tp_size = config.actor.tp_size
-            actor_meshes = create_mesh(fsdp_size=actor_fsdp_size, tp_size=actor_tp_size, sp_size=actor_sp_size)
+            actor_meshes = create_mesh(fsdp_size=actor_fsdp_size,
+                                       tp_size=actor_tp_size,
+                                       sp_size=actor_sp_size,
+                                       tp_outside=config.actor.tp_outside)
             self.actor_fsdp_mesh = actor_meshes[0]
             self.actor_tp_mesh = actor_meshes[1]  # shared for both train and inference
             self.actor_sp_mesh = actor_meshes[2]
             self.actor_gather_mesh = actor_meshes[3]
             self.actor_gather_manager = DataGatherManager(self.actor_gather_mesh, self.actor_sp_mesh)
-            if torch.distributed.get_rank():
+            if torch.distributed.get_rank() == 0:
                 print(
                     f"Created actor with fsdp_size={self.actor_fsdp_mesh.shape}, tp_size={self.actor_tp_mesh.size()}, "
                     f"actor sp_size={self.actor_sp_mesh.size()}")
@@ -149,7 +152,10 @@ class AsyncActorRolloutRefWorker(Worker):
                 ref_fsdp_size = config.ref.fsdp_size
                 ref_sp_size = config.ref.ulysses_sequence_parallel_size
                 ref_tp_size = config.ref.tp_size
-                ref_meshes = create_mesh(fsdp_size=ref_fsdp_size, tp_size=ref_tp_size, sp_size=ref_sp_size)
+                ref_meshes = create_mesh(fsdp_size=ref_fsdp_size,
+                                         tp_size=ref_tp_size,
+                                         sp_size=ref_sp_size,
+                                         tp_outside=config.ref.tp_outside)
                 self.ref_fsdp_mesh = ref_meshes[0]
                 self.ref_tp_mesh = ref_meshes[1]
                 self.ref_sp_mesh = ref_meshes[2]
@@ -386,7 +392,8 @@ class AsyncActorRolloutRefWorker(Worker):
                                  device_mesh=fsdp_mesh,
                                  cpu_offload=cpu_offload)
 
-        register_dtensor_save_hook(actor_module_fsdp, shard_plan)
+        tp_outside = self.config.ref.tp_outside if role == "ref" else self.config.actor.tp_outside
+        register_dtensor_save_hook(actor_module_fsdp, shard_plan, tp_outside)
 
         log_gpu_memory_usage('After Actor FSDP init', logger=logger)
 

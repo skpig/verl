@@ -13,7 +13,7 @@ orig_optim_state_dict = FSDP.optim_state_dict
 orig_optim_state_dict_to_load = FSDP.optim_state_dict_to_load
 
 
-def _append_state_with_tp_spec(tensor: DTensor, shard: Placement, tp_mesh: DeviceMesh):
+def _append_state_with_tp_spec(tensor: DTensor, shard: Placement, tp_mesh: DeviceMesh, tp_outside: bool):
     global_device_mesh = tp_mesh._parent_mesh
     assert global_device_mesh is not None, f"The tp_mesh must be a sub_mesh to global device mesh"
     orig_device = tensor.device
@@ -47,7 +47,10 @@ def _append_state_with_tp_spec(tensor: DTensor, shard: Placement, tp_mesh: Devic
         else:
             tensor = tensor.redistribute(placements=placements, async_op=False)
     # add tensor parallel shard
-    placements.append(shard)
+    if tp_outside:
+        placements = [shard] + placements
+    else:
+        placements.append(shard)
     shape = list(tensor.size())
     if isinstance(shard, Shard):
         shape[shard.dim] *= tp_mesh.size()
@@ -66,8 +69,9 @@ def _append_state_with_tp_spec(tensor: DTensor, shard: Placement, tp_mesh: Devic
 
 class FlexDTensor(FSDPExtensions):
 
-    def __init__(self, shard_plan: Dict):
+    def __init__(self, shard_plan: Dict, tp_outside: bool):
         super().__init__()
+        self.tp_outside = tp_outside
         self.tp_mesh = None
         self.fqn2spec: Dict[str, TPSpec] = shard_plan
         for spec in self.fqn2spec.values():
@@ -124,9 +128,14 @@ class FlexDTensor(FSDPExtensions):
             return _ext_all_gather_dtensor(tensor, None)
         # replicate the fsdp dimension while keeps tp sharding
         placements = list(copy.deepcopy(tensor.placements))
-        assert len(placements) >= 2 and parent_mesh.mesh_dim_names[-1] == "tp"
-        # no need to touch the tp dimension
-        placements[-2] = Replicate()
+        if self.tp_outside:
+            assert len(placements) >= 2 and parent_mesh.mesh_dim_names[0] == "tp"
+            # no need to touch the tp dimension
+            placements[-1] = Replicate()
+        else:
+            assert len(placements) >= 2 and parent_mesh.mesh_dim_names[-1] == "tp"
+            # no need to touch the tp dimension
+            placements[-2] = Replicate()
         local_tensor = tensor.redistribute(placements=placements, async_op=False)._local_tensor
         return local_tensor
 
@@ -147,7 +156,7 @@ class FlexDTensor(FSDPExtensions):
             tensor = state_dict[name]
             if isinstance(tensor, DTensor):
                 shard = self.fqn2spec[name].shard
-                tensor = _append_state_with_tp_spec(tensor, shard, self.tp_mesh)
+                tensor = _append_state_with_tp_spec(tensor, shard, self.tp_mesh, self.tp_outside)
                 state_dict[name] = tensor
 
     def register_post_optim_hook(self):
@@ -174,7 +183,7 @@ class FlexDTensor(FSDPExtensions):
                 for key, val in optim_state["state"][fqn].items():
                     if isinstance(val, DTensor):
                         shard = self.fqn2spec[fqn].shard
-                        val = _append_state_with_tp_spec(val, shard, self.tp_mesh)
+                        val = _append_state_with_tp_spec(val, shard, self.tp_mesh, self.tp_outside)
                     fqn_state[key] = val
                 optim_state["state"][fqn] = fqn_state
             return optim_state
@@ -228,7 +237,7 @@ class FlexDTensor(FSDPExtensions):
         FSDP.optim_state_dict_to_load = staticmethod(optim_state_load_pre_hook)
 
 
-def register_dtensor_save_hook(fsdp_model: FSDP, shard_plan: Dict = None):
+def register_dtensor_save_hook(fsdp_model: FSDP, shard_plan: Dict = None, tp_outside: bool = False):
     """
     Register dtensor-based hooks for FSDP+TP
 
@@ -238,7 +247,7 @@ def register_dtensor_save_hook(fsdp_model: FSDP, shard_plan: Dict = None):
     2. Equip each module with attribute `_tp_mesh` for access.
     """
     shard_plan = {} if shard_plan is None else shard_plan
-    extension = FlexDTensor(shard_plan)
+    extension = FlexDTensor(shard_plan, tp_outside)
     for fsdp_module in FSDP.fsdp_modules(fsdp_model):
         fsdp_module._fsdp_extension = extension
         fsdp_module._handle._fsdp_extension = extension
