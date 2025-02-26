@@ -67,16 +67,23 @@ def diff(x1, x2, prefix=()):
     return only_left, only_right, mismatch
 
 
-def model_save_load_fsdp_hsdp_tp_omnistore_reshard(fsdp_size_save: int, tp_size_save: int, fsdp_size_load: int,
-                                                   tp_size_load: int):
+def model_save_load_fsdp_hsdp_tp_omnistore_reshard(fsdp_size_save: int,
+                                                   tp_size_save: int,
+                                                   fsdp_size_load: int,
+                                                   tp_size_load: int,
+                                                   optimizer_type: str = 'adam'):
 
-    model_save, optim_save, meshes = build_model(fsdp_size=fsdp_size_save, tp_size=tp_size_save)
+    model_save, optim_save, meshes = build_model(fsdp_size=fsdp_size_save,
+                                                 tp_size=tp_size_save,
+                                                 optimizer_type=optimizer_type)
     train_one_step(model_save, optim_save)
     # save
     save_omnistore(model_save, optim_save, f"/tmp/ckpt/fsdp_{fsdp_size_save}_tp_{tp_size_save}")
 
     train_one_step(model_save, optim_save)
-    model_load, optim_load, meshes = build_model(fsdp_size=fsdp_size_load, tp_size=tp_size_load)
+    model_load, optim_load, meshes = build_model(fsdp_size=fsdp_size_load,
+                                                 tp_size=tp_size_load,
+                                                 optimizer_type=optimizer_type)
     RLFSDPCheckpointer._RLFSDPCheckpointer__cleanup()
     # load
     load_omnistore(model_load, optim_load, f"/tmp/ckpt/fsdp_{fsdp_size_save}_tp_{tp_size_save}")
@@ -109,3 +116,6 @@ def model_save_load_fsdp_hsdp_tp_omnistore_reshard(fsdp_size_save: int, tp_size_
 test_model_save_load_fsdp_hsdp_tp_omnistore_reshard = partial(torchrun, 8,
                                                               model_save_load_fsdp_hsdp_tp_omnistore_reshard, 8, 1, 2,
                                                               4)
+test_model_save_load_fsdp_hsdp_tp_omnistore_reshard = partial(torchrun, 8,
+                                                              model_save_load_fsdp_hsdp_tp_omnistore_reshard, 8, 1, 2,
+                                                              4, 'lion')

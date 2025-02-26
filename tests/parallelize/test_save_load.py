@@ -30,7 +30,7 @@ from omnistore import RLFSDPCheckpointer
 os.environ['NCCL_DEBUG'] = '0'
 
 
-def build_model(fsdp_size: int, tp_size: int):
+def build_model(fsdp_size: int, tp_size: int, optimizer_type: str):
     torch.manual_seed(42)
 
     meshes = create_mesh(fsdp_size, tp_size, 1)
@@ -68,7 +68,14 @@ def build_model(fsdp_size: int, tp_size: int):
                  device_mesh=fsdp_mesh)
 
     register_dtensor_save_hook(model, shard_plan)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    from alpha_seed.trainer.optim import get_optimizer_from_config
+    optim_config = {
+        "type": optimizer_type,
+        "lr": 1e-4,
+        "betas": [0.9, 0.95],
+    }
+    from omegaconf import DictConfig
+    optimizer = get_optimizer_from_config(model.parameters(), DictConfig(optim_config))
     return model, optimizer, meshes
 
 
@@ -198,11 +205,11 @@ def load_omnistore(model, optimizer, folder):
     random.setstate(rng['random'])
 
 
-def model_save_load_fsdp_tp(fsdp_size: int, tp_size: int, version='v1'):
+def model_save_load_fsdp_tp(fsdp_size: int, tp_size: int, version: str = 'v1', optimizer_type: str = 'adam'):
 
     # cannot use tempfile here because every rank gets a different one
     tmpdir = "/tmp/ckpt_12321"
-    model, optim, meshes = build_model(fsdp_size=fsdp_size, tp_size=tp_size)
+    model, optim, meshes = build_model(fsdp_size=fsdp_size, tp_size=tp_size, optimizer_type=optimizer_type)
 
     iter_res = []
 
@@ -254,3 +261,8 @@ test_model_save_load_fsdp_omnistore = partial(torchrun, 4, model_save_load_fsdp_
 test_model_save_load_hsdp_omnistore = partial(torchrun, 4, model_save_load_fsdp_tp, 2, 1, 'omnistore')
 test_model_save_load_fsdp_tp_omnistore = partial(torchrun, 4, model_save_load_fsdp_tp, 2, 2, 'omnistore')
 test_model_save_load_hsdp_tp_omnistore = partial(torchrun, 8, model_save_load_fsdp_tp, 2, 2, 'omnistore')
+# omnistore and byted_optimizer test
+test_model_save_load_fsdp_omnistore = partial(torchrun, 4, model_save_load_fsdp_tp, 4, 1, 'omnistore', 'lion')
+test_model_save_load_hsdp_omnistore = partial(torchrun, 4, model_save_load_fsdp_tp, 2, 1, 'omnistore', 'lion')
+test_model_save_load_fsdp_tp_omnistore = partial(torchrun, 4, model_save_load_fsdp_tp, 2, 2, 'omnistore', 'lion')
+test_model_save_load_hsdp_tp_omnistore = partial(torchrun, 8, model_save_load_fsdp_tp, 2, 2, 'omnistore', 'lion')

@@ -65,7 +65,7 @@ import verl.utils.torch_functional as verl_F
 # m8_path = 'hdfs://harunava/home/byte_data_seed_us/hdd_va/user/zhiqi.0/rlhf/m8_2B5_sft'
 
 
-def init_model(model_path: str, fsdp_size: int, tp_size: int, sp_size: int):
+def init_model(model_path: str, fsdp_size: int, tp_size: int, sp_size: int, optimizer_type: str):
 
     meshes = create_mesh(fsdp_size, tp_size, sp_size)
     fsdp_mesh, tp_mesh = meshes[:2]
@@ -129,7 +129,14 @@ def init_model(model_path: str, fsdp_size: int, tp_size: int, sp_size: int):
 
     register_dtensor_save_hook(model, shard_plan)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    from alpha_seed.trainer.optim import get_optimizer_from_config
+    optim_config = {
+        "type": optimizer_type,
+        "lr": 1e-4,
+        "betas": [0.9, 0.95],
+    }
+    from omegaconf import DictConfig
+    optimizer = get_optimizer_from_config(model.parameters(), DictConfig(optim_config))
     print_each_rank(f"After FSDP init: memory: {torch.cuda.memory_allocated() / (1024**3):.2f} GB")
     return model, optimizer, meshes
 
@@ -301,9 +308,14 @@ def load_checkpoint(fsdp_model: FSDP, optimizer: torch.optim.Optimizer, folder):
     print_each_rank(f"finished loading checkpoint from {filepath}.")
 
 
-def test_performance(model_path: str, fsdp_size: int, tp_size: int, sp_size: int, profile_to_mlx: bool = False):
+def test_performance(model_path: str,
+                     fsdp_size: int,
+                     tp_size: int,
+                     sp_size: int,
+                     profile_to_mlx: bool = False,
+                     optimizer_type: str = 'adam'):
 
-    model, optimizer, device_mesh = init_model(model_path, fsdp_size, tp_size, sp_size)
+    model, optimizer, device_mesh = init_model(model_path, fsdp_size, tp_size, sp_size, optimizer_type)
     train(model, optimizer, device_mesh, profile_to_mlx=profile_to_mlx)
 
 
@@ -319,6 +331,7 @@ if __name__ == '__main__':
     parser.add_argument("--max-token", type=int, default=16384, help="max token length (total) for a batch")
     parser.add_argument("--seqlen", type=int, default=16384, help="sequence length for a device (before tp / sp)")
     parser.add_argument("--grad-accum", type=int, default=1, help="gradient accumulation times")
+    parser.add_argument("--optimizer-type", type=str, default="adam", help="optimizer type, default: adam")
     args = parser.parse_args()
     print(args)
 
@@ -329,5 +342,6 @@ if __name__ == '__main__':
                      fsdp_size=args.fsdp_size,
                      tp_size=args.tp_size,
                      sp_size=args.sp_size,
-                     profile_to_mlx=args.profile_to_mlx)
+                     profile_to_mlx=args.profile_to_mlx,
+                     optimizer_type=args.optimizer_type)
     dist.destroy_process_group()

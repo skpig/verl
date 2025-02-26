@@ -2,8 +2,8 @@ name: unit tests
 trigger:
   change
 jobs:
-  model_tests:
-    # Merlin - data.aml.verl:v144
+  e2e_runnable_ckpt_tests:
+    # Merlin - data.aml.verl:v85
     image: hub.byted.org/reckon/data.reckon.mlx.image_5940:36aebfdb72c17e002e016c4594c602c4
     if: ${{ !contains(Event.Change.Title, "WIP") }}
     runs-on:
@@ -12,8 +12,8 @@ jobs:
         shared-memory: 1024
     envs:
       LIBHDFS_OPTS: -Dhadoop.root.logger=warn,console
-    timeout: 10  # timeout 10min
-    retry: 3
+    timeout: 30  # timeout 10min
+    retry: 2
     steps:
       - name: check env
         commands:
@@ -32,31 +32,39 @@ jobs:
         name: setup doas
         id: doas
         uses: actions/doas
-      - &step_setup_env
-        name: setup env
+      - &step_dependency
+        name: setup dependency
         commands:
-          - pip3 install --upgrade byted-omnistore
-          - pip3 install --upgrade bytedance.ndtimeline
+          - cd /opt/tiger
+          - git clone -b 20250103 git@code.byted.org:seed/seed_models.git
+          - cd seed_models
+          - pip3 install -e . --user
           - cd /opt/tiger
           - git clone git@code.byted.org:data/verl
-          - git clone git@code.byted.org:seed/seed_models
+          - cd verl
+          - pip3 install -e . --user
+          - pip3 install bytedance.ndtimeline==2.2.11
+          - pip3 install byted-omnistore==0.7.5
+          - pip3 install pylatexenc
+          - cd /opt/tiger
           - git clone git@code.byted.org:data/byted_optimizer.git
-          - cd /opt/tiger/byted_optimizer
+          - cd byted_optimizer
           - git checkout ad30d9d0c1d23167a26ea84a9c4a84090ebb1277
           - pip3 install -r requirements.txt
           - pip3 install -v --disable-pip-version-check --no-cache-dir --no-build-isolation -e ./ --user
-          - export PYTHONPATH=/opt/tiger/seed_models:/opt/tiger/verl/:/opt/tiger/byted_optimizer:$PYTHONPATH
+
+      - name: m8 ckpt save resume omnistore lion optimizer
+        commands:
           - cd -
-      - name: monkey patch tests
-        commands:
-          - pytest -s tests/models/transformers/test_ce_loss_op.py
-      - name: parallelize tests
-        commands:
-          - export export NCCL_SHM_DISABLE=1
-          - export PYTHONPATH=/opt/tiger/seed_models:/opt/tiger/verl/:$PYTHONPATH
-          - pytest tests/parallelize/test_create_mesh.py
-          - pytest tests/parallelize/test_parallel_init.py
-          - pytest tests/parallelize/test_group_gemm_ep.py
-          - pytest tests/parallelize/test_save_load.py
-          - pytest tests/parallelize/test_train_memory_offload.py
-          - pytest tests/parallelize/test_omnistore_reshard.py
+          - export NUM_STEPS=3
+          - export N_GPUS_PER_NODE=8
+          - export NCCL_SHM_DISABLE=1
+          - export SAVE_FREQ=2
+          - export CKPT_VERSION=omnistore
+          - wandb offline
+          - ray stop --force
+          - ray start --num-cpus=100 --head
+          - bash tasks_scripts/ci/run_m8_100m_math_v1_grpo_ckpt_save_resume.sh OPTIM=lion BF16STATE=True
+          - export RESUME_STEPS=auto
+          - bash tasks_scripts/ci/run_m8_100m_math_v1_grpo_ckpt_save_resume.sh OPTIM=lion BF16STATE=True
+          - ray stop --force

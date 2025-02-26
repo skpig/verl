@@ -232,10 +232,8 @@ class SFTTrainer(object):
 
         register_dtensor_save_hook(self.fsdp_model, shard_plan)
 
-        self.optimizer = optim.AdamW(self.fsdp_model.parameters(),
-                                     lr=self.config.optim.lr,
-                                     betas=self.config.optim.betas,
-                                     weight_decay=self.config.optim.weight_decay)
+        from alpha_seed.trainer.optim import get_optimizer_from_config
+        self.optimizer = get_optimizer_from_config(self.fsdp_model.parameters(), self.config.optim)
 
         steps_per_epoch = len(self.train_dataloader)
         total_steps = steps_per_epoch * self.config.trainer.total_epochs

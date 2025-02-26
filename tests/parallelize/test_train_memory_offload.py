@@ -43,7 +43,7 @@ torch.backends.cudnn.flags(deterministic=True)
 p6_400m_path = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhiqi.0/rlhf/p6_400m_sft'
 
 
-def get_model(use_orig_params: bool):
+def get_model(use_orig_params: bool, optimizer_type: str):
 
     world_size = torch.distributed.get_world_size()
     device_mesh = init_device_mesh('cuda', mesh_shape=(world_size,), mesh_dim_names=['fsdp'])
@@ -71,7 +71,14 @@ def get_model(use_orig_params: bool):
                              sync_module_states=False,
                              device_id=torch.cuda.current_device(),
                              device_mesh=device_mesh)
-    optimizer = torch.optim.AdamW(actor_module_fsdp.parameters(), lr=1e-4)
+    from alpha_seed.trainer.optim import get_optimizer_from_config
+    optim_config = {
+        "type": optimizer_type,
+        "lr": 1e-4,
+        "betas": [0.9, 0.95],
+    }
+    from omegaconf import DictConfig
+    optimizer = get_optimizer_from_config(actor_module_fsdp.parameters(), DictConfig(optim_config))
     return actor_module_fsdp, optimizer
 
 
@@ -102,9 +109,9 @@ def train(model: FSDP, optimizer, offload: bool, steps=3):
     return losses, gnorms
 
 
-def offload_and_load(use_orig_params: bool = False):
+def offload_and_load(use_orig_params: bool = False, optimizer_type: str = 'adam'):
 
-    model, _ = get_model(use_orig_params=use_orig_params)
+    model, _ = get_model(use_orig_params=use_orig_params, optimizer_type=optimizer_type)
     curr_memory = torch.cuda.memory_allocated()
     print_each_rank(f"after init model: {curr_memory / (1024 ** 3):.2f} GB")
 
@@ -120,14 +127,14 @@ def offload_and_load(use_orig_params: bool = False):
     assert offload_memory / (1024**3) < 0.1
 
 
-def offload_and_load_correctness(use_orig_params: bool = False):
+def offload_and_load_correctness(use_orig_params: bool = False, optimizer_type: str = 'adam'):
 
     torch.manual_seed(42)
-    model, optimizer = get_model(use_orig_params=use_orig_params)
+    model, optimizer = get_model(use_orig_params=use_orig_params, optimizer_type=optimizer_type)
     ref_losses, ref_gnorms = train(model, optimizer, offload=False)
 
     torch.manual_seed(42)
-    model, optimizer = get_model(use_orig_params=use_orig_params)
+    model, optimizer = get_model(use_orig_params=use_orig_params, optimizer_type=optimizer_type)
     offload_losses, offload_gnorms = train(model, optimizer, offload=True)
 
     for idx in range(len(ref_losses)):
@@ -146,3 +153,7 @@ test_offload_memory_not_orig_param = partial(torchrun, 4, offload_and_load, Fals
 # FIXME: L20 gots 1e-5 diff due to non-deterministic kernels. H800 can bitwise align
 # test_offload_bitwise_correctness_orig_param = partial(torchrun, 4, offload_and_load_correctness, True)
 # test_offload_bitwise_correctness_not_orig_param = partial(torchrun, 4, offload_and_load_correctness, False)
+
+# test byted_optimizer
+test_offload_memory_orig_param = partial(torchrun, 4, offload_and_load, True, 'lion')
+test_offload_memory_not_orig_param = partial(torchrun, 4, offload_and_load, False, 'lion')

@@ -2,6 +2,16 @@
 
 set -x
 
+for ARGUMENT in "$@"
+do
+   KEY=$(echo $ARGUMENT | cut -f1 -d=)
+
+   KEY_LENGTH=${#KEY}
+   VALUE="${ARGUMENT:$KEY_LENGTH+1}"
+
+   export "$KEY"="$VALUE"
+done
+
 NUM_STEPS="${NUM_STEPS:-120}"
 echo "NUM_STEPS: $NUM_STEPS"
 
@@ -33,6 +43,8 @@ val_batch_size=5000
 total_epochs=100
 test_freq=5
 # 算法相关的参数
+optimizer_type=${OPTIM-adam}
+force_bfloat16_state=${BF16STATE-False}
 actor_lr=1e-5
 critic_lr=2e-6
 lr_warmup_steps=10
@@ -72,6 +84,8 @@ offload=True
 offload_train_memory=True
 act_offload=False  # temporally disable it
 
+
+
 python3 tasks/main_ppo.py \
     data.train_files=${TRAIN_FILE} \
     data.val_files=${TEST_FILE} \
@@ -96,6 +110,8 @@ python3 tasks/main_ppo.py \
     +actor_rollout_ref.model.override_config.embd_pdrop=0. \
     +actor_rollout_ref.model.override_config.resid_pdrop=0. \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
+    actor_rollout_ref.actor.optim.type=${optimizer_type} \
+    actor_rollout_ref.actor.optim.force_bfloat16_state=${force_bfloat16_state} \
     actor_rollout_ref.actor.optim.lr=${actor_lr} \
     actor_rollout_ref.actor.optim.lr_warmup_steps=${lr_warmup_steps} \
     actor_rollout_ref.actor.ppo_mini_batch_size=${ppo_mini_batch_size} \
@@ -115,6 +131,8 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.actor.optim.weight_decay=${weight_decay} \
     critic.use_dynamic_bsz=${use_dynamic_bsz} \
     critic.ppo_max_token_len=${critic_ppo_max_token_len} \
+    critic.optim.type=${optimizer_type} \
+    critic.optim.force_bfloat16_state=${force_bfloat16_state} \
     critic.optim.lr=${critic_lr} \
     critic.optim.lr_warmup_steps=${lr_warmup_steps} \
     critic.model.path=${RM_MODEL_PATH} \

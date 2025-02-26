@@ -393,11 +393,8 @@ class AsyncActorRolloutRefWorker(Worker):
         # TODO: add more optimizer args into config
         if role == 'actor':
             from verl.utils.torch_functional import get_constant_schedule_with_warmup
-            actor_optimizer = optim.AdamW(actor_module_fsdp.parameters(),
-                                          lr=optim_config.lr,
-                                          betas=optim_config.get('betas', (0.9, 0.95)),
-                                          eps=optim_config.get('eps', 1e-08),
-                                          weight_decay=optim_config.get('weight_decay', 0.1))
+            from alpha_seed.trainer.optim import get_optimizer_from_config
+            actor_optimizer = get_optimizer_from_config(actor_module_fsdp.parameters(), optim_config)
 
             total_steps = optim_config.get('total_training_steps', 0)
             num_warmup_steps = int(optim_config.get('lr_warmup_steps', -1))
