@@ -50,6 +50,7 @@ jobs:
       - name: m8 ckpt save resume omnistore
         commands:
           - cd -
+          - export TEST_NAME=ckpt_save_resume
           - export NUM_STEPS=3
           - export N_GPUS_PER_NODE=8
           - export NCCL_SHM_DISABLE=1
