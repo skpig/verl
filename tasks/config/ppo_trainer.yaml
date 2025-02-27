@@ -165,7 +165,7 @@ actor_rollout_ref:
       warmup_step: 0
   streaming_rollout_args: ${streaming_rollout}
   streaming_validator_args: ${streaming_validator}
-  use_cuda_timer: False # deprecated
+  use_cuda_timer: False # doesn't take effect; only for backward-compatibility
 
 critic:
   remove_o_bias: False
@@ -225,7 +225,7 @@ critic:
     wait: 10
     active: 2
     mem_enable: False
-  use_cuda_timer: False # deprecated
+  use_cuda_timer: False # doesn't take effect; only for backward-compatibility
 
 reward_model:
   len_ema_json: null
@@ -265,7 +265,7 @@ reward_model:
   strict_box_verify: False
   punish_format: False
   format_punish_score: -5
-  use_cuda_timer: False # deprecated
+  use_cuda_timer: False # doesn't take effect; only for backward-compatibility
   length_ema_method: mean
 
 algorithm:

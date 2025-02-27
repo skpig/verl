@@ -293,9 +293,7 @@ class CriticWorker(Worker):
         if self.config.train_memory_offload:
             self.to("cpu")
         torch.cuda.empty_cache()
-        # tmp method, which will be refactored after `use_cuda_timer` deleted from config
-        is_ndtimeline_enabled = self.config.get("use_cuda_timer", False) or ndtimeline.use_cuda_timer()
-        ndtimeline.init_with_ray(is_ndtimeline_enabled, self)
+        ndtimeline.init_with_ray(self)
         self._model_initialized = True
         if remove_safetensors_after_init:
             cleanup_local_tmp_folder_safetensors_files(self.critic_model_config._name_or_path)

@@ -2,28 +2,10 @@ import os
 import requests
 import inspect
 from typing import Tuple, Union, List, Literal
-from packaging.version import Version
 
 from .timed_collectives import patch_coll_ops
 from .nccl_trace import upload_process_group, DumpType
-
-_USE_CUDA_TIMER = False
-
-
-def version_checker():
-    NDTIMELINE_BASE_VERSION = "2.2.14"
-    NDTIMELINE_HIGH_VERSION = "3.0.0"
-    err_msg = f"bytedance.ndtimeline is not installed or not proper. Try to " + \
-    "set use_cuda_timer=False in config file to disable it or install bytedance.ndtimeline >={NDTIMELINE_BASE_VERSION} <{NDTIMELINE_HIGH_VERSION}"
-    try:
-        from bytedance.ndtimeline import __version__
-        if Version(__version__) < Version(NDTIMELINE_BASE_VERSION) or Version(__version__) >= Version(
-                NDTIMELINE_HIGH_VERSION):
-            raise RuntimeError(err_msg)
-        return
-    except (ImportError, ModuleNotFoundError):
-        pass
-    raise RuntimeError(err_msg)
+from .check import use_cuda_timer, version_checker
 
 
 def get_cuda_timer_hires_persist_predicate():
@@ -52,22 +34,6 @@ enable_by_global_step = get_cuda_timer_hires_persist_predicate()
 # 10 True
 # [10, 20) False
 # ...
-
-
-def use_cuda_timer():
-    global _USE_CUDA_TIMER
-    # original init method will be dropped, use ENV here
-    return _USE_CUDA_TIMER or os.getenv("ALPHASEED_USE_NDTIMELINE", "0") == "1"
-
-
-def set_cuda_timer_option(turn_on):
-    global _USE_CUDA_TIMER
-    if turn_on:
-        # use warning level log in alpha seed
-        if "NDTIMELINE_LOG_LEVEL" not in os.environ:
-            os.environ["NDTIMELINE_LOG_LEVEL"] = "WARNING"
-        version_checker()
-    _USE_CUDA_TIMER = turn_on
 
 
 def get_all_actor_functions(instance: "WorkerHelper"):
@@ -130,19 +96,17 @@ def flush():
 def init_ndtimers(mesh_shape: Union[Tuple[int, int], Tuple[int]], ray_class_instance: object):
     if not use_cuda_timer():
         return
-    version_checker()
-
-    from bytedance.ndtimeline import DeviceTimerMeta
-
-    extra_timers = [
-        DeviceTimerMeta("ep-ar", is_cpu_op=False),
-        DeviceTimerMeta("tp-ari", is_cpu_op=False),
-        DeviceTimerMeta("tp-iar", is_cpu_op=False),
-        DeviceTimerMeta("ep-iar", is_cpu_op=False),
-        DeviceTimerMeta("ep-ari", is_cpu_op=False),
-    ]
 
     import bytedance.ndtimeline as nd
+
+    extra_timers = [
+        nd.DeviceTimerMeta("ep-ar", is_cpu_op=False),
+        nd.DeviceTimerMeta("tp-ari", is_cpu_op=False),
+        nd.DeviceTimerMeta("tp-iar", is_cpu_op=False),
+        nd.DeviceTimerMeta("ep-iar", is_cpu_op=False),
+        nd.DeviceTimerMeta("ep-ari", is_cpu_op=False),
+    ]
+
     # wangchenyuan.99: deliberately not compatable with ray in lower verison
     import ray
     actor_name = ray.get_runtime_context().get_actor_name()

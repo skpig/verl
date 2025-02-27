@@ -195,7 +195,8 @@ actor_rollout_ref:
       default_hdfs_dir: null
       upload_to_mlx: False
       enable: False
-  use_cuda_timer: False
+  use_cuda_timer: False # doesn't take effect; only for backward-compatibility
+
 
 critic:
   load_score_head: True
@@ -242,7 +243,7 @@ critic:
     default_hdfs_dir: null
     upload_to_mlx: False
     enable: False
-  use_cuda_timer: False
+  use_cuda_timer: False # doesn't take effect; only for backward-compatibility
 
 reward_model:
   enable: False
@@ -276,7 +277,7 @@ reward_model:
   need_punish_trunc: False
   trunc_punish_score: -5
   strict_box_verify: False
-  use_cuda_timer: False
+  use_cuda_timer: False # doesn't take effect; only for backward-compatibility
 
 algorithm:
   force_append_eos: False

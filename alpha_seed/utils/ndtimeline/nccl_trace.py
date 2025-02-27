@@ -1,9 +1,6 @@
-import os
 import logging
 from enum import Enum
-from packaging.version import Version
-
-_USE_NCCL_TRACE = True
+from .check import use_cuda_timer
 
 
 class DumpType(Enum):
@@ -11,36 +8,7 @@ class DumpType(Enum):
 
 
 def use_nccl_trace():
-    global _USE_NCCL_TRACE
-    return _USE_NCCL_TRACE
-
-
-# (wangchenyuan.99): no need for set, will be refactored soon
-def set_nccl_trace_option():
-    global _USE_NCCL_TRACE
-
-    if os.getenv("TRAINER_DISABLE_NCCL_TRACE", "false").lower() != "true" and check_version_for_nccl_trace():
-        _USE_NCCL_TRACE = True
-        logging.info("nccl trace is enabled")
-    else:
-        _USE_NCCL_TRACE = False
-
-
-def check_version_for_nccl_trace():
-    NDTIMELINE_BASE_VERSION = "2.2.5"
-    try:
-        from bytedance.ndtimeline import EmergencyServer, FlightRecorderDumper
-        from bytedance.ndtimeline import __version__
-        if Version(__version__) < Version(NDTIMELINE_BASE_VERSION):
-            logging.warning(
-                f"bytedance.ndtimeline's version should be >={NDTIMELINE_BASE_VERSION} to allow nccl trace dumping,"
-                f"but {__version__} found, set use_cuda_timer=False in config file to disable it or install bytedance.ndtimeline properly"
-            )
-            return False
-        return True
-    except (ImportError, ModuleNotFoundError):
-        logging.warning("ndtimeline EmergencyServer,FlightRecorderDumper is not found")
-        return False
+    return use_cuda_timer()
 
 
 def init_emergency_server(local_rank, actor_name):

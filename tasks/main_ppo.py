@@ -45,7 +45,7 @@ from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRe
 from alpha_seed.workers.actors.critic_worker import CriticWorker
 from alpha_seed.utils.alarm.lark_util import send_message_to_employee
 from alpha_seed.utils.server_client import validate_client_config, KVStore, ServerHealthCheck, TaskRunner, ClientTaskRunner, check_all_workers_alive, recreate_actor
-from alpha_seed.utils.ndtimeline import version_checker, set_cuda_timer_option
+from alpha_seed.utils.ndtimeline import version_checker
 
 user_email = os.getenv('ARNOLD_LARK_RECEIVER', '')
 task_url = os.getenv('ARNOLD_ORIGIN_PLATFORM_URL', '')
@@ -663,20 +663,6 @@ def validate_config(config):
         assert config.critic.ppo_mini_batch_size % config.critic.ppo_micro_batch_size == 0
         assert config.critic.ppo_micro_batch_size * ulysses >= n_gpus
 
-    assert (config.critic.use_cuda_timer and config.actor_rollout_ref.use_cuda_timer) or (
-            not config.actor_rollout_ref.use_cuda_timer and not config.critic.use_cuda_timer), \
-    "Error: config.critic.use_cuda_timer and config.actor_rollout_ref.use_cuda_timer must be the same"
-
-    # wangchenyuan.99: new method for ndtimeline init, cmdline option will be dropped
-    if config.actor_rollout_ref.use_cuda_timer or config.reward_model.use_cuda_timer or os.getenv(
-            "ALPHASEED_USE_NDTIMELINE", "0") == "1":
-        if os.getenv("ALPHASEED_USE_NDTIMELINE", "0") != "1":
-            print(
-                "Warning: `use_cuda_timer` option in commandline will be ignored, use env `ALPHASEED_USE_NDTIMELINE=1` instead"
-            )
-        version_checker()
-        set_cuda_timer_option(True)
-
     min_required_seq_len = config.data.max_prompt_length + config.data.max_response_length
     if config.actor_rollout_ref.actor.use_dynamic_bsz:
         if min_required_seq_len > config.actor_rollout_ref.actor.ppo_max_token_len:
@@ -696,6 +682,12 @@ def validate_config(config):
             print(
                 f"Warning: config.actor_rollout_ref.rollout.max_token_len is set to {config.actor_rollout_ref.rollout.max_token_len}"
             )
+    if config.actor_rollout_ref.use_cuda_timer or config.critic.use_cuda_timer or config.reward_model.use_cuda_timer:
+        print(
+            "Warning: actor_rollout_ref.use_cuda_timer or critic.use_cuda_timer or reward_model.use_cuda_timer is set to True, but not supported yet. "+\
+            "Use ALPHASEED_USE_NDTIMELINE=1 instead."
+        )
+
     if config.critic.use_dynamic_bsz:
         if min_required_seq_len > config.critic.ppo_max_token_len:
             config.critic.ppo_max_token_len = min_required_seq_len

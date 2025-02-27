@@ -783,9 +783,7 @@ class AsyncActorRolloutRefWorker(Worker):
                 # TODO: build megatron checkpoint manager
                 pass
 
-        # tmp method, which will be refactored after `use_cuda_timer` deleted from config
-        is_ndtimeline_enabled = self.config.get("use_cuda_timer", False) or ndtimeline.use_cuda_timer()
-        ndtimeline.init_with_ray(is_ndtimeline_enabled, self)
+        ndtimeline.init_with_ray(self)
         torch.cuda.empty_cache()
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)

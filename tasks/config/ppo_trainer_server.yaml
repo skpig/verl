@@ -50,7 +50,7 @@ actor_rollout_ref:
     # for xperf_gpt
     quant_mode: "NO_QUANT"
     gpu_memory_utilization: 0.7
-  use_cuda_timer: False
+  use_cuda_timer: False # doesn't take effect; only for backward-compatibility
 
 critic:
   strategy: fsdp
@@ -71,7 +71,7 @@ critic:
   use_dynamic_bsz: True
   ppo_max_token_len: -1
   act_offload: False
-  use_cuda_timer: False
+  use_cuda_timer: False # doesn't take effect; only for backward-compatibility
 
 reward_model:
   enable: False
@@ -91,7 +91,7 @@ reward_model:
   max_prompt_length: ${data.max_prompt_length}
   max_response_length: ${data.max_response_length}
   reward_executor_maxnum: 128
-  use_cuda_timer: False
+  use_cuda_timer: False # doesn't take effect; only for backward-compatibility
 
 trainer:
   nnodes: 1

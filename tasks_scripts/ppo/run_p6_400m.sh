@@ -78,7 +78,6 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.actor.scale_pg_by_kl=True \
     actor_rollout_ref.actor.upgo_loss_weight=${upgo_loss_weight} \
     actor_rollout_ref.actor.upgo_loss_version=${upgo_loss_version} \
-    actor_rollout_ref.use_cuda_timer=True \
     critic.optim.lr=${critic_lr} \
     critic.optim.lr_warmup_steps=${lr_warmup_steps} \
     critic.model.path=${RM_MODEL_PATH} \
@@ -86,7 +85,6 @@ python3 tasks/main_ppo.py \
     critic.ppo_micro_batch_size=${train_micro_batch_size} \
     critic.infer_micro_batch_size=${infer_micro_batch_size} \
     critic.model.fsdp_config.param_offload=False \
-    critic.use_cuda_timer=True \
     +critic.model.override_config.attention_dropout=0. \
     +critic.model.override_config.embd_pdrop=0. \
     +critic.model.override_config.resid_pdrop=0. \
