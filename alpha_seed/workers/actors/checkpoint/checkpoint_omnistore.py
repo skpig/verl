@@ -18,7 +18,7 @@ from .checkpoint_manager import BaseCheckpointManager
 
 from ray.actor import ActorHandle
 
-REQUIRED_OMNISTORE_VERSION = '0.7.5'
+REQUIRED_OMNISTORE_VERSION = '0.7.9'
 ACTUAL_OMNISTORE_VERSION = None
 
 

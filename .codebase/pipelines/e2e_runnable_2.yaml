@@ -44,7 +44,7 @@ jobs:
           - cd verl
           - pip3 install -e . --user
           - pip3 install bytedance.ndtimeline --upgrade
-          - pip3 install byted-omnistore==0.7.5
+          - pip3 install byted-omnistore==0.7.9
           - pip3 install pylatexenc
       - name: math v1 ppo async and grpo
         commands:
