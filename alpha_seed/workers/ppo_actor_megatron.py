@@ -98,7 +98,7 @@ class MegatronPPOActor(BasePPOActor):
             scheduler = schedulers[0]
             scheduler.step(increment=1)
 
-    def _forward_backward_batch(self, data: TensorDict, forward_only=False):
+    def _forward_backward_batch(self, batch: TensorDict, forward_only=False):
         from megatron import get_args
         from flash_attn.bert_padding import unpad_input
         from verl.utils.megatron.sequence_parallel import pad_to_sequence_parallel
@@ -106,38 +106,32 @@ class MegatronPPOActor(BasePPOActor):
 
         from verl.utils.torch_functional import logprobs_from_logits, entropy_from_logits
 
+        from verl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_parallel_log_probs_from_logits
+
         args = get_args()
         # TODO: select pipeline strategy here
         forward_backward_func = get_forward_backward_func(pipeline_strategy=None)
 
         # TODO: add sequence balancing and dynamic bsz here. For now, we simply split the data according to micro_bsz
-        batch = data
-
         batches = batch.split(self.config.ppo_micro_batch_size)
-        response_length = data['responses'].size(-1)
+        response_length = batch['responses'].size(-1)
 
-        def loss_func(output, data):
-            # compute logprobs and entropy here. We only compute entropy when forward_only=True
-            attention_mask = data['attention_mask']
-            response_mask = attention_mask[:, -response_length:]
-            responses = data['input_ids'][:, -response_length:]
-
-            # compute policy loss
-            logits = output
-            # TODO(zhangchi.usc1992): optimize this
-            logits = logits[:, -response_length - 1:-1]
-            # log_probs = vocab_parallel_log_probs_from_logits(logits, responses)
-            log_prob = logprobs_from_logits(logits, responses)
-
+        def loss_func(output, micro_batch):
             if forward_only:
-                entropy = entropy_from_logits(logits)
-                return 1.0, {'log_probs': log_prob, 'entropy': entropy}
+                return 1.0, output
 
-            old_log_prob = data['old_log_probs']
-            advantages = data['advantages']
-            ref_log_prob = data.get('ref_log_prob', None)
-            upgo_advantages = data['upgo_advantages']
-            overlong_mask = data.get('overlong_mask', None)
+            log_prob = output['log_probs']
+            assert output['entropy'] is None
+
+            # compute logprobs and entropy here. We only compute entropy when forward_only=True
+            attention_mask = micro_batch['attention_mask']
+            response_mask = attention_mask[:, -response_length:]
+
+            old_log_prob = micro_batch['old_log_probs']
+            advantages = micro_batch['advantages']
+            ref_log_prob = micro_batch.get('ref_log_prob', None)
+            upgo_advantages = micro_batch['upgo_advantages']
+            overlong_mask = micro_batch.get('overlong_mask', None)
 
             clip_ratio = self.config.clip_ratio
             clip_ratio2 = self.config.clip_ratio2
@@ -175,8 +169,8 @@ class MegatronPPOActor(BasePPOActor):
                 kl_loss = torch.zeros((), device=pg_loss.device)
 
             if lm_loss_weight > 0.0:
-                eos_ids = data['eos_ids']
-                raw_scores = data['token_level_scores']
+                eos_ids = micro_batch['eos_ids']
+                raw_scores = micro_batch['token_level_scores']
                 lm_loss = core_algos.compute_lm_loss(log_prob, raw_scores, eos_ids)
             else:
                 lm_loss = torch.zeros((), device=pg_loss.device)
@@ -198,9 +192,9 @@ class MegatronPPOActor(BasePPOActor):
             return policy_loss, stats
 
         def forward_step(batch_iter, model):
-            batch = next(batch_iter)
-            input_ids = batch['input_ids']
-            attention_mask = batch['attention_mask']
+            micro_batch = next(batch_iter)
+            input_ids = micro_batch['input_ids']
+            attention_mask = micro_batch['attention_mask']
             position_ids = compute_position_id_with_mask(attention_mask)
 
             batch_size, sequence_length = input_ids.shape
@@ -216,7 +210,7 @@ class MegatronPPOActor(BasePPOActor):
 
             # pad to sequence parallel size
             input_ids_rmpad_padded = pad_to_sequence_parallel(input_ids_rmpad)  # (total_nnz + pad_size, 1)
-            input_ids_rmpad_padded = input_ids_rmpad_padded.transpose(0, 1)
+            input_ids_rmpad_padded = input_ids_rmpad_padded.transpose(0, 1)  # (1, total_nnz + pad_size)
             position_ids_rmpad = position_ids_rmpad.transpose(0, 1)
 
             # form a batch and feed into the model
@@ -231,31 +225,33 @@ class MegatronPPOActor(BasePPOActor):
             output = model(batch=forward_batch)
 
             if mpu.is_pipeline_last_stage():
-                logits = output['logits']
-                logits = tensor_parallel.gather_from_tensor_model_parallel_region(
-                    logits)  # (total_nnz_padded, 1, vocab_size)
+                labels = torch.roll(input_ids_rmpad_padded, shifts=-1, dims=1).squeeze(dim=0)  # (total_nnz + pad_size,)
+                logits = output['logits'].squeeze(dim=1)  # (total_nnz_padded, vocab_size // tp)
 
-                # from IPython import embed
-                # if dist.get_rank() == 0:
-                #     embed()
-                # dist.barrier()
+                if forward_only:
+                    entropy = vocab_parallel_entropy(logits)  # (total_nnz + pad_size,)
+                    entropy = entropy[:total_s]
+                    entropy = pad_input(entropy.unsqueeze(-1), indices, batch_size, sequence_length).squeeze(-1)
+                    entropy = entropy[:, -response_length - 1:-1]
+                else:
+                    entropy = None
 
-                # all gather from sequence parallel region. This makes replicate on each tp rank
-                logits = logits[:total_s]  # (total_nnz_padded)
+                # vocab_parallel logprobs and vocab_parallel entropy
+                # Note(zhangchi.usc1992) very important. This function will modify logits inplace
+                log_prob = vocab_parallel_log_probs_from_logits(logits=logits, labels=labels)  # (total_nnz + pad_size,)
+                log_prob = log_prob[:total_s]
 
-                logits = torch.squeeze(logits, dim=1)  # remove the artificial batch dimension
-                # add removed padding back
-                logits = pad_input(logits, indices, batch_size,
-                                   seqlen=sequence_length)  # (batch_size, sequence_length, vocab_size)
+                # pad log_prob into full
+                log_prob = pad_input(log_prob.unsqueeze(-1), indices, batch_size,
+                                     sequence_length).squeeze(-1)  # (batch_size, sequence_length)
+                log_prob = log_prob[:, -response_length - 1:-1]
 
-                # TODO(zhangchi.usc1992)
-                # currently, we allgather from sequence parallel region of logits and remove padding from tp here
-                # in fact, we can first perform reduction and then directly outputs logprobs and
+                output = {'log_probs': log_prob, 'entropy': entropy}
 
-                return logits, partial(loss_func, data=batch)
+                return output, partial(loss_func, micro_batch=micro_batch)
             else:
                 hidden_states = output['hidden_states']
-                return hidden_states, partial(loss_func, data=batch)
+                return hidden_states, partial(loss_func, micro_batch=micro_batch)
 
         from verl.utils.megatron.pipeline_parallel import make_batch_generator, compute_transformers_input_shapes
         batch_generator = make_batch_generator(batches, vpp_size=len(self.actor_module))

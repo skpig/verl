@@ -120,6 +120,7 @@ def main(config: DictConfig):
 
     # step 4: generate random data. Currently we only support TP. So we have to make sure the data is identical on every TP
     from verl.utils.model import compute_position_id_with_mask, create_random_mask
+    from verl.utils.torch_functional import masked_mean
 
     batch_size = 8
     max_prompt_length = 128
@@ -148,6 +149,8 @@ def main(config: DictConfig):
                    src=mpu.get_pipeline_model_parallel_first_rank(),
                    group=mpu.get_pipeline_model_parallel_group())
 
+    response_mask = attention_mask[:, -max_response_length:]
+
     data = {
         'input_ids': input_ids,
         'attention_mask': attention_mask,
@@ -161,13 +164,17 @@ def main(config: DictConfig):
     # step 5: perform forward
     entropy, logprobs = actor.compute_log_prob(data=data)
 
+    if mpu.get_tensor_model_parallel_rank() == 0 and mpu.is_pipeline_last_stage():
+        print(masked_mean(entropy, response_mask))
+        print(masked_mean(logprobs, response_mask))
+
     # step 6: perform forward + backward
     # if dist.get_rank() == 0:
     #     from IPython import embed
     #     embed()
     # dist.barrier()
 
-    metrics = actor.update_policy(data=data)
+    # metrics = actor.update_policy(data=data)
 
     # if dist.get_rank() == 0:
     #     from IPython import embed
