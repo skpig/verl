@@ -11,7 +11,7 @@ def get_optimizer_from_config(param_groups, optimizer_config):
     if type == "adam":
         import torch
         warnings.warn(f"Using torch.optim.AdamW. force_bfloat16_state is not supported.")
-        optimizer = torch.optim.AdamW(param_groups, lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
+        optimizer = torch.optim.AdamW(param_groups, lr=lr, betas=betas, eps=eps, weight_decay=weight_decay, fused=True)
     else:
         try:
             from byted_optimizer.alphaseed import get_byted_optimizer_from_alphaseed_config
