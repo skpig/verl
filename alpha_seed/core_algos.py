@@ -257,15 +257,26 @@ def compute_policy_loss(old_log_prob, ref_log_prob, log_prob, advantages, upgo_a
     seq_len_per_sample = torch.clamp(torch.sum(eos_mask, dim=1), min=1.0)
     if not use_ewma_loss:
         ratio = torch.exp(log_prob - old_log_prob)
+        pg_losses1 = -advantages * ratio
+        pg_losses2 = -advantages * torch.clamp(ratio, 1.0 - cliprange, 1.0 + cliprange)
+        pg_losses3 = torch.abs(-advantages * cliprange2)
+        pg_losses_clip = torch.maximum(pg_losses1, pg_losses2)
+        pg_losses = torch.minimum(pg_losses_clip, pg_losses3)  # 这个应该对advantage为正的情况不影响
     else:
-        ratio = torch.exp(log_prob - ref_log_prob)
-    pg_losses1 = -advantages * ratio
-    pg_losses2 = -advantages * torch.clamp(ratio, 1.0 - cliprange, 1.0 + cliprange)
-    pg_losses3 = torch.abs(-advantages * cliprange2)
-    pg_losses_clip = torch.maximum(pg_losses1, pg_losses2)
-    pg_losses = torch.minimum(pg_losses_clip, pg_losses3)  # 这个应该对advantage为正的情况不影响
-    if use_ewma_loss:
-        pg_losses = torch.exp(ref_log_prob - old_log_prob) * pg_losses
+        # ref: https://github.com/openai/ppo-ewma/blob/master/ppo_ewma/ppo.py#L93
+        # log space importance sampling
+        log_ratio = log_prob - ref_log_prob
+        # clip by 10.0
+        logp_adj = torch.max(old_log_prob, log_prob.detach() - np.log(10.))
+        # log space importance sampling again
+        pg_losses1 = -advantages * torch.exp(log_prob - logp_adj)
+        clipped_logratio = torch.clamp(log_ratio, np.log(1.0 - cliprange), np.log(1.0 + cliprange))
+        pg_losses2 = -advantages * torch.exp(clipped_logratio + ref_log_prob - logp_adj)
+
+        pg_losses3 = torch.abs(-advantages * cliprange2)
+        pg_losses_clip = torch.maximum(pg_losses1, pg_losses2)
+        pg_losses = torch.minimum(pg_losses_clip, pg_losses3)  # 这个应该对advantage为正的情况不影响
+
     pg_loss = torch.sum(pg_losses * eos_mask, dim=1) / seq_len_per_sample
 
     negative_approx_kl = kl_penalty(log_prob, old_log_prob, kl_penalty_type=kl_penalty_type)

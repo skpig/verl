@@ -313,12 +313,15 @@ class DataParallelPPOActor(BasePPOActor):
                 )
         temperature = data.meta_info['temperature']  # temperature must be in the data.meta_info to avoid slient error
         global_step = data.meta_info.get('global_step')
+        use_rollout_log_probs = self.config.get("use_rollout_log_probs", False)
 
         # make minibatch iterator
         # dataloader = self._make_minibatch_iterator(data=data)
         select_keys = ['responses', 'input_ids', 'attention_mask', 'old_log_probs', 'advantages', 'upgo_advantages']
         if 'ref_log_prob' in data.batch.keys():
             select_keys.append('ref_log_prob')
+        if 'rollout_log_probs' in data.batch.keys():
+            select_keys.append('rollout_log_probs')
         if 'overlong_mask' in data.batch.keys():
             select_keys.append('overlong_mask')
         if 'eos_ids' in data.batch.keys():
@@ -353,8 +356,15 @@ class DataParallelPPOActor(BasePPOActor):
                     response_length = responses.size(1)
                     attention_mask = micro_data['attention_mask']
                     response_mask = attention_mask[:, -response_length:]
-                    old_log_prob = micro_data['old_log_probs']
-                    ref_log_prob = micro_data.get('ref_log_prob', None)
+                    if use_rollout_log_probs:
+                        # use ewma if use_rollout_log_probs: importance sampling by rollout_logp)rob, clip by old_log_prob
+                        use_ewma_loss = True
+                        old_log_prob = micro_data['rollout_log_probs']
+                        ref_log_prob = micro_data['old_log_probs']
+                    else:
+                        use_ewma_loss = self.config.use_ewma_loss
+                        old_log_prob = micro_data['old_log_probs']
+                        ref_log_prob = micro_data.get('ref_log_prob', None)
                     advantages = micro_data['advantages']
                     upgo_advantages = micro_data['upgo_advantages']
                     overlong_mask = micro_data.get('overlong_mask', None)
@@ -390,7 +400,7 @@ class DataParallelPPOActor(BasePPOActor):
                         scale_pg_by_kl=scale_pg_by_kl,
                         scale_pg_by_local_kl=scale_pg_by_local_kl,
                         upgo_loss_weight=upgo_loss_weight,
-                        use_ewma_loss=self.config.use_ewma_loss,
+                        use_ewma_loss=use_ewma_loss,
                         kl_penalty_type=kl_penalty_type,
                         overlong_mask=overlong_mask)
 
