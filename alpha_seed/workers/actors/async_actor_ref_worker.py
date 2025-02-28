@@ -279,31 +279,14 @@ class AsyncActorRolloutRefWorker(Worker):
                     from alpha_seed.workers.actors import activation_offload
                     torch.utils.checkpoint.CheckpointFunction = activation_offload.CheckpointFunction
 
-                # this is a specialization for seed m8 to get avoid of
-                # non-deterministic recompute of gate
-                if actor_module.config.model_type == "seed_m8":
-                    from seed_models.models.m8.modeling_m8 import M8DecoderLayer
-                    from torch.utils.checkpoint import checkpoint
-                    gradient_checkpointing_kwargs = {
+                actor_module.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={
                         'use_reentrant':
                             use_reentrant,
                         "context_fn":
-                            partial(metrics_context_fn, metrics_context) if
-                            (enable_training_stats and not use_reentrant) else noop_context_fn,
-                    }
-                    recompute_fn = partial(checkpoint, **gradient_checkpointing_kwargs)
-                    for layer in actor_module.transformer.h:
-                        assert isinstance(layer, M8DecoderLayer)
-                        layer._gradient_checkpointing_func = recompute_fn
-                else:
-                    actor_module.gradient_checkpointing_enable(
-                        gradient_checkpointing_kwargs={
-                            'use_reentrant':
-                                use_reentrant,
-                            "context_fn":
-                                partial(metrics_context_fn, metrics_context) if (
-                                    enable_training_stats and not use_reentrant) else noop_context_fn,
-                        })
+                            partial(metrics_context_fn, metrics_context) if (
+                                enable_training_stats and not use_reentrant) else noop_context_fn,
+                    })
                 actor_module.train()
                 if self.rank == 0:
                     print(actor_module)
@@ -315,7 +298,9 @@ class AsyncActorRolloutRefWorker(Worker):
                     else:
                         model = None
                     if model is not None:
-                        print(f'{model.gradient_checkpointing=}, {model.training=}')
+                        print(
+                            f'{model.gradient_checkpointing=}, {model.training=}, {model._gradient_checkpointing_func=}'
+                        )
         # use shard plan
         tp_mesh = self.ref_tp_mesh if role == 'ref' else self.actor_tp_mesh
         shard_plan = apply_parallel_plan(actor_module, actor_module.config, tp_mesh)

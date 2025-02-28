@@ -24,7 +24,6 @@ import hdfs_io
 import ray
 import torch
 import torch.distributed
-from functools import partial
 
 import verl.utils.torch_functional as verl_F
 from single_controller.base import Worker
@@ -162,19 +161,8 @@ class CriticWorker(Worker):
             if config.model.enable_gradient_checkpointing:
                 # doc link: https://bytedance.us.larkoffice.com/docx/NiWVd0QgoopepBxBXmDuHJKwsNe
                 use_reentrant = self.config.act_offload
-                # this is a specialization for seed m8 to get avoid of
-                # non-deterministic recompute of gate
-                if critic_module.config.model_type == "seed_m8":
-                    from seed_models.models.m8.modeling_m8 import M8DecoderLayer
-                    from torch.utils.checkpoint import checkpoint
-                    gradient_checkpointing_kwargs = {'use_reentrant': use_reentrant}
-                    recompute_fn = partial(checkpoint, **gradient_checkpointing_kwargs)
-                    for layer in critic_module.transformer.h:
-                        assert isinstance(layer, M8DecoderLayer)
-                        layer._gradient_checkpointing_func = recompute_fn
-                else:
-                    critic_module.gradient_checkpointing_enable(
-                        gradient_checkpointing_kwargs={'use_reentrant': use_reentrant})
+                critic_module.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={'use_reentrant': use_reentrant})
                 critic_module.train()
                 if self.rank == 0:
                     print(critic_module)
@@ -185,7 +173,9 @@ class CriticWorker(Worker):
                     else:
                         model = None
                     if model is not None:
-                        print(f'{model.gradient_checkpointing=}, {model.training=}')
+                        print(
+                            f'{model.gradient_checkpointing=}, {model.training=}, {model._gradient_checkpointing_func=}'
+                        )
         shard_plan = apply_parallel_plan(critic_module, critic_module.config, self.tp_mesh)
 
         if self.rank == 0:
