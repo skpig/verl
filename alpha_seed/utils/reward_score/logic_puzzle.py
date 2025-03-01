@@ -3,7 +3,7 @@ from collections import defaultdict
 
 
 def dummy_verify(solution_str, answer, meta):
-    return 0
+    return -1
 
 
 registried_tasks = {}
@@ -33,6 +33,6 @@ def compute_score(solution_str, ground_truth, **argv) -> float:
     try:
         verify_fn = registried_tasks[task_name]
         score = verify_fn(solution_str, answer, meta)
-        return score
+        return score * 2 - 1  # 0, 1 -> -1, 1
     except Exception as ex:
         return dummy_verify(solution_str, answer, meta)
