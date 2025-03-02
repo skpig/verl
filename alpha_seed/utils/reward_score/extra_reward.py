@@ -6,8 +6,11 @@ def add_length_reward(thinking_len, correct_reward, config, current_mean_len=Non
     """
     ratio: 从多长开始奖励
     enhance: 最多多奖励多少
+    TODO: just stepv2 and overlong is justified. others not
     """
     assert isinstance(thinking_len, int), thinking_len
+    # length reward
+    length_reward = 0
     if config.algorithm.inference_scaling == "v1":  # 从 0.1 * max_length 以上开始奖励
         ratio = 0.1
         enhance = 2.0 if correct_reward > 0 else 0.0
@@ -61,16 +64,6 @@ def add_length_reward(thinking_len, correct_reward, config, current_mean_len=Non
             correct_reward = (max(min((thinking_len - current_mean_len) / interval, 1.0), -1.0) * 0.5 +
                               0.5) * (max_reward - min_reward) + min_reward
     elif 'stepv2' in config.algorithm.inference_scaling:
-        overlong_reward = 0
-        if config.algorithm.overlong_punish == 'v1':
-            overlong_length = config.data.max_response_length - config.algorithm.overlong_punish_cache
-            # overlong_length -> config.data.max_response_length, 0 -> -1
-            if thinking_len > overlong_length:
-                overlong_reward = -(thinking_len - overlong_length) / (config.data.max_response_length -
-                                                                       overlong_length)
-        if overlong_reward != 0:
-            return overlong_reward + correct_reward
-
         if config.algorithm.no_length_reward == 'v1':
             if thinking_len > 12288:
                 return correct_reward
@@ -85,16 +78,6 @@ def add_length_reward(thinking_len, correct_reward, config, current_mean_len=Non
         else:
             length_reward = 0
         length_reward = length_reward * length_reward_slope
-        if config.algorithm.inference_scaling == "stepv2_all":
-            correct_reward = length_reward + correct_reward
-        elif config.algorithm.inference_scaling == "stepv2_correct":
-            if correct_reward > 0:
-                correct_reward = length_reward + correct_reward
-        elif config.algorithm.inference_scaling == "stepv2_wrong":
-            if correct_reward < 0:
-                correct_reward = length_reward + correct_reward
-        else:
-            raise NotImplementedError
     elif 'step' in config.algorithm.inference_scaling and 'stepv1' not in config.algorithm.inference_scaling:
         length_reward_slope = config.algorithm.get("inference_scaling_slope", 0.1)
         length_reward_steps = config.algorithm.get("length_reward_steps", 1)
@@ -136,11 +119,30 @@ def add_length_reward(thinking_len, correct_reward, config, current_mean_len=Non
         else:
             raise NotImplementedError
     elif config.algorithm.inference_scaling == "v0":
-        return correct_reward
+        length_reward = 0
     else:
         raise NotImplementedError(config.algorithm.inference_scaling)
 
-    return correct_reward
+    if "_all" in config.algorithm.inference_scaling:
+        length_reward = length_reward
+    elif "_correct" in config.algorithm.inference_scaling:
+        if correct_reward < 0:
+            length_reward = 0
+    elif "_wrong" in config.algorithm.inference_scaling:
+        if correct_reward > 0:
+            length_reward = 0
+
+    # overlong punishment
+    overlong_reward = 0
+    if config.algorithm.overlong_punish == 'v1':
+        overlong_length = config.data.max_response_length - config.algorithm.overlong_punish_cache
+        # overlong_length -> config.data.max_response_length, 0 -> -1
+        if thinking_len > overlong_length:
+            overlong_reward = -(thinking_len - overlong_length) / (config.data.max_response_length - overlong_length)
+    if overlong_reward != 0:  # 如果有overlong reward，直接返回correct_reward + overlong reward，不要length reward
+        return 0, overlong_reward
+
+    return length_reward, overlong_reward
 
 
 # # copied from shengding
@@ -193,41 +195,80 @@ def add_length_reward(thinking_len, correct_reward, config, current_mean_len=Non
 #     return final_reward
 
 
-def punish_format(generation, config):
-    """
-    return: reward, [bot, eot, bor, eor]
-    """
+def punish_format_return_positions(text, config):
+    pattern = re.compile(
+        r'^(?P<leading>\n{0,2})'  # optional leading whitespace
+        r'(?P<thinking_open><(thinking|think|\|object_ref_start\|)>)'
+        # Capture the thinking body, but fail if we see
+        # <thinking>, </thinking>, <answer>, or </answer> inside it again:
+        r'(?P<thinking_body>(?:(?!<thinking>|</thinking>|<answer>|</answer>).)*)'
+        r'(?P<thinking_close><(/thinking|/think|\|object_ref_end\|)>\n)'
+        r'(?P<answer_open><(answer|\|box_start\|)>)'
+        # Capture the answer body, with the same restriction:
+        r'(?P<answer_body>(?:(?!<thinking>|</thinking>|<answer>|</answer>).)*)'
+        r'(?P<answer_close><(/answer|\|box_end\|)>\n{0,2})'
+        r'(<\|endoftext\|>|<\|im_end\|>)'
+        r'$',
+        re.DOTALL)
 
-    pause_tokens = {'thinking': ['<思考>', '</思考>'], 'response': ['<回复>', '</回复>']}
-    pause_tokens_all = pause_tokens['thinking'] + pause_tokens['response']
+    match = pattern.match(text)
+    if not match:
+        return config.reward_model.format_punish_score, None  # Does not match the required format
 
-    bot = [m.start() for m in re.finditer(pause_tokens['thinking'][0], generation)]
-    eot = [m.start() for m in re.finditer(pause_tokens['thinking'][1], generation)]
-    bor = [m.start() for m in re.finditer(pause_tokens['response'][0], generation)]
-    eor = [m.start() for m in re.finditer(pause_tokens['response'][1], generation)]
+    # Get positions of each captured group
+    positions = {
+        'thinking_open': (match.start('thinking_open'), match.end('thinking_open')),
+        'thinking_close': (match.start('thinking_close'), match.end('thinking_close')),
+        'answer_open': (match.start('answer_open'), match.end('answer_open')),
+        'answer_close': (match.start('answer_close'), match.end('answer_close')),
+    }
 
-    if len(bot) != 1 or len(eot) != 1 or len(bor) != 1 or len(eor) != 1:  # 如果特殊token不在里面或者出现大于1次就惩罚
-        return config.reward_model.format_punish_score, None
+    return 0, [
+        positions['thinking_open'][0], positions['thinking_close'][0], positions['answer_open'][0],
+        positions['answer_close'][0]
+    ]
 
-    bot, eot, bor, eor = bot[0], eot[0], bor[0], eor[0]
 
-    if (eot - bot) < (eor - bor):  # 思考比答案短，罚
-        return config.reward_model.format_punish_score, None
+# def punish_format(generation, config):
+#     """
+#     return: reward, [bot, eot, bor, eor]
+#     """
 
-    return 0, [bot, eot, bor, eor]
+#     pause_tokens = {'thinking': ['<thinking>', '</thinking>'], 'response': ['<answer>', '</answer>']}
+#     pause_tokens_all = pause_tokens['thinking'] + pause_tokens['response']
 
-    if punish_not_think_response < 0:
-        correct1 = solution_ids[0] == format_tokens[0] and \
-                  solution_ids[-1] == format_tokens[3] and \
-                  len(bor) > 0 and \
-                  len(eot) > 0 and \
-                  bor - eot == 1
+#     bot = [m.start() for m in re.finditer(pause_tokens['thinking'][0], generation)]
+#     eot = [m.start() for m in re.finditer(pause_tokens['thinking'][1], generation)]
+#     bor = [m.start() for m in re.finditer(pause_tokens['response'][0], generation)]
+#     eor = [m.start() for m in re.finditer(pause_tokens['response'][1], generation)]
 
-        if not correct1:
-            final_reward += punish_not_think_response
+#     if len(bot) != 1 or len(eot) != 1 or len(bor) != 1 or len(eor) != 1:  # 如果特殊token不在里面或者出现大于1次就惩罚
+#         return config.reward_model.format_punish_score, None
 
-    if punish_response_over_long < 0:
-        correct2 = len(eor) > 0 and len(bor) > 0 and eor - bor < response_interval_max_len
-        if not correct2:
-            final_reward += punish_response_over_long
-    return final_reward
+#     bot, eot, bor, eor = bot[0], eot[0], bor[0], eor[0]
+
+#     if (eot - bot) < (eor - bor):  # 思考比答案短，罚
+#         return config.reward_model.format_punish_score, None
+
+#     if len(generation) - eor > 20:  # </answer>不在最后，罚
+#         return -1, None
+
+#     if bot > 5 or bor - eot > 20:
+#         return config.reward_model.format_punish_score, None
+#     return 0, [bot, eot, bor, eor]
+
+#     if punish_not_think_response < 0:
+#         correct1 = solution_ids[0] == format_tokens[0] and \
+#                   solution_ids[-1] == format_tokens[3] and \
+#                   len(bor) > 0 and \
+#                   len(eot) > 0 and \
+#                   bor - eot == 1
+
+#         if not correct1:
+#             final_reward += punish_not_think_response
+
+#     if punish_response_over_long < 0:
+#         correct2 = len(eor) > 0 and len(bor) > 0 and eor - bor < response_interval_max_len
+#         if not correct2:
+#             final_reward += punish_response_over_long
+#     return final_reward

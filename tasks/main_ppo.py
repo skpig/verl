@@ -38,7 +38,7 @@ except ImportError:
     MegavisionMetricsCtx = None
 
 # rule-based reward score
-from alpha_seed.utils.reward_score.extra_reward import add_length_reward, punish_format
+from alpha_seed.utils.reward_score.extra_reward import add_length_reward, punish_format_return_positions
 from alpha_seed.utils.reward_score import math_v1, verifier_service, gsm8k, math_v2, model_score_fn, logic_puzzle, oj_utils, math_verifier, response_post_proc, gpqa_verifier, math_deepscale, code_local_verifier
 from alpha_seed.utils.duplicate import para_dup
 from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRefWorker
@@ -242,6 +242,7 @@ class RewardManager():
 
         reward_tensor = torch.zeros_like(response_ids, dtype=torch.float32)
         raw_scores = torch.zeros_like(response_ids, dtype=torch.float32)
+        format_scores = torch.zeros_like(response_ids, dtype=torch.float32)
         len_scores = torch.zeros_like(response_ids, dtype=torch.float32)
         idx_tensor = torch.zeros(response_ids.shape[0], dtype=torch.int64, device=response_ids.device)
         already_print_data_sources = {}
@@ -283,7 +284,8 @@ class RewardManager():
             thinking_len = 0
             if self.rm_name == 'train':
                 if self.config.reward_model.punish_format:
-                    format_reward, pause_tokens_index = punish_format(solution_str_post_proc, self.config)
+                    format_reward, pause_tokens_index = punish_format_return_positions(
+                        solution_str_post_proc, self.config)
                     if pause_tokens_index is not None:
                         thinking_len = len(
                             self.tokenizer(
@@ -349,7 +351,20 @@ class RewardManager():
         not_dup_lens = []
         from tqdm import tqdm
         all_ngram = []
+
+        all_raw_scores = []
+        counter_raw_scores = []
         all_final_scores = []
+        counter_final_scores = []
+        all_format_scores = []
+        counter_format_scores = []
+        all_length_rewards = []
+        counter_length_rewards = []
+        all_overlong_rewards = []
+        counter_overlong_rewards = []
+        all_thinking_len = []
+        all_dup_punish_scores = []
+
         all_final_scores_to_lens = defaultdict(list)
         for res in tqdm(as_completed(rm_res_future_list), total=len(data), desc="get_rm_score"):
             output_dict = res.result()
@@ -369,6 +384,8 @@ class RewardManager():
             format_reward = output_dict['format_reward']
             global_index = output_dict['global_index']
 
+            all_thinking_len.append(thinking_len)
+
             all_ngram.extend(ngram)
             if reward_style == "code-sandbox":
                 oj_total_cnt += 1
@@ -386,25 +403,37 @@ class RewardManager():
             if need_norm:
                 score = (score - self.mean) / self.std
             raw_scores[idx, valid_response_length - 1] = score
+            raw_reward = score
+
+            format_scores[idx, valid_response_length - 1] = format_reward
+
+            length_reward, overlong_reward = 0, 0
 
             # 对score做额外的条件处理，例如length、dup、trunc、format等
-            if self.rm_name == 'train':
+            # 没有format punish的时候才加length reward
+            if self.rm_name == 'train' and format_reward == 0:
                 # length reward有不同版本，by default不加length reward
                 thinking_len = valid_response_length if thinking_len == 0 else thinking_len
-                score = add_length_reward(thinking_len, score, self.config, current_mean_len=mean_len_per_prompt[idx])
+                length_reward, overlong_reward = add_length_reward(thinking_len,
+                                                                   score,
+                                                                   self.config,
+                                                                   current_mean_len=mean_len_per_prompt[idx])
+                score = score + length_reward + overlong_reward
                 len_scores[idx, valid_response_length - 1] = score
 
+            dup_punish_reward = 0
             if is_para_dup:
                 dup_cnt += 1
                 dup_lens.append(valid_response_length)
                 if self.need_punish_duplicate and not is_validation:
-                    score = self.punish_score.get(reward_style, -1)
+                    dup_punish_reward = self.punish_score.get(reward_style, -1)
+                score += dup_punish_reward
             else:
                 not_dup_lens.append(valid_response_length)
             if self.need_punish_trunc and is_trunc and not is_validation:
                 score = self.trunc_punish_score
             if format_reward != 0:
-                score = format_reward
+                score += format_reward
             reward_tensor[idx, valid_response_length - 1] = score
             idx_tensor[idx] = valid_response_length - 1
 
@@ -431,7 +460,13 @@ class RewardManager():
                 solution_str_post_proc[-32:], is_para_dup, is_trunc, valid_response_length
             ])
 
-        counter = Counter(all_final_scores)
+        raw_counter = Counter(counter_raw_scores)
+        final_counter = Counter(counter_final_scores)
+        format_counter = Counter(counter_format_scores)
+        length_counter = Counter(counter_length_rewards)
+        overlong_counter = Counter(counter_overlong_rewards)
+        dup_punish_counter = Counter(all_dup_punish_scores)
+
         all_final_scores_to_lens = {key: sum(value) / len(value) for key, value in all_final_scores_to_lens.items()}
         prefix = "" if not is_validation else "val/"
         log_data = {
@@ -443,9 +478,25 @@ class RewardManager():
             prefix + 'unique_2gram': len(set(all_ngram)) / (len(all_ngram) + 1),
             prefix + 'current_mean_len': current_mean_len
         }
-        log_counter = {prefix + f"score_counter/{key}": value for key, value in counter.items()}
+        log_counter = {prefix + f"score_counter/raw_{key}": value for key, value in raw_counter.items()}
+        log_counter.update({prefix + f"score_counter/final_{key}": value for key, value in final_counter.items()})
+        log_counter.update({prefix + f"score_counter/format_{key}": value for key, value in format_counter.items()})
+        log_counter.update({prefix + f"score_counter/length_{key}": value for key, value in length_counter.items()})
+        log_counter.update({prefix + f"score_counter/overlong_{key}": value for key, value in overlong_counter.items()})
+        log_counter.update({
+            prefix + f"score_counter/dup_punish_{key}": value for key, value in dup_punish_counter.items()
+        })
+
         log_score_to_lens = {prefix + f"score_to_lens/{key}": value for key, value in all_final_scores_to_lens.items()}
-        log_data = {**log_data, **log_counter, **log_score_to_lens}
+        log_score = {
+            prefix + f"score/raw": sum(all_raw_scores) / max(1, len(all_raw_scores)),
+            prefix + f"score/format": sum(all_format_scores) / max(1, len(all_format_scores)),
+            prefix + f"score/length": sum(all_length_rewards) / max(1, len(all_length_rewards)),
+            prefix + f"score/overlong": sum(all_overlong_rewards) / max(1, len(all_overlong_rewards)),
+            prefix + f"score/final": sum(all_final_scores) / max(1, len(all_final_scores)),
+            prefix + f"score/dup_punish": sum(all_dup_punish_scores) / max(1, len(all_dup_punish_scores)),
+        }
+        log_data = {**log_data, **log_counter, **log_score_to_lens, **log_score}
         self.logger.log(data=log_data, step=global_step)
 
         if oj_total_cnt > 0 and oj_fail_cnt / oj_total_cnt >= 0.01:
@@ -466,7 +517,7 @@ class RewardManager():
                     ],
                                 data=self.log_table)
             }
-            if not is_validation and global_step % self.config.trainer.logger_step_interval == 0:
+            if (not is_validation and global_step % self.config.trainer.logger_step_interval == 0) or global_step == 1:
                 # logger_step = global_step - global_step % self.config.trainer.logger_step_interval
                 self.logger.log(log_table, step=global_step, backend='tracking')
 
