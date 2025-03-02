@@ -50,6 +50,7 @@ actor_rollout_ref:
     grad_clip: 1.0
     clip_ratio: 0.2
     clip_ratio2: 10.0
+    reduce_loss_by_token: False
     scale_pg_by_kl: False
     scale_pg_by_local_kl: False
     upgo_loss_weight: 0.0
