@@ -5,6 +5,7 @@ import re
 import hdfs_io
 
 import warnings
+from packaging.version import Version
 
 import torch
 import torch.distributed
@@ -25,7 +26,7 @@ def check_omnistore_version():
     try:
         global ACTUAL_OMNISTORE_VERSION
         ACTUAL_OMNISTORE_VERSION = importlib.metadata.version('byted-omnistore')
-        assert ACTUAL_OMNISTORE_VERSION >= REQUIRED_OMNISTORE_VERSION, \
+        assert Version(ACTUAL_OMNISTORE_VERSION) >= Version(REQUIRED_OMNISTORE_VERSION), \
             f'byted-omnistore version {ACTUAL_OMNISTORE_VERSION} is too old. Please upgrade to version ' \
             f'{REQUIRED_OMNISTORE_VERSION} or higher. Example command: pip3 install --upgrade byted-omnistore.'
     except importlib.metadata.PackageNotFoundError as e:
