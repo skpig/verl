@@ -68,14 +68,6 @@ if __name__ == '__main__':
     parser.add_argument('--ckpt-dir1', required=True)
     parser.add_argument('--ckpt-dir2', required=True)
 
-    parser.add_argument('--flatten-ckpt1',
-                        action='store_true',
-                        help='should be set explicitly if config trainer.ckpt_enable_flatten is enabled when training',
-                        default=False)
-    parser.add_argument('--flatten-ckpt2',
-                        action='store_true',
-                        help='should be set explicitly if config trainer.ckpt_enable_flatten is enabled when training',
-                        default=False)
     parser.add_argument('--untie-embeddings1', action='store_true', default=False)
     parser.add_argument('--untie-embeddings2', action='store_true', default=False)
     parser.add_argument('--model', action='store_true', default=False)

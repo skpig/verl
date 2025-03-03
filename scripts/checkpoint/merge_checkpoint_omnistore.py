@@ -13,10 +13,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--load-dir', required=True)
     parser.add_argument('--save-path', required=False)
-    parser.add_argument('--flatten-ckpt',
-                        action='store_true',
-                        help='should be set explicitly if config trainer.ckpt_enable_flatten is enabled when training',
-                        default=False)
     # for compatibility with merlin auto eval
     parser.add_argument('--cruise-config', required=False)
     parser.add_argument('--dtype', required=False)
