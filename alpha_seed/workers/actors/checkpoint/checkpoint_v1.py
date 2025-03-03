@@ -117,18 +117,10 @@ class CheckpointManagerV1(BaseCheckpointManager):
         torch.distributed.barrier()
 
         if self.rank == 0:
-            hf_local_path = os.path.join(local_path, 'huggingface')
-            os.makedirs(hf_local_path, exist_ok=True)
-            self.model._fsdp_wrapped_module.config.save_pretrained(hf_local_path)
-            self.tokenizer.save_pretrained(hf_local_path)
-            if hdfs_path is not None:
-                ray.get(
-                    ckpt_global_uploader_ref.register_upload_task.remote(role, global_step,
-                                                                         ray.get_runtime_context().get_node_id(),
-                                                                         hf_local_path, hdfs_path))
-                print(f'[rank-{self.rank}]: register upload ckpt task of path {hf_local_path} to hdfs {hdfs_path} done')
+            self.save_hf_configs(path, hdfs_path, role, 'fsdp', global_step, ckpt_global_uploader_ref)
+            if hdfs_path:
                 ckpt_global_uploader_ref.start_uploading.remote(role, global_step)
-
+                print(f'[rank-{self.rank}]: start uploading ckpt')
         torch.distributed.barrier()
 
         self.previous_save_local_path = local_path

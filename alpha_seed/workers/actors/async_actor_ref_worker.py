@@ -764,24 +764,18 @@ class AsyncActorRolloutRefWorker(Worker):
 
         if self._is_actor:
             self.flops_counter = FlopsCounter(self.actor_model_config)
-            if self.actor_strategy == 'fsdp':
-                self.checkpoint_manager = CheckpointManagerWrapper(model=self.actor.actor_module,
-                                                                   optimizer=self.actor.actor_optimizer,
-                                                                   lr_scheduler=self.actor_lr_scheduler,
-                                                                   tokenizer=self.tokenizer)
-            elif self.actor_strategy == 'megatron':
-                # TODO: build megatron checkpoint manager
-                pass
+            self.checkpoint_manager = CheckpointManagerWrapper(strategy=self.actor_strategy,
+                                                               model=self.actor.actor_module,
+                                                               optimizer=self.actor.actor_optimizer,
+                                                               lr_scheduler=self.actor_lr_scheduler,
+                                                               tokenizer=self.tokenizer)
 
         if self._is_ref:
-            if self.ref_strategy == 'fsdp':
-                self.checkpoint_manager_ref = CheckpointManagerWrapper(model=self.ref_policy.actor_module,
-                                                                       optimizer=None,
-                                                                       lr_scheduler=None,
-                                                                       tokenizer=self.tokenizer)
-            elif self.ref_strategy == 'megatron':
-                # TODO: build megatron checkpoint manager
-                pass
+            self.checkpoint_manager_ref = CheckpointManagerWrapper(strategy=self.ref_strategy,
+                                                                   model=self.ref_policy.actor_module,
+                                                                   optimizer=None,
+                                                                   lr_scheduler=None,
+                                                                   tokenizer=self.tokenizer)
 
         ndtimeline.init_with_ray(self)
         torch.cuda.empty_cache()
@@ -1005,28 +999,43 @@ class AsyncActorRolloutRefWorker(Worker):
         output = output.to('cpu')
         return output
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def load_checkpoint(self, hdfs_path=None, version='v1', enable_shm=False, model='actor'):
-        # TODO: remove the following line once megatron ckpt manager is implemented
-        if self.actor_strategy in ['megatron']:
-            # TODO(fix me)
-            return
-
+    def _save_load_checkpoint_helper(self, version, model):
+        """verify settings and prepare input params for saving and loading ckpt
+        """
+        device_mesh = None
         if model == 'actor':
             assert self._is_actor
             ckpt_manager = self.checkpoint_manager
+            parallel_strategy = self.actor_strategy
+            if hasattr(self, 'actor_fsdp_mesh'):
+                device_mesh = self.actor_fsdp_mesh
         elif model == 'ref':
             assert self._is_ref
             ckpt_manager = self.checkpoint_manager_ref
+            parallel_strategy = self.ref_strategy
+            if hasattr(self, 'ref_fsdp_mesh'):
+                device_mesh = self.ref_fsdp_mesh
         else:
             raise ValueError(f'Unknown {model=}')
+
+        if parallel_strategy == 'megatron':
+            if version != 'omnistore':
+                raise NotImplementedError('Only the OmniStore ckpt manager supports megatron strategy currently')
+        elif parallel_strategy != 'fsdp':
+            raise NotImplementedError(f'Saving / loading ckpt is not supported for strategy {parallel_strategy}')
+        return ckpt_manager, parallel_strategy, device_mesh
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def load_checkpoint(self, hdfs_path=None, version='v1', enable_shm=False, model='actor'):
+        ckpt_manager, parallel_strategy, device_mesh = self._save_load_checkpoint_helper(version, model)
 
         if self.config.actor.train_memory_offload:
             self.to("cuda")
         ckpt_manager.load_checkpoint(version=version,
                                      hdfs_path=hdfs_path,
-                                     device_mesh=self.actor_fsdp_mesh,
-                                     role='actor',
+                                     device_mesh=device_mesh,
+                                     role=model,
+                                     strategy=parallel_strategy,
                                      enable_shm=enable_shm)
         if self.config.actor.train_memory_offload:
             self.to("cpu")
@@ -1040,29 +1049,16 @@ class AsyncActorRolloutRefWorker(Worker):
                         ckpt_global_uploader_ref=None,
                         enable_shm=False,
                         model='actor'):
-        # TODO: remove the following line once megatron ckpt manager is implemented
-        if self.actor_strategy in ['megatron']:
-            # TODO(fix me)
-            return
-
-        # TODO: support omnistore
-        if model == 'actor':
-            assert self._is_actor
-            ckpt_manager = self.checkpoint_manager
-        elif model == 'ref':
-            assert self._is_ref
-            ckpt_manager = self.checkpoint_manager_ref
-        else:
-            raise ValueError(f'Unknown {model=}')
+        ckpt_manager, parallel_strategy, device_mesh = self._save_load_checkpoint_helper(version, model)
 
         if self.config.actor.train_memory_offload:
             self.to("cuda")
-
         ckpt_manager.save_checkpoint(version=version,
                                      local_path=local_path,
                                      hdfs_path=hdfs_path,
-                                     device_mesh=self.actor_fsdp_mesh,
+                                     device_mesh=device_mesh,
                                      role=model,
+                                     strategy=parallel_strategy,
                                      global_step=global_step,
                                      ckpt_global_uploader_ref=ckpt_global_uploader_ref,
                                      enable_shm=enable_shm)

@@ -6,10 +6,10 @@ import tempfile
 import ray
 import torch
 import torch.distributed
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, StateDictType
 from transformers import PreTrainedTokenizer
 import numpy as np
 import random
+from ray.actor import ActorHandle
 
 
 class BaseCheckpointManager:
@@ -27,8 +27,8 @@ class BaseCheckpointManager:
     - huggingface tokenizer and config for ckpt merge
     """
 
-    def __init__(self, model: FSDP, optimizer: torch.optim.Optimizer,
-                 lr_scheduler: torch.optim.lr_scheduler.LRScheduler, tokenizer: PreTrainedTokenizer):
+    def __init__(self, model, optimizer: torch.optim.Optimizer, lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
+                 tokenizer: PreTrainedTokenizer):
         self.previous_global_step = None
         self.previous_save_local_path = None
 
@@ -37,7 +37,6 @@ class BaseCheckpointManager:
         self.lr_scheduler = lr_scheduler
         self.tokenizer = tokenizer
 
-        assert isinstance(self.model, FSDP)
         self.rank = torch.distributed.get_rank()
 
     def load_checkpoint(self, *args, **kwargs):
@@ -85,3 +84,20 @@ class BaseCheckpointManager:
         torch.cuda.set_rng_state(rng_state['cuda'])
         np.random.set_state(rng_state['numpy'])
         random.setstate(rng_state['random'])
+
+    def save_hf_configs(self, local_path: str, hdfs_path: str, role: str, strategy: str, global_step: int,
+                        ckpt_global_uploader_ref: ActorHandle):
+        hf_local_path = os.path.join(local_path, 'huggingface')
+        os.makedirs(hf_local_path, exist_ok=True)
+        if strategy == 'fsdp':
+            self.model._fsdp_wrapped_module.config.save_pretrained(hf_local_path)
+        elif strategy == 'megatron':
+            # TODO need implementation
+            pass
+        self.tokenizer.save_pretrained(hf_local_path)
+        if hdfs_path is not None:
+            ray.get(
+                ckpt_global_uploader_ref.register_upload_task.remote(role, global_step,
+                                                                     ray.get_runtime_context().get_node_id(),
+                                                                     hf_local_path, hdfs_path))
+            print(f'[rank-{self.rank}]: register upload ckpt task of path {hf_local_path} to hdfs {hdfs_path} done')

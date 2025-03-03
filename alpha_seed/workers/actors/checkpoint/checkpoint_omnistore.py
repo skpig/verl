@@ -9,7 +9,6 @@ from packaging.version import Version
 
 import torch
 import torch.distributed
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, StateDictType
 
 from transformers import PreTrainedTokenizer
 import importlib.metadata
@@ -37,7 +36,7 @@ def check_omnistore_version():
 
 check_omnistore_version()
 
-from omnistore import RLFSDPCheckpointer
+import omnistore
 
 
 def check_ckpt_is_omnistore(path):
@@ -64,13 +63,19 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
     - huggingface tokenizer and config for ckpt merge
     """
 
-    def __init__(self, model: FSDP, optimizer: torch.optim.Optimizer,
-                 lr_scheduler: torch.optim.lr_scheduler.LRScheduler, tokenizer: PreTrainedTokenizer):
+    def __init__(self, model, optimizer: torch.optim.Optimizer, lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
+                 tokenizer: PreTrainedTokenizer):
         super().__init__(model, optimizer, lr_scheduler, tokenizer)
         if self.rank == 0:
             print(f'OmniStore ckpt manager initialized, byted-omnistore version: {ACTUAL_OMNISTORE_VERSION}')
 
-    def load_checkpoint(self, hdfs_path=None, role: str = 'actor', enable_shm: bool = False, *args, **kwargs):
+    def load_checkpoint(self,
+                        hdfs_path=None,
+                        role: str = 'actor',
+                        strategy: str = 'fsdp',
+                        enable_shm: bool = False,
+                        *args,
+                        **kwargs):
         if hdfs_path is None:
             return
 
@@ -83,24 +88,42 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
         assert check_ckpt_is_omnistore(hdfs_path), f'{hdfs_path} is not in omnistore checkpoint format, resume failed'
         ckpt_state = {'model': self.model, 'extra_state': {}}
         if self.optimizer:
-            ckpt_state['optimizer'] = self.optimizer
-        RLFSDPCheckpointer.load(
-            hdfs_path,
-            ckpt_state,
-            enable_shm_download_ckpt_tmp=enable_shm,
-            allow_extra_states=True,
-            rl_role=role,
-        )
+            if isinstance(self.optimizer, list):
+                ckpt_state['optimizer'] = self.optimizer[0]
+            else:
+                ckpt_state['optimizer'] = self.optimizer
+        if strategy == 'fsdp':
+            omnistore.FSDPCheckpointer.load(
+                hdfs_path,
+                ckpt_state,
+                enable_shm_download_ckpt_tmp=enable_shm,
+                role=role,
+            )
+        elif strategy == 'megatron':
+            omnistore.MegatronCheckpointer.load(
+                hdfs_path,
+                ckpt_state,
+                enable_shm_download_ckpt_tmp=enable_shm,
+                allow_extra_state_not_exists=True,
+                allow_client_state_not_exists=True,
+                role=role,
+            )
+        else:
+            raise NotImplementedError(f'Alpha-seed OmniStore checkpointer does not support strategy {strategy}')
+
         # try loading lr scheduler state
         if 'lr_scheduler' in ckpt_state['extra_state']:
-            self.lr_scheduler.load_state_dict(ckpt_state['extra_state']['lr_scheduler'])
+            if isinstance(self.lr_scheduler, list):
+                self.lr_scheduler[0].load_state_dict(ckpt_state['extra_state']['lr_scheduler'])
+            else:
+                self.lr_scheduler.load_state_dict(ckpt_state['extra_state']['lr_scheduler'])
         else:
             print(f'[rank-{self.rank}]: lr_scheduler not found in extra_state, skip loading')
         if 'rng_state' in ckpt_state['extra_state']:
             self.load_rng_state(ckpt_state['extra_state']['rng_state'])
         print(f'[rank-{self.rank}]: finish loading checkpoint {hdfs_path}')
 
-    def save_checkpoint(self, local_path: str, hdfs_path: str, role: str, global_step: int,
+    def save_checkpoint(self, local_path: str, hdfs_path: str, role: str, strategy: str, global_step: int,
                         ckpt_global_uploader_ref: ActorHandle, enable_shm: bool, *args, **kwargs):
         path = os.path.abspath(local_path)
         print(f'[rank-{self.rank}]: start saving checkpoint {path}')
@@ -126,21 +149,41 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
             warnings.simplefilter("ignore")
             ckpt_state = {'model': self.model, 'extra_state': {'rng_state': self.get_rng_state(),}}
             if self.optimizer:
-                ckpt_state['optimizer'] = self.optimizer
+                if isinstance(self.optimizer, list):
+                    ckpt_state['optimizer'] = self.optimizer[0]
+                else:
+                    ckpt_state['optimizer'] = self.optimizer
             if self.lr_scheduler:
-                ckpt_state['extra_state']['lr_scheduler'] = self.lr_scheduler if isinstance(
-                    self.lr_scheduler, dict) else self.lr_scheduler.state_dict()
+                if isinstance(self.lr_scheduler, dict):
+                    ckpt_state['extra_state']['lr_scheduler'] = self.lr_scheduler
+                elif isinstance(self.lr_scheduler, list):
+                    ckpt_state['extra_state']['lr_scheduler'] = self.lr_scheduler[0].state_dict()
+                else:
+                    ckpt_state['extra_state']['lr_scheduler'] = self.lr_scheduler.state_dict()
 
-            print(f'[rank-{self.rank}]: Saving checkpoint to {os.path.abspath(path)} with omnistore FSDP')
-            RLFSDPCheckpointer.save(
-                path,
-                ckpt_state,
-                enable_shm_upload_ckpt_tmp=enable_shm,
-                async_fast_checkpoint=False,
-                enable_tree_topo=True,
-                global_steps=global_step,
-                rl_role=role,
-            )
+            print(f'[rank-{self.rank}]: Saving checkpoint to {os.path.abspath(path)} with omnistore')
+            if strategy == 'fsdp':
+                omnistore.FSDPCheckpointer.save(
+                    path,
+                    ckpt_state,
+                    enable_shm_upload_ckpt_tmp=enable_shm,
+                    async_fast_checkpoint=False,
+                    enable_tree_topo=True,
+                    global_steps=global_step,
+                    role=role,
+                )
+            elif strategy == 'megatron':
+                omnistore.MegatronCheckpointer.save(
+                    path,
+                    ckpt_state,
+                    enable_shm_upload_ckpt_tmp=enable_shm,
+                    async_fast_checkpoint=False,
+                    enable_tree_topo=True,
+                    global_steps=global_step,
+                    role=role,
+                )
+            else:
+                raise NotImplementedError(f'Alpha-seed OmniStore checkpointer does not support strategy {strategy}')
 
         if hdfs_path is not None:
             if self.rank == 0:
@@ -166,19 +209,10 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
         torch.distributed.barrier()
 
         if self.rank == 0:
-            hf_local_path = os.path.join(path, 'huggingface')
-            os.makedirs(hf_local_path, exist_ok=True)
-            self.model._fsdp_wrapped_module.config.save_pretrained(hf_local_path)
-            self.tokenizer.save_pretrained(hf_local_path)
-            if hdfs_path is not None:
-                ray.get(
-                    ckpt_global_uploader_ref.register_upload_task.remote(role, global_step,
-                                                                         ray.get_runtime_context().get_node_id(),
-                                                                         hf_local_path, hdfs_path))
-                print(f'[rank-{self.rank}]: register upload ckpt task of path {hf_local_path} to hdfs {hdfs_path} done')
+            self.save_hf_configs(path, hdfs_path, role, strategy, global_step, ckpt_global_uploader_ref)
+            if hdfs_path:
                 ckpt_global_uploader_ref.start_uploading.remote(role, global_step)
                 print(f'[rank-{self.rank}]: start uploading ckpt')
-
         torch.distributed.barrier()
 
         self.previous_save_local_path = path
