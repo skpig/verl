@@ -378,7 +378,6 @@ class DataParallelPPOActor(BasePPOActor):
                     kl_loss_weight = self.config.kl_loss_weight
                     lm_loss_weight = self.config.lm_loss_weight
                     kl_penalty_type = self.config.kl_penalty
-                    reduce_loss_by_token = self.config.reduce_loss_by_token
 
                     if entropy_coeff <= 0.:
                         compute_entropy = False
@@ -403,8 +402,7 @@ class DataParallelPPOActor(BasePPOActor):
                         upgo_loss_weight=upgo_loss_weight,
                         use_ewma_loss=use_ewma_loss,
                         kl_penalty_type=kl_penalty_type,
-                        overlong_mask=overlong_mask,
-                        reduce_loss_by_token=reduce_loss_by_token)
+                        overlong_mask=overlong_mask)
 
                     if self.config.early_stop_by_kl != 0 and ppo_kl > self.config.early_stop_by_kl and batch_idx > 0:
                         minibatch_early_stop = True
