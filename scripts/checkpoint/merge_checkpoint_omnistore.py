@@ -1,9 +1,15 @@
+"""
+Example usage: python3 scripts/checkpoint/merge_checkpoint_omnistore.py
+--load-dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangmofan/test/new_omnistore_ckpt_folder_format/checkpoints/global_step_1/actor/
+--save_hf
+"""
+
 import os
 import argparse
 import time
-import re
 import hdfs_io
 import torch
+from verl.utils.fs import copy_local_path_from_hdfs
 from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForTokenClassification
 from omnistore.utilities.ckpt_format.merge_tool import omnistore_ckpt_to_pytorch_ckpt
 from seed_models.commands.convert_to_megatron import convert_seed_models_to_megatron
@@ -11,7 +17,11 @@ from seed_models.commands.convert_to_megatron import convert_seed_models_to_mega
 if __name__ == '__main__':
     print('Step1: prepare args and folders')
     parser = argparse.ArgumentParser()
-    parser.add_argument('--load-dir', required=True)
+    parser.add_argument(
+        '--load-dir',
+        required=True,
+        help='the HDFS directory in the form of default_hdfs_dir/checkpoints/global_step_1/actor/, and the directory '
+        'contains the omnistore model/ subdirectory and huggingface/ subdirectory')
     parser.add_argument('--save-path', required=False)
     # for compatibility with merlin auto eval
     parser.add_argument('--cruise-config', required=False)
@@ -19,25 +29,13 @@ if __name__ == '__main__':
     parser.add_argument('--save_hf', action='store_true')
     args = parser.parse_args()
 
-    if not args.load_dir.endswith('actor') and not args.load_dir.endswith('critic'):
-        args.load_dir = os.path.join(args.load_dir, 'actor')
-
     if not args.save_path:
         args.save_path = args.load_dir
     print(f'Complete save dir path for merge checkpoint: {args.save_path}')
 
     local_dir = '/opt/tiger/.cache/src_model'
     os.makedirs(local_dir, exist_ok=True)
-    hdfs_io.copy(os.path.join(args.load_dir, 'huggingface'), os.path.join(local_dir, 'huggingface'))
-    hf_path = os.path.join(local_dir, 'huggingface')
-
-    # prepare omnistore ckpt folder
-    match = re.search(r'global_step_(\d+)', args.load_dir)
-    if match:
-        global_step = match.group(0)
-        print(f'Extracted global step: {global_step}')
-        args.load_dir = os.path.join(args.load_dir, global_step)
-    print(f'Complete load dir path for merge checkpoint: {args.load_dir}')
+    hf_path = copy_local_path_from_hdfs(os.path.join(args.load_dir, 'huggingface'))
 
     print('Step2: merge omnistore ckpt to get state_dict')
     time_begin = time.time()
@@ -77,7 +75,8 @@ if __name__ == '__main__':
     # upload back to hdfs
     print(f'Step4: convert model to xperf format and upload to {args.save_path}')
     # convert to megatron for autoeval
+    megatron_save_path = os.path.join(args.save_path, 'megatron')
     convert_seed_models_to_megatron(hf_path=hf_path,
                                     local_path=local_dir,
-                                    output_path=os.path.dirname(args.save_path),
+                                    output_path=megatron_save_path,
                                     validate=False)

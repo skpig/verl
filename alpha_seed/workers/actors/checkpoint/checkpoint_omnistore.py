@@ -17,7 +17,7 @@ from .checkpoint_manager import BaseCheckpointManager
 
 from ray.actor import ActorHandle
 
-REQUIRED_OMNISTORE_VERSION = '0.7.9'
+REQUIRED_OMNISTORE_VERSION = '0.7.11'
 ACTUAL_OMNISTORE_VERSION = None
 
 
@@ -80,12 +80,14 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
         if hdfs_path is None:
             return
 
-        match = re.search(r'global_step_(\d+)', hdfs_path)
-        if match:
-            global_step = int(match.group(1))
-        else:
-            raise ValueError(f'[rank-{self.rank}] Invalid hdfs path: {hdfs_path}, no global step section found.')
-        hdfs_path = os.path.join(hdfs_path, f'global_step_{global_step}')
+        if not check_ckpt_is_omnistore(hdfs_path):
+            # be compatible with old ckpt folder format
+            match = re.search(r'global_step_(\d+)', hdfs_path)
+            if match:
+                global_step = int(match.group(1))
+            else:
+                raise ValueError(f'[rank-{self.rank}] Invalid hdfs path: {hdfs_path}, no global step section found.')
+            hdfs_path = os.path.join(hdfs_path, f'global_step_{global_step}')
         assert check_ckpt_is_omnistore(hdfs_path), f'{hdfs_path} is not in omnistore checkpoint format, resume failed'
         ckpt_state = {'model': self.model, 'extra_state': {}}
         if self.optimizer:
@@ -137,15 +139,10 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
         self.local_mkdir(path)
         torch.distributed.barrier()
 
-        file_path_list = [(f'global_step_{global_step}/model',
-                           os.path.join(path, f'global_step_{global_step}/model', f'__{self.rank}_0.distcp')),
-                          (f'global_step_{global_step}/extra_state',
-                           os.path.join(path, f'global_step_{global_step}/extra_state',
-                                        f'extra_state_rank_{self.rank}.pt'))]
+        file_path_list = [('model', os.path.join(path, 'model', f'__{self.rank}_0.distcp')),
+                          ('extra_state', os.path.join(path, 'extra_state', f'extra_state_rank_{self.rank}.pt'))]
         if self.optimizer:
-            file_path_list.append((f'global_step_{global_step}/optimizer',
-                                   os.path.join(path, f'global_step_{global_step}/optimizer',
-                                                f'__{self.rank}_0.distcp')))
+            file_path_list.append(('optimizer', os.path.join(path, 'optimizer', f'__{self.rank}_0.distcp')))
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             ckpt_state = {'model': self.model, 'extra_state': {'rng_state': self.get_rng_state(),}}
@@ -172,6 +169,7 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
                     enable_tree_topo=True,
                     global_steps=global_step,
                     role=role,
+                    ignore_append_global_steps_to_folder=True,
                 )
             elif strategy == 'megatron':
                 omnistore.MegatronCheckpointer.save(
@@ -182,6 +180,7 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
                     enable_tree_topo=True,
                     global_steps=global_step,
                     role=role,
+                    ignore_append_global_steps_to_folder=True,
                 )
             else:
                 raise NotImplementedError(f'Alpha-seed OmniStore checkpointer does not support strategy {strategy}')
@@ -189,12 +188,9 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
         if hdfs_path is not None:
             if self.rank == 0:
                 print(f'[rank-{self.rank}]: prepare for uploading omnistore metadata')
-                file_path_list.append(
-                    (f'global_step_{global_step}/model', os.path.join(path,
-                                                                      f'global_step_{global_step}/model/.metadata')))
+                file_path_list.append(('model', os.path.join(path, 'model/.metadata')))
                 if self.optimizer:
-                    file_path_list.append((f'global_step_{global_step}/optimizer',
-                                           os.path.join(path, f'global_step_{global_step}/optimizer/.metadata')))
+                    file_path_list.append(('optimizer', os.path.join(path, 'optimizer/.metadata')))
             for sub_folder_name, file_local_path in file_path_list:
                 file_local_path = os.path.abspath(file_local_path)
                 hdfs_path_sub_folder = os.path.join(hdfs_path, sub_folder_name)
