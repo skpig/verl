@@ -373,6 +373,7 @@ class CriticWorker(Worker):
                                                 hdfs_path=hdfs_path,
                                                 device_mesh=self.fsdp_mesh,
                                                 role='critic',
+                                                strategy='fsdp',
                                                 enable_shm=enable_shm)
         if self.config.train_memory_offload:
             self.to("cpu")
@@ -392,6 +393,7 @@ class CriticWorker(Worker):
                                                 hdfs_path=hdfs_path,
                                                 device_mesh=self.fsdp_mesh,
                                                 role='critic',
+                                                strategy='fsdp',
                                                 global_step=global_step,
                                                 ckpt_global_uploader_ref=ckpt_global_uploader_ref,
                                                 enable_shm=enable_shm)
