@@ -15,11 +15,15 @@
 # limitations under the License.
 
 import torch
-from typing import Tuple
+from typing import Optional, Tuple, Union, List
 import logging
 
 from transformers.cache_utils import Cache
 from typing import Optional
+
+from torch.distributed._tensor import Shard
+from torch.distributed.device_mesh import DeviceMesh
+from .parallel.collectives import allreduce_identity, identity_allreduce
 
 from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
 from dist_attn.ulysses.ops import gather_seq_scatter_heads, gather_heads_scatter_seq, gather_outputs
@@ -27,15 +31,30 @@ from dist_attn.ulysses.ops import gather_seq_scatter_heads, gather_heads_scatter
 import torch.nn.functional as F
 
 from seed_models.models.p6dense.modeling_p6d import (
+    P6DenseMLP,
     P6DenseFlashAttention2,
     apply_rotary_pos_emb,
 )
-from typing import Optional, Tuple, Union, List
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from .modeling_flash_attention_utils import _flash_attention_forward
 
 logger = logging.getLogger(__file__)
+
+
+def make_p6d_plan():
+    plan = {
+        # attention block (TP)
+        "k_proj": Shard(0),
+        "q_proj": Shard(0),
+        "v_proj": Shard(0),
+        "o_proj.weight": Shard(1),  # bias is replicated
+        # mlp (TP)
+        "gate_proj": Shard(0),
+        "up_proj": Shard(0),
+        "down_proj": Shard(1)
+    }
+    return plan
 
 
 def flash_attn2_rmpad_forward(
@@ -54,19 +73,30 @@ def flash_attn2_rmpad_forward(
     assert cu_seqlens is None
     assert not output_attentions
     assert (not past_key_value) and (not use_cache)
+    assert position_embeddings is not None
+    if position_ids.size(0) != 1:
+        raise RuntimeError(f"You are using an old version of seed models, please upgrade to the latest one.")
+
+    tp_mesh: DeviceMesh = self._tp_mesh
+    tp_size = 1 if tp_mesh is None else tp_mesh.size()
+    tp_group = None if tp_mesh is None else tp_mesh.get_group()
     sp_size = get_ulysses_sequence_parallel_world_size()
-    if sp_size > 1:
-        if position_ids.size(0) != 1:
-            raise RuntimeError(f"You are using an old version of seed models, please upgrade to the latest one.")
+    assert self.num_heads % (tp_size * sp_size) == 0
+
+    # ============== tensor parallel region ================
+    if tp_size > 1:
+        hidden_states = identity_allreduce(hidden_states, tp_group, "tp-iar")
+    # ============== tensor parallel region ================
+
     bsz, q_len, _ = hidden_states.size()  # q_len = seq_length / sp_size
 
     query_states = self.q_proj(hidden_states)  # (batch_size, seq_length / sp_size, num_heads * head_size)
     key_states = self.k_proj(hidden_states)
     value_states = self.v_proj(hidden_states)
 
-    query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-    key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-    value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+    query_states = query_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
+    key_states = key_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
+    value_states = value_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
 
     if sp_size > 1:
         # (batch_size, num_head / sp_size, seq_length, head_size)
@@ -77,10 +107,7 @@ def flash_attn2_rmpad_forward(
             f"got seqlen mismatches: {query_states.size(2)} != {position_ids.size(1)}"
     full_q_len = query_states.size(2)  # full_q_len = seq_length
 
-    if position_embeddings is None:
-        cos, sin = self.rotary_emb(value_states, position_ids)
-    else:
-        cos, sin = position_embeddings
+    cos, sin = position_embeddings
     query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
     query_states.stat_meta = {"name": f"layer_{self.layer_idx}.P6DenseFlashAttention2.query_states"}
@@ -135,8 +162,33 @@ def flash_attn2_rmpad_forward(
     if sp_size > 1:
         attn_output = gather_heads_scatter_seq(attn_output, head_dim=2, seq_dim=1)
     attn_output = attn_output.reshape(bsz, q_len, -1)
-    attn_output = self.o_proj(attn_output)
+    attn_output = F.linear(attn_output, self.o_proj.weight)
+    # ============== tensor parallel region ================
+    if tp_size > 1:
+        attn_output = allreduce_identity(attn_output, tp_group, "tp-ari")
+    # ============== tensor parallel region ================
+    if self.o_proj.bias is not None:
+        attn_output = attn_output + self.o_proj.bias
     return attn_output, None, None
+
+
+def mlp_tp_forward(self: P6DenseMLP, x: torch.Tensor):
+    tp_mesh: DeviceMesh = self._tp_mesh
+    tp_group = None if tp_mesh is None else tp_mesh.get_group()
+    tp_size = 1 if tp_mesh is None else tp_mesh.size()
+    # ============== tensor parallel region ================
+    if tp_size > 1:
+        x = identity_allreduce(x, tp_group, "tp-iar")
+    # ============== tensor parallel region ================
+
+    down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+    down_proj = self.dropout(down_proj)
+
+    # ============== tensor parallel region ================
+    if tp_size > 1:
+        down_proj = allreduce_identity(down_proj, tp_group, "tp-ari")
+    # ============== tensor parallel region ================
+    return down_proj
 
 
 def p6d_model_forward(

@@ -8,6 +8,7 @@ from torch.distributed._tensor import DeviceMesh, DTensor, Replicate, Shard
 from torch.distributed._tensor.placement_types import Placement
 from alpha_seed.models.transformers.parallel import TPSpec
 import copy
+import warnings
 
 orig_optim_state_dict = FSDP.optim_state_dict
 orig_optim_state_dict_to_load = FSDP.optim_state_dict_to_load
@@ -38,7 +39,7 @@ def _append_state_with_tp_spec(tensor: DTensor, shard: Placement, tp_mesh: Devic
         placements[-1] = Shard(selected)
         tensor = tensor.cuda()
         if tensor.device_mesh.size() >= 128:
-            # FXIME(zhiqi.0): for large device number, we cannot create large-scope
+            # FIXME(zhiqi.0): for large device number, we cannot create large-scope
             # all2all due to the port number limitation for each device.
             # Therefore, we choose to first replicate the tensor and then chunk.
             replicates = [Replicate() for _ in range(len(placements))]
@@ -47,14 +48,19 @@ def _append_state_with_tp_spec(tensor: DTensor, shard: Placement, tp_mesh: Devic
         else:
             tensor = tensor.redistribute(placements=placements, async_op=False)
     # add tensor parallel shard
-    if tp_outside:
-        placements = [shard] + placements
-    else:
-        placements.append(shard)
     shape = list(tensor.size())
     if isinstance(shard, Shard):
         shape[shard.dim] *= tp_mesh.size()
-        assert placements[-1] != placements[-2], f"{placements[-1]} vs. {placements[-2]}"
+        # for the case that a tensor has only one dimension, we cannot avoid
+        # having FSDP and TP sharding on a same dimension. In this case,
+        # we change FSDP placement to replicate.
+        if shard == placements[-1]:
+            assert len(shape) == 1, f"got unexpected ndim ({len(shape)}) > 1"
+            placements[-1] = Replicate()
+            tensor = tensor.redistribute(placements=placements, async_op=False)
+            # print(f"after reshard: {tensor.size()}")
+        assert placements[-1] != shard, f"{placements[-1]} vs. {shard}"
+    placements = [shard] + placements if tp_outside else placements + [shard]
     # shape must be tuple. Give a list will cause unhashable error
     # in torch. This is a bug in torch.
     tensor = DTensor.from_local(tensor._local_tensor,
@@ -128,7 +134,12 @@ class FlexDTensor(FSDPExtensions):
             return _ext_all_gather_dtensor(tensor, None)
         # replicate the fsdp dimension while keeps tp sharding
         placements = list(copy.deepcopy(tensor.placements))
-        if self.tp_outside:
+        if "tp" not in parent_mesh.mesh_dim_names:
+            warnings.warn(
+                "Cannot detect tp mesh when loading model, this can only happen when the checkpoint is saved before tp support."
+            )
+            placements[-1] = Replicate()
+        elif self.tp_outside:
             assert len(placements) >= 2 and parent_mesh.mesh_dim_names[0] == "tp"
             # no need to touch the tp dimension
             placements[-1] = Replicate()
@@ -212,10 +223,19 @@ class FlexDTensor(FSDPExtensions):
                     for key, val in optim_state_dict["state"][fqn].items():
                         if isinstance(val, DTensor):
                             device_mesh = val.device_mesh
-                            mesh_dim_names = device_mesh.mesh_dim_names
-                            assert mesh_dim_names[-1] == "tp"
                             placements = copy.deepcopy(val.placements)[:-1]
-                            fsdp_mesh = device_mesh[mesh_dim_names[:-1]]
+                            mesh_dim_names = device_mesh.mesh_dim_names
+                            if "tp" not in mesh_dim_names:
+                                warnings.warn(
+                                    "Cannot detect tp mesh when loading optimizer, this can only happen when the checkpoint is saved before tp support."
+                                )
+                                fsdp_mesh = device_mesh
+                            elif self.tp_outside:
+                                assert mesh_dim_names[0] == "tp"
+                                fsdp_mesh = device_mesh[mesh_dim_names[1:]]
+                            else:
+                                assert mesh_dim_names[-1] == "tp"
+                                fsdp_mesh = device_mesh[mesh_dim_names[:-1]]
                             assert fsdp_mesh.ndim <= 2
                             val = DTensor.from_local(
                                 local_tensor=val._local_tensor,
