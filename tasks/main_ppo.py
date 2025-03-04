@@ -19,10 +19,13 @@ import time
 import warnings
 import contextlib
 import json
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from collections import defaultdict, Counter
 from datetime import datetime
 from multiprocessing import Process
+from collections import Counter
+# rule-based reward score
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import defaultdict
+
 import os
 
 import ray
@@ -33,10 +36,13 @@ import wandb
 import pandas as pd
 import hdfs_io
 try:
-    from bytedance.trainingmetrics.rl_metrics_client_context_manager import RLMetricsClientContextManager as MegavisionMetricsCtx
+    from bytedance.trainingmetrics.rl_metrics_client_context_manager import \
+        RLMetricsClientContextManager as MegavisionMetricsCtx
 except ImportError:
     MegavisionMetricsCtx = None
 
+from alpha_seed.utils.server_client import validate_client_config, KVStore, ServerHealthCheck, TaskRunner, \
+    ClientTaskRunner, check_all_workers_alive, recreate_actor
 # rule-based reward score
 from alpha_seed.utils.reward_score.extra_reward import add_length_reward, punish_format_return_positions
 from alpha_seed.utils.reward_score import math_v1, verifier_service, gsm8k, math_v2, model_score_fn, logic_puzzle, oj_utils, math_verifier, response_post_proc, gpqa_verifier, math_deepscale, code_local_verifier
@@ -45,7 +51,6 @@ from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRe
 from alpha_seed.workers.actors.critic_worker import CriticWorker
 from alpha_seed.utils.alarm.lark_util import send_message_to_employee
 from alpha_seed.utils.server_client import validate_client_config, KVStore, ServerHealthCheck, TaskRunner, ClientTaskRunner, check_all_workers_alive, recreate_actor
-from alpha_seed.utils.ndtimeline import version_checker
 
 user_email = os.getenv('ARNOLD_LARK_RECEIVER', '')
 task_url = os.getenv('ARNOLD_ORIGIN_PLATFORM_URL', '')
@@ -501,12 +506,13 @@ class RewardManager():
 
         if oj_total_cnt > 0 and oj_fail_cnt / oj_total_cnt >= 0.01:
             send_message_to_employee("alpha seed任务oj失败率过高",
-                                     f"任务链接: {task_url}, 失败率: {round(oj_fail_cnt/oj_total_cnt * 100.0, 2)}", user_email)
+                                     f"任务链接: {task_url}, 失败率: {round(oj_fail_cnt / oj_total_cnt * 100.0, 2)}",
+                                     user_email)
 
         if verifier_total_cnt > 0 and verifier_fail_cnt / verifier_total_cnt >= 0.01:
             send_message_to_employee(
                 "alpha seed任务verifier失败率过高",
-                f"任务链接: {task_url}, 失败率: {round(verifier_fail_cnt/verifier_total_cnt * 100.0, 2)}", user_email)
+                f"任务链接: {task_url}, 失败率: {round(verifier_fail_cnt / verifier_total_cnt * 100.0, 2)}", user_email)
         log_table = None
         if self.config.trainer.num_cases_to_wandb > 0:
             log_table = {
@@ -635,8 +641,8 @@ def check_arnold_resources(config):
         return
 
     total_required_gpus = config.trainer.nnodes * config.trainer.n_gpus_per_node + \
-        config.streaming_rollout.nnodes * config.streaming_rollout.n_gpus_per_node + \
-        config.streaming_validator.nnodes * config.streaming_validator.n_gpus_per_node
+                          config.streaming_rollout.nnodes * config.streaming_rollout.n_gpus_per_node + \
+                          config.streaming_validator.nnodes * config.streaming_validator.n_gpus_per_node
 
     assert total_required_gpus <= total_gpus, f'Require {total_required_gpus} GPUs, but only have {total_gpus} GPUs'
 
@@ -898,10 +904,12 @@ def main_task(config):
         trainer_kwargs, kv_store = config_to_trainer_kwargs(config)
         trainer = RayPPOTrainer(**trainer_kwargs)
 
+    global_step, resume_folder = trainer.get_resume_checkpoint_info()
+
     metric_collection_context = MegavisionMetricsCtx().collect_init_worker_duration() \
         if MegavisionMetricsCtx else contextlib.nullcontext()
     with metric_collection_context:
-        trainer.init_workers(kv_store)
+        trainer.init_workers(kv_store, from_step=global_step, resume_folder=resume_folder)
 
     if config.server_client.role == "server":
         send_message_to_employee("alpha seed server启动", f"任务链接: {task_url}", user_email)

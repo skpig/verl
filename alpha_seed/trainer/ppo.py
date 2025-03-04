@@ -47,6 +47,7 @@ from alpha_seed.utils.observility.pretty_print import pprint
 from alpha_seed.utils import ndtimeline
 from alpha_seed.utils.dataset.rl_dataset import RLHFDataset
 from alpha_seed.utils.multithreads import ThreadPoolManager
+from alpha_seed.utils.ckpt import find_latest_ckpt_path_
 
 from single_controller.base import Worker
 from single_controller.ray import RayResourcePool, RayWorkerGroup, RayClassWithInitArgs
@@ -679,11 +680,10 @@ class RayPPOTrainer(object):
         if self.use_standalone_validator:
             self.validation_manager.standalone_validator_wg = self.standalone_validator_wg
 
-    def init_workers(self, kv_store=None, ckpt_global_uploader=None):
+    def init_workers(self, kv_store=None, ckpt_global_uploader=None, from_step=0, resume_folder=None):
         """Init resource pool and worker group"""
-
+        from_scratch = from_step == 0
         self.resource_pool_manager.create_resource_pool()
-
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
 
         # create actor and rollout
@@ -835,14 +835,17 @@ class RayPPOTrainer(object):
 
         init_futures.append(
             self.actor_rollout_wg.init_model(
-                remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init))
+                remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init,
+                from_scratch=from_scratch))
 
         if self.use_standalone_rollout:
             self.standalone_rollout_wg = self.all_wg['standalone_rollout']
             standalone_rollout_address = self.standalone_rollout_wg.get_master_addr()
+
             init_futures.append(
                 self.standalone_rollout_wg.init_model(
-                    remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init))
+                    remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init,
+                    from_scratch=from_scratch))
         else:
             self.standalone_rollout_wg = None
 
@@ -851,7 +854,8 @@ class RayPPOTrainer(object):
             standalone_validator_address = self.standalone_validator_wg.get_master_addr()
             init_futures.append(
                 self.standalone_validator_wg.init_model(
-                    remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init))
+                    remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init,
+                    from_scratch=from_scratch))
 
         tasks_mgr = ThreadPoolManager()
 
@@ -883,21 +887,22 @@ class RayPPOTrainer(object):
 
         if self.use_critic:
             self.critic_wg = self.all_wg['critic']
-            self.critic_wg.init_model(
-                remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init)  # blocking
+            self.critic_wg.init_model(remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init,
+                                      from_scratch=from_scratch)  # blocking
 
         if self.use_standalone_reference_policy:
             self.ref_policy_wg = self.all_wg['ref']
             init_futures.append(
                 self.ref_policy_wg.init_model(
-                    remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init))
+                    remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init,
+                    from_scratch=from_scratch))
         elif self.use_colocate_reference_policy:
             self.ref_policy_wg = self.all_wg['actor_rollout_ref']
 
         if self.use_rm:
             self.rm_wg = self.all_wg['rm']
-            self.rm_wg.init_model(
-                remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init)  # blocking
+            self.rm_wg.init_model(remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init,
+                                  from_scratch=from_scratch)  # blocking
 
         remote_reward_style = []
         if self.config.trainer.use_remote_sandbox:
@@ -938,6 +943,9 @@ class RayPPOTrainer(object):
                 self.standalone_rollout_wg.set_eos_callback_fn(sandbox_callback_fn)
             if self.use_standalone_validator:
                 self.standalone_validator_wg.set_eos_callback_fn(sandbox_callback_fn)
+
+        self.global_step = from_step
+        self.resume_folder = resume_folder
 
     def save_checkpoint(self, specified_ckpt_version=None):
         """Save checkpoint to hdfs.
@@ -1054,22 +1062,21 @@ class RayPPOTrainer(object):
         if ref_uploader_future is not None:
             ray.get(ref_uploader_future)
 
-    def load_checkpoint(self):
+    def get_resume_checkpoint_info(self):
+        """
+        Get checkpoint info from checkpoint, return 0 if no checkpoint exists or train from scratch.
+        Otherwise, resume training.
+        """
         if self.config.trainer.resume_steps == 'disable':
-            return 0
+            return 0, None
 
-        # find the latest global step of the current default_dir
-        try:
-            from omnistore.utilities.ckpt_format_tool import find_latest_ckpt_path
-        except ImportError:
-            from omnistore.utilities.ckpt_format.common_utils import find_latest_ckpt_path
         remote_checkpoint_folder = os.path.join(self.config.trainer.default_hdfs_dir, 'checkpoints')
-        remote_global_step_folder = find_latest_ckpt_path(remote_checkpoint_folder)  # None if no latest
+        remote_global_step_folder = find_latest_ckpt_path_()(remote_checkpoint_folder)  # None if no latest
         # find remote_global_step_folder
         if self.config.trainer.resume_steps == 'auto':
             if remote_global_step_folder is None:
                 print('Training from scratch')
-                return 0
+                return 0, None
         else:
             if not (self.config.trainer.auto_over_others and remote_global_step_folder is not None):
                 assert isinstance(self.config.trainer.resume_steps, str), "resume ckpt must be str type"
@@ -1077,12 +1084,14 @@ class RayPPOTrainer(object):
                 remote_global_step_folder = self.config.trainer.resume_steps
 
         # set global step
-        self.global_step = int(remote_global_step_folder.split('global_step_')[-1])
+        global_step = int(remote_global_step_folder.split('global_step_')[-1])
+        return global_step, remote_global_step_folder
 
-        # note that we start from the next global_step
-        # self.global_step += 1
+    def load_checkpoint(self):
+        global_step = self.global_step
+        remote_global_step_folder = self.resume_folder  # None if no latest
 
-        print(f'Setting global step to {self.global_step}')
+        print(f'Setting global step to {global_step}')
         print(f'Resuming from {remote_global_step_folder}')
 
         actor_remote_path = os.path.join(remote_global_step_folder, 'actor')
@@ -1146,8 +1155,6 @@ class RayPPOTrainer(object):
             self.standalone_gen_batch_output_resume = load_dataproto(path=remote_global_step_folder,
                                                                      prefix='standalone_gen_batch_output')
             self.standalone_batch_resume = load_dataproto(path=remote_global_step_folder, prefix='standalone_batch')
-
-        return self.global_step
 
     def _balance_batch(self, batch, metrics, logging_prefix='global_seqlen'):
         # Note that the reorder is in place
@@ -1555,13 +1562,12 @@ class RayPPOTrainer(object):
         self._create_dataloader()
         self._create_validation_manager()
 
-        self.global_step = 0
-
         metric_collection_context = self.megavision_metrics_collector.collect_resume_from_checkpoint_duration() \
             if MegavisionMetricsCtx else contextlib.nullcontext()
         with metric_collection_context:
-            # load checkpoint before doing anything
-            resume_step = self.load_checkpoint()
+            if self.global_step != 0:
+                # load checkpoint before doing anything
+                self.load_checkpoint()
 
         # perform validation before training
         if self.val_reward_fn is not None and self.config.trainer.eval_before_training:

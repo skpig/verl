@@ -44,6 +44,7 @@ from verl.utils.debug import log_gpu_memory_usage
 from alpha_seed.workers.hybrid_engine.fsdp_gather import DataGatherManager
 from alpha_seed.workers.ppo_critic import DataParallelPPOCritic
 from alpha_seed.utils import ndtimeline
+from alpha_seed.utils.ckpt import download_minimal_required_files
 
 from seed_models.utils.count_flops import FlopsCounter
 
@@ -97,7 +98,7 @@ class CriticWorker(Worker):
 
         self._model_initialized = False
 
-    def _build_critic_model_optimizer(self, config):
+    def _build_critic_model_optimizer(self, config, from_scratch=True):
         # the following line is necessary
         from verl.utils.model import LambdaLayer, print_model_size, squeeze
         from verl.utils.torch_dtypes import PrecisionType
@@ -105,8 +106,8 @@ class CriticWorker(Worker):
             CPUOffload
         from torch import optim
 
-        # TODO: ignore pulling model file if resuming ckpt
-        local_path = copy_local_path_from_hdfs(config.model.path)
+        local_path = download_minimal_required_files(config.model.path, from_scratch, torch.distributed.get_rank(),
+                                                     torch.distributed.get_world_size())
         # note that the tokenizer between actor and critic may be different. So override tokenizer info with actor info
         # using random initialized model from any architecture. May not be the same as Actor.
         # TODO: support loading critic weights from RM. Support using AutoModelForTokenClassification
@@ -268,14 +269,14 @@ class CriticWorker(Worker):
                 offload_fsdp_optimizer(self.critic_optimizer)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def init_model(self, remove_safetensors_after_init=False):
+    def init_model(self, remove_safetensors_after_init=False, from_scratch=True):
         if self._model_initialized:
             return
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get('external_lib', None))
 
         self.critic_module, self.critic_optimizer, self.critic_lr_scheduler, self.critic_model_config = self._build_critic_model_optimizer(
-            self.config)
+            self.config, from_scratch=from_scratch)
 
         self.critic = DataParallelPPOCritic(config=self.config,
                                             critic_module=self.critic_module,

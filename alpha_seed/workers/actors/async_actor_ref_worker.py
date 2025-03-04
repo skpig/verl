@@ -36,7 +36,6 @@ from single_controller.base import Worker
 from single_controller.base.decorator import register, Dispatch
 from verl import DataProto
 from verl.utils.model import compute_position_id_with_mask
-from verl.utils.fs import copy_local_path_from_hdfs
 from verl.utils.fsdp_utils import get_fsdp_wrap_policy
 from .offload import offload_fsdp_model_to_cpu, load_fsdp_model_to_gpu
 from alpha_seed.workers.actors.offload import offload_fsdp_optimizer, load_fsdp_optimizer
@@ -57,6 +56,7 @@ from alpha_seed.utils.kernels.persist_gemm import deploy_persist_gemm, undelopy_
 from alpha_seed.models.transformers.parallel.collectives import get_memory
 from alpha_seed.utils.observility.training_stats import MetricsTorchDispatchMode, metrics_context_fn
 from alpha_seed.utils.observility import get_profiler_context_wrapped
+from alpha_seed.utils.ckpt import download_minimal_required_files
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig, AutoModelForVision2Seq
 
 from seed_models.utils.count_flops import FlopsCounter
@@ -90,7 +90,6 @@ class AsyncActorRolloutRefWorker(Worker):
         warnings.simplefilter(action='ignore', category=FutureWarning)
 
         self.config = config
-        import torch.distributed
         if not torch.distributed.is_initialized():
             timeout = timedelta(minutes=int(os.getenv('NCCL_TIMEOUT', 60)))
             torch.distributed.init_process_group(backend="nccl", timeout=timeout)
@@ -205,7 +204,8 @@ class AsyncActorRolloutRefWorker(Worker):
                                use_rmpad=False,
                                enable_gradient_checkpointing=False,
                                trust_remote_code=False,
-                               role='actor'):
+                               role='actor',
+                               from_scratch=True):
         if self.rank == 0:
             print(f'Build model and optimizer for {role}')
 
@@ -217,7 +217,8 @@ class AsyncActorRolloutRefWorker(Worker):
 
         log_gpu_memory_usage('Before init from HF AutoModel', logger=logger)
         # TODO: ignore pulling model file if resuming ckpt
-        local_path = copy_local_path_from_hdfs(model_path)
+        local_path = download_minimal_required_files(model_path, from_scratch, torch.distributed.get_rank(),
+                                                     torch.distributed.get_world_size())
 
         # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect
         # TODO(zhangchi.usc1992): 1. support create from random initialized model. 2. Support init with FSDP directly
@@ -363,10 +364,11 @@ class AsyncActorRolloutRefWorker(Worker):
         else:
             raise NotImplementedError(f"role: {role}: get device mesh ndim={fsdp_mesh.ndim}, but only support 1 or 2")
 
+        shard_states = parallel_load_safetensors(local_path) if from_scratch else {}
+        print(f"init fsdp from_scratch={from_scratch}")
         # TODO: add transformer policy
         actor_module_fsdp = FSDP(actor_module,
-                                 param_init_fn=parallel_init_fsdp_fn(actor_module,
-                                                                     parallel_load_safetensors(local_path)),
+                                 param_init_fn=parallel_init_fsdp_fn(actor_module, shard_states),
                                  use_orig_params=self.config.actor.fsdp_config.use_orig_params,
                                  auto_wrap_policy=auto_wrap_policy,
                                  device_id=torch.cuda.current_device(),
@@ -622,11 +624,11 @@ class AsyncActorRolloutRefWorker(Worker):
                     raise NotImplementedError
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    def init_model(self, remove_safetensors_after_init=False):
+    def init_model(self, remove_safetensors_after_init=False, from_scratch=True):
         if self._model_initialized:
             return
         with self.profiler_context:
-            self._init_model()
+            self._init_model(from_scratch)
         self._normalize_config()
         self._model_initialized = True
         if remove_safetensors_after_init:
@@ -671,7 +673,7 @@ class AsyncActorRolloutRefWorker(Worker):
                 dp_size = mpu.get_data_parallel_world_size()
                 self.config.ref.log_prob_micro_batch_size //= dp_size
 
-    def _init_model(self):
+    def _init_model(self, from_scratch):
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get('external_lib', None))
 
@@ -699,7 +701,8 @@ class AsyncActorRolloutRefWorker(Worker):
                     enable_gradient_checkpointing=self.config.model.get('enable_gradient_checkpointing', False),
                     use_rmpad=use_rmpad,
                     trust_remote_code=self.config.model.get('trust_remote_code', False),
-                    role='actor' if self._is_actor else 'rollout')
+                    role='actor' if self._is_actor else 'rollout',
+                    from_scratch=from_scratch)
 
                 # get the original unwrapped module
                 self.actor_module = self.actor_module_fsdp._fsdp_wrapped_module
@@ -742,7 +745,8 @@ class AsyncActorRolloutRefWorker(Worker):
                     override_model_config=override_model_config,
                     enable_gradient_checkpointing=self.config.model.get('enable_gradient_checkpointing', False),
                     trust_remote_code=self.config.model.get('trust_remote_code', False),
-                    role='ref')[0]
+                    role='ref',
+                    from_scratch=from_scratch)[0]
                 self.ref_module_fsdp.eval()
 
                 OmegaConf.set_struct(self.config.ref, True)

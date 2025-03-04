@@ -44,7 +44,6 @@ def get_profiler_context_wrapped(filename,
                                                 repeat=repeat,
                                                 profiler_uploader=merlin_lineage_uploader)
     except ImportError:
-        logging.warning("MerlinLineageUploader not found")
         profiler_context = get_profiler_context(filename=filename,
                                                 profile_on_ranks=profile_on_ranks,
                                                 default_hdfs_dir=default_hdfs_dir,

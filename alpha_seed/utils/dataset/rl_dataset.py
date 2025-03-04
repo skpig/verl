@@ -154,7 +154,7 @@ class RLHFDataset(Dataset):
         print(f'filter dataset len: {len(self.dataframe)}')
 
         # Apply epoch replication if needed
-        if self.data_auto_repeat:
+        if hasattr(self, 'data_auto_repeat') and self.data_auto_repeat:
             self._replicate_for_epochs()
 
     def _replicate_for_epochs(self):
