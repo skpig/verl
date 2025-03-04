@@ -232,7 +232,7 @@ def compute_lm_loss(log_prob, raw_scores, eos_ids):
 
 def compute_policy_loss(old_log_prob, ref_log_prob, log_prob, advantages, upgo_advantages, eos_mask, cliprange,
                         cliprange2, scale_pg_by_kl, scale_pg_by_local_kl, upgo_loss_weight, use_ewma_loss,
-                        kl_penalty_type, overlong_mask):
+                        kl_penalty_type, overlong_mask, loss_average_method):
     """Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py#L1122
 
     Args:
@@ -277,7 +277,13 @@ def compute_policy_loss(old_log_prob, ref_log_prob, log_prob, advantages, upgo_a
         pg_losses_clip = torch.maximum(pg_losses1, pg_losses2)
         pg_losses = torch.minimum(pg_losses_clip, pg_losses3)  # 这个应该对advantage为正的情况不影响
 
-    pg_loss = torch.sum(pg_losses * eos_mask, dim=1) / seq_len_per_sample
+    assert loss_average_method in ['sample', 'token'
+                                  ], f"loss_average_method must be 'sample' or 'token', but got {loss_average_method}"
+
+    if loss_average_method == 'sample':
+        pg_loss = torch.sum(pg_losses * eos_mask, dim=1) / seq_len_per_sample  # batch
+    else:
+        pg_loss = pg_losses  # batch x seq_len
 
     negative_approx_kl = kl_penalty(log_prob, old_log_prob, kl_penalty_type=kl_penalty_type)
     ppo_kl = verl_F.masked_mean(-negative_approx_kl, eos_mask)
@@ -289,16 +295,30 @@ def compute_policy_loss(old_log_prob, ref_log_prob, log_prob, advantages, upgo_a
                                   dim=1),
                         min=1.0))
         normed_sqrt_kl = (1 / sqrt_kl) / (torch.sum(1 / sqrt_kl)) * torch.clamp(torch.sum(eos_mask[:, 0]), min=1.0)
-        pg_loss = pg_loss * normed_sqrt_kl
+        if loss_average_method == 'sample':
+            pg_loss = pg_loss * normed_sqrt_kl
+        else:
+            pg_loss = pg_loss * normed_sqrt_kl.unsqueeze(-1)
 
     if scale_pg_by_local_kl:
         sqrt_kl = torch.sqrt(torch.clamp(torch.sum(negative_approx_kl * eos_mask, dim=1), min=1.0))
         normed_sqrt_kl = (1 / sqrt_kl) / (torch.sum(1 / sqrt_kl)) * torch.clamp(torch.sum(eos_mask[:, 0]), min=1.0)
-        pg_loss = pg_loss * normed_sqrt_kl
+        if loss_average_method == 'sample':
+            pg_loss = pg_loss * normed_sqrt_kl
+        else:
+            pg_loss = pg_loss * normed_sqrt_kl.unsqueeze(-1)
 
+    pg_loss_mask = eos_mask
     if overlong_mask is not None:
-        pg_loss = pg_loss * overlong_mask
-    pg_loss = torch.mean(pg_loss)
+        if loss_average_method == 'sample':
+            pg_loss = pg_loss * overlong_mask
+        else:
+            pg_loss_mask = pg_loss_mask * overlong_mask.unsqueeze(-1)
+
+    if loss_average_method == 'sample':
+        pg_loss = torch.mean(pg_loss)
+    else:
+        pg_loss = verl_F.masked_mean(pg_loss, pg_loss_mask)
 
     if upgo_loss_weight > 0.0:
         rho = torch.minimum(ratio, torch.ones_like(ratio)).detach()
