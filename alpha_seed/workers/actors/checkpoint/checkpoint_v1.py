@@ -117,7 +117,7 @@ class CheckpointManagerV1(BaseCheckpointManager):
         torch.distributed.barrier()
 
         if self.rank == 0:
-            self.save_hf_configs(path, hdfs_path, role, 'fsdp', global_step, ckpt_global_uploader_ref)
+            self.save_hf_configs(local_path, hdfs_path, role, 'fsdp', global_step, ckpt_global_uploader_ref)
             if hdfs_path:
                 ckpt_global_uploader_ref.start_uploading.remote(role, global_step)
                 print(f'[rank-{self.rank}]: start uploading ckpt')
