@@ -218,8 +218,10 @@ class CriticWorker(Worker):
         else:
             raise NotImplementedError(f"get device mesh ndim={self.fsdp_mesh.ndim}, but only support 1 or 2")
 
+        shard_states = parallel_load_safetensors(local_path) if from_scratch else {}
+        print(f"init fsdp from_scratch={from_scratch}")
         critic_module = FSDP(critic_module,
-                             param_init_fn=parallel_init_fsdp_fn(critic_module, parallel_load_safetensors(local_path)),
+                             param_init_fn=parallel_init_fsdp_fn(critic_module, shard_states),
                              use_orig_params=self.config.model.fsdp_config.use_orig_params,
                              auto_wrap_policy=auto_wrap_policy,
                              device_id=torch.cuda.current_device(),
