@@ -177,8 +177,9 @@ class FlexDTensor(FSDPExtensions):
         This will extend the DTensors in optimizer state dict with TP placements
         """
 
-        def optim_state_post_hook_patch(model, optim, optim_state_dict=None):
+        def optim_state_post_hook_patch(model: FSDP, optim, optim_state_dict=None):
             fsdp_mesh = model._device_mesh
+            extension: FlexDTensor = model._fsdp_extension
             assert fsdp_mesh is not None, f"Please init FSDP module with device_mesh"
             # NOTE we don't support diverse process group for different FSDP sub-modules
             fsdp_pg = model.process_group
@@ -193,7 +194,9 @@ class FlexDTensor(FSDPExtensions):
                 fqn_state = {}
                 for key, val in optim_state["state"][fqn].items():
                     if isinstance(val, DTensor):
-                        shard = self.fqn2spec[fqn].shard
+                        if fqn not in extension.fqn2spec:
+                            raise KeyError(f"cannot find {fqn} in tp sepc: {extension.fqn2spec}")
+                        shard = extension.fqn2spec[fqn].shard
                         val = _append_state_with_tp_spec(val, shard, self.tp_mesh, self.tp_outside)
                     fqn_state[key] = val
                 optim_state["state"][fqn] = fqn_state
