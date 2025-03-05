@@ -119,6 +119,12 @@ class ValidateManager(object):
                         self.config.data.max_response_length,
                         dtype=torch.bfloat16,
                         device=test_batch.batch['input_ids'].device).fill_(-1)
+                if 'off_policy_steps' not in test_batch:
+                    test_batch.batch['off_policy_steps'] = torch.zeros(
+                        test_batch.batch['input_ids'].shape[0],
+                        self.config.data.max_response_length,
+                        dtype=torch.bfloat16,
+                        device=test_batch.batch['input_ids'].device).fill_(-1)
                 prompt_names = test_batch.non_tensor_batch['prompt_names'][0]
                 num_prompts_per_data = len(prompt_names)
 

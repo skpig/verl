@@ -28,7 +28,6 @@ def process_output(input_batch, output_batch, tokenizer, ready_batch, pending_ba
             if is_finished[i]:
                 ready_batch.append(item)
             else:
-                item.batch['off_policy_steps'] += 1
                 item.pop(batch_keys=['responses'])
                 pending_batch.append(rmpad(item))
     else:
@@ -67,7 +66,6 @@ def process_output(input_batch, output_batch, tokenizer, ready_batch, pending_ba
                                                  gen_len >= total_len else item.batch['prompts'].shape[1] + gen_len] = 1
                 ready_batch.append(item)
             else:
-                item.batch['off_policy_steps'] += 1
                 pending_batch.append(rmpad(item))
     return finished_num, ready_batch, pending_batch
 

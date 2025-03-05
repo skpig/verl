@@ -378,25 +378,27 @@ class AsyncXPerfGPTRollout(object):
         if hasattr(self.inference_engine.engine.module, "_prepare_yarn_embedding"):
             self.inference_engine.engine.module._prepare_yarn_embedding()
 
-    def _postprocess_log_probs(self, off_p_log_probs, on_p_log_probs, target_length, pad_token=-1):
-        assert (len(off_p_log_probs) == len(on_p_log_probs))
-        final_p_log_probs = []
-        for i, on_p_log_probs_i in enumerate(on_p_log_probs):
-            off_p_log_probs_i = off_p_log_probs[i]
-            prev_index = torch.nonzero(off_p_log_probs_i == -1)
+    def _postprocess(self, off_p_list, on_p_list, target_length, pad_token=-1, mode="off_policy_step"):
+        assert (len(off_p_list) == len(on_p_list))
+        list_padded = []
+        for i, on_p_list_i in enumerate(on_p_list):
+            off_p_list_i = off_p_list[i]
+            prev_index = torch.nonzero(off_p_list_i == -1)
             if prev_index.numel() == 0:
                 prev_index = -1
             else:
                 prev_index = prev_index[0]
-            cur_p_log_probs_i = off_p_log_probs_i[:prev_index].tolist() + on_p_log_probs_i
+            cur_list_i = off_p_list_i[:prev_index].tolist() + on_p_list_i
+            if mode == "off_policy_step":
+                cur_list_i = [x + 1 for x in cur_list_i]
             # off-policy + on-policy might exceeds the target length
-            if len(cur_p_log_probs_i) > target_length:
-                padded_list = cur_p_log_probs_i[:target_length]
+            if len(cur_list_i) > target_length:
+                padded_list = cur_list_i[:target_length]
             else:
-                padded_list = cur_p_log_probs_i + [pad_token] * (target_length - len(cur_p_log_probs_i))
-            final_p_log_probs.append(padded_list)
-        log_probs_padded = torch.tensor(final_p_log_probs)
-        return log_probs_padded
+                padded_list = cur_list_i + [pad_token] * (target_length - len(cur_list_i))
+            list_padded.append(padded_list)
+        t_padded = torch.tensor(list_padded)
+        return t_padded
 
     def generate(self):
         torch.cuda.set_device(int(os.getenv('LOCAL_RANK', '0')))
@@ -451,17 +453,19 @@ class AsyncXPerfGPTRollout(object):
             response_outputs = []
             response_log_probs = []
             is_finished = []
+            off_policy_steps = []
             for prompt, v in zip(original_query_pool, self.inference_engine.get_inorder_responses()):
                 response_outputs.append((v.input_ids + v.new_token_ids)[len(prompt):])
                 response_log_probs.append(v.new_token_log_probs)
                 is_finished.append(v.is_finished)
+                off_policy_steps.append([-1] * len(v.new_token_log_probs))
             is_finished = torch.Tensor(is_finished)
             metrics = {}
             if hasattr(self.inference_engine.infer_scheduler,
                        "init_metrics") and self.inference_engine.infer_scheduler.enable_metrics:
                 metrics = self.inference_engine.infer_scheduler.metrics
             self.inference_engine.empty_cache()
-            self.output_queue.put((response_outputs, response_log_probs, is_finished, metrics))
+            self.output_queue.put((response_outputs, response_log_probs, is_finished, off_policy_steps, metrics))
 
     def _get_output_from_queue(self):
         while True:
@@ -481,15 +485,15 @@ class AsyncXPerfGPTRollout(object):
         batch_size = prompt_ids.shape[0]
         # left-padded attention_mask
         attention_mask = prompts.batch['attention_mask']
-        off_policy_steps = prompts.batch["off_policy_steps"]
+        off_turn_off_policy_steps = prompts.batch["off_policy_steps"]
         off_policy_response_log_probs = prompts.batch["rollout_log_probs"]
         first_non_one_indices = (prompt_ids != self.tokenizer.pad_token_id).int().argmax(dim=1)
         rmv_padding_prompt_ids = [row[index:].tolist() for row, index in zip(prompt_ids, first_non_one_indices)]
 
         # (zhangchi.usc1992) note, here we pass all the non_tensor_batch and meta_info to the inference engine as prompt_meta_info.
         prompt_meta_info = [{
-            "off_policy_steps": off_policy_step
-        } for off_policy_step in off_policy_steps.reshape(-1).tolist()]
+            "off_policy_steps": max(off_policy_step)
+        } for off_policy_step in off_turn_off_policy_steps.tolist()]
         for key, value in prompts.non_tensor_batch.items():
             for i in range(batch_size):
                 prompt_meta_info[i][key] = value[i]
@@ -502,13 +506,15 @@ class AsyncXPerfGPTRollout(object):
             # stop event
             if self.async_remain_warmup_step <= 0:
                 self.stop_event.set()
-            (response_outputs, response_log_probs, is_finished, metrics) = self._get_output_from_queue()
+            (response_outputs, response_log_probs, is_finished, this_turn_off_policy_steps,
+             metrics) = self._get_output_from_queue()
             if self.async_remain_warmup_step <= 0:
                 self.stop_event.clear()
             self.async_remain_warmup_step -= 1
         else:
             # complete_ratio or all prompts are finished
-            (response_outputs, response_log_probs, is_finished, metrics) = self._get_output_from_queue()
+            (response_outputs, response_log_probs, is_finished, this_turn_off_policy_steps,
+             metrics) = self._get_output_from_queue()
 
         # Note that the tokenizer may change at runtime
         tokenizer: PreTrainedTokenizer = self.tokenizer
@@ -519,8 +525,15 @@ class AsyncXPerfGPTRollout(object):
                                              padding="max_length",
                                              max_length=max_new_tokens,
                                              return_tensors="pt")
-        response_log_probs = self._postprocess_log_probs(off_policy_response_log_probs, response_log_probs,
-                                                         max_new_tokens)
+
+        response_log_probs = self._postprocess(off_policy_response_log_probs,
+                                               response_log_probs,
+                                               max_new_tokens,
+                                               mode="log_prob")
+        response_off_policy = self._postprocess(off_turn_off_policy_steps,
+                                                this_turn_off_policy_steps,
+                                                max_new_tokens,
+                                                mode="off_policy_step")
         response_ids = response_outputs["input_ids"].cuda().to(torch.int32)
         response_attention_mask = response_outputs["attention_mask"].cuda().to(torch.int8)
         attention_mask = torch.hstack((attention_mask, response_attention_mask))
@@ -534,11 +547,11 @@ class AsyncXPerfGPTRollout(object):
             'input_ids': input_ids.to(torch.int32),  # here input_ids become the whole sentences
             'attention_mask': attention_mask.to(torch.int8),
             'is_finished': is_finished.to(torch.int8),
-            'off_policy_steps': off_policy_steps.to(torch.int8),
+            'off_policy_steps': response_off_policy.to(torch.int8),
         }
 
         out = DataProto.from_dict(batch)
-        metrics["off_policy_steps"] = off_policy_steps.tolist()
+        metrics["off_policy_steps"] = response_off_policy.tolist()
         out.meta_info["xperf_metrics"] = metrics
         out.meta_info["generation_kwargs"] = prompts.meta_info['generation_kwargs']
         yield out

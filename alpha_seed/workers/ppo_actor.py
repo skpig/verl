@@ -317,7 +317,10 @@ class DataParallelPPOActor(BasePPOActor):
 
         # make minibatch iterator
         # dataloader = self._make_minibatch_iterator(data=data)
-        select_keys = ['responses', 'input_ids', 'attention_mask', 'old_log_probs', 'advantages', 'upgo_advantages']
+        select_keys = [
+            'responses', 'input_ids', 'attention_mask', 'old_log_probs', 'advantages', 'upgo_advantages',
+            'off_policy_steps'
+        ]
         if 'ref_log_prob' in data.batch.keys():
             select_keys.append('ref_log_prob')
         if 'rollout_log_probs' in data.batch.keys():
@@ -356,6 +359,7 @@ class DataParallelPPOActor(BasePPOActor):
                     response_length = responses.size(1)
                     attention_mask = micro_data['attention_mask']
                     response_mask = attention_mask[:, -response_length:]
+
                     if use_rollout_log_probs:
                         # use ewma if use_rollout_log_probs: importance sampling by rollout_logp)rob, clip by old_log_prob
                         use_ewma_loss = True
@@ -365,6 +369,7 @@ class DataParallelPPOActor(BasePPOActor):
                         use_ewma_loss = self.config.use_ewma_loss
                         old_log_prob = micro_data['old_log_probs']
                         ref_log_prob = micro_data.get('ref_log_prob', None)
+
                     advantages = micro_data['advantages']
                     upgo_advantages = micro_data['upgo_advantages']
                     overlong_mask = micro_data.get('overlong_mask', None)
@@ -448,7 +453,6 @@ class DataParallelPPOActor(BasePPOActor):
                         'actor/seqlen': seqlen,
                         'actor/lm_loss': lm_loss.detach().item(),
                     }
-
                     if batch_idx == 0:
                         first_mini_ppo_kl_sum += ppo_kl_sum.detach().item()
 

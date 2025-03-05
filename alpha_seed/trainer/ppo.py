@@ -1190,6 +1190,12 @@ class RayPPOTrainer(object):
                                                            dtype=torch.bfloat16,
                                                            device=batch.batch['input_ids'].device).fill_(-1)
 
+        if 'off_policy_steps' not in batch:
+            batch.batch['off_policy_steps'] = torch.zeros(batch.batch['input_ids'].shape[0],
+                                                          self.config.data.max_response_length,
+                                                          dtype=torch.bfloat16,
+                                                          device=batch.batch['input_ids'].device).fill_(-1)
+
         if self.config.data.num_prompts_per_data > 1:
             batch = batch.unfold_column_chunks(
                 self.config.data.num_prompts_per_data,
@@ -1352,7 +1358,7 @@ class RayPPOTrainer(object):
         standalone_batch = []
         max_standalone_len = 0
         # sort by staleness, put items with larger off_policy_steps at the end of the list so they can be popped early
-        pending_batch = sorted(pending_batch, key=lambda item: item.batch['off_policy_steps'].item())
+        pending_batch = sorted(pending_batch, key=lambda item: item.batch['off_policy_steps'].max().item())
         while self.standalone_rollout_wg is not None and len(pending_batch) >= self.standalone_rollout_wg.world_size:
             for _ in range(self.standalone_rollout_wg.world_size):
                 standalone_batch.append(pending_batch.pop())
