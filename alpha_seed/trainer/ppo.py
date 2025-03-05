@@ -912,12 +912,10 @@ class RayPPOTrainer(object):
         # add more reward style here that are going to be pipelined inside generation
 
         # set the eos_callback_fn of actor_rollout
-        from alpha_seed.workers.xperf_rollout.component.query import Query
+        from xperf_gpt.inference.session import Query
 
         def sandbox_callback_fn(query: Query):
             input_ids = query.input_ids + query.new_token_ids
-            # only select response
-            input_ids = input_ids[len(query.original_input_ids):]
             req_id = query.meta_info['uid']
             reward_model = query.meta_info['reward_model']
             reward_style = reward_model['style']

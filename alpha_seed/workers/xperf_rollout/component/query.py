@@ -2,7 +2,6 @@ from typing import *
 from dataclasses import dataclass
 import uuid
 import torch
-import copy
 
 
 @dataclass
@@ -49,7 +48,7 @@ class Query:
                  constraint_decoding_predictor=None):
         self.id = uuid.uuid4()
         self.idx = idx
-        self.original_input_ids = copy.deepcopy(input_ids)
+        self.original_input_ids = input_ids
         self.input_ids = input_ids
         self.code_book = code_book
         self.accepted_len = []
