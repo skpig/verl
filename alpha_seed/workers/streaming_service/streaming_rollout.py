@@ -258,8 +258,6 @@ class AsyncXPerfGPTRollout(object):
             worker_helper = WorkerHelper()
             if tp_rank == 0:
                 free_port_addr = list(worker_helper.get_availale_master_addr_port())
-                # use the by default port
-                free_port_addr[1] = int(os.getenv("PORT9", free_port_addr[1]))
             else:
                 free_port_addr = [None, None]
 
@@ -268,10 +266,14 @@ class AsyncXPerfGPTRollout(object):
                 tp_group = self.device_mesh['tp'].get_group()
                 tp_src_rank = dist.get_global_rank(tp_group, group_rank=0)
                 torch.distributed.broadcast_object_list(free_port_addr, src=tp_src_rank, group=tp_group)
+
+            if is_multihost_model(self.config.get('tensor_model_parallel_size', 1)):
+                self._set_multihost_env()
+                free_port_addr[1] = int(os.getenv("PORT9", free_port_addr[1]))
+
             master_addr, master_port = free_port_addr[0], free_port_addr[1]
             gpus_per_node = get_gpus_per_node()
             local_world_size = min(tp_size, gpus_per_node)
-            self._set_multihost_env()
             with patch.dict(
                     os.environ, {
                         'RANK': str(tp_rank),
@@ -346,15 +348,14 @@ class AsyncXPerfGPTRollout(object):
                 print(f"tuner config not found in {config_path}")
 
     def _set_multihost_env(self):
-        if is_multihost_model(self.config.get('tensor_model_parallel_size', 1)):
-            os.environ["NCCL_SOCKET_IFNAME"] = os.getenv("NCCL_SOCKET_IFNAME", "eth0")
-            os.environ["NCCL_IB_HCA"] = os.getenv("NCCL_IB_HCA", "^=mlx5_0")
-            os.environ["NCCL_NVLS_ENABLE"] = "0"
-            os.environ["NCCL_IB_GID_INDEX"] = "3"
-            os.environ["NCCL_IB_DISABLE"] = "0"
-            os.environ["NCCL_IB_TIMEOUT"] = "20"
-            os.environ["NCCL_IB_RETRY_CNT"] = "7"
-            os.environ["NCCL_MULTI_HOST"] = "1"
+        os.environ["NCCL_SOCKET_IFNAME"] = os.getenv("NCCL_SOCKET_IFNAME", "eth0")
+        os.environ["NCCL_IB_HCA"] = os.getenv("NCCL_IB_HCA", "^=mlx5_0")
+        os.environ["NCCL_NVLS_ENABLE"] = "0"
+        os.environ["NCCL_IB_GID_INDEX"] = "3"
+        os.environ["NCCL_IB_DISABLE"] = "0"
+        os.environ["NCCL_IB_TIMEOUT"] = "20"
+        os.environ["NCCL_IB_RETRY_CNT"] = "7"
+        os.environ["NCCL_MULTI_HOST"] = "1"
 
     def __init_sub_process(self):
         self._set_tuner_config()
