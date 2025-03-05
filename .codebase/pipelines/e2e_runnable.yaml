@@ -7,7 +7,7 @@ jobs:
     image: hub.byted.org/reckon/data.reckon.mlx.image_5940:36aebfdb72c17e002e016c4594c602c4
     if: ${{ !contains(Event.Change.Title, "WIP") }}
     runs-on:
-      cluster: gpu-l20-16
+      cluster: gpu-h20
       docker:
         shared-memory: 1024
     envs:
@@ -59,4 +59,5 @@ jobs:
           - ray start --num-cpus=100 --head
           - bash tasks_scripts/ci/run_p6d_0b5_math_v1_grpo_kl0.sh
           - bash tasks_scripts/ci/run_m8_100m_math_v1_grpo.sh
+          - bash tasks_scripts/ci/run_p6d_0b5_math_v1_grpo.sh
           - ray stop --force
