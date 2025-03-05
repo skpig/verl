@@ -1712,6 +1712,11 @@ class RayPPOTrainer(object):
                             id2acc[k] = sum([1 for i in v if i == 1]) / len(v)
                     self.update_acc_per_query(id2acc)
 
+                    if self.config.algorithm.shuffle_sample_batch:
+                        idx_lst = list(range(batch.batch.batch_size[0]))
+                        random.shuffle(idx_lst)
+                        batch.reorder(torch.tensor(idx_lst))
+
                     # perform sequence balancing.
                     # Very important: Note that this reorders data globally.
                     # So anything that requires ordering below this line will cause incorrect results

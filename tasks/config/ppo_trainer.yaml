@@ -272,6 +272,8 @@ reward_model:
   length_ema_method: mean
 
 algorithm:
+  shuffle_sample_batch: False
+
   prior_sampling: 
     enable: False
     prior_sampling_ema: 0.9
