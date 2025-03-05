@@ -49,6 +49,8 @@ actor_rollout_ref:
     ppo_max_token_len: -1
     grad_clip: 1.0
     clip_ratio: 0.2
+    clip_ratio_low: null
+    clip_ratio_high: null
     clip_ratio2: 10.0
     loss_average_method: "sample"
     scale_pg_by_kl: False

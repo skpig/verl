@@ -230,9 +230,9 @@ def compute_lm_loss(log_prob, raw_scores, eos_ids):
     return lm_loss
 
 
-def compute_policy_loss(old_log_prob, ref_log_prob, log_prob, advantages, upgo_advantages, eos_mask, cliprange,
-                        cliprange2, scale_pg_by_kl, scale_pg_by_local_kl, upgo_loss_weight, use_ewma_loss,
-                        kl_penalty_type, overlong_mask, loss_average_method):
+def compute_policy_loss(old_log_prob, ref_log_prob, log_prob, advantages, upgo_advantages, eos_mask, cliprange_low,
+                        cliprange_high, cliprange2, scale_pg_by_kl, scale_pg_by_local_kl, upgo_loss_weight,
+                        use_ewma_loss, kl_penalty_type, overlong_mask, loss_average_method):
     """Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py#L1122
 
     Args:
@@ -258,7 +258,7 @@ def compute_policy_loss(old_log_prob, ref_log_prob, log_prob, advantages, upgo_a
     if not use_ewma_loss:
         ratio = torch.exp(log_prob - old_log_prob)
         pg_losses1 = -advantages * ratio
-        pg_losses2 = -advantages * torch.clamp(ratio, 1.0 - cliprange, 1.0 + cliprange)
+        pg_losses2 = -advantages * torch.clamp(ratio, 1.0 - cliprange_low, 1.0 + cliprange_high)
         pg_losses3 = torch.abs(-advantages * cliprange2)
         pg_losses_clip = torch.maximum(pg_losses1, pg_losses2)
         pg_losses = torch.minimum(pg_losses_clip, pg_losses3)  # 这个应该对advantage为正的情况不影响
@@ -270,7 +270,7 @@ def compute_policy_loss(old_log_prob, ref_log_prob, log_prob, advantages, upgo_a
         logp_adj = torch.max(old_log_prob, log_prob.detach() - np.log(10.))
         # log space importance sampling again
         pg_losses1 = -advantages * torch.exp(log_prob - logp_adj)
-        clipped_logratio = torch.clamp(log_ratio, np.log(1.0 - cliprange), np.log(1.0 + cliprange))
+        clipped_logratio = torch.clamp(log_ratio, np.log(1.0 - cliprange_low), np.log(1.0 + cliprange_high))
         pg_losses2 = -advantages * torch.exp(clipped_logratio + ref_log_prob - logp_adj)
 
         pg_losses3 = torch.abs(-advantages * cliprange2)

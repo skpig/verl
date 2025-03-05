@@ -375,6 +375,12 @@ class DataParallelPPOActor(BasePPOActor):
                     overlong_mask = micro_data.get('overlong_mask', None)
 
                     clip_ratio = self.config.clip_ratio
+                    clip_ratio_low = clip_ratio
+                    clip_ratio_high = clip_ratio
+                    if self.config.clip_ratio_low:
+                        clip_ratio_low = self.config.clip_ratio_low
+                    if self.config.clip_ratio_high:
+                        clip_ratio_high = self.config.clip_ratio_high
                     clip_ratio2 = self.config.clip_ratio2
                     scale_pg_by_kl = self.config.scale_pg_by_kl
                     scale_pg_by_local_kl = self.config.scale_pg_by_local_kl
@@ -401,7 +407,8 @@ class DataParallelPPOActor(BasePPOActor):
                         advantages=advantages,
                         upgo_advantages=upgo_advantages,
                         eos_mask=response_mask,
-                        cliprange=clip_ratio,
+                        cliprange_low=clip_ratio_low,
+                        cliprange_high=clip_ratio_high,
                         cliprange2=clip_ratio2,
                         scale_pg_by_kl=scale_pg_by_kl,
                         scale_pg_by_local_kl=scale_pg_by_local_kl,
