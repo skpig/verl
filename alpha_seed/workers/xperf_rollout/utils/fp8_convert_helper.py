@@ -12,6 +12,11 @@ from alpha_seed.workers.xperf_rollout.utils.layout_convert_helper import _fix_qk
 from alpha_seed.workers.xperf_rollout.utils.bf16_convert_helper import assert_not_nan
 
 
+def blockwise_quant_weights(weights, GROUP_SIZE=128):
+    xperf_ops = torch.classes.XGPT.Fp8Quant()
+    return xperf_ops.per_group_quant(weights, GROUP_SIZE)
+
+
 def convert_fp8_weights_from_bf16(qkv_proj_weight,
                                   attention_proj_weight,
                                   FFN0_weight,
@@ -773,6 +778,314 @@ def _reshard_fsdp_state_dict_to_xperf_m8_fp8(tp_model, state_dict, device_mesh: 
         FFN0_in_inv_scale.fill_(1.0)
         FFN0_out_scale.fill_(1.0)
         FFN1_in_inv_scale.fill_(1.0)
+
+    # enforce check nan
+    assert_not_nan(tp_model.layernorm_weight.data)
+    assert_not_nan(tp_model.wte_weight.data)
+    assert_not_nan(tp_model.lm_head_weight.data)
+
+    for layer_index, weights in enumerate(tp_model.layers_weight):
+        for weight in weights:
+            if isinstance(weight, torch.Tensor):
+                assert_not_nan(weight)
+
+    load_to_cuda(tp_model=tp_model)
+    torch.cuda.empty_cache()
+
+
+def _reshard_fsdp_state_dict_to_xperf_deepseek_v3_fp8(tp_model, state_dict, device_mesh: DeviceMesh, model_config):
+    """
+    Reshard the state dict of FSDP model to XPerf DeepSeek V3 model.
+    """
+    from seed_models import DeepseekV3Config
+    assert isinstance(model_config, DeepseekV3Config)
+
+    # checking
+    if device_mesh is not None:
+        tp_size = device_mesh['tp'].size()
+        tp_rank = device_mesh['tp'].get_local_rank()
+        assert model_config.num_key_value_heads % tp_size == 0 or tp_size % model_config.num_key_value_heads == 0
+    else:
+        tp_size = 1
+        tp_rank = 0
+
+    # assert tp_size == model_config.num_key_value_heads or tp_size == 1
+
+    head_dim = model_config.hidden_size // model_config.num_attention_heads
+    hidden_size = model_config.hidden_size
+    num_kv_heads = model_config.num_key_value_heads
+
+    ln_f_weight = state_dict.pop('model.norm.weight').full_tensor().to(torch.bfloat16)
+    ln_f_weight = ln_f_weight.reshape(1, ln_f_weight.shape[-1])
+    tp_model.layernorm_weight.data = ln_f_weight.contiguous()
+
+    # TODO: use xperf vocab_tp
+    wte: DTensor = state_dict.pop('model.embed_tokens.weight').to(torch.bfloat16)
+    lm_head: DTensor = state_dict.pop('lm_head.weight').to(torch.bfloat16)
+
+    wte_weight = wte.full_tensor()
+    lm_head = lm_head.full_tensor()
+    if device_mesh is not None and tp_model.wte_weight.data.shape != wte_weight.shape:
+        # TODO: we may need to do full first
+        wte_weight = DTensor.from_local(wte_weight, device_mesh=device_mesh, placements=[Replicate(), Replicate()])
+        wte_weight_tp = wte_weight.redistribute(device_mesh=device_mesh, placements=[Replicate(),
+                                                                                     Shard(1)])._local_tensor
+        lm_head = DTensor.from_local(lm_head, device_mesh=device_mesh, placements=[Replicate(), Replicate()])
+        lm_head_tp = lm_head.redistribute(device_mesh=device_mesh, placements=[Replicate(), Shard(0)])._local_tensor
+        # del wte
+    else:
+        wte_weight_tp = wte_weight
+        lm_head_tp = lm_head
+
+    assert wte_weight_tp.shape == tp_model.wte_weight.data.shape
+    assert lm_head_tp.shape == tp_model.lm_head_weight.data.shape
+
+    tp_model.wte_weight.data = wte_weight_tp.contiguous()
+    tp_model.lm_head_weight.data = lm_head_tp.contiguous()  # untied weights
+    '''
+      const TensorView& norm0_gamma, const TensorView& query_gamma, const TensorView& key_gamma,
+      const TensorView& q_a_proj_weight,
+      const TensorView& q_b_proj_weight,  // q_b_proj_weight if has q lora
+      const TensorView& kv_a_proj_weight, const TensorView& k_b_proj_weight, const TensorView& v_b_proj_weight,
+      const TensorView& k_b_proj_bf16_weight, const TensorView& v_b_proj_bf16_weight,
+      const TensorView& attention_proj_weight, const TensorView& norm1_gamma, const TensorView& moe_gate_weight,
+      const TensorView& moe_gate_bias, const TensorView& FFN0_weight, const TensorView& FFN1_weight,
+      const TensorView& share_expert_FFN0_weight, const TensorView& share_expert_FFN1_weight,
+      const TensorView& q_a_proj_weight_inv_scale, const TensorView& q_b_proj_weight_inv_scale,
+      const TensorView& kv_a_proj_weight_inv_scale, const TensorView& k_b_proj_weight_inv_scale,
+      const TensorView& v_b_proj_weight_inv_scale, const TensorView& attention_proj_weight_inv_scale,
+      const TensorView& FFN0_weight_inv_scale, const TensorView& FFN1_weight_inv_scale,
+      const TensorView& share_expert_FFN0_weight_inv_scale, const TensorView& share_expert_FFN1_weight_inv_scale
+    '''
+    for layer_index, (norm0_gamma, query_gamma, key_gamma, q_a_proj_weight, q_b_proj_weight, kv_a_proj_weight,
+                      k_b_proj_weight, v_b_proj_weight, k_b_proj_bf16_weight, v_b_proj_bf16_weight,
+                      attention_proj_weight, norm1_gamma, moe_gate_weight, moe_gate_bias, FFN0_weight, FFN1_weight,
+                      share_expert_FFN0_weight, share_expert_FFN1_weight, q_a_proj_weight_inv_scale,
+                      q_b_proj_weight_inv_scale, kv_a_proj_weight_inv_scale, k_b_proj_weight_inv_scale,
+                      v_b_proj_weight_inv_scale, attention_proj_weight_inv_scale, FFN0_weight_inv_scale,
+                      FFN1_weight_inv_scale, share_expert_FFN0_weight_inv_scale, share_expert_FFN1_weight_inv_scale,
+                      *_) in enumerate(tp_model.layers_weight):
+        ln_1_weight = state_dict.pop(f'model.layers.{layer_index}.input_layernorm.weight').full_tensor()
+        ln_1_weight = torch.stack((ln_1_weight,), dim=0).to(torch.bfloat16).reshape(1, ln_1_weight.shape[-1])
+        assert norm0_gamma.data.shape == ln_1_weight.shape
+        norm0_gamma.data = ln_1_weight.cpu().contiguous()
+
+        query_ln_weight = state_dict[f'model.layers.{layer_index}.self_attn.q_a_layernorm.weight'].full_tensor()
+        query_ln_weight = torch.stack((query_ln_weight,),
+                                      dim=0).to(torch.bfloat16).reshape(1, query_ln_weight.shape[-1])
+        assert query_gamma.data.shape == query_ln_weight.shape
+        query_gamma.data = query_ln_weight.cpu().contiguous()
+
+        kv_ln_weight = state_dict[f'model.layers.{layer_index}.self_attn.kv_a_layernorm.weight'].full_tensor()
+        kv_ln_weight = torch.stack((kv_ln_weight,), dim=0).to(torch.bfloat16).reshape(1, kv_ln_weight.shape[-1])
+        assert key_gamma.data.shape == kv_ln_weight.shape
+        key_gamma.data = kv_ln_weight.cpu().contiguous()
+
+        # query
+        q_a_proj_weight_src = state_dict.pop(f'model.layers.{layer_index}.self_attn.q_a_proj.weight').full_tensor().to(
+            torch.bfloat16)
+        q_b_proj_weight_src = state_dict.pop(f'model.layers.{layer_index}.self_attn.q_b_proj.weight').full_tensor().to(
+            torch.bfloat16)
+
+        # shard qkv and concat
+        if device_mesh is not None:
+            q_b_proj_weight_src = DTensor.from_local(q_b_proj_weight_src,
+                                                     device_mesh=device_mesh,
+                                                     placements=[Replicate(), Replicate()])
+            q_b_proj_weight_src = q_b_proj_weight_src.redistribute(device_mesh=device_mesh,
+                                                                   placements=[Replicate(), Shard(0)])._local_tensor
+        q_a_proj_weight_src, q_a_proj_weight_src_scale = blockwise_quant_weights(q_a_proj_weight_src, 128)
+        assert q_a_proj_weight.data.shape == q_a_proj_weight_src.shape
+
+        q_a_proj_weight.data = q_a_proj_weight_src.cpu().contiguous()
+        q_a_proj_weight_inv_scale.data = q_a_proj_weight_src_scale.cpu().contiguous()
+
+        q_b_proj_weight_src, q_b_proj_weight_src_scale = blockwise_quant_weights(q_b_proj_weight_src, 128)
+        assert q_b_proj_weight.data.shape == q_b_proj_weight_src.shape
+        q_b_proj_weight.data = q_b_proj_weight_src.cpu().contiguous()
+        q_b_proj_weight_inv_scale.data = q_b_proj_weight_src_scale.cpu().contiguous()
+
+        # key and value
+        kv_a_proj_weight_src = state_dict.pop(
+            f'model.layers.{layer_index}.self_attn.kv_a_proj_with_mqa.weight').full_tensor().to(torch.bfloat16)
+        kv_a_proj_weight_src, kv_a_proj_weight_src_scale = blockwise_quant_weights(kv_a_proj_weight_src, 128)
+        assert kv_a_proj_weight.data.shape == kv_a_proj_weight_src.shape
+        kv_a_proj_weight.data = kv_a_proj_weight_src.cpu().contiguous()
+        kv_a_proj_weight_inv_scale.data = kv_a_proj_weight_src_scale.cpu().contiguous()
+
+        kv_b_proj_weight_src = state_dict.pop(
+            f'model.layers.{layer_index}.self_attn.kv_b_proj.weight').full_tensor().to(torch.bfloat16)
+        w_kv_b = kv_b_proj_weight_src.reshape(model_config.num_attention_heads,
+                                              model_config.qk_nope_head_dim + model_config.v_head_dim, -1)
+        w_k_b, w_v_b = torch.split(w_kv_b, [model_config.qk_nope_head_dim, model_config.v_head_dim], dim=1)
+        w_k_b = w_k_b.reshape(model_config.num_attention_heads, model_config.qk_nope_head_dim, -1)
+        w_v_b = w_v_b.reshape(model_config.num_attention_heads, model_config.v_head_dim, -1)
+
+        if device_mesh is not None:
+            w_k_b = DTensor.from_local(w_k_b, device_mesh=device_mesh, placements=[Replicate(), Replicate()])
+            w_k_b = w_k_b.redistribute(device_mesh=device_mesh, placements=[Replicate(), Shard(0)])._local_tensor
+
+            w_v_b = DTensor.from_local(w_v_b, device_mesh=device_mesh, placements=[Replicate(), Replicate()])
+            w_v_b = w_v_b.redistribute(device_mesh=device_mesh, placements=[Replicate(), Shard(0)])._local_tensor
+
+        w_k_b = w_k_b.reshape(-1, w_k_b.shape[-1])
+        w_v_b = w_v_b.reshape(-1, w_v_b.shape[-1])
+
+        assert k_b_proj_weight.data.shape == w_k_b.shape
+        assert v_b_proj_weight.data.shape == w_v_b.shape
+
+        w_k_b_bf16 = w_k_b.clone()
+        w_v_b_bf16 = w_v_b.clone()
+
+        w_k_b, w_k_b_scale = blockwise_quant_weights(w_k_b, 128)
+        w_v_b, w_v_b_scale = blockwise_quant_weights(w_v_b, 128)
+
+        k_b_proj_bf16_weight.data = w_k_b_bf16.cpu().contiguous()
+        v_b_proj_bf16_weight.data = w_v_b_bf16.cpu().contiguous()
+        k_b_proj_weight.data = w_k_b.cpu().contiguous()
+        v_b_proj_weight.data = w_v_b.cpu().contiguous()
+        k_b_proj_weight_inv_scale.data = w_k_b_scale.cpu().contiguous()
+        v_b_proj_weight_inv_scale.data = w_v_b_scale.cpu().contiguous()
+
+        o_proj_weight_src = state_dict.pop(f'model.layers.{layer_index}.self_attn.o_proj.weight').full_tensor().to(
+            torch.bfloat16)
+
+        if device_mesh is not None:
+            o_proj_weight_src = DTensor.from_local(o_proj_weight_src,
+                                                   device_mesh=device_mesh,
+                                                   placements=[Replicate(), Replicate()])
+            o_proj_weight_src = o_proj_weight_src.redistribute(device_mesh=device_mesh,
+                                                               placements=[Replicate(), Shard(1)])._local_tensor
+
+        o_proj_weight_src = o_proj_weight_src.view(hidden_size, -1).contiguous()
+        o_proj_weight_src, o_proj_weight_src_scale = blockwise_quant_weights(o_proj_weight_src, 128)
+        assert o_proj_weight_src.shape == attention_proj_weight.shape
+        attention_proj_weight.data = o_proj_weight_src.cpu().contiguous()
+        attention_proj_weight_inv_scale.data = o_proj_weight_src_scale.cpu().contiguous()
+
+        ln_2_weight = state_dict.pop(f'model.layers.{layer_index}.post_attention_layernorm.weight').full_tensor().to(
+            torch.bfloat16)
+        ln_2_weight = torch.stack((ln_2_weight,), dim=0).reshape(1, ln_2_weight.shape[-1])
+        assert ln_2_weight.shape == norm1_gamma.shape
+        norm1_gamma.data = ln_2_weight.cpu().contiguous()
+
+        if layer_index < model_config.first_k_dense_replace:
+            gate_proj_src = state_dict.pop(f'model.layers.{layer_index}.mlp.gate_proj.weight').to(
+                torch.bfloat16).full_tensor()
+            up_proj_src = state_dict.pop(f'model.layers.{layer_index}.mlp.up_proj.weight').to(
+                torch.bfloat16).full_tensor()
+            down_proj_src = state_dict.pop(f'model.layers.{layer_index}.mlp.down_proj.weight').to(
+                torch.bfloat16).full_tensor()
+
+            if device_mesh is not None:
+                gate_proj_src = DTensor.from_local(gate_proj_src,
+                                                   device_mesh=device_mesh,
+                                                   placements=[Replicate(), Replicate()])
+                gate_proj_src = gate_proj_src.redistribute(device_mesh=device_mesh, placements=[Replicate(),
+                                                                                                Shard(0)])._local_tensor
+
+                up_proj_src = DTensor.from_local(up_proj_src,
+                                                 device_mesh=device_mesh,
+                                                 placements=[Replicate(), Replicate()])
+                up_proj_src = up_proj_src.redistribute(device_mesh=device_mesh, placements=[Replicate(),
+                                                                                            Shard(0)])._local_tensor
+
+                down_proj_src = DTensor.from_local(down_proj_src,
+                                                   device_mesh=device_mesh,
+                                                   placements=[Replicate(), Replicate()])
+                down_proj_src = down_proj_src.redistribute(device_mesh=device_mesh, placements=[Replicate(),
+                                                                                                Shard(1)])._local_tensor
+
+            FFN0_weight_src = torch.cat((gate_proj_src, up_proj_src), dim=0)
+            del gate_proj_src
+            del up_proj_src
+            assert FFN0_weight_src.shape == FFN0_weight.shape
+            FFN0_weight_src, FFN0_weight_src_scale = blockwise_quant_weights(FFN0_weight_src, 128)
+            FFN0_weight.data = FFN0_weight_src.cpu().contiguous()
+            FFN0_weight_inv_scale.data = FFN0_weight_src_scale.cpu().contiguous()
+
+            assert down_proj_src.shape == FFN1_weight.shape
+            down_proj_src, down_proj_src_scale = blockwise_quant_weights(down_proj_src, 128)
+            FFN1_weight.data = down_proj_src.cpu().contiguous()
+            FFN1_weight_inv_scale.data = down_proj_src_scale.cpu().contiguous()
+
+        else:
+            gate_w_src = state_dict.pop(f'model.layers.{layer_index}.mlp.gate.weight').to(torch.bfloat16).full_tensor()
+            assert moe_gate_weight.data.shape == gate_w_src.shape
+            moe_gate_weight.data = gate_w_src.cpu().contiguous()
+
+            gate_score_src = state_dict.pop(f'model.layers.{layer_index}.mlp.gate.e_score_correction_bias').to(
+                torch.bfloat16)
+            assert moe_gate_bias.data.shape == gate_score_src.shape
+            moe_gate_bias.data = gate_score_src.cpu().contiguous()
+
+            fc1_1_src = state_dict.pop(f'model.layers.{layer_index}.mlp.fc1_1').to(torch.bfloat16).full_tensor()
+            fc1_2_src = state_dict.pop(f'model.layers.{layer_index}.mlp.fc1_2').to(torch.bfloat16).full_tensor()
+            fc2_src = state_dict.pop(f'model.layers.{layer_index}.mlp.fc2').to(torch.bfloat16).full_tensor()
+            fc_1_src = torch.cat((fc1_1_src, fc1_2_src), dim=1)
+
+            if device_mesh is not None:
+                fc_1_src = DTensor.from_local(fc_1_src, device_mesh=device_mesh, placements=[Replicate(), Replicate()])
+                fc_1_src = fc_1_src.redistribute(device_mesh=device_mesh, placements=[Replicate(),
+                                                                                      Shard(0)])._local_tensor
+                fc2_src = DTensor.from_local(fc2_src, device_mesh=device_mesh, placements=[Replicate(), Replicate()])
+                fc2_src = fc2_src.redistribute(device_mesh=device_mesh, placements=[Replicate(),
+                                                                                    Shard(0)])._local_tensor
+
+            assert fc_1_src.shape == FFN0_weight.data.shape
+            fc_1_src, fc_1_src_scale = blockwise_quant_weights(fc_1_src, 128)
+            FFN0_weight.data = fc_1_src.cpu().contiguous()
+            FFN0_weight_inv_scale.data = fc_1_src_scale.cpu().contiguous()
+
+            assert fc2_src.shape == FFN1_weight.data.shape
+            fc2_src, fc2_src_scale = blockwise_quant_weights(fc2_src, 128)
+            FFN1_weight.data = fc2_src.cpu().contiguous()
+            FFN1_weight_inv_scale.data = fc2_src_scale.cpu().contiguous()
+
+            shared_gate_weight_src = state_dict.pop(
+                f'model.layers.{layer_index}.mlp.shared_experts.gate_proj.weight').to(torch.bfloat16).full_tensor()
+
+            shared_up_weight_src = state_dict.pop(f'model.layers.{layer_index}.mlp.shared_experts.up_proj.weight').to(
+                torch.bfloat16).full_tensor()
+
+            shared_down_weight_src = state_dict.pop(
+                f'model.layers.{layer_index}.mlp.shared_experts.down_proj.weight').to(torch.bfloat16).full_tensor()
+
+            if device_mesh is not None:
+                shared_gate_weight_src = DTensor.from_local(shared_gate_weight_src,
+                                                            device_mesh=device_mesh,
+                                                            placements=[Replicate(), Replicate()])
+                shared_gate_weight_src = shared_gate_weight_src.redistribute(device_mesh=device_mesh,
+                                                                             placements=[Replicate(),
+                                                                                         Shard(0)])._local_tensor
+
+                shared_up_weight_src = DTensor.from_local(shared_up_weight_src,
+                                                          device_mesh=device_mesh,
+                                                          placements=[Replicate(), Replicate()])
+                shared_up_weight_src = shared_up_weight_src.redistribute(device_mesh=device_mesh,
+                                                                         placements=[Replicate(),
+                                                                                     Shard(0)])._local_tensor
+
+                shared_down_weight_src = DTensor.from_local(shared_down_weight_src,
+                                                            device_mesh=device_mesh,
+                                                            placements=[Replicate(), Replicate()])
+                shared_down_weight_src = shared_down_weight_src.redistribute(device_mesh=device_mesh,
+                                                                             placements=[Replicate(),
+                                                                                         Shard(1)])._local_tensor
+
+            shared_FFN0_weight_src = torch.cat((shared_gate_weight_src, shared_up_weight_src), dim=0)
+            del shared_gate_weight_src
+            del shared_up_weight_src
+
+            assert share_expert_FFN0_weight.shape == shared_FFN0_weight_src.shape
+            shared_FFN0_weight_src, shared_FFN0_weight_src_scale = blockwise_quant_weights(shared_FFN0_weight_src, 128)
+            share_expert_FFN0_weight.data = shared_FFN0_weight_src.cpu().contiguous()
+            share_expert_FFN0_weight_inv_scale.data = shared_FFN0_weight_src_scale.cpu().contiguous()
+
+            assert share_expert_FFN1_weight.shape == shared_down_weight_src.shape
+            shared_down_weight_src, shared_down_weight_src_scale = blockwise_quant_weights(shared_down_weight_src, 128)
+            share_expert_FFN1_weight.data = shared_down_weight_src.cpu().contiguous()
+            share_expert_FFN1_weight_inv_scale.data = shared_down_weight_src_scale.cpu().contiguous()
 
     # enforce check nan
     assert_not_nan(tp_model.layernorm_weight.data)

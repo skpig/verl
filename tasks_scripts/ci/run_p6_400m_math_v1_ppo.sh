@@ -85,7 +85,7 @@ python3 tasks/main_ppo.py \
     critic.optim.lr=${critic_lr} \
     critic.optim.lr_warmup_steps_ratio=${lr_warmup_steps_ratio} \
     critic.model.path=${RM_MODEL_PATH} \
-    critic.model.enable_gradient_checkpointing=True \
+    critic.model.enable_gradient_checkpointing=False \
     critic.ppo_micro_batch_size=${ppo_micro_batch_size} \
     critic.model.fsdp_config.param_offload=False \
     +critic.model.override_config.attention_dropout=0. \
@@ -93,7 +93,7 @@ python3 tasks/main_ppo.py \
     +critic.model.override_config.resid_pdrop=0. \
     +critic.use_rmpad=True \
     critic.model.external_lib=seed_models \
-    reward_model.enable=True \
+    reward_model.enable=False \
     reward_model.model.input_tokenizer=null \
     reward_model.model.path=${RM_MODEL_PATH} \
     reward_model.micro_batch_size=512 \
@@ -117,7 +117,7 @@ python3 tasks/main_ppo.py \
     trainer.save_freq=${save_freq} \
     trainer.test_freq=${test_freq} \
     trainer.total_epochs=${total_epochs} \
-    trainer.eval_before_training=True \
+    trainer.eval_before_training=False \
     trainer.val_only=False \
     trainer.val_epoch=1 \
     trainer.need_log=False \

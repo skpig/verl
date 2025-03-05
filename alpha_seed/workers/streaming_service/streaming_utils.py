@@ -1,3 +1,4 @@
+import ray
 import torch
 import numpy as np
 import torch.nn.functional as F
@@ -104,3 +105,22 @@ def record_xperf_metrics(batch_info, metrics, logger, global_step, prefix=''):
             pass
         batch_info.meta_info.pop('xperf_metrics')
     return
+
+
+def get_gpus_per_node():
+    gpu_per_node = 0
+    for node in ray.nodes():
+        if "Resources" not in node or "GPU" not in node['Resources']:
+            continue
+        gpu_per_node = int(node['Resources']['GPU'])
+        break
+    return gpu_per_node
+
+
+def is_multihost_model(model_parallel_size: int) -> bool:
+    if model_parallel_size <= 8:
+        return False
+    gpu_per_node = get_gpus_per_node()
+    print(f'find gpu_per_node: {gpu_per_node}, model_parallel_size: {model_parallel_size}')
+    # assuming that all nodes have the same number of GPUs
+    return gpu_per_node < model_parallel_size

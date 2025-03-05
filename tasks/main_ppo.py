@@ -782,6 +782,9 @@ def config_to_trainer_kwargs(config):
     if config.data.get('chat_template', None) == 'seed':
         from verl.utils.seed import CHAT_TEMPLATE
         tokenizer.chat_template = CHAT_TEMPLATE
+    if config.data.get('chat_template', None) == 'raw':
+        raw_template = """{% for message in messages %}{{ message['content'] }}{% endfor %}"""
+        tokenizer.chat_template = raw_template
 
     if config.data.image_key:
         processor = AutoProcessor.from_pretrained(local_path)

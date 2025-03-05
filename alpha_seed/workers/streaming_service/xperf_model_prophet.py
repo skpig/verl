@@ -19,7 +19,7 @@ class XperfModelProphet:
         self.sched_cfg = sched_cfg
         self.model_type = model_cfg.get("model_name", "GPT2LMHeadModel")
         self.supported_model_types = [
-            "GPT2LMHeadModel", "GPT2LMHeadModelMoe", "LlamaForCausalLM", "SeedLLaMAForCausalLM"
+            "GPT2LMHeadModel", "GPT2LMHeadModelMoe", "LlamaForCausalLM", "SeedLLaMAForCausalLM", "DeepSeekV3Model"
         ]
         if self.model_type not in self.supported_model_types:
             raise ValueError(f"XperfModelProphet not support [{self.model_type}] yet, can't auto configure scheduler.")
@@ -45,6 +45,10 @@ class XperfModelProphet:
         self.moe_topk = model_cfg.get("moe_topk", 0)
         self.is_exp_moe = model_cfg.get("is_exp_moe", False)
         self.has_mlp_gate = model_cfg.get("has_mlp_gate", False)
+
+        # deep seek only
+        self.qk_nope_head_dim = model_cfg.get("qk_nope_head_dim", 0)
+        self.kv_lora_rank = model_cfg.get("kv_lora_rank", 0)
 
         self.mp_size = mp_size
         self.force_use_full_cache = force_use_full_cache
@@ -119,11 +123,12 @@ class XperfModelProphet:
         model_size_calculator = {
             "GPT2LMHeadModel": calc_gpt2_model_size,
             "GPT2LMHeadModelMoe": calc_gpt2moe_model_size,
+            "DeepSeekV3Model": calc_gpt2moe_model_size,
             "LlamaForCausalLM": calc_llama_model_size,
             "SeedLLaMAForCausalLM": calc_llama_model_size,
         }
         total_weights_sz = model_size_calculator[self.model_type]()
-        logging.info(f"XperfModelProphet get_model_size {total_weights_sz/1024**3}GB per card.")
+        print(f"XperfModelProphet get_model_size {total_weights_sz/1024**3}GB per card.")
         return total_weights_sz
 
     def profile_max_sample_io_buffer_size_per_token(self) -> int:
@@ -133,7 +138,7 @@ class XperfModelProphet:
         logits_buf_size = self.vocab_size * logits_element_size
         topk_topp_buf_sz = self.vocab_size * (logits_element_size + topk_topp_index_element_size)
         sample_buf_sz = logits_buf_size + topk_topp_buf_sz
-        logging.info(f"XperfModelProphet profile_max_sample_io_buffer_size_per_token got {sample_buf_sz/1024**3}GB.")
+        print(f"XperfModelProphet profile_max_sample_io_buffer_size_per_token got {sample_buf_sz/1024**3}GB.")
         return sample_buf_sz
 
     def profile_max_forward_io_buffer_size_per_token(self) -> int:
@@ -210,12 +215,14 @@ class XperfModelProphet:
         io_buf_calculator = {
             "GPT2LMHeadModel": calc_gpt2_io_buffer,
             "GPT2LMHeadModelMoe": calc_gpt2moe_io_buffer,
+            "DeepSeekV3Model": calc_gpt2moe_io_buffer,
+            "LlamaForCausalLM": calc_gpt2_io_buffer,
             "SeedLLaMAForCausalLM": calc_gpt2_io_buffer,
         }
 
         max_io_buf_size = io_buf_calculator[self.model_type]()
         # other io buffer are omited.
-        logging.info(f"XperfModelProphet profile_max_forward_io_buffer_size_per_token got {max_io_buf_size/1024**3}GB.")
+        print(f"XperfModelProphet profile_max_forward_io_buffer_size_per_token got {max_io_buf_size/1024**3}GB.")
         return max_io_buf_size
 
     def profile_kv_cache_size_per_token(self) -> int:
@@ -231,13 +238,17 @@ class XperfModelProphet:
         kv_cache_element_sz = kv_cache_element_size_map[self.quant_type]
         num_kv_heads_per_card = self.num_kv_heads // self.mp_size if self.num_kv_heads > self.mp_size else 1
         kv_cache_size_per_token = self.kv_num_layers * num_kv_heads_per_card * 2 * kv_cache_element_sz * self.head_dim
-        logging.info(
-            f"XperfModelProphet profile_kv_cache_size_per_token got {kv_cache_size_per_token/1024**3}GB per card.")
+
+        if self.model_type == "DeepSeekV3Model":
+            kv_cache_size_per_token = self.kv_num_layers * 1 * kv_cache_element_sz * (self.qk_nope_head_dim +
+                                                                                      self.kv_lora_rank)
+
+        print(f"XperfModelProphet profile_kv_cache_size_per_token got {kv_cache_size_per_token/1024**3}GB per card.")
         return kv_cache_size_per_token
 
     def profile_available_vllm_cfg(self, gpu_memory_utilization: float) -> Dict:
         tot_gpu_mem_bytes = torch.cuda.get_device_properties(0).total_memory
-        logging.info(f"XperfModelProphet profile_available_vllm_cfg got total {tot_gpu_mem_bytes/1024**3}GB per card.")
+        print(f"XperfModelProphet profile_available_vllm_cfg got total {tot_gpu_mem_bytes/1024**3}GB per card.")
         model_sz = self.get_model_size()
         kv_cache_sz_per_token = self.profile_kv_cache_size_per_token()
         fwd_io_buf_sz_per_token = self.profile_max_forward_io_buffer_size_per_token()
@@ -272,13 +283,13 @@ class XperfModelProphet:
             orca_max_batch_size * sample_io_buf_sz_per_token,
         )
         predict_tot_use = model_sz + kv_cache_mem_use + peak_io_buffer_mem_use
-        logging.info(
+        print(
             f"XperfModelProphet profile_available_vllm_cfg got[orca_max_batch_size={orca_max_batch_size}, orca_max_context_batch_sz={orca_max_context_batch_size}, vllm_max_slots={vllm_max_slots}]"
         )
-        logging.info(
+        print(
             f"Total Memory {tot_gpu_mem_bytes/1024**3}GB, Gpu Memory Utilization={gpu_memory_utilization}, Expected Used Memory={tot_gpu_mem_bytes*gpu_memory_utilization/1024**3}GB."
         )
-        logging.info(
+        print(
             f"Predict Model Weight Memory Use={model_sz/1024**3}GB, KV Cache Memory Use={kv_cache_mem_use/1024**3}GB, Peak IO Buffer Use={peak_io_buffer_mem_use/1024**3}GB, Sum Of The Above={predict_tot_use/1024**3}GB."
         )
 
@@ -290,7 +301,7 @@ class XperfModelProphet:
 
     def profile_available_orca_cfg(self, gpu_memory_utilization: float) -> Dict:
         tot_gpu_mem_bytes = torch.cuda.get_device_properties(0).total_memory
-        logging.info(f"XperfModelProphet profile_available_orca_cfg got total {tot_gpu_mem_bytes/1024**3}GB per card.")
+        print(f"XperfModelProphet profile_available_orca_cfg got total {tot_gpu_mem_bytes/1024**3}GB per card.")
         model_sz = self.get_model_size()
         kv_cache_sz_per_token = self.profile_kv_cache_size_per_token()
         fwd_io_buf_sz_per_token = self.profile_max_forward_io_buffer_size_per_token()
@@ -343,13 +354,13 @@ class XperfModelProphet:
             orca_max_batch_sz * sample_io_buf_sz_per_token,
         )
         predict_tot_use = model_sz + kv_cache_mem_use + peak_io_buffer_mem_use
-        logging.info(
+        print(
             f"XperfModelProphet profile_available_orca_cfg got[orca_max_batch_size={orca_max_batch_sz}, orca_max_context_batch_sz={orca_max_context_batch_sz}]"
         )
-        logging.info(
+        print(
             f"Total Memory {tot_gpu_mem_bytes/1024**3}GB, Gpu Memory Utilization={gpu_memory_utilization}, Expected Used Memory={tot_gpu_mem_bytes*gpu_memory_utilization/1024**3}GB."
         )
-        logging.info(
+        print(
             f"Predict Model Weight Memory Use={model_sz/1024**3}GB, KV Cache Memory Use={kv_cache_mem_use/1024**3}GB, Peak IO Buffer Use={peak_io_buffer_mem_use/1024**3}GB, Sum Of The Above={predict_tot_use/1024**3}GB."
         )
 

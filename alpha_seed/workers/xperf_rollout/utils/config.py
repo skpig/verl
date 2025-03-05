@@ -36,6 +36,8 @@ def get_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
         return _get_m8_xperf_gpt_config(model_config, tokenizer)
     elif model_config.model_type == 'seed_vl':
         return _get_vl_xperf_gpt_config(model_config, tokenizer)
+    elif model_config.model_type == 'deepseek_v3':
+        return _get_dsv3_xperf_gpt_config(model_config, tokenizer)
     else:
         raise NotImplementedError(f'Unsupported model {model_config.model_type}')
 
@@ -393,3 +395,52 @@ def _get_vl_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
     else:
         raise RuntimeError(f"Unsupported model type {model_config.text_config.architectures[0]}")
     return llm_config, vision_config
+
+
+def _get_dsv3_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
+    from seed_models import DeepseekV3Config
+    assert isinstance(model_config, DeepseekV3Config)
+    config = model_config
+    xperf_config = {
+        "dtype": "bfloat16",
+        "vocab_size": config.vocab_size,
+        "max_position_embeddings": config.max_position_embeddings,
+        "embed_dim": config.hidden_size,
+        "hidden_size": config.hidden_size,
+        "num_heads": config.num_attention_heads,
+        "num_layers": config.num_hidden_layers,
+        "num_kv_heads": config.num_key_value_heads,
+        "kv_lora_rank": config.kv_lora_rank,
+        "q_lora_rank": config.q_lora_rank,
+        "qk_nope_head_dim": config.qk_nope_head_dim,
+        "qk_rope_head_dim": config.qk_rope_head_dim,
+        "v_head_dim": config.v_head_dim,
+        "ffn_internal_dim": config.intermediate_size,
+        "moe_ffn_internal_dim": config.moe_intermediate_size,
+        "moe_expert_num": config.n_routed_experts,
+        "moe_topk": config.num_experts_per_tok,
+        "n_group": config.n_group,
+        "topk_group": config.topk_group,
+        "share_expert_num": config.n_shared_experts,
+        "model_name": "DeepSeekV3Model",
+        "is_meta": True,
+        "use_flash2": True,
+        "has_output_quant": False,
+        "has_kv_qscale": False,
+        "rms_norm_eps": config.rms_norm_eps,
+        "rope_scaling": {
+            "beta_fast": config.rope_scaling["beta_fast"],
+            "beta_slow": config.rope_scaling["beta_slow"],
+            "factor": config.rope_scaling["factor"],
+            "mscale": config.rope_scaling["mscale"],
+            "mscale_all_dim": config.rope_scaling["mscale_all_dim"],
+            "original_max_position_embeddings": config.rope_scaling["original_max_position_embeddings"],
+            "type": config.rope_scaling["type"],
+        },
+        "first_k_dense_replace": config.first_k_dense_replace,
+        "rope_theta": config.rope_theta,
+        "quant_mode": "NO_QUANT",
+        "routed_scaling_factor": config.routed_scaling_factor,
+        "weight_block_size": [128, 128]
+    }
+    return xperf_config

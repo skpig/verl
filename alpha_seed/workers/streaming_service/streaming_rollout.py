@@ -25,6 +25,7 @@ import tempfile
 import json
 import queue
 import threading
+import time
 
 from alpha_seed.workers.xperf_rollout.session import InferenceSession, StepProfiler
 
@@ -42,6 +43,7 @@ from contextlib import contextmanager
 import logging
 
 from alpha_seed.workers.xperf_rollout.utils import get_xperf_gpt_config
+from alpha_seed.workers.streaming_service.streaming_utils import is_multihost_model, get_gpus_per_node
 from alpha_seed.workers.xperf_rollout.utils.layout_convert_helper import init_meta
 from alpha_seed.workers.streaming_service.xperf_model_prophet import XperfModelProphet
 from alpha_seed.workers.xperf_rollout.utils.logits_manipulate import logits_manipulate_fn_core, logits_manipulate_fn_eta, logits_manipulate_fn_minp, logits_manipulate_fn_clip
@@ -121,6 +123,7 @@ class AsyncXPerfGPTRollout(object):
         }
         tp_size = self.config.get('tensor_model_parallel_size', 1)
         use_ep = self.config.get('use_ep', False)
+        multi_host_tp = is_multihost_model(tp_size)
 
         xperf_prophet = XperfModelProphet(model_cfg, sched_cfg, tp_size)
         gpu_memory_utilization = self.config.get('gpu_memory_utilization', 0.7)
@@ -255,31 +258,35 @@ class AsyncXPerfGPTRollout(object):
             worker_helper = WorkerHelper()
             if tp_rank == 0:
                 free_port_addr = list(worker_helper.get_availale_master_addr_port())
+                # use the by default port
+                free_port_addr[1] = int(os.getenv("PORT9", free_port_addr[1]))
             else:
                 free_port_addr = [None, None]
+
             # broadcast port and addr in tp group
             if self.device_mesh is not None:
                 tp_group = self.device_mesh['tp'].get_group()
                 tp_src_rank = dist.get_global_rank(tp_group, group_rank=0)
                 torch.distributed.broadcast_object_list(free_port_addr, src=tp_src_rank, group=tp_group)
             master_addr, master_port = free_port_addr[0], free_port_addr[1]
-
+            gpus_per_node = get_gpus_per_node()
+            local_world_size = min(tp_size, gpus_per_node)
+            self._set_multihost_env()
             with patch.dict(
                     os.environ, {
                         'RANK': str(tp_rank),
                         'WORLD_SIZE': str(tp_size),
-                        'LOCAL_RANK': str(tp_rank),
-                        'LOCAL_WORLD_SIZE': str(tp_size),
+                        'LOCAL_RANK': str(tp_rank % local_world_size),
+                        'LOCAL_WORLD_SIZE': str(local_world_size),
                         'MASTER_ADDR': master_addr,
-                        'MASTER_PORT': master_port,
+                        'MASTER_PORT': str(int(master_port) - 1),
                         'XPERF_SESSION_SET_TORCH_DEVICE': '0'
                     }):
-                local_world_size = 8  # TODO: hard code
-                for start_rank in range(0, local_world_size, tp_size):
+                for start_rank in range(0, gpus_per_node, tp_size):
                     end_rank = start_rank + tp_size
                     if start_rank <= global_rank % local_world_size < end_rank:
                         print(
-                            f'Global rank {global_rank}, tp_rank {tp_rank}, master_addr: {master_addr}, master_port: {master_port}'
+                            f'XPerf init Global rank {global_rank}, tp_rank {tp_rank}, master_addr: {master_addr}, master_port: {master_port}'
                         )
                         with logging_set_level(self.config.get('logging_level', 'INFO')):
                             inference_sess.init_inference_engine(f.name,
@@ -288,7 +295,8 @@ class AsyncXPerfGPTRollout(object):
                                                                  mp_size=tp_size,
                                                                  enable_metrics=True,
                                                                  use_ep=use_ep,
-                                                                 tokenizer_path=tokenizer.name_or_path)
+                                                                 tokenizer_path=tokenizer.name_or_path,
+                                                                 multi_host_tp=multi_host_tp)
                     if dist.is_initialized() and tp_size > 1:
                         dist.barrier()
                         if tp_rank == 0:
@@ -310,11 +318,12 @@ class AsyncXPerfGPTRollout(object):
         os.environ["USE_SESSION_CACHE"] = "0"
         if self.config.get("quant_mode", "NO_QUANT") == "WFP8":
             model_type = self.config.get('model_type', "")
-            assert model_type in ["dense_70b", "m8_2b5", "m8_14b", "m8_20b"], f"model_type {model_type} not supported"
+            if model_type not in ["dense_70b", "m8_2b5", "m8_14b", "m8_20b"]:
+                print(f"model_type {model_type} tuner not supported")
             model_type = "m8_14b" if model_type == "m8_20b" else model_type
             # set environment variables for tuner
-            os.environ["XGPT_TUNER_ENABLE"] = "1"
-            os.environ["XPERF_TUNER_ONLINE_PRIORITY"] = "1"
+            os.environ["XGPT_TUNER_ENABLE"] = os.getenv("XGPT_TUNER_ENABLE", "1")
+            os.environ["XPERF_TUNER_ONLINE_PRIORITY"] = os.getenv("XPERF_TUNER_ONLINE_PRIORITY", "1")
 
             # fp8 must use offline tuning config
             base_dir = os.path.normpath(os.path.dirname(os.path.dirname(__file__)))
@@ -336,6 +345,17 @@ class AsyncXPerfGPTRollout(object):
             else:
                 print(f"tuner config not found in {config_path}")
 
+    def _set_multihost_env(self):
+        if is_multihost_model(self.config.get('tensor_model_parallel_size', 1)):
+            os.environ["NCCL_SOCKET_IFNAME"] = os.getenv("NCCL_SOCKET_IFNAME", "eth0")
+            os.environ["NCCL_IB_HCA"] = os.getenv("NCCL_IB_HCA", "^=mlx5_0")
+            os.environ["NCCL_NVLS_ENABLE"] = "0"
+            os.environ["NCCL_IB_GID_INDEX"] = "3"
+            os.environ["NCCL_IB_DISABLE"] = "0"
+            os.environ["NCCL_IB_TIMEOUT"] = "20"
+            os.environ["NCCL_IB_RETRY_CNT"] = "7"
+            os.environ["NCCL_MULTI_HOST"] = "1"
+
     def __init_sub_process(self):
         self._set_tuner_config()
         self.input_queue = queue.Queue()
@@ -347,7 +367,7 @@ class AsyncXPerfGPTRollout(object):
     def set_rollout_callback_function(self, eos_callback_fn):
         self.inference_engine.set_callback_function(eos_callback_fn=eos_callback_fn)
 
-    def reset_kv_cache(self):
+    def reset_status(self):
         model = self.inference_engine.engine.module
         for i in range(model.num_layers):
             if (hasattr(model, "kv_mirror_layers")):
@@ -355,6 +375,8 @@ class AsyncXPerfGPTRollout(object):
                     mirror_layer = model.kv_mirror_imitated_layers[model.kv_mirror_layers.index(i + 1)] - 1
                     model.layers_impl[i].set_kv_cache(model.layers_impl[mirror_layer].get_kv_cache_2HBSD(
                         torch.bfloat16))
+        if hasattr(self.inference_engine.engine.module, "_prepare_yarn_embedding"):
+            self.inference_engine.engine.module._prepare_yarn_embedding()
 
     def _postprocess_log_probs(self, off_p_log_probs, on_p_log_probs, target_length, pad_token=-1):
         assert (len(off_p_log_probs) == len(on_p_log_probs))
@@ -387,14 +409,14 @@ class AsyncXPerfGPTRollout(object):
             self.inference_engine.set_generator_strategy(**generation_kwargs)
             with logging_set_level(self.config.get('logging_level', 'WARN')), self.profiler_context as p:
                 try:
-                    self.reset_kv_cache()
+                    self.reset_status()
                     self.inference_engine.execute(query_pool,
                                                   complete_ratio=complete_ratio,
                                                   stop_event=self.stop_event if self.is_standalone else None,
                                                   prompt_meta_info=prompt_meta_info)
                     profile_step(p, None)
                 except Exception as e:
-                    if os.getenv('XPERF_DUMP_NAN', '1') == '1':
+                    if os.getenv('XPERF_DUMP_NAN', '0') == '1':
                         from hdfs_io.hdfs_io import hcopy, hmkdir
                         dump_nan_dir = self.config.get("dump_nan", None)
                         if dump_nan_dir is None:
