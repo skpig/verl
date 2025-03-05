@@ -324,8 +324,13 @@ def parallel_init_fsdp_fn(module: torch.nn.Module, shard_states: Dict[str, torch
             warnings.warn(f"{param_name} not found in shard states, init it from random")
             assert is_param
             if dist.get_rank() == 0:
+                size = list(state.size())
+                if hasattr(state, "_spec"):
+                    shard = state._spec.shard
+                    if isinstance(shard, Shard):
+                        size[shard.dim] *= state._spec.mesh.size()
                 shard_states[param_name] = torch.nn.Parameter(
-                    torch.randn_like(state, device=torch.cuda.current_device()))
+                    torch.randn(size, dtype=state.dtype, device=device, requires_grad=state.requires_grad))
             else:
                 shard_states[param_name] = 0
         loaded = shard_states[param_name]
