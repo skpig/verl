@@ -454,6 +454,7 @@ class InferenceSession:
 
     def empty_cache(self):
         self.cache_manager.empty_cache()
+        self.infer_scheduler.empty_cache()
         self.waiting = []
         self.running = []
         self.finished = {}
