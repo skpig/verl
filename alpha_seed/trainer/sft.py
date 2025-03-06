@@ -45,6 +45,8 @@ from verl.utils.fsdp_utils import get_fsdp_wrap_policy
 from alpha_seed.models.transformers.monkey_patch import apply_monkey_patch
 from alpha_seed.workers.actors.initialize import create_mesh, parallel_load_safetensors, parallel_init_fsdp_fn, meta_device_init
 from alpha_seed.workers.actors.checkpoint.extensions import register_dtensor_save_hook
+from alpha_seed.workers.actors import activation_offload
+from alpha_seed.workers.actors.offload import offload_fsdp_optimizer, load_fsdp_optimizer
 from alpha_seed.models.transformers.parallel import apply_parallel_plan
 from alpha_seed.models.transformers.ops import clip_grad_norm_
 from alpha_seed.utils.observility.training_stats import all_reduce
@@ -195,7 +197,13 @@ class SFTTrainer(object):
                                                      torch_dtype=torch.float32,
                                                      attn_implementation="flash_attention_2")
             # enable recompute
-            model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': False})
+            if self.config.model.enable_gradient_checkpointing:
+                if self.config.model.act_offload:
+                    from alpha_seed.workers.actors import activation_offload
+                    torch.utils.checkpoint.CheckpointFunction = activation_offload.CheckpointFunction
+
+                model.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={'use_reentrant': self.config.model.act_offload})
 
             nparams = sum(p.numel() for p in model.parameters())
             print(f"number of parameters before parallelization: {nparams / (1e9):.2f}B")
@@ -235,6 +243,8 @@ class SFTTrainer(object):
         from alpha_seed.trainer.optim import get_optimizer_from_config
         self.optimizer = get_optimizer_from_config(self.fsdp_model.parameters(), self.config.optim)
 
+        self.act_offload_ctx = activation_offload.get_offload_context(self.config.model.act_offload, self.fsdp_model)
+
         steps_per_epoch = len(self.train_dataloader)
         total_steps = steps_per_epoch * self.config.trainer.total_epochs
 
@@ -244,7 +254,6 @@ class SFTTrainer(object):
             )
 
         num_warmup_steps = int(total_steps * self.config.optim.warmup_steps_ratio)
-
         self.lr_scheduler = verl_F.get_cosine_schedule_with_warmup(optimizer=self.optimizer,
                                                                    num_warmup_steps=num_warmup_steps,
                                                                    num_training_steps=total_steps,
@@ -282,10 +291,13 @@ class SFTTrainer(object):
             }
             if self.config.model.fuse_lm_head_ce_loss:
                 kwargs.update({'fuse_lm_head_ce_loss': True, 'labels': input_ids_rmpad_rolled})
-                loss = self.fsdp_model(**kwargs, use_cache=False).loss
+                with self.act_offload_ctx:
+                    loss = self.fsdp_model(**kwargs, use_cache=False).loss
             else:
                 vocab_size = self.fsdp_model.module.config.vocab_size
-                logits = self.fsdp_model(**kwargs, use_cache=False).logits.reshape(-1, vocab_size)
+                with self.act_offload_ctx:
+                    logits = self.fsdp_model(**kwargs, use_cache=False).logits.reshape(-1, vocab_size)
+
                 loss = cross_entropy_loss(logits, input_ids_rmpad_rolled, inplace_backward=True)[0]
 
             # since gather_manager gathers data from all sp/tp ranks
@@ -300,8 +312,10 @@ class SFTTrainer(object):
                 loss /= num_valid_tokens
         else:
             labels = torch.where(loss_mask == 1, input_ids, -100)  # ignored_label_index
-            loss = self.fsdp_model(input_ids=input_ids, attention_mask=attention_mask, labels=labels,
-                                   use_cache=False).loss * micro_batch_size / self.train_batch_size
+            with self.act_offload_ctx:
+                loss = self.fsdp_model(
+                    input_ids=input_ids, attention_mask=attention_mask, labels=labels,
+                    use_cache=False).loss * micro_batch_size / self.train_batch_size
 
         return loss
 
@@ -325,9 +339,15 @@ class SFTTrainer(object):
             loss.backward()
             total_loss += loss.item()
 
+        if self.config.optim.state_offload:
+            load_fsdp_optimizer(self.optimizer, torch.cuda.current_device())
+
         grad_norm = clip_grad_norm_(self.fsdp_model, max_norm=self.config.optim.max_grad_norm).item()
         self.optimizer.step()
         self.lr_scheduler.step()
+        if self.config.optim.state_offload:
+            offload_fsdp_optimizer(self.optimizer)
+
         lr = self.lr_scheduler.get_last_lr()[0]
 
         total_loss, grad_norm = all_reduce([total_loss, grad_norm], op="mean")

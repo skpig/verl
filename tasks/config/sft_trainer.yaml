@@ -12,6 +12,7 @@ model:
   path: hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/models/gemma-1.1-7b-it
   external_lib: null
   enable_gradient_checkpointing: False
+  act_offload: False
   override_config: {}
   fuse_lm_head_ce_loss: True
   trust_remote_code: True
@@ -27,7 +28,8 @@ optim:
   warmup_steps_ratio: 0.1
   max_grad_norm: 1.0
   min_lr_ratio: 0.1
-  force_bfloat16_state: False  # wether to compress optimizer states to bf16
+  state_offload: False
+  force_bfloat16_state: False  # whether to compress optimizer states to bf16
 
 trainer:
   default_local_dir: /tmp/alpha_seed_sft
