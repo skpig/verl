@@ -10,7 +10,7 @@ from single_controller.ray.base import RayResourcePool, RayClassWithInitArgs, Ra
 import torch
 import torch.distributed as dist
 
-from alpha_seed.trainer.sft import RaySFTTrainer
+from alpha_seed.trainer.rm import RayRMTrainer
 
 ENABLE_REDIS_TRITON_CACHE = int(os.getenv("ENABLE_REDIS_TRITON_CACHE", '1'))
 
@@ -34,7 +34,7 @@ def init_ray():
         ray.init(runtime_env=runtime_env)
 
 
-@hydra.main(config_path='config', config_name='sft_trainer', version_base=None)
+@hydra.main(config_path='config', config_name='rm_trainer', version_base=None)
 def main(config):
     init_ray()
     ray.get(main_task.remote(config))
@@ -47,8 +47,8 @@ def main_task(config):
     pprint((config.trainer.n_gpus_per_node, config.trainer.nnodes))
 
     resource_pool = RayResourcePool([config.trainer.n_gpus_per_node] * config.trainer.nnodes, use_gpu=True)
-    class_with_args = RayClassWithInitArgs(cls=ray.remote(RaySFTTrainer), config=config)
-    worker_group = RayWorkerGroup(resource_pool, class_with_args, name_prefix="main_sft")
+    class_with_args = RayClassWithInitArgs(cls=ray.remote(RayRMTrainer), config=config)
+    worker_group = RayWorkerGroup(resource_pool, class_with_args, name_prefix="main_rm")
 
     worker_group.fit()
 

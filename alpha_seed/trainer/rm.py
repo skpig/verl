@@ -22,15 +22,18 @@ from typing import Optional, Tuple
 import torch
 import torch.distributed as dist
 from torch import nn, optim
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, MixedPrecision, ShardingStrategy
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, MixedPrecision, ShardingStrategy, CPUOffload
 from torch.utils.data import DataLoader, DistributedSampler
 from codetiming import Timer
 from omegaconf import OmegaConf
+from torch.nn import functional as F
+from collections import defaultdict
 
-from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
+from transformers import AutoTokenizer, AutoModelForTokenClassification, AutoConfig
 
 import hdfs_io
 import seed_models
+from seed_models.utils.count_flops import FlopsCounter
 from pprint import pprint
 
 from tensordict import TensorDict
@@ -41,6 +44,7 @@ from verl import DataProto
 from verl.utils.seqlen_balancing import rearrange_micro_batches
 from verl.utils.model import compute_position_id_with_mask
 from verl.utils.fsdp_utils import get_fsdp_wrap_policy
+from verl.utils.debug import log_gpu_memory_usage
 
 from alpha_seed.models.transformers.monkey_patch import apply_monkey_patch
 from alpha_seed.workers.actors.initialize import create_mesh, parallel_load_safetensors, parallel_init_fsdp_fn, meta_device_init
@@ -49,9 +53,9 @@ from alpha_seed.models.transformers.parallel import apply_parallel_plan
 from alpha_seed.models.transformers.ops import clip_grad_norm_
 from alpha_seed.utils.observility.training_stats import all_reduce
 
-from alpha_seed.utils.dataset.sft_dataset import SFTDataset
+from alpha_seed.utils.dataset.rm_dataset import RMDataset
 from alpha_seed.utils.dataset.rl_dataset import collate_fn
-from alpha_seed.workers.hybrid_engine.fsdp_gather import DataGatherManager, ulysses_pad_and_slice_inputs
+from alpha_seed.workers.hybrid_engine.fsdp_gather import DataGatherManager, ulysses_pad_and_slice_inputs, gather_outpus_and_unpad
 
 from single_controller.base.worker import Worker
 from single_controller.base.decorator import register, Dispatch
@@ -90,7 +94,7 @@ def reduce_sequence_parallel_loss(loss: torch.Tensor, num_valid_tokens: torch.Te
     return ReduceLoss.apply(loss, num_valid_tokens)
 
 
-class SFTTrainer(object):
+class RMTrainer(object):
 
     def __init__(self, config):
         self.config = config
@@ -136,17 +140,19 @@ class SFTTrainer(object):
     def _build_dataloader(self):
         config = self.config
         # build dataset
-        self.train_dataset = SFTDataset(parquet_files=config.data.train_files,
-                                        tokenizer=self.tokenizer,
-                                        key=config.data.key,
-                                        max_length=config.data.max_seq_length,
-                                        truncation=config.data.truncation)
+        self.train_dataset = RMDataset(parquet_files=config.data.train_files,
+                                       tokenizer=self.tokenizer,
+                                       key=config.data.key,
+                                       max_length=config.data.max_seq_length,
+                                       max_response_num=config.data.max_response_num,
+                                       truncation=config.data.truncation)
 
-        self.val_dataset = SFTDataset(parquet_files=config.data.val_files,
-                                      tokenizer=self.tokenizer,
-                                      key=config.data.key,
-                                      max_length=config.data.max_seq_length,
-                                      truncation=config.data.truncation)
+        self.val_dataset = RMDataset(parquet_files=config.data.val_files,
+                                     tokenizer=self.tokenizer,
+                                     key=config.data.key,
+                                     max_length=config.data.max_seq_length,
+                                     max_response_num=config.data.max_response_num,
+                                     truncation=config.data.truncation)
 
         self.train_sampler = DistributedSampler(self.train_dataset,
                                                 shuffle=True,
@@ -182,18 +188,26 @@ class SFTTrainer(object):
 
         with meta_device_init(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            config = AutoConfig.from_pretrained(local_model_path, trust_remote_code=self.config.model.trust_remote_code)
+            config = AutoConfig.from_pretrained(local_model_path,
+                                                num_labels=1,
+                                                classifier_dropout=0.0,
+                                                trust_remote_code=self.config.model.trust_remote_code)
             for k, v in override_model_config.items():
                 setattr(config, k, v)
+            setattr(config, "id2label", {0: "LABEL_0"})
+            setattr(config, "label2id", {"LABEL_0": 0})
+            architecture = config.architectures[0].replace('ForCausalLM', 'ForTokenClassification')
+            setattr(config, "architectures", [architecture])
 
             if self.rank == 0:
                 pprint(config)
 
             # monkey patch
             apply_monkey_patch(config, verbose=self.rank == 0)
-            model = AutoModelForCausalLM.from_config(config=config,
-                                                     torch_dtype=torch.float32,
-                                                     attn_implementation="flash_attention_2")
+            model = AutoModelForTokenClassification.from_config(config=config,
+                                                                torch_dtype=torch.float32,
+                                                                attn_implementation="flash_attention_2")
+
             # enable recompute
             model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': False})
 
@@ -204,6 +218,7 @@ class SFTTrainer(object):
 
             nparams = sum(p.numel() for p in model.parameters())
             print(f"number of parameters after parallelization: {nparams / (1e9):.2f}B")
+            self.flops_counter = FlopsCounter(config)
 
         mixed_precision = MixedPrecision(param_dtype=torch.bfloat16,
                                          reduce_dtype=torch.float32,
@@ -213,13 +228,19 @@ class SFTTrainer(object):
         shards = parallel_load_safetensors(local_model_path)
         init_fn = parallel_init_fsdp_fn(model, shards)
 
+        if (not self.config.model.offload_params) or (self.train_batch_size != self.micro_batch_size) \
+            or self.config.model.use_dynamic_bsz:
+            cpu_offload = None
+        else:
+            cpu_offload = CPUOffload(offload_params=self.config.model.offload_params)
+
         self.fsdp_model = FSDP(model,
                                use_orig_params=True,
                                param_init_fn=init_fn,
                                auto_wrap_policy=auto_wrap_policy,
                                sharding_strategy=ShardingStrategy.FULL_SHARD,
                                mixed_precision=mixed_precision,
-                               cpu_offload=None,
+                               cpu_offload=cpu_offload,
                                forward_prefetch=True,
                                sync_module_states=False,
                                device_id=torch.cuda.current_device(),
@@ -232,8 +253,11 @@ class SFTTrainer(object):
 
         register_dtensor_save_hook(self.fsdp_model, shard_plan)
 
-        from alpha_seed.trainer.optim import get_optimizer_from_config
-        self.optimizer = get_optimizer_from_config(self.fsdp_model.parameters(), self.config.optim)
+        self.optimizer = optim.AdamW(self.fsdp_model.parameters(),
+                                     lr=self.config.optim.lr,
+                                     betas=self.config.optim.betas,
+                                     weight_decay=self.config.optim.weight_decay,
+                                     fused=True)
 
         steps_per_epoch = len(self.train_dataloader)
         total_steps = steps_per_epoch * self.config.trainer.total_epochs
@@ -251,18 +275,26 @@ class SFTTrainer(object):
                                                                    min_lr_ratio=self.config.optim.min_lr_ratio)
 
     def _compute_loss(self, micro_batch: TensorDict):
-        input_ids = micro_batch['input_ids'].to(torch.int64)
-        attention_mask = micro_batch['attention_mask'].to(torch.int64)
-        loss_mask = micro_batch['loss_mask'].to(torch.int64)
-        micro_batch_size = len(micro_batch)
+        response_num = micro_batch['response_num']
+        input_ids = micro_batch['input_ids'].to(torch.int64)  # (bsz, n_resp, max_len)
+        attention_mask = micro_batch['attention_mask'].to(torch.int64)  # (bsz, n_resp, max_len)
+        gt_scores = micro_batch['scores'].to(torch.int64)  # (bsz, n_resp)
+        batch_size, num_responses, seqlen = input_ids.shape
+        input_ids_lst, attention_mask_lst, gt_score_lst = [], [], []
+        for n, i, a, g in zip(response_num, input_ids, attention_mask, gt_scores):
+            input_ids_lst.append(i[:n])
+            attention_mask_lst.append(a[:n])
+            gt_score_lst.append(g[:n])
+        input_ids = torch.cat(input_ids_lst, dim=0)  # (totol_bsz, max_len)
+        attention_mask = torch.cat(attention_mask_lst, dim=0)  # (totol_bsz, max_len)
+        flat_gt_scores = torch.cat(gt_score_lst, dim=0)  # (totol_bsz)
+        total_response_num = input_ids.size(0)
+
         if self.config.model.use_rmpad:
             position_ids = compute_position_id_with_mask(attention_mask)
             input_ids_rmpad, indices, cu_seqlens, max_seqlen_in_batch = unpad_input(
                 input_ids.unsqueeze(-1), attention_mask=attention_mask)  # (totol_nnz, 1)
             input_ids_rmpad = input_ids_rmpad.transpose(0, 1)  # (1, total_nnz)
-            loss_mask, _, _, _ = unpad_input(loss_mask.unsqueeze(-1), attention_mask=attention_mask)
-            loss_mask = loss_mask.transpose(0, 1)  # (1, total_nnz)
-            input_ids_rmpad_rolled = torch.roll(input_ids_rmpad, shifts=-1, dims=1)
             position_ids_rmpad = index_first_axis(rearrange(position_ids.unsqueeze(-1), "b s ... -> (b s) ..."),
                                                   indices).transpose(0, 1)
 
@@ -270,40 +302,55 @@ class SFTTrainer(object):
             total_nnz = input_ids_rmpad.size(1)
             input_ids_rmpad, position_ids_rmpad, pad_size = ulysses_pad_and_slice_inputs(
                 input_ids_rmpad, position_ids_rmpad, self.sp_size)
-            input_ids_rmpad_rolled, _, _ = ulysses_pad_and_slice_inputs(input_ids_rmpad_rolled, None, self.sp_size)
-            input_ids_rmpad_rolled = input_ids_rmpad_rolled.squeeze(0)
-            loss_mask, _, _ = ulysses_pad_and_slice_inputs(loss_mask, None, self.sp_size)
-            loss_mask = loss_mask.squeeze(0)
-            # batch_size, seqlen = input_ids.shape
             kwargs = {
                 'input_ids': input_ids_rmpad,
                 'position_ids': position_ids_rmpad,
                 'output_hidden_states': False,
             }
-            if self.config.model.fuse_lm_head_ce_loss:
-                kwargs.update({'fuse_lm_head_ce_loss': True, 'labels': input_ids_rmpad_rolled})
-                loss = self.fsdp_model(**kwargs, use_cache=False).loss
-            else:
-                vocab_size = self.fsdp_model.module.config.vocab_size
-                logits = self.fsdp_model(**kwargs, use_cache=False).logits.reshape(-1, vocab_size)
-                loss = cross_entropy_loss(logits, input_ids_rmpad_rolled, inplace_backward=True)[0]
-
-            # since gather_manager gathers data from all sp/tp ranks
-            loss = torch.sum(loss * loss_mask) * micro_batch_size / self.train_batch_size
+            logits_rmpad = self.fsdp_model(**kwargs, use_cache=False).logits.squeeze(0)  # (total_nnz)
+            # gather output from sp
             if self.sp_size > 1:
-                num_valid_tokens = loss_mask.sum()
-                if num_valid_tokens == 0:
-                    print(f"local num_valid_tokens is zero on rank {self.rank}")
-                loss = reduce_sequence_parallel_loss(loss, num_valid_tokens)
-            else:
-                num_valid_tokens = loss_mask.sum()
-                loss /= num_valid_tokens
+                logits_rmpad = gather_outpus_and_unpad(logits_rmpad, gather_dim=0, unpad_dim=0, padding_size=pad_size)
+            # pad it back
+            logits = pad_input(logits_rmpad.unsqueeze(-1), indices=indices, batch=total_response_num,
+                               seqlen=seqlen).squeeze(-1)
         else:
-            labels = torch.where(loss_mask == 1, input_ids, -100)  # ignored_label_index
-            loss = self.fsdp_model(input_ids=input_ids, attention_mask=attention_mask, labels=labels,
-                                   use_cache=False).loss * micro_batch_size / self.train_batch_size
+            logits = self.fsdp_model(input_ids=input_ids, attention_mask=None,
+                                     use_cache=False).logits  # (total_nnz, max_len)
+        last_non_pad_token_idxs = (attention_mask.cumsum(dim=-1)).argmax(dim=-1)
+        flat_rewards = logits[torch.arange(total_response_num), last_non_pad_token_idxs]  # (total_response_num)
+        # chosen_reward_mean = torch.mean(flat_rewards[flat_gt_scores > 2])
+        # rejected_reward_mean = torch.mean(flat_rewards[flat_gt_scores <= 2])
+        reward_mean = torch.mean(flat_rewards)
+        l2_loss = torch.mean(flat_rewards**2)
+        rewards = []
+        scores_diff = gt_scores.view(batch_size, num_responses, 1) - gt_scores.view(
+            batch_size, 1, num_responses)  # (bsz, n_resp, n_resp)
+        pairwise_mask = (scores_diff > 0).to(torch.float32)  # (bsz, n_resp, n_resp)
+        for i, n in enumerate(response_num):
+            rewards.append(
+                torch.cat([flat_rewards[:n]] + [flat_rewards[n - 1:n]] * (self.config.data.max_response_num - n)))
+            flat_rewards = flat_rewards[n:]
+            pairwise_mask[i, n:, :] = 0
+            pairwise_mask[i, :, n:] = 0
+        pairwise_mask = pairwise_mask.view(batch_size, -1)  # (bsz, n_resp * n_resp)
+        rewards = torch.cat(rewards, dim=0)  # (bsz, n_resp)
+        pos_rewards = rewards.view(batch_size, num_responses, 1)
+        neg_rewards = rewards.view(batch_size, 1, num_responses)
+        rewards_diff = (pos_rewards - neg_rewards).view(batch_size,
+                                                        -1)  # (bsz, n_resp, n_resp) -> (bsz, n_resp * n_resp)
+        if self.config.trainer.margin:
+            logsig_loss = -F.logsigmoid(rewards_diff - self.config.trainer.margin)
+        else:
+            logsig_loss = -F.logsigmoid(rewards_diff)
+        logsig_loss = torch.sum(logsig_loss * pairwise_mask, dim=-1) / (torch.sum(pairwise_mask, dim=-1) + 1e-8
+                                                                       )  # (bsz,)
+        loss = torch.mean(logsig_loss) * batch_size / self.train_batch_size
+        if self.config.trainer.center_rewards_coeff > 0:
+            loss += self.config.trainer.center_rewards_coeff * l2_loss * batch_size / self.train_batch_size
+        pairwise_acc = torch.sum((rewards_diff > 0) * pairwise_mask) / (torch.sum(pairwise_mask) + 1e-8)
 
-        return loss
+        return loss, pairwise_acc, reward_mean
 
     def training_step(self, batch_data: DataProto):
         self.fsdp_model.train()
@@ -312,38 +359,54 @@ class SFTTrainer(object):
 
         batch_data.to(torch.cuda.current_device())
 
-        if self.config.model.use_dynamic_bsz:
-            micro_batches, _, _ = rearrange_micro_batches(batch=batch_data.batch,
-                                                          max_token_len=self.config.data.max_token_len)
-        else:
+        with Timer(name='train_step', logger=None) as timer:
             # split batch into micro_batches
             micro_batches = batch_data.batch.split(self.micro_batch_size)
 
-        total_loss = 0.0
-        for micro_batch in micro_batches:
-            loss = self._compute_loss(micro_batch)
-            loss.backward()
-            total_loss += loss.item()
+            log_gpu_memory_usage('Before train')
+            total_loss, pairwise_acc_lst, reward_mean_lst = 0.0, [], []
+            for micro_batch in micro_batches:
+                loss, pairwise_acc, reward_mean = self._compute_loss(micro_batch)
+                loss.backward()
+                total_loss += loss.item()
+                pairwise_acc_lst.append(pairwise_acc)
+                reward_mean_lst.append(reward_mean)
 
-        grad_norm = clip_grad_norm_(self.fsdp_model, max_norm=self.config.optim.max_grad_norm).item()
-        self.optimizer.step()
-        self.lr_scheduler.step()
-        lr = self.lr_scheduler.get_last_lr()[0]
+            log_gpu_memory_usage('Before optimizer step')
+            grad_norm = clip_grad_norm_(self.fsdp_model, max_norm=self.config.optim.max_grad_norm).item()
+            pairwise_acc = torch.mean(torch.stack(pairwise_acc_lst)).item()
+            reward_mean = torch.mean(torch.stack(reward_mean_lst)).item()
+            self.optimizer.step()
+            self.lr_scheduler.step()
+            lr = self.lr_scheduler.get_last_lr()[0]
+            log_gpu_memory_usage('After optimizer step')
 
-        total_loss, grad_norm = all_reduce([total_loss, grad_norm], op="mean")
+        delta_time = timer.last
+        global_num_tokens = torch.sum(batch_data.batch['attention_mask'], dim=-1).view(-1).tolist()
+        estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
+        mfu = estimated_flops / promised_flops / self.sp_size
+
+        total_loss, grad_norm, pairwise_acc, reward_mean, mfu = \
+            all_reduce([total_loss, grad_norm, pairwise_acc, reward_mean, mfu], op="mean")
         return {
             'train/loss': total_loss,
+            'train/pairwise_acc': pairwise_acc,
             'train/lr(1e-4)': lr * 1e4,
             'train/grad_norm': grad_norm,
-            'train/num_micro_batches': len(micro_batches)
+            'train/num_micro_batches': len(micro_batches),
+            'train/reward_mean': reward_mean,
+            'train/mfu': mfu,
         }
 
     def validation_step(self, batch_data: TensorDict):
         self.fsdp_model.eval()
         with torch.no_grad():
-            loss = self._compute_loss(batch_data) * self.train_batch_size / self.micro_batch_size
+            loss, pairwise_acc, reward_mean = self._compute_loss(batch_data)
+            loss = loss * self.train_batch_size / self.micro_batch_size
             torch.distributed.all_reduce(loss, op=torch.distributed.ReduceOp.AVG)
-        return loss
+            torch.distributed.all_reduce(pairwise_acc, op=torch.distributed.ReduceOp.AVG)
+            torch.distributed.all_reduce(reward_mean, op=torch.distributed.ReduceOp.AVG)
+        return loss, pairwise_acc, reward_mean
 
     def save_checkpoint(self, step):
         RLFSDPCheckpointer.save(
@@ -357,7 +420,8 @@ class SFTTrainer(object):
         if self.rank == 0:
             tracking = Tracking(project_name=self.config.trainer.project_name,
                                 experiment_name=self.config.trainer.experiment_name,
-                                default_backend=self.config.trainer.logger)
+                                default_backend=self.config.trainer.logger,
+                                config=OmegaConf.to_container(self.config, resolve=True))
 
         global_step = 0
         for epoch in range(self.config.trainer.total_epochs):
@@ -371,14 +435,22 @@ class SFTTrainer(object):
 
                 # validation
                 if global_step % self.config.trainer.eval_interval == 0:
-                    val_losses = []
+                    val_losses, pairwise_accs, reward_means = [], [], []
                     for data in self.val_dataloader:
                         data = TensorDict(data, batch_size=self.micro_batch_size).cuda()
-                        val_loss = self.validation_step(data)
+                        val_loss, pairwise_acc, reward_mean = self.validation_step(data)
                         val_losses.append(val_loss)
+                        pairwise_accs.append(pairwise_acc)
+                        reward_means.append(reward_mean)
                     if self.rank == 0:
                         val_loss = torch.mean(torch.stack(val_losses))
-                        metric.update({'val/loss': val_loss.detach().item()})
+                        pairwise_acc = torch.mean(torch.stack(pairwise_accs))
+                        reward_mean = torch.mean(torch.stack(reward_means))
+                        metric.update({
+                            'val/loss': val_loss.detach().item(),
+                            'val/pairwise_acc': pairwise_acc.detach().item(),
+                            'val/reward_mean': reward_mean.detach().item()
+                        })
                     torch.distributed.barrier()
 
                 if self.rank == 0:
@@ -390,7 +462,7 @@ class SFTTrainer(object):
             self.save_checkpoint(step=global_step)
 
         if self.rank == 0:
-            local_path = os.path.join(self.config.trainer.default_local_dir, "model_assets")
+            local_path = os.path.join(self.config.trainer.default_local_dir, "huggingface")
             os.makedirs(local_path, exist_ok=True)
             self.fsdp_model.module.config.save_pretrained(local_path)
             self.tokenizer.save_pretrained(local_path)
@@ -399,13 +471,13 @@ class SFTTrainer(object):
         dist.barrier()
 
 
-class RaySFTTrainer(Worker):
+class RayRMTrainer(Worker):
 
     def __init__(self, config):
         super().__init__()
         self.config = config
         dist.init_process_group(backend="nccl")
-        self.trainer = SFTTrainer(self.config)
+        self.trainer = RMTrainer(self.config)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def fit(self):

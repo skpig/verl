@@ -23,6 +23,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from verl.utils.torch_functional import allgather_dict_tensors
 from dist_attn.ulysses.parallel_states import set_ulysses_sequence_parallel_group, get_ulysses_sequence_parallel_group
 from dist_attn.ulysses.ops import slice_input_tensor
+from typing import Any
 import numpy as np
 
 import torch
@@ -138,3 +139,75 @@ def ulysses_pad_and_slice_inputs(input_ids_rmpad: torch.Tensor, position_ids_rmp
     # if position_ids_rmpad is not None:
     #     position_ids_rmpad = slice_input_tensor(position_ids_rmpad, dim=1, padding=False)
     return input_ids_rmpad, position_ids_rmpad, pad_size
+
+
+def gather_outpus_and_unpad(x: torch.Tensor,
+                            gather_dim: int,
+                            unpad_dim: int = None,
+                            padding_size: int = 0,
+                            grad_scaler: bool = True,
+                            sp_size: int = 1):
+    group = get_ulysses_sequence_parallel_group()
+    if group == None:
+        return x
+    x = Gather.apply(group, x, gather_dim, grad_scaler)
+    if unpad_dim is not None:
+        assert isinstance(padding_size, int), 'padding size is not given or is not an integer'
+        if padding_size == 0:
+            return x
+        x = _unpad_tensor(x, unpad_dim, padding_size)
+    return x
+
+
+class Gather(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx: Any,
+                group: torch.distributed.ProcessGroup,
+                local_tensor: torch.Tensor,
+                gather_dim: int,
+                grad_scaler: bool = True,
+                async_op=False) -> torch.Tensor:
+        ctx.group = group
+        ctx.gather_dim = gather_dim
+        ctx.grad_scaler = grad_scaler
+        ctx.async_op = async_op
+
+        sp_world_size = torch.distributed.get_world_size(group=group)
+        ctx.sp_world_size = sp_world_size
+
+        sp_rank = torch.distributed.get_rank(group=group)
+        ctx.sp_rank = sp_rank
+
+        local_shape = list(local_tensor.size())
+        split_size = local_shape[0]
+        part_size = local_shape[gather_dim]  # store original size
+        ctx.part_size = part_size
+
+        output = all_gather_tensor(local_tensor, group, async_op)
+        return torch.cat(output.split(split_size, dim=0), dim=gather_dim)
+
+    @staticmethod
+    def backward(ctx: Any, grad_output: torch.Tensor) -> Any:
+        if ctx.grad_scaler:
+            grad_output = grad_output * ctx.sp_world_size
+        return (None, grad_output.split(ctx.part_size,
+                                        dim=ctx.gather_dim)[ctx.sp_rank].contiguous(), None, None, None, None)
+
+
+def all_gather_tensor(local_tensor: torch.Tensor,
+                      group: Optional[torch.distributed.ProcessGroup] = None,
+                      async_op: bool = False):
+    group = get_ulysses_sequence_parallel_group() if group is None else group
+    sp_world_size = torch.distributed.get_world_size(group=group)
+    output_shape = list(local_tensor.shape)
+    output_shape[0] = output_shape[0] * sp_world_size
+    output = torch.empty(output_shape, dtype=local_tensor.dtype, device=local_tensor.device)
+    torch.distributed.all_gather_into_tensor(output, local_tensor, group=group, async_op=async_op)
+    return output
+
+
+def _unpad_tensor(x: torch.Tensor, dim: int, padding_size: int) -> torch.Tensor:
+    slc = [slice(None)] * len(x.shape)
+    slc[dim] = slice(0, -padding_size)
+    return x[slc]
