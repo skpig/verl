@@ -4,14 +4,18 @@ Generate runtime parallel configuration for specific models and hardware
 Example:
 
 ```sh
+# Recommanded recipe format: gpu_ngpus_model_size_seqlen.yaml, e.g.,
+`h800_128_m8_20b_18k.yaml`
+
+
 # Generate using torchrun
 torchrun --nproc_per_node=$ARNOLD_WORKER_GPU --nnodes=$ARNOLD_WORKER_NUM --node_rank=$ARNOLD_ID \
     --master_addr=$ARNOLD_WORKER_0_HOST --master_port=12321 \
     tasks/auto_tuner.py \
     --model hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/20b_sft_summary_0131_hf \
-    --max-seqlen 16384 \
+    --max-seqlen 18432 \
     --nnodes 16 --ngpus-per-node 8 --gpu-type H800 \
-    --recipe-out ./auto.yaml \
+    --recipe-out hdfs://haruna/home/byte_data_seed/lf_lq/user/zhiqi.0/rlhf/recipes/h800_128_m8_20b_18k.yaml \
     2>&1 | tee log.txt
 
 cat ./auto.yaml
@@ -34,6 +38,7 @@ import numpy as np
 import copy
 import warnings
 import torch
+import os
 
 from torch.distributed.fsdp.api import ShardingStrategy, MixedPrecision
 from transformers import AutoConfig, AutoModelForCausalLM
@@ -51,6 +56,7 @@ from verl.utils.fsdp_utils import get_fsdp_wrap_policy
 from tests.hybrid_engine.utils import print_each_rank
 from tests.hybrid_engine.test_parallel import init_random_data
 from alpha_seed.workers.actors import activation_offload
+import hdfs_io
 import verl.utils.torch_functional as verl_F
 import torch.distributed as dist
 import matplotlib.pyplot as plt
@@ -73,8 +79,7 @@ parser.add_argument("--nnodes", type=int)
 parser.add_argument("--ngpus-per-node", type=int)
 parser.add_argument("--gpu-type", type=str, choices=["H20", "H800", "H100", "L20"])
 parser.add_argument("--mem-margin", type=float, default=0.15, help="ratio of reserved memory in GB of total memory")
-parser.add_argument("--recipe-output", type=str, default='./auto.yaml')
-parser.add_argument("--num-layer", type=int, default=10, help="number of layers in memory estimation")
+parser.add_argument("--recipe-output", type=str, default='./auto.yaml', help="can be local or hdfs path")
 args = parser.parse_args()
 print(args)
 
@@ -361,6 +366,7 @@ class AutoTuner:
         have_tp_implementation = self.config.model_type in (
             "seed_m8",
             "deepseek_v3",
+            "seed_p6dense",
         )
         tp_size = 1
         if have_tp_implementation:
@@ -425,7 +431,8 @@ class AutoTuner:
             plt.close()
         return slope, intercept
 
-    def export_recipe(self, config: ParallelConfig, filepath):
+    def export_recipe(self, config: ParallelConfig, filepath: str):
+        assert filepath.endswith(".yaml"), f"{filepath} must ends with .yaml"
         with open('tasks_scripts/recipes/template.yaml', "r") as f:
             template = yaml.safe_load(f)
         template["actor_rollout_ref"]["actor"]["ppo_max_token_len"] = config.max_token_len
@@ -452,9 +459,17 @@ class AutoTuner:
         tp_size = max(tp_size, 1)
         template["actor_rollout_ref"].setdefault("rollout", {})["tensor_model_parallel_size"] = tp_size
 
-        with open(filepath, "w") as f:
+        local_filepath = filepath
+        if filepath.startswith("hdfs://"):
+            local_filepath = os.path.join('/tmp/', os.path.basename(filepath))
+        with open(local_filepath, "w") as f:
             yaml.safe_dump(template, f)
-        print(f"recipe is dumped at {filepath}")
+        print(f"recipe is dumped at local path {local_filepath}")
+        if filepath.startswith("hdfs://"):
+            folder = os.path.dirname(filepath)
+            hdfs_io.makedirs(folder, exist_ok=True)
+            hdfs_io.hput(local_filepath, folder)
+            print(f"recipe is dumped at hdfs path: {filepath}")
         return template
 
 
@@ -462,6 +477,13 @@ if __name__ == '__main__':
 
     dist.init_process_group(backend='nccl')
     torch.cuda.set_device(int(os.environ['LOCAL_RANK']))
+
+    filepath: str = args.recipe_output
+    if filepath.startswith("hdfs://"):
+        if hdfs_io.exists(filepath):
+            print(f"{filepath} exists, search stopped.")
+            dist.destroy_process_group()
+            exit(0)
 
     env = Env(
         args.gpu_type,
@@ -476,5 +498,6 @@ if __name__ == '__main__':
     config = tuner.search(plot_file="search.png")
     if dist.get_rank() == 0:
         print(f"Find solution: {config}")
-        recipe = tuner.export_recipe(config, args.recipe_output)
+        recipe = tuner.export_recipe(config, filepath)
+
     dist.destroy_process_group()

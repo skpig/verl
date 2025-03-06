@@ -31,6 +31,7 @@ import os
 import ray
 from verl import DataProto
 from verl.utils.tracking import Tracking
+from verl.utils.fs import copy_local_path_from_hdfs
 import torch
 import wandb
 import pandas as pd
@@ -581,7 +582,8 @@ def main(config):
         if MegavisionMetricsCtx else contextlib.nullcontext()
 
     if config.recipe:
-        recipe = omegaconf.OmegaConf.load(config.recipe)
+        filepath = copy_local_path_from_hdfs(config.recipe)
+        recipe = omegaconf.OmegaConf.load(filepath)
         print(f"recipe found: {config.recipe}, overriding with config: {recipe}")
         override(config, recipe)
 
