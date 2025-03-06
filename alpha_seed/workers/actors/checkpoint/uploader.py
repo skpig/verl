@@ -16,6 +16,7 @@ class CkptGlobalUploader:
         self.tracker_role = tracker_role
         self.ckpt_version = ckpt_version
         self.local_checkpoint_folder = os.path.join(default_local_dir, 'checkpoints')
+        os.makedirs(self.local_checkpoint_folder, exist_ok=True)
         self.remote_checkpoint_folder = os.path.join(default_remote_dir, 'checkpoints')
         self.upload_retry_count = upload_retry_count
 
