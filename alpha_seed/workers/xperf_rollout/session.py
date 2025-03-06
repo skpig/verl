@@ -650,14 +650,15 @@ class InferenceSession:
                 break
             context_input, decode_input, total_length, kv_index, context_shifts, history_ids, sample_kwargs = self._pack_to_tensors(
                 self.running)
-            next_tokens, _, _, log_probs = self.infer_scheduler.forward_and_sample(context_input=context_input,
-                                                                                   decode_input=decode_input,
-                                                                                   total_length=total_length,
-                                                                                   kv_index=kv_index,
-                                                                                   orca_updated=True,
-                                                                                   context_shifts=context_shifts,
-                                                                                   history_ids=history_ids,
-                                                                                   sample_kwargs=sample_kwargs)
+            next_tokens, _, _, log_probs, probs_gt_threshold_num, probs_lt_threshold_sum = self.infer_scheduler.forward_and_sample(
+                context_input=context_input,
+                decode_input=decode_input,
+                total_length=total_length,
+                kv_index=kv_index,
+                orca_updated=True,
+                context_shifts=context_shifts,
+                history_ids=history_ids,
+                sample_kwargs=sample_kwargs)
 
             if self.engine.module.tp_size > 1 and next_tokens is not None:
                 self.engine.module.layers_impl[0].broadcast(next_tokens)
@@ -665,7 +666,9 @@ class InferenceSession:
             self._update_running_batch(next_tokens=next_tokens,
                                        tokens_len=tokens_len,
                                        accepted_len=accepted_len,
-                                       log_probs=log_probs)
+                                       log_probs=log_probs,
+                                       probs_gt_threshold_num=probs_gt_threshold_num,
+                                       probs_lt_threshold_sum=probs_lt_threshold_sum)
             self.infer_scheduler.next_step()
             if self.step_profiler is not None:
                 ctx_tokens = context_input.shape[0] if context_input is not None else 0
@@ -702,7 +705,13 @@ class InferenceSession:
 
         return finished_sequences
 
-    def _update_running_batch(self, next_tokens, tokens_len, accepted_len=None, log_probs=None):
+    def _update_running_batch(self,
+                              next_tokens,
+                              tokens_len,
+                              accepted_len=None,
+                              log_probs=None,
+                              probs_gt_threshold_num=None,
+                              probs_lt_threshold_sum=None):
         next_running = [[], []]
         next_tokens = next_tokens.cpu().tolist()
         if accepted_len is not None:
@@ -710,6 +719,12 @@ class InferenceSession:
         if log_probs is not None:
             assert (log_probs.shape[0] == len(self.running))
             log_probs = log_probs.cpu().tolist()
+        if probs_gt_threshold_num is not None:
+            assert (probs_gt_threshold_num.shape[0] == len(self.running))
+            probs_gt_threshold_num = probs_gt_threshold_num.cpu().tolist()
+        if probs_lt_threshold_sum is not None:
+            assert (probs_lt_threshold_sum.shape[0] == len(self.running))
+            probs_lt_threshold_sum = probs_lt_threshold_sum.cpu().tolist()
         for i, query in enumerate(self.running):
             # decoding
             if (query._is_to_decoding_compute()):
@@ -722,6 +737,10 @@ class InferenceSession:
                 finished_sequences = False
                 query.accepted_len.append(accepted_len[i] if accepted_len is not None else -1)
                 query.new_token_log_probs.append(log_probs[i] if log_probs is not None else 0)
+                query.probs_gt_threshold_num.append(
+                    probs_gt_threshold_num[i] if probs_gt_threshold_num is not None else 0)
+                query.probs_lt_threshold_sum.append(
+                    probs_lt_threshold_sum[i] if probs_lt_threshold_sum is not None else 0)
                 for token_idx in range(query_next_tokens_len):
                     next_token = query_next_tokens[token_idx]
                     query.new_token_ids.append(next_token)

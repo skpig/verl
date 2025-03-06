@@ -135,6 +135,8 @@ def calculate_score_in_length_ranges(raw_scores_log, response_length, ranges):
 
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty='kl'):
     rollout_log_probs = data.batch['rollout_log_probs']
+    probs_gt_threshold_num = data.batch['probs_gt_threshold_num']
+    probs_lt_threshold_sum = data.batch['probs_lt_threshold_sum']
     old_log_probs = data.batch['old_log_probs']
     responses = data.batch['responses']
     response_length = responses.size(1)
@@ -179,7 +181,9 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
     metrics.update({
         'rollout/kl_diff_max': kl_diff_max,
         'rollout/kl_diff_max_rollout_log_probs': rollout_log_probs_max,
-        'rollout/kl_diff_max_old_log_probs': old_log_probs_max
+        'rollout/kl_diff_max_old_log_probs': old_log_probs_max,
+        'prob/probs_gt_threshold_num': masked_mean(probs_gt_threshold_num, mask=response_mask),
+        'prob/probs_lt_threshold_sum': masked_mean(probs_lt_threshold_sum, mask=response_mask)
     })
 
     kl_diff_min = kl_diff.min().item()
@@ -1188,6 +1192,18 @@ class RayPPOTrainer(object):
                                                            dtype=torch.bfloat16,
                                                            device=batch.batch['input_ids'].device).fill_(-1)
 
+        if 'probs_gt_threshold_num' not in batch:
+            batch.batch['probs_gt_threshold_num'] = torch.zeros(batch.batch['input_ids'].shape[0],
+                                                                self.config.data.max_response_length,
+                                                                dtype=torch.bfloat16,
+                                                                device=batch.batch['input_ids'].device).fill_(-1)
+
+        if 'probs_lt_threshold_sum' not in batch:
+            batch.batch['probs_lt_threshold_sum'] = torch.zeros(batch.batch['input_ids'].shape[0],
+                                                                self.config.data.max_response_length,
+                                                                dtype=torch.bfloat16,
+                                                                device=batch.batch['input_ids'].device).fill_(-1)
+
         if 'off_policy_steps' not in batch:
             batch.batch['off_policy_steps'] = torch.zeros(batch.batch['input_ids'].shape[0],
                                                           self.config.data.max_response_length,
@@ -1195,9 +1211,12 @@ class RayPPOTrainer(object):
                                                           device=batch.batch['input_ids'].device).fill_(-1)
 
         if self.config.data.num_prompts_per_data > 1:
-            batch = batch.unfold_column_chunks(
-                self.config.data.num_prompts_per_data,
-                split_keys=['input_ids', 'attention_mask', 'off_policy_steps', 'rollout_log_probs'])
+            batch = batch.unfold_column_chunks(self.config.data.num_prompts_per_data,
+                                               split_keys=[
+                                                   'input_ids', 'attention_mask', 'off_policy_steps',
+                                                   'rollout_log_probs', 'probs_gt_threshold_num',
+                                                   'probs_lt_threshold_sum'
+                                               ])
 
         # hybrid rollout
         if self.config.algorithm.prior_sampling.enable:
@@ -1233,7 +1252,10 @@ class RayPPOTrainer(object):
         batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(batch))], dtype=object)
         batch.check_consistency()
 
-        gen_batch = batch.pop(batch_keys=['input_ids', 'attention_mask', 'off_policy_steps', 'rollout_log_probs'])
+        gen_batch = batch.pop(batch_keys=[
+            'input_ids', 'attention_mask', 'off_policy_steps', 'rollout_log_probs', 'probs_gt_threshold_num',
+            'probs_lt_threshold_sum'
+        ])
         # assign the non_tensor_batch uid to the generator as well.
         non_tensor_infos = ['rollout_id', 'uid', 'reward_model']
         for key in non_tensor_infos:
@@ -1374,8 +1396,10 @@ class RayPPOTrainer(object):
             standalone_batch = make_interleave(standalone_batch, self.standalone_rollout_wg.world_size)
 
             standalone_batch = DataProto.concat(standalone_batch)
-            standalone_gen_batch = standalone_batch.pop(
-                batch_keys=['input_ids', 'attention_mask', 'off_policy_steps', 'rollout_log_probs'])
+            standalone_gen_batch = standalone_batch.pop(batch_keys=[
+                'input_ids', 'attention_mask', 'off_policy_steps', 'rollout_log_probs', 'probs_gt_threshold_num',
+                'probs_lt_threshold_sum'
+            ])
             non_tensor_infos = ['rollout_id', 'uid', 'reward_model']
             for key in non_tensor_infos:
                 standalone_gen_batch.non_tensor_batch[key] = standalone_batch.non_tensor_batch[key]
@@ -1560,6 +1584,16 @@ class RayPPOTrainer(object):
             raise RuntimeError("Allocation does not sum to N; check logic.")
 
         return allocation
+
+    def cal_corr(self, x, y, mask, epsilon=1e-5):
+        x_mean = (x * mask).sum(dim=1) / torch.clamp(mask.sum(dim=1), min=1.0)
+        y_mean = (y * mask).sum(dim=1) / torch.clamp(mask.sum(dim=1), min=1.0)
+        xy_mean = (x * y * mask).sum(dim=1) / torch.clamp(mask.sum(dim=1), min=1.0)
+        x_square_mean = (x * x * mask).sum(dim=1) / torch.clamp(mask.sum(dim=1), min=1.0)
+        y_square_mean = (y * y * mask).sum(dim=1) / torch.clamp(mask.sum(dim=1), min=1.0)
+        return (xy_mean - x_mean * y_mean) / (
+            torch.sqrt(torch.clamp(
+                (x_square_mean - x_mean * x_mean) * (y_square_mean - y_mean * y_mean), min=0.0)) + epsilon)
 
     def fit(self):
         self._create_kl_control()
@@ -1902,6 +1936,12 @@ class RayPPOTrainer(object):
                                         rewards_tensor_data_source.shape[0],
                                 })
                             metrics.update(score_metrics)
+                            advantages = batch.batch['advantages']
+                            response_length = batch.batch['responses'].shape[-1]
+                            response_mask = batch.batch['attention_mask'][:, -response_length:]
+                            idx = torch.arange(advantages.shape[1]).unsqueeze(dim=0).tile(advantages.shape[0], 1)
+                            adv_idx_corr = self.cal_corr(advantages, idx, response_mask)
+                            metrics['critic/advantages/adv_idx_corr'] = adv_idx_corr.mean()
                         metrics['timing/compute_metrics'] = timer.last
 
                     metric_collection_context = self.megavision_metrics_collector.collect_save_checkpoint_duration() \

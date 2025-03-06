@@ -453,11 +453,15 @@ class AsyncXPerfGPTRollout(object):
 
             response_outputs = []
             response_log_probs = []
+            response_probs_gt_threshold_num = []
+            response_probs_lt_threshold_sum = []
             is_finished = []
             off_policy_steps = []
             for prompt, v in zip(original_query_pool, self.inference_engine.get_inorder_responses()):
                 response_outputs.append((v.input_ids + v.new_token_ids)[len(prompt):])
                 response_log_probs.append(v.new_token_log_probs)
+                response_probs_gt_threshold_num.append(v.probs_gt_threshold_num)
+                response_probs_lt_threshold_sum.append(v.probs_lt_threshold_sum)
                 is_finished.append(v.is_finished)
                 off_policy_steps.append([-1] * len(v.new_token_log_probs))
             is_finished = torch.Tensor(is_finished)
@@ -466,7 +470,8 @@ class AsyncXPerfGPTRollout(object):
                        "init_metrics") and self.inference_engine.infer_scheduler.enable_metrics:
                 metrics = self.inference_engine.infer_scheduler.metrics
             self.inference_engine.empty_cache()
-            self.output_queue.put((response_outputs, response_log_probs, is_finished, off_policy_steps, metrics))
+            self.output_queue.put((response_outputs, response_log_probs, response_probs_gt_threshold_num,
+                                   response_probs_lt_threshold_sum, is_finished, off_policy_steps, metrics))
 
     def _get_output_from_queue(self):
         while True:
@@ -488,6 +493,8 @@ class AsyncXPerfGPTRollout(object):
         attention_mask = prompts.batch['attention_mask']
         off_turn_off_policy_steps = prompts.batch["off_policy_steps"]
         off_policy_response_log_probs = prompts.batch["rollout_log_probs"]
+        off_policy_probs_gt_threshold_num = prompts.batch["probs_gt_threshold_num"]
+        off_policy_probs_lt_threshold_sum = prompts.batch["probs_lt_threshold_sum"]
         first_non_one_indices = (prompt_ids != self.tokenizer.pad_token_id).int().argmax(dim=1)
         rmv_padding_prompt_ids = [row[index:].tolist() for row, index in zip(prompt_ids, first_non_one_indices)]
 
@@ -507,15 +514,15 @@ class AsyncXPerfGPTRollout(object):
             # stop event
             if self.async_remain_warmup_step <= 0:
                 self.stop_event.set()
-            (response_outputs, response_log_probs, is_finished, this_turn_off_policy_steps,
-             metrics) = self._get_output_from_queue()
+            (response_outputs, response_log_probs, response_probs_gt_threshold_num, response_probs_lt_threshold_sum,
+             is_finished, this_turn_off_policy_steps, metrics) = self._get_output_from_queue()
             if self.async_remain_warmup_step <= 0:
                 self.stop_event.clear()
             self.async_remain_warmup_step -= 1
         else:
             # complete_ratio or all prompts are finished
-            (response_outputs, response_log_probs, is_finished, this_turn_off_policy_steps,
-             metrics) = self._get_output_from_queue()
+            (response_outputs, response_log_probs, response_probs_gt_threshold_num, response_probs_lt_threshold_sum,
+             is_finished, this_turn_off_policy_steps, metrics) = self._get_output_from_queue()
 
         # Note that the tokenizer may change at runtime
         tokenizer: PreTrainedTokenizer = self.tokenizer
@@ -531,6 +538,14 @@ class AsyncXPerfGPTRollout(object):
                                                response_log_probs,
                                                max_new_tokens,
                                                mode="log_prob")
+        response_probs_gt_threshold_num = self._postprocess(off_policy_probs_gt_threshold_num,
+                                                            response_probs_gt_threshold_num,
+                                                            max_new_tokens,
+                                                            mode="probs_gt_threshold_num")
+        response_probs_lt_threshold_sum = self._postprocess(off_policy_probs_lt_threshold_sum,
+                                                            response_probs_lt_threshold_sum,
+                                                            max_new_tokens,
+                                                            mode="probs_lt_threshold_sum")
         response_off_policy = self._postprocess(off_turn_off_policy_steps,
                                                 this_turn_off_policy_steps,
                                                 max_new_tokens,
@@ -545,6 +560,8 @@ class AsyncXPerfGPTRollout(object):
             # 'prompts': prompt_ids,
             # 'responses': response_ids,
             'rollout_log_probs': response_log_probs.to(torch.bfloat16),
+            'probs_gt_threshold_num': response_probs_gt_threshold_num.to(torch.bfloat16),
+            'probs_lt_threshold_sum': response_probs_lt_threshold_sum.to(torch.bfloat16),
             'input_ids': input_ids.to(torch.int32),  # here input_ids become the whole sentences
             'attention_mask': attention_mask.to(torch.int8),
             'is_finished': is_finished.to(torch.int8),

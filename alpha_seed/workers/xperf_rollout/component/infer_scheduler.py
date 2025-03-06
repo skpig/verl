@@ -165,12 +165,10 @@ class InferScheduler():
             if self.context_only:
                 next_tokens = None
             else:
-                next_tokens, log_probs = self.sampler.sample(logits,
-                                                             need_torch_tensor=True,
-                                                             history_ids=history_ids,
-                                                             sample_kwargs=sample_kwargs)
+                next_tokens, log_probs, probs_gt_threshold_num, probs_lt_threshold_sum = self.sampler.sample(
+                    logits, need_torch_tensor=True, history_ids=history_ids, sample_kwargs=sample_kwargs)
 
-            return next_tokens, accepted_len, output, log_probs
+            return next_tokens, accepted_len, output, log_probs, probs_gt_threshold_num, probs_lt_threshold_sum
         else:
             # forward ngrams
             accpeted_tokens, accepted_len = self.engine.forward_spec(

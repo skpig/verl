@@ -400,7 +400,7 @@ class DataParallelPPOActor(BasePPOActor):
                                                                                temperature=temperature,
                                                                                compute_entropy=compute_entropy)
 
-                    total_loss, pg_loss, upgo_loss, pg_clipfrac, pg_clipfrac2, ppo_kl, ppo_kl_sum = core_algos.compute_policy_loss(
+                    total_loss, pg_loss, upgo_loss, pg_clipfrac, pg_clipfrac_hi, pg_clipfrac_lo, pg_clipfrac2, ppo_kl, ppo_kl_sum = core_algos.compute_policy_loss(
                         old_log_prob=old_log_prob,
                         ref_log_prob=ref_log_prob,
                         log_prob=log_prob,
@@ -453,6 +453,8 @@ class DataParallelPPOActor(BasePPOActor):
                         'actor/upgo_loss': upgo_loss.detach().item(),
                         'actor/kl_loss': kl_loss.detach().item(),
                         'actor/pg_clipfrac': pg_clipfrac.detach().item(),
+                        'actor/pg_clipfrac_hi': pg_clipfrac_hi.detach().item(),
+                        'actor/pg_clipfrac_lo': pg_clipfrac_lo.detach().item(),
                         'actor/pg_clipfrac2': pg_clipfrac2.detach().item(),
                         'actor/ppo_kl': ppo_kl.detach().item(),
                         'actor/ppo_kl_sum': ppo_kl_sum.detach().item(),

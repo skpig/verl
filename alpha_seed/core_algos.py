@@ -259,6 +259,8 @@ def compute_policy_loss(old_log_prob, ref_log_prob, log_prob, advantages, upgo_a
         ratio = torch.exp(log_prob - old_log_prob)
         pg_losses1 = -advantages * ratio
         pg_losses2 = -advantages * torch.clamp(ratio, 1.0 - cliprange_low, 1.0 + cliprange_high)
+        pg_losses2_hi = -advantages * torch.clamp(ratio, max=1.0 + cliprange_high)
+        pg_losses2_lo = -advantages * torch.clamp(ratio, min=1.0 - cliprange_low)
         pg_losses3 = torch.abs(-advantages * cliprange2)
         pg_losses_clip = torch.maximum(pg_losses1, pg_losses2)
         pg_losses = torch.minimum(pg_losses_clip, pg_losses3)  # 这个应该对advantage为正的情况不影响
@@ -272,6 +274,10 @@ def compute_policy_loss(old_log_prob, ref_log_prob, log_prob, advantages, upgo_a
         pg_losses1 = -advantages * torch.exp(log_prob - logp_adj)
         clipped_logratio = torch.clamp(log_ratio, np.log(1.0 - cliprange_low), np.log(1.0 + cliprange_high))
         pg_losses2 = -advantages * torch.exp(clipped_logratio + ref_log_prob - logp_adj)
+        clipped_logratio_hi = torch.clamp(log_ratio, max=np.log(1.0 + cliprange_high))
+        clipped_logratio_lo = torch.clamp(log_ratio, min=np.log(1.0 - cliprange_low))
+        pg_losses2_hi = -advantages * torch.exp(clipped_logratio_hi + ref_log_prob - logp_adj)
+        pg_losses2_lo = -advantages * torch.exp(clipped_logratio_lo + ref_log_prob - logp_adj)
 
         pg_losses3 = torch.abs(-advantages * cliprange2)
         pg_losses_clip = torch.maximum(pg_losses1, pg_losses2)
@@ -330,6 +336,8 @@ def compute_policy_loss(old_log_prob, ref_log_prob, log_prob, advantages, upgo_a
     total_loss = pg_loss + upgo_loss_weight * upgo_loss
 
     pg_clipfrac = verl_F.masked_mean(torch.gt(pg_losses2, pg_losses1).float(), eos_mask)
+    pg_clipfrac_hi = verl_F.masked_mean(torch.gt(pg_losses2_hi, pg_losses1).float(), eos_mask)
+    pg_clipfrac_lo = verl_F.masked_mean(torch.gt(pg_losses2_lo, pg_losses1).float(), eos_mask)
     pg_clipfrac2 = verl_F.masked_mean(torch.gt(pg_losses1, pg_losses3).float(), eos_mask)
 
     if total_loss.isnan().any():
@@ -343,7 +351,7 @@ def compute_policy_loss(old_log_prob, ref_log_prob, log_prob, advantages, upgo_a
                 print("find inf in ", k, v)
         raise ValueError("find nan in total_loss")
 
-    return total_loss, pg_loss, upgo_loss, pg_clipfrac, pg_clipfrac2, ppo_kl, ppo_kl_sum
+    return total_loss, pg_loss, upgo_loss, pg_clipfrac, pg_clipfrac_hi, pg_clipfrac_lo, pg_clipfrac2, ppo_kl, ppo_kl_sum
 
 
 def compute_entropy_loss(logits, eos_mask):
