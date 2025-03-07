@@ -354,7 +354,7 @@ class SFTTrainer(object):
         delta_time = timer.last
         global_num_tokens = torch.sum(batch_data.batch['attention_mask'], dim=-1).view(-1).tolist()
         estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
-        mfu = estimated_flops / promised_flops / self.sp_size
+        mfu = estimated_flops / promised_flops / (self.sp_size * self.tp_size)
         seqlen = sum(global_num_tokens) / len(global_num_tokens)
 
         lr = self.lr_scheduler.get_last_lr()[0]
