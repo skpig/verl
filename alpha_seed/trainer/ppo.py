@@ -48,6 +48,7 @@ from alpha_seed.utils import ndtimeline
 from alpha_seed.utils.dataset.rl_dataset import RLHFDataset
 from alpha_seed.utils.multithreads import ThreadPoolManager
 from alpha_seed.utils.ckpt import find_latest_ckpt_path_
+from alpha_seed.trainer.utils.dataloader_mgr import DataLoaderMgr
 
 from single_controller.base import Worker
 from single_controller.ray import RayResourcePool, RayWorkerGroup, RayClassWithInitArgs
@@ -567,99 +568,10 @@ class RayPPOTrainer(object):
         self.is_vlm = config.data['image_key'] is not None
 
     def _create_dataloader(self):
-        from torch.utils.data import DataLoader
-        version = self.config.data.get('version', 'v1')
-        # TODO: we have to make sure the batch size is divisible by the dp size
-        if self.is_vlm:
-            from alpha_seed.utils.dataset.vlm_rl_dataset import collate_fn
-            if self.config.data.get('task_type') == 'VLM_GUI':
-                from alpha_seed.utils.dataset.vlm_rl_dataset import RLHFDatasetGUI as RLHFDataset
-            else:
-                from alpha_seed.utils.dataset.vlm_rl_dataset import RLHFDatasetVL as RLHFDataset
-        else:
-            from alpha_seed.utils.dataset.rl_dataset import RLHFDataset, collate_fn
-        train_batch_size = self.config.data.train_batch_size
-        if self.config.trainer.league_training_config.enable:
-            train_batch_size = train_batch_size * self.config.trainer.league_training_config.buffer_size
-        kwargs = {"processor": self.processor, 'image_key': self.config.data.image_key} if self.is_vlm else {}
-
-        data_auto_repeat = self.config.data.get('data_auto_repeat', False)
-        self.train_dataset = RLHFDataset(
-            parquet_files=self.config.data.train_files,
-            tokenizer=self.tokenizer,
-            prompt_key=self.config.data.prompt_key,
-            answer_key=self.config.data.answer_key,
-            use_ref_answer=self.config.data.use_ref_answer,
-            max_prompt_length=self.config.data.max_prompt_length,
-            filter_prompts=True,
-            return_raw_chat=self.config.data.get('return_raw_chat', False),
-            truncation=self.config.data.get('truncation', 'error'),
-            multi_prompts=self.config.data.get("multi_prompts", "none"),
-            num_prompts_per_data=self.config.data.get("num_prompts_per_data", 1),
-            # Repeat dataset by total_epochs times, and shuffle each epoch if needed
-            total_epochs=self.config.trainer.total_epochs,
-            shuffle_per_epoch=self.config.data.shuffle,
-            data_auto_repeat=data_auto_repeat,
-            **kwargs)
-
-        if self.config.data.BITWISE_RESUME:
-            from alpha_seed.utils.dataset.sampler import RandomSampler, SequentialSampler
-        else:
-            from torch.utils.data import RandomSampler, SequentialSampler
-
-        if self.config.data.shuffle and not data_auto_repeat:
-            # No need for random sampler if data_auto_repeat is on
-            train_dataloader_generator = torch.Generator()
-            train_dataloader_generator.manual_seed(self.config.data.get('seed', 1))
-            sampler = RandomSampler(data_source=self.train_dataset, generator=train_dataloader_generator)
-        else:
-            sampler = SequentialSampler(data_source=self.train_dataset)
-
-        self.train_dataloader = DataLoader(dataset=self.train_dataset,
-                                           batch_size=train_batch_size,
-                                           shuffle=None,
-                                           drop_last=True,
-                                           collate_fn=collate_fn,
-                                           sampler=sampler)
-
-        self.val_dataset = RLHFDataset(parquet_files=self.config.data.val_files,
-                                       tokenizer=self.tokenizer,
-                                       prompt_key=self.config.data.prompt_key,
-                                       answer_key=self.config.data.answer_key,
-                                       use_ref_answer=self.config.data.use_ref_answer,
-                                       max_prompt_length=self.config.data.max_prompt_length,
-                                       filter_prompts=True,
-                                       return_raw_chat=True,
-                                       truncation=self.config.data.get('truncation', 'error'),
-                                       multi_prompts=self.config.data.get("multi_prompts", "none"),
-                                       num_prompts_per_data=1,
-                                       is_eval=True,
-                                       **kwargs)
-
-        self.val_dataloader = DataLoader(dataset=self.val_dataset,
-                                         batch_size=len(self.val_dataset),
-                                         shuffle=self.config.data.shuffle,
-                                         drop_last=True,
-                                         collate_fn=collate_fn)
-
-        assert len(self.train_dataloader) >= 1
-        assert len(self.val_dataloader) >= 1
-
-        print(f'Size of train dataloader: {len(self.train_dataloader)}')
-        print(f'Size of val dataloader: {len(self.val_dataloader)}')
-
-        # inject total_training_steps to actor/critic optim_config. This is hacky.
-        total_training_steps = len(self.train_dataloader) * self.config.trainer.total_epochs
-
-        if self.config.trainer.total_steps is not None:
-            total_training_steps = self.config.trainer.total_steps
-
-        self.total_training_steps = total_training_steps
-
-        OmegaConf.set_struct(self.config, True)
-        with open_dict(self.config):
-            self.config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
-            self.config.critic.optim.total_training_steps = total_training_steps
+        self.dataloader_mgr = DataLoaderMgr(self.config, self.tokenizer, self.is_vlm, self.processor)
+        self.train_dataloader = self.dataloader_mgr.train_dataloader
+        self.val_dataloader = self.dataloader_mgr.val_dataloader
+        self.total_training_steps = self.dataloader_mgr.total_training_steps
 
     def _create_kl_control(self):
         # define KL control
@@ -1114,16 +1026,7 @@ class RayPPOTrainer(object):
                                                   self.config.trainer.ckpt_enable_shm, 'ref')
 
         # load dataloader
-        dataloader_remote_path = os.path.join(remote_global_step_folder, 'data.pt')
-        dataloader_local_path = copy_local_path_from_hdfs(dataloader_remote_path)
-        self.train_dataloader = torch.load(dataloader_local_path)
-        if isinstance(self.train_dataloader.dataset, RLHFDataset):
-            self.train_dataloader.dataset.resume_dataset_state()
-
-        try:
-            os.remove(dataloader_local_path)
-        except Exception as e:
-            print(f'remove local dataloader ckpt file after loading failed, exception {e} will be ignored')
+        self.train_dataloader = self.dataloader_mgr._load_dataloader(remote_global_step_folder)
 
         # resume data_len info
         data_len_per_query_remote_path = os.path.join(remote_global_step_folder, 'data_len_per_query.pkl')
