@@ -31,6 +31,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 
 import hdfs_io
 import seed_models
+from seed_models.utils.count_flops import FlopsCounter
 from pprint import pprint
 
 from tensordict import TensorDict
@@ -199,7 +200,6 @@ class SFTTrainer(object):
             # enable recompute
             if self.config.model.enable_gradient_checkpointing:
                 if self.config.model.act_offload:
-                    from alpha_seed.workers.actors import activation_offload
                     torch.utils.checkpoint.CheckpointFunction = activation_offload.CheckpointFunction
 
                 model.gradient_checkpointing_enable(
@@ -212,6 +212,7 @@ class SFTTrainer(object):
 
             nparams = sum(p.numel() for p in model.parameters())
             print(f"number of parameters after parallelization: {nparams / (1e9):.2f}B")
+            self.flops_counter = FlopsCounter(config)
 
         mixed_precision = MixedPrecision(param_dtype=torch.bfloat16,
                                          reduce_dtype=torch.float32,
@@ -326,36 +327,45 @@ class SFTTrainer(object):
 
         batch_data.to(torch.cuda.current_device())
 
-        if self.config.model.use_dynamic_bsz:
-            micro_batches, _, _ = rearrange_micro_batches(batch=batch_data.batch,
-                                                          max_token_len=self.config.data.max_token_len)
-        else:
-            # split batch into micro_batches
-            micro_batches = batch_data.batch.split(self.micro_batch_size)
+        with Timer(name='train_step', logger=None) as timer:
+            if self.config.model.use_dynamic_bsz:
+                micro_batches, _, _ = rearrange_micro_batches(batch=batch_data.batch,
+                                                              max_token_len=self.config.data.max_token_len)
+            else:
+                # split batch into micro_batches
+                micro_batches = batch_data.batch.split(self.micro_batch_size)
 
-        total_loss = 0.0
-        for micro_batch in micro_batches:
-            loss = self._compute_loss(micro_batch)
-            loss.backward()
-            total_loss += loss.item()
+            total_loss = 0.0
+            for micro_batch in micro_batches:
+                loss = self._compute_loss(micro_batch)
+                loss.backward()
+                total_loss += loss.item()
 
-        if self.config.optim.state_offload:
-            load_fsdp_optimizer(self.optimizer, torch.cuda.current_device())
+            if self.config.optim.state_offload:
+                load_fsdp_optimizer(self.optimizer, torch.cuda.current_device())
 
-        grad_norm = clip_grad_norm_(self.fsdp_model, max_norm=self.config.optim.max_grad_norm).item()
-        self.optimizer.step()
-        self.lr_scheduler.step()
-        if self.config.optim.state_offload:
-            offload_fsdp_optimizer(self.optimizer)
+            grad_norm = clip_grad_norm_(self.fsdp_model, max_norm=self.config.optim.max_grad_norm).item()
+            self.optimizer.step()
+            self.lr_scheduler.step()
+
+            if self.config.optim.state_offload:
+                offload_fsdp_optimizer(self.optimizer)
+
+        delta_time = timer.last
+        global_num_tokens = torch.sum(batch_data.batch['attention_mask'], dim=-1).view(-1).tolist()
+        estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
+        mfu = estimated_flops / promised_flops / self.sp_size
+        seqlen = sum(global_num_tokens) / len(global_num_tokens)
 
         lr = self.lr_scheduler.get_last_lr()[0]
-
-        total_loss, grad_norm = all_reduce([total_loss, grad_norm], op="mean")
+        total_loss, grad_norm, mfu, seqlen = all_reduce([total_loss, grad_norm, mfu, seqlen], op="mean")
         return {
             'train/loss': total_loss,
             'train/lr(1e-4)': lr * 1e4,
             'train/grad_norm': grad_norm,
-            'train/num_micro_batches': len(micro_batches)
+            'train/num_micro_batches': len(micro_batches),
+            'train/mfu': mfu,
+            'train/seqlen_avg': seqlen,
         }
 
     def validation_step(self, batch_data: TensorDict):
@@ -410,7 +420,7 @@ class SFTTrainer(object):
             self.save_checkpoint(step=global_step)
 
         if self.rank == 0:
-            local_path = os.path.join(self.config.trainer.default_local_dir, "model_assets")
+            local_path = os.path.join(self.config.trainer.default_local_dir, "huggingface")
             os.makedirs(local_path, exist_ok=True)
             self.fsdp_model.module.config.save_pretrained(local_path)
             self.tokenizer.save_pretrained(local_path)
