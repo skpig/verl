@@ -63,5 +63,5 @@ def profile_step(p, step=None):
         if type(p) is VerlProfiler and step is not None:
             p.set_step(step)
     except ImportError:
-        logging.warning("VerlProfiler not found, current profiler type is {}".format(type(p)))
+        pass
     p.step()
