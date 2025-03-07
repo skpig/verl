@@ -19,19 +19,18 @@ This trainer supports model-agonistic model initialization with huggingface
 import time
 import uuid
 import contextlib
-
-import ray
 import random
 import os
 import copy
 import json
-import wandb
 import queue
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Type, Tuple, Union
-import pandas as pd
+from typing import Callable, Type, Tuple, Union, List
 
+import wandb
+import ray
+import pandas as pd
 from omegaconf import OmegaConf, open_dict
 import numpy as np
 from codetiming import Timer
@@ -519,7 +518,7 @@ class RayPPOTrainer(object):
         # assert torch.cuda.is_available(), 'cuda must be available on driver'
 
         self.all_wg = {}
-        self.internal_wgs = []
+        self.internal_wgs: List[RayWorkerGroup] = []
         self.internal_wg_roles = []
         self.all_meta = {}
         self.remote_client = remote_client
@@ -1878,20 +1877,19 @@ class RayPPOTrainer(object):
                     ray.get(self.ckpt_global_uploader.final_wait_all_steps.remote())
                     return
 
-    def call_once_on_each_ray_actor(self, func_name: str, *args, **kwargs):
+    def do_ndtimeline_action(self, *args, **kwargs):
         """Call a function on each actor.
         Args:
-            func_name (str): func_name must be registered as each WorkGroup's user_defined_cls's method
             *args: arguments
             **kwargs: keyword arguments
         """
-        assert len(self.internal_wgs) == len(self.internal_wg_roles)
-        assert len(self.internal_wgs) > 0
         results = []
-        for i, wg in enumerate(self.internal_wgs):
-            prefix = self.internal_wg_roles[i][0]  # first role name
-            f = getattr(wg, f"{prefix}_{func_name}")
-            results.append(f(*args, **kwargs))
+        # because worker dict may be used, we only want the real worker to execute do_ndtimeline_action once
+        executed_wg_name_prefix = set()
+        for wg_name, wg in self.all_wg.items():
+            if wg.name_prefix not in executed_wg_name_prefix:
+                results.append(wg.do_ndtimeline_action(*args, **kwargs))
+                executed_wg_name_prefix.add(wg.name_prefix)
         return results
 
     def convert_ckpt_to_omnistore(self):
@@ -1914,9 +1912,6 @@ class RayPPOTrainer(object):
         if ndtimeline.use_cuda_timer() and self._global_step + 1 == step:
             for fut in self._timeline_futures:
                 ray.get(fut)
-            futs = self.call_once_on_each_ray_actor("do_ndtimeline_action",
-                                                    "flush_set_upload",
-                                                    global_step=step,
-                                                    ts=int(time.time()))
+            futs = self.do_ndtimeline_action("flush_set_upload", global_step=step, ts=int(time.time()))
             self._timeline_futures = futs
         self._global_step = step
