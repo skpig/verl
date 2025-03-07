@@ -71,37 +71,27 @@ def process_output(input_batch, output_batch, tokenizer, ready_batch, pending_ba
 
 
 def record_xperf_metrics(batch_info, metrics, logger, global_step, prefix=''):
-    import wandb
-    if 'xperf_metrics' in batch_info.meta_info:
-        for name, x_metric in batch_info.meta_info['xperf_metrics'].items():
-            if isinstance(x_metric, list):
-                logger.log(data={"rollout/{}/{}".format(prefix, name): wandb.Histogram(x_metric)}, step=global_step)
-        try:
-            sample_token_num = batch_info.meta_info['xperf_metrics']['sample_token_num']
-            metrics[
-                f'rollout/{prefix}/prob_mean'] = batch_info.meta_info['xperf_metrics']['prob_mean'] / sample_token_num
-            metrics[f'rollout/{prefix}/prob_lt_0.0001_ratio'] = batch_info.meta_info['xperf_metrics'][
-                'prob_lt_0.0001'] / sample_token_num
-            metrics[f'rollout/{prefix}/prob_lt_1e-5_ratio'] = batch_info.meta_info['xperf_metrics'][
-                'prob_lt_1e-5'] / sample_token_num
-            metrics[f'rollout/{prefix}/prob_lt_1e-6_ratio'] = batch_info.meta_info['xperf_metrics'][
-                'prob_lt_1e-6'] / sample_token_num
-            metrics[f'rollout/{prefix}/page_swap_out_bs'] = batch_info.meta_info['xperf_metrics']['page_swap_out_bs']
-            metrics[f'rollout/{prefix}/page_swap_out_token'] = batch_info.meta_info['xperf_metrics'][
-                'page_swap_out_token']
-            metrics[f'rollout/{prefix}/max_off_policy_steps'] = max(
-                batch_info.meta_info['xperf_metrics']['off_policy_steps'])
-            per_token_latency = batch_info.meta_info['xperf_metrics']['per_token_latency']
-            tokens_num = batch_info.meta_info['xperf_metrics']['tokens_num']
-            total_tokens = sum(tokens_num)
-            metrics[f'rollout/{prefix}/per_token_latency_avg'] = 0 if len(per_token_latency) == 0 else (
-                sum(per_token_latency) / len(per_token_latency))
-            metrics[f'rollout/{prefix}/tps'] = total_tokens / (sum(per_token_latency) + 1e-6) * 1000
-            metrics[f'rollout/{prefix}/bs_avg'] = 0 if len(tokens_num) == 0 else (total_tokens / len(tokens_num))
-        except Exception as e:
-            # some xperf metrics is not ready on lower version
-            pass
-        batch_info.meta_info.pop('xperf_metrics')
+    xperf_metrics = batch_info.meta_info['xperf_metrics']
+    metrics[f'rollout/{prefix}/steps'] = len(xperf_metrics['finished_tokens_by_step'])
+    # sampling tokens
+    sample_token_num = xperf_metrics['sample_token_num']
+    metrics[f'rollout/{prefix}/prob_mean'] = xperf_metrics['prob_mean'] / sample_token_num
+    metrics[f'rollout/{prefix}/prob_lt_0.0001_ratio'] = xperf_metrics['prob_lt_0.0001'] / sample_token_num
+    metrics[f'rollout/{prefix}/prob_lt_1e-5_ratio'] = xperf_metrics['prob_lt_1e-5'] / sample_token_num
+    metrics[f'rollout/{prefix}/prob_lt_1e-6_ratio'] = xperf_metrics['prob_lt_1e-6'] / sample_token_num
+    metrics[f'rollout/{prefix}/page_swap_out_bs'] = xperf_metrics['page_swap_out_bs']
+    metrics[f'rollout/{prefix}/page_swap_out_token'] = xperf_metrics['page_swap_out_token']
+    metrics[f'rollout/{prefix}/max_off_policy_steps'] = max(max(xperf_metrics['off_policy_steps']))
+
+    # context + decode tokens
+    tokens_num = xperf_metrics['tokens_num']
+    per_token_latency = xperf_metrics['per_token_latency']
+    total_tokens = sum(tokens_num)
+    metrics[f'rollout/{prefix}/per_token_latency_avg'] = 0 if len(per_token_latency) == 0 else (sum(per_token_latency) /
+                                                                                                len(per_token_latency))
+    metrics[f'rollout/{prefix}/tps'] = total_tokens / (sum(per_token_latency) + 1e-6) * 1000
+    metrics[f'rollout/{prefix}/bs_avg'] = 0 if len(tokens_num) == 0 else (total_tokens / len(tokens_num))
+    batch_info.meta_info.pop('xperf_metrics')
     return
 
 

@@ -261,15 +261,15 @@ class AsyncXPerfGPTRollout(object):
             else:
                 free_port_addr = [None, None]
 
+            if is_multihost_model(self.config.get('tensor_model_parallel_size', 1)):
+                self._set_multihost_env()
+                free_port_addr[1] = int(os.getenv("PORT9", free_port_addr[1])) if tp_rank == 0 else None
+
             # broadcast port and addr in tp group
             if self.device_mesh is not None:
                 tp_group = self.device_mesh['tp'].get_group()
                 tp_src_rank = dist.get_global_rank(tp_group, group_rank=0)
                 torch.distributed.broadcast_object_list(free_port_addr, src=tp_src_rank, group=tp_group)
-
-            if is_multihost_model(self.config.get('tensor_model_parallel_size', 1)):
-                self._set_multihost_env()
-                free_port_addr[1] = int(os.getenv("PORT9", free_port_addr[1]))
 
             master_addr, master_port = free_port_addr[0], free_port_addr[1]
             gpus_per_node = get_gpus_per_node()
