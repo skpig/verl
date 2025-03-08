@@ -24,6 +24,7 @@ import os
 import copy
 import json
 import queue
+from multiprocessing import Process
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Type, Tuple, Union, List
@@ -565,6 +566,9 @@ class RayPPOTrainer(object):
         self.acc_per_query = {}  # moving avg acc
         self.sample_acc_dir = config.trainer.default_hdfs_dir + "/sample_acc"
         self.is_vlm = config.data['image_key'] is not None
+        self.save_batch_dir = ""
+        if config.trainer.default_hdfs_dir and config.trainer.save_cases_to_hdfs:
+            self.save_batch_dir = os.path.join(config.trainer.default_hdfs_dir, "batch_data")
 
     def _create_dataloader(self):
         self.dataloader_mgr = DataLoaderMgr(self.config, self.tokenizer, self.is_vlm, self.processor)
@@ -1502,6 +1506,9 @@ class RayPPOTrainer(object):
         self._create_dataloader()
         self._create_validation_manager()
 
+        if self.save_batch_dir:
+            makedirs(self.save_batch_dir, exist_ok=True)
+
         metric_collection_context = self.megavision_metrics_collector.collect_resume_from_checkpoint_duration() \
             if MegavisionMetricsCtx else contextlib.nullcontext()
         with metric_collection_context:
@@ -1838,6 +1845,21 @@ class RayPPOTrainer(object):
                                         rewards_tensor_data_source.shape[0],
                                 })
                             metrics.update(score_metrics)
+
+                            # save batch to hdfs
+                            if self.save_batch_dir:
+                                batch_fname = f"global_step_{self.global_step}_batch.pickle"
+                                batch.save_to_disk(batch_fname)
+
+                                def async_hput(fname, dir_name):
+                                    print(f"async hcopy {fname} to {self.save_batch_dir}")
+                                    hcopy(fname, dir_name)
+                                    print(f"removing {fname}")
+                                    os.remove(fname)
+
+                                p = Process(target=async_hput, args=(batch_fname, self.save_batch_dir))
+                                p.start()
+
                             advantages = batch.batch['advantages']
                             response_length = batch.batch['responses'].shape[-1]
                             response_mask = batch.batch['attention_mask'][:, -response_length:]

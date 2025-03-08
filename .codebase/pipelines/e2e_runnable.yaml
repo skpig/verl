@@ -43,6 +43,7 @@ jobs:
           - git clone git@code.byted.org:data/verl
           - cd verl
           - pip3 install -e . --user
+          - pip3 install --upgrade byted-wandb
           - pip3 install bytedance.ndtimeline --upgrade
           - pip3 install byted-omnistore==0.7.11
           - pip3 install pylatexenc

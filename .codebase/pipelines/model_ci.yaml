@@ -35,6 +35,7 @@ jobs:
       - &step_setup_env
         name: setup env
         commands:
+          - pip3 install --upgrade byted-wandb
           - pip3 install --upgrade byted-omnistore
           - pip3 install --upgrade bytedance.ndtimeline
           - cd /opt/tiger
