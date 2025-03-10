@@ -23,6 +23,7 @@ import torch
 import torch.distributed as dist
 from torch import nn, optim
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, MixedPrecision, ShardingStrategy
+from torch.distributed.fsdp._runtime_utils import _lazy_init
 from torch.utils.data import DataLoader, DistributedSampler
 from codetiming import Timer
 from omegaconf import OmegaConf
@@ -65,7 +66,7 @@ from flash_attn.ops.triton.cross_entropy import cross_entropy_loss
 
 from dist_attn.ulysses.parallel_states import set_ulysses_sequence_parallel_group, get_ulysses_sequence_parallel_group, get_ulysses_sequence_parallel_world_size
 
-from omnistore import RLFSDPCheckpointer
+import omnistore
 
 
 class ReduceLoss(torch.autograd.Function):
@@ -219,7 +220,7 @@ class SFTTrainer(object):
                                          buffer_dtype=torch.float32)
         auto_wrap_policy = get_fsdp_wrap_policy(module=model)
 
-        shards = parallel_load_safetensors(local_model_path)
+        shards = parallel_load_safetensors(local_model_path) if self.config.model.omnistore_path is None else {}
         init_fn = parallel_init_fsdp_fn(model, shards)
 
         self.fsdp_model = FSDP(model,
@@ -240,6 +241,12 @@ class SFTTrainer(object):
             shards.clear()
 
         register_dtensor_save_hook(self.fsdp_model, shard_plan)
+
+        if self.config.model.omnistore_path is not None:
+            _lazy_init(self.fsdp_model, self.fsdp_model)
+            omnistore.FSDPCheckpointer.load(self.config.model.omnistore_path, {
+                "model": self.fsdp_model,
+            })
 
         from alpha_seed.trainer.optim import get_optimizer_from_config
         self.optimizer = get_optimizer_from_config(self.fsdp_model.parameters(), self.config.optim)
@@ -376,11 +383,10 @@ class SFTTrainer(object):
         return loss
 
     def save_checkpoint(self, step):
-        RLFSDPCheckpointer.save(
+        omnistore.FSDPCheckpointer.save(
             os.path.join(self.config.trainer.default_hdfs_dir, "checkpoints"),
             {"model": self.fsdp_model},
             global_steps=step,
-            rl_role="sft",
         )
 
     def fit(self):

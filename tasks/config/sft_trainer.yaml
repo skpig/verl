@@ -9,7 +9,8 @@ data:
   truncation: error
   chat_template: null
 model:
-  path: hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/models/gemma-1.1-7b-it
+  path: hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/models/gemma-1.1-7b-it  # huggingface path
+  omnistore_path: null
   external_lib: null
   enable_gradient_checkpointing: False
   act_offload: False
