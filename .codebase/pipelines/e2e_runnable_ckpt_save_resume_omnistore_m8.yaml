@@ -2,7 +2,7 @@ name: unit tests
 trigger:
   change
 jobs:
-  e2e_runnable_ckpt_tests:
+  e2e_runnable_ckpt_save_resume_omnistore_m8_tests:
     # Merlin - data.aml.verl:v85
     image: hub.byted.org/reckon/data.reckon.mlx.image_5940:36aebfdb72c17e002e016c4594c602c4
     if: ${{ !contains(Event.Change.Title, "WIP") }}
@@ -48,10 +48,10 @@ jobs:
           - pip3 install byted-omnistore==0.7.11
           - pip3 install pylatexenc
 
-      - name: m8 ckpt save resume omnistore
+      - name: m8 grpo ckpt save resume omnistore
         commands:
           - cd -
-          - export TEST_NAME=ckpt_save_resume
+          - export TEST_NAME=ckpt_save_resume_omnistore
           - export NUM_STEPS=3
           - export N_GPUS_PER_NODE=8
           - export NCCL_SHM_DISABLE=1
