@@ -553,27 +553,42 @@ class RewardManager():
 
 import ray
 import hydra
+from hydra.core.hydra_config import HydraConfig
 import omegaconf
 from omegaconf import DictConfig
 
 from alpha_seed.trainer.ppo import RayPPOTrainer
 
 
-def override(config: DictConfig, overrides: DictConfig):
+def override(config: DictConfig, overrides: DictConfig, skips: DictConfig, paths=None):
     """
     Override config with overrides.
     """
+    paths = [] if paths is None else paths
     for name, value in overrides.items():
         if name not in config:
             config[name] = value
             continue
         if isinstance(value, DictConfig):
             assert isinstance(config[name], DictConfig)
-            override(config[name], value)
+            override(config[name], value, skips.get(name, {}), paths + [name])
             continue
         else:
             assert name in config, f"{config}"
-            config[name] = value
+            if name in skips:
+                print(
+                    f"found {'.'.join(paths+[name])}={skips[name]} specified in program entry, skip overridding it by recipe"
+                )
+            else:
+                config[name] = value
+
+
+def insert_nested(cfg_dict, key, value):
+    """Recursively inserts a value into a nested dictionary based on a dot-separated key."""
+    keys = key.split(".")
+    for k in keys[:-1]:
+        cfg_dict = cfg_dict.setdefault(k, {})
+    cfg_dict[keys[-1]] = value
 
 
 @hydra.main(config_path='config', config_name='ppo_trainer', version_base=None)
@@ -582,10 +597,14 @@ def main(config):
         if MegavisionMetricsCtx else contextlib.nullcontext()
 
     if config.recipe:
+        skips = {}
+        for kv in HydraConfig.get().overrides.task:
+            key = kv.split("=")[0]
+            insert_nested(skips, key, omegaconf.OmegaConf.select(config, key))
         filepath = copy_local_path_from_hdfs(config.recipe)
         recipe = omegaconf.OmegaConf.load(filepath)
         print(f"recipe found: {config.recipe}, overriding with config: {recipe}")
-        override(config, recipe)
+        override(config, recipe, skips)
 
     with metric_collection_context:
         if config.server_client.role == "client":
