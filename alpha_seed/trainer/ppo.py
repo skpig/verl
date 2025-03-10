@@ -1739,7 +1739,7 @@ class RayPPOTrainer(object):
                         metrics['memory/critic_max_reserved'] = critic_output.meta_info['memory/critic_max_reserved']
                         critic_output_metrics = reduce_metrics(critic_output.meta_info['metrics'])
                         metrics.update(critic_output_metrics)
-
+                        print(f"After update_critic")
                     if self.config.algorithm.phasic_critic_interval > 0:
                         select_keys = ['input_ids', 'responses', 'attention_mask', 'values', 'returns']
                         buffer_batch = batch.select(batch_keys=select_keys)

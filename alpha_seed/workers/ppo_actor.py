@@ -47,6 +47,7 @@ from verl.utils.seqlen_balancing import rearrange_micro_batches, get_reverse_idx
 
 from alpha_seed.workers.actors import activation_offload
 from alpha_seed.workers.actors.offload import offload_fsdp_optimizer, load_fsdp_optimizer
+from alpha_seed.workers.actors.activation_offload import reset_cpu_buffer
 
 from contextlib import nullcontext
 import ray
@@ -473,6 +474,8 @@ class DataParallelPPOActor(BasePPOActor):
                     append_to_dict(metrics, micro_data_metric)
                     if self.config.gc_freq == "micro":
                         gc.collect()
+                    if self.config.act_offload:
+                        reset_cpu_buffer()
 
                 if minibatch_early_stop:
                     print(f'early stop at {batch_idx}!!!')
@@ -504,4 +507,5 @@ class DataParallelPPOActor(BasePPOActor):
         append_to_dict(metrics, {'first_mini_ppo_kl_sum': first_mini_ppo_kl_sum})
 
         self._optimizer_zero_grad()
+
         return metrics

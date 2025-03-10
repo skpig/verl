@@ -1,6 +1,8 @@
 from collections.abc import Iterable
 from contextlib import nullcontext
 
+import os
+import time
 import torch
 import torch.distributed
 import torch.nn as nn
@@ -14,6 +16,48 @@ act_offload_supported_layer_classes = [
     "torch.nn.modules.linear.Linear",
     "liger_kernel.transformers.rms_norm.LigerRMSNorm",
 ]
+
+CPU_BUFFER_SIZE = int(os.getenv('ACT_OFFLOAD_CPU_BUFFER_SIZE', '20'))
+CPU_BUFFER = None
+CPU_BUFFER_ADDR = 0
+
+
+def init_cpu_buffer():
+    global CPU_BUFFER, CPU_BUFFER_SIZE, CPU_BUFFER_ADDR
+    if os.getenv("ACT_OFFLOAD_USE_MEM_BUFFER", "0") != "1":
+        return
+    if CPU_BUFFER is not None:
+        return
+    print(f'Initialize CPU_BUFFER with size {CPU_BUFFER_SIZE} GB...')
+    start_time = time.time()
+    CPU_BUFFER = torch.zeros(CPU_BUFFER_SIZE * 1024 * 1024 * 1024 // 2,
+                             dtype=torch.bfloat16,
+                             device='cpu',
+                             pin_memory=True)
+    end_time = time.time()
+    print(f'Initialize CPU_BUFFER with size {CPU_BUFFER_SIZE} GB takes {end_time - start_time} seconds...')
+    CPU_BUFFER_ADDR = 0
+
+
+def reset_cpu_buffer():
+    global CPU_BUFFER_ADDR
+    CPU_BUFFER_ADDR = 0
+
+
+def slice_from_cpu_buffer(gpu_tensor):
+    global CPU_BUFFER, CPU_BUFFER_ADDR
+    tensor_len = gpu_tensor.numel()
+    assert gpu_tensor.layout == torch.strided, \
+        f'tensor_layout {gpu_tensor.layout} is not strided!'
+    assert gpu_tensor.dtype == torch.bfloat16, \
+        f'tensor_dtype {gpu_tensor.dtype} is not bfloat16!'
+    my_rank = torch.distributed.get_rank()
+    assert CPU_BUFFER_ADDR + tensor_len < CPU_BUFFER.numel(
+    ), f'rank {my_rank} cpu buffer is too small: {CPU_BUFFER_SIZE} G'
+
+    cpu_tensor = CPU_BUFFER[CPU_BUFFER_ADDR:CPU_BUFFER_ADDR + tensor_len].reshape(gpu_tensor.shape)
+    CPU_BUFFER_ADDR += tensor_len
+    return cpu_tensor
 
 
 class ActOffload(torch.autograd.graph.saved_tensors_hooks):
@@ -33,6 +77,8 @@ class ActOffload(torch.autograd.graph.saved_tensors_hooks):
         self.offload_last_layer = offload_last_layer
         self.offload_stream = torch.cuda.Stream()
         self.register_layer_offload_hook(module, layer_classes)
+
+        init_cpu_buffer()
 
     def layer_offload(self):
         # offload previous layer to cpu
@@ -60,7 +106,10 @@ class ActOffload(torch.autograd.graph.saved_tensors_hooks):
         if not isinstance(x, nn.Parameter) and x.numel() >= self.offload_threshold and (
                 self.offload_upbound is None or x.numel() <= self.offload_upbound) and x.requires_grad:
             self.current_layer.append(x)
-            x_cpu = torch.empty(x.data.size(), device=torch.device('cpu'), dtype=x.data.dtype, pin_memory=True)
+            if os.getenv("ACT_OFFLOAD_USE_MEM_BUFFER", "0") == "1":
+                x_cpu = slice_from_cpu_buffer(x)
+            else:
+                x_cpu = torch.empty(x.data.size(), device=torch.device('cpu'), dtype=x.data.dtype, pin_memory=True)
             self.offload_stream.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(self.offload_stream):
                 x_cpu.copy_(x.data, non_blocking=True)

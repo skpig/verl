@@ -37,6 +37,7 @@ from alpha_seed.workers.hybrid_engine.fsdp_gather import ulysses_pad_and_slice_i
 from alpha_seed.models.transformers.ops import clip_grad_norm_
 from alpha_seed import core_algos
 from alpha_seed.workers.actors.offload import offload_fsdp_optimizer, load_fsdp_optimizer
+from alpha_seed.workers.actors.activation_offload import reset_cpu_buffer
 
 from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
 from dist_attn.ulysses.ops import gather_outputs
@@ -295,6 +296,8 @@ class DataParallelPPOCritic(BasePPOCritic):
                     append_to_dict(metrics, micro_data_metric)
                     if self.config.gc_freq == "micro":
                         gc.collect()
+                    if self.config.act_offload:
+                        reset_cpu_buffer()
 
                 grad_norm = self._optimizer_step()
                 if self.config.gc_freq == "mini":
