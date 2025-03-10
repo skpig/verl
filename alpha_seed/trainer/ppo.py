@@ -1776,7 +1776,7 @@ class RayPPOTrainer(object):
                     metrics['timing/update_ref_ema'] = timer.last
 
                     # validate
-                    if self.val_reward_fn is not None and self.global_step % self.config.trainer.test_freq == 0:
+                    if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and self.global_step % self.config.trainer.test_freq == 0:
                         with Timer(name='testing', logger=None) as timer:
                             self.validation_manager.validate(is_async=self.use_standalone_validator,
                                                              global_step=self.global_step)
