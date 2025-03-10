@@ -8,31 +8,31 @@ actor_rollout_ref:
     enable_gradient_checkpointing: True
     use_ce_loss_fusion: True
   actor:
+    act_offload: True
     use_dynamic_bsz: True
-    ppo_max_token_len: 122880
+    ppo_max_token_len: 32768
     fsdp_size: -1
-    tp_size: 1
+    tp_size: 4
     ulysses_sequence_parallel_size: 2
     fsdp_config:
       param_offload: False
       use_orig_params: True
     profile:
-      enable: False
+      enable: True
       upload_to_mlx: True
       filename: "actor"
       profile_on_ranks: [0,8,16,24]
   ref:
     use_dynamic_bsz: True
-    max_token_len: 122880
+    max_token_len: 32768
     fsdp_size: -1
-    tp_size: 1
+    tp_size: 4
     ulysses_sequence_parallel_size: 2
     fsdp_config:
       param_offload: True
       use_orig_params: True
   rollout:
     max_token_len: 24576
-    tensor_model_parallel_size: 1
 
 critic:
   model:
@@ -41,9 +41,10 @@ critic:
       param_offload: False
       use_orig_params: True
   fsdp_size: -1
-  tp_size: 1
+  tp_size: 4
+  act_offload: True
   ulysses_sequence_parallel_size: 2
-  ppo_max_token_len: 122880
+  ppo_max_token_len: 32768
 
 trainer:
   offload_train_memory: True

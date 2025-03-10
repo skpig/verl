@@ -7,7 +7,8 @@ import torch.nn as nn
 
 act_offload_supported_layer_classes = [
     "seed_models.models.p6.modeling_p6.P6DecoderLayer", "seed_models.models.p7.modeling_p7.P7DecoderLayer",
-    "seed_models.models.m8.modeling_m8.M8DecoderLayer"
+    "seed_models.models.m8.modeling_m8.M8DecoderLayer",
+    "seed_models.models.deepseek_v3.modeling_deepseek.DeepseekV3DecoderLayer"
 ]
 
 

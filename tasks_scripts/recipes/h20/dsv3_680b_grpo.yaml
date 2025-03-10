@@ -6,12 +6,14 @@
 actor_rollout_ref:
   model:
     enable_gradient_checkpointing: True
+    use_ce_loss_fusion: True
   actor:
     use_dynamic_bsz: True
     ppo_max_token_len: 32768
     fsdp_size: -1
     tp_size: 4
     ulysses_sequence_parallel_size: 2
+    act_offload: True
     fsdp_config:
       param_offload: False
       use_orig_params: True
@@ -41,6 +43,7 @@ critic:
   fsdp_size: -1
   tp_size: 4
   ulysses_sequence_parallel_size: 2
+  act_offload: True
   ppo_max_token_len: 32768
 
 trainer:
