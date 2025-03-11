@@ -1,8 +1,9 @@
 from megatron import get_args
 from megatron.optimizer import get_megatron_optimizer
 from megatron.training import get_optimizer_param_scheduler
-
 from megatron.core import parallel_state as mpu
+
+# from mariana.optim.megatron import get_megatron_optimizer, get_optimizer_param_scheduler
 
 
 def configure_optimizers(models,

@@ -388,19 +388,18 @@ mariana:
     expert_parallel_size: ${mariana.megatron.tensor_parallel_size}  # hardcode for now
     micro_batch_size: 1
     global_batch_size: -1
-    sequence_parallel: true
+    sequence_parallel: true  # must be true
     recompute_granularity: ''
     use_flash_attention: true
     recompute_method: uniform
     recompute_num_layers: 1
     distribute_saved_activations: false
-    enable_distributed_optimizer: true
-    use_multi_precision_ddp: false
+    enable_distributed_optimizer: true  # must be true
+    use_multi_precision_ddp: true  # must be true
     enable_initial_jit_warmup: false
-    disable_gradient_accumulation_fusion: true
     switch_pp_and_dp: false
     force_fp32_embed: false
-    ddp_impl: local
+    ddp_impl: local  # must be local
     bf16_qt: false
     empty_cache_level: 0
     grad_norm_skip: -1.0
@@ -408,10 +407,10 @@ mariana:
     strict_align_row_para: false
     overlap_data_parallel_communication: false
     mem_efficient_column_parallel: true
-    overlap_dp_grad_comm: false
-    overlap_dp_param_comm: false
+    overlap_dp_grad_comm: true   # true
+    overlap_dp_param_comm: true  # true
     sequence_data_parallel_size: -1
-    vocab_parallel_embedding_fusion: false
+    vocab_parallel_embedding_fusion: false  # true
     bias_gelu_fusion: false
     use_non_sequential_block: false
     timing_log_level: 0
@@ -431,9 +430,11 @@ mariana:
     no_save_rng: false
     num_layers_for_pipeline_stages: []
     num_layers_per_virtual_pipeline_stage: 0
-    optimizer_offload_main_param: false
+    optimizer_offload_main_param: true  # must be true to turn on offload
+    optimizer_offload_state: true # must be true to turn on offload
     overlap_attn_grad_input_comm: false
-    overlap_p2p_comm: false
+    optimizer_offload_overlap_with_dp: true
+    overlap_p2p_comm: true  # true
     parallel_linear_force_weight_contiguous: false
     scale_gradient_after_allreduce: false
     scale_loss_in_gradient: false
@@ -444,4 +445,7 @@ mariana:
   # this set of config determines how the mariana model is implemented. The model structure is defined by huggingface config
   model_implementation:
     noop_transformer_layers: []
+    janus_use_big_op: false
+    janus_big_op_version: V1
+    moe_pr_expert_type: swiglu-default
 

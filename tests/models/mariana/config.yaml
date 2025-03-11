@@ -37,9 +37,8 @@ megatron:
   recompute_num_layers: 1
   distribute_saved_activations: false
   enable_distributed_optimizer: true
-  use_multi_precision_ddp: false
-  enable_initial_jit_warmup: false
-  disable_gradient_accumulation_fusion: true
+  use_multi_precision_ddp: true  # improvement on performance
+  enable_initial_jit_warmup: false 
   switch_pp_and_dp: false
   force_fp32_embed: false
   ddp_impl: local
@@ -50,10 +49,10 @@ megatron:
   strict_align_row_para: false
   overlap_data_parallel_communication: false
   mem_efficient_column_parallel: true
-  overlap_dp_grad_comm: false
-  overlap_dp_param_comm: false
+  overlap_dp_grad_comm: false  # change to true
+  overlap_dp_param_comm: false  # change to true
   sequence_data_parallel_size: -1
-  vocab_parallel_embedding_fusion: false
+  vocab_parallel_embedding_fusion: false  # change to true
   bias_gelu_fusion: false
   use_non_sequential_block: false
   timing_log_level: 0
@@ -73,13 +72,14 @@ megatron:
   no_save_rng: false
   num_layers_for_pipeline_stages: []
   num_layers_per_virtual_pipeline_stage: 0
-  optimizer_offload_main_param: false
+  optimizer_offload_main_param: true
+  optimizer_offload_state: true
   overlap_attn_grad_input_comm: false
-  overlap_p2p_comm: false
+  overlap_p2p_comm: false  # change to true
   parallel_linear_force_weight_contiguous: false
   scale_gradient_after_allreduce: false
   scale_loss_in_gradient: false
-  pipeline_strategy: ''
+  pipeline_strategy: ''  # Any1F1B
   param_alignment_in_bytes: 16  # this is necessary for H20/H800
 
 

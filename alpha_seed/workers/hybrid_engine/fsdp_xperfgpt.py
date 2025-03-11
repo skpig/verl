@@ -310,8 +310,11 @@ class MegatronXPerfGPTShardingManager(ActorXPerfGPTShardingManager):
         # from verl.utils.model import normalize_pp_vpp_params
         from megatron.training import unwrap_model
         from megatron.model import DistributedDataParallel, Float16Module
+        from megatron.core.distributed import DistributedDataParallel as MultiPrecisionDDP
 
         all_state_dict = {}
+
+        has_non_cuda_param = False
 
         valid_start_str = ['transformer.ln_f', 'transformer.h', 'transformer.wte.weight']
         # module = self.module
@@ -331,12 +334,20 @@ class MegatronXPerfGPTShardingManager(ActorXPerfGPTShardingManager):
                 if not is_valid:
                     state_dict.pop(key)
 
-            unwrapped_module = unwrap_model(module, module_instances=(DistributedDataParallel, Float16Module))
+            unwrapped_module = unwrap_model(module,
+                                            module_instances=(DistributedDataParallel, Float16Module,
+                                                              MultiPrecisionDDP))
             start_layer_idx = unwrapped_module.transformer.h.layers[0].layer_number - 1
 
             for key, param in state_dict.items():
                 normalized_key = normalize_key(key, 'layers', start_layer_idx)
                 assert normalized_key not in all_state_dict
                 all_state_dict[normalized_key] = param
+
+                if not param.is_cuda:
+                    has_non_cuda_param = True
+                    print(f'param {key} is not on cuda')
+
+        assert not has_non_cuda_param
 
         return all_state_dict

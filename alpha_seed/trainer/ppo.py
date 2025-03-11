@@ -1875,7 +1875,7 @@ class RayPPOTrainer(object):
                         if self.config.trainer.save_freq > 0 and self.global_step % self.config.trainer.save_freq == 0:
                             with metric_collection_context:
                                 self.save_checkpoint()
-                        metrics['timing/save_checkpoint'] = timer.last
+                    metrics['timing/save_checkpoint'] = timer.last
 
                     # collect sandbox client remaining results
                     if self.config.trainer.use_remote_sandbox:

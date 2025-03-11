@@ -1,0 +1,15 @@
+mariana:
+  megatron:
+    tensor_parallel_size: 8
+    pipeline_parallel_size: 9
+    virtual_pipeline_parallel_size: 12
+
+  model_implementation:
+    noop_transformer_layers: [1, 108]
+    janus_use_big_op: True
+    janus_big_op_version: P7V3
+    moe_pr_expert_type: swiglu-default
+
+actor_rollout_ref:
+  actor:
+    ppo_max_token_len: 18432

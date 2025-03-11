@@ -72,3 +72,11 @@ def get_xperf_gpt_weight_bind_fn(model_config: PretrainedConfig, quant_mode: str
             return partial(_reshard_fsdp_state_dict_to_xperf_deepseek_v3, model_config=model_config)
         else:
             raise NotImplementedError(f'Unsupported model type {model_config.model_type} in WFP8 quant mode')
+
+    elif backend == 'megatron':
+        assert quant_mode == 'NO_QUANT'
+
+        if model_config.model_type == 'seed_m8':
+            return partial(_reshard_fsdp_state_dict_to_xperf_m8_megatron, model_config=model_config)
+        else:
+            raise NotImplementedError(f'Unsupported model type {model_config.model_type}')

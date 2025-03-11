@@ -6,7 +6,7 @@ torchrun --nproc-per-node=8 --standalone tests/hybrid_engine/test_xperf_gpt_fsdp
     actor_rollout_ref.actor.strategy=megatron \
     mariana.megatron.tensor_parallel_size=2 \
     mariana.megatron.pipeline_parallel_size=4 \
-    mariana.megatron.virtual_pipeline_parallel_size=7 \
+    mariana.megatron.virtual_pipeline_parallel_size=7
 
 """
 
@@ -33,6 +33,8 @@ from torch.distributed.fsdp.api import ShardingStrategy, MixedPrecision
 from torch.distributed.device_mesh import init_device_mesh
 
 import hydra
+
+from alpha_seed.workers.actors.offload import offload_megatron_model_to_cpu, load_megatron_model_to_gpu
 
 
 @hydra.main(config_path='../../tasks/config', config_name='ppo_trainer')
@@ -109,7 +111,8 @@ def main(global_config):
         megatron_config = MegatronConfig(**global_config.mariana.megatron)
         local_path = copy_local_path_from_hdfs(model_path)
 
-        model_config = convert_hf_config_to_mariana(hf_config=config)
+        model_config = convert_hf_config_to_mariana(hf_config=config,
+                                                    model_implementation=global_config.mariana.model_implementation)
 
         # vpp size
         update_megatron_config(model_config,
@@ -157,6 +160,9 @@ def main(global_config):
             checkpoint_state=ckpt_state,
             loader_in_split_mode=False,
         )
+
+        # offload
+        offload_megatron_model_to_cpu(models=models)
 
     from alpha_seed.workers.streaming_service.streaming_rollout import AsyncXPerfGPTRollout
 
@@ -232,7 +238,9 @@ def main(global_config):
         non_tensors=non_tensors,
         meta_info={'generation_kwargs': global_config.actor_rollout_ref.rollout.train_generate_kwargs})
 
+    load_megatron_model_to_gpu(models=models, load_grad=False)
     with sharding_manager:
+        offload_megatron_model_to_cpu(models=models)
         data = sharding_manager.preprocess_data(data)
         output = next(rollout.generate_sequences(data))
         output = sharding_manager.postprocess_data(output)

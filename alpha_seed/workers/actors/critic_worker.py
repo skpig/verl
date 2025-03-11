@@ -15,6 +15,7 @@
 The main entry point to run the PPO algorithm
 """
 
+import json
 from filelock import FileLock
 import shutil
 import warnings
@@ -36,7 +37,8 @@ from alpha_seed.models.transformers.parallel.collectives import get_memory
 from .initialize import create_mesh
 from .initialize import parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init, cleanup_local_tmp_folder_safetensors_files
 from .checkpoint.extensions import register_dtensor_save_hook
-from .offload import offload_fsdp_model_to_cpu, load_fsdp_model_to_gpu
+from .offload import (offload_fsdp_model_to_cpu, load_fsdp_model_to_gpu, offload_megatron_model_to_cpu,
+                      load_megatron_model_to_gpu)
 from alpha_seed.workers.actors.offload import offload_fsdp_optimizer, load_fsdp_optimizer
 from verl.utils.import_utils import import_external_libs
 from verl.utils.debug import log_gpu_memory_usage
@@ -73,28 +75,40 @@ class CriticWorker(Worker):
         self.config = config
         self.role = "critic"
 
+        self.critic_strategy = config.strategy
+
+        assert self.critic_strategy in ['fsdp', 'megatron']
+
         world_size = torch.distributed.get_world_size()
 
-        fsdp_size = config.fsdp_size
-        sp_size = config.ulysses_sequence_parallel_size
-        tp_size = config.tp_size
-        meshes = create_mesh(fsdp_size=fsdp_size, tp_size=tp_size, sp_size=sp_size, tp_outside=config.tp_outside)
-        # Deprecated case: critic model is saved as ShardedTensor
-        # we will always use full FSDP
-        self.fsdp_mesh = None
-        if not config.NO_DEVICE_MESH:
-            self.fsdp_mesh = meshes[0]
-        self.tp_mesh = meshes[1]
-        self.sp_mesh = meshes[2]
-        self.gather_mesh = meshes[3]
-        self.gather_manager = DataGatherManager(self.gather_mesh, self.sp_mesh)
-        if tp_size > 1:
-            if not self.config.model.fsdp_config.use_orig_params:
-                raise RuntimeError("enable tensor / expert parallelism requires use_orig_params=True")
+        if self.critic_strategy == 'fsdp':
+            fsdp_size = config.fsdp_size
+            sp_size = config.ulysses_sequence_parallel_size
+            tp_size = config.tp_size
+            meshes = create_mesh(fsdp_size=fsdp_size, tp_size=tp_size, sp_size=sp_size, tp_outside=config.tp_outside)
+            # Deprecated case: critic model is saved as ShardedTensor
+            # we will always use full FSDP
+            self.fsdp_mesh = None
+            if not config.NO_DEVICE_MESH:
+                self.fsdp_mesh = meshes[0]
+            self.tp_mesh = meshes[1]
+            self.sp_mesh = meshes[2]
+            self.gather_mesh = meshes[3]
+            self.gather_manager = DataGatherManager(self.gather_mesh, self.sp_mesh)
+            if tp_size > 1:
+                if not self.config.model.fsdp_config.use_orig_params:
+                    raise RuntimeError("enable tensor / expert parallelism requires use_orig_params=True")
 
-        # normalize config
-        self.config.ppo_mini_batch_size //= (world_size // sp_size // tp_size)
-        self.config.ppo_micro_batch_size //= (world_size // sp_size // tp_size)
+            # normalize config
+            self.config.ppo_mini_batch_size //= (world_size // sp_size // tp_size)
+            self.config.ppo_micro_batch_size //= (world_size // sp_size // tp_size)
+        elif self.critic_strategy == 'megatron':
+            # implement 3D parallel self.actor_gather_manager. We still assume that data is chunked in data parallel.
+            # We first need to perform allgather in model parallel group so that data in each tp/pp/cp group is identical.
+            # Then, we chunk data according to context parallel rank
+            # In this way, the API of FSDP and Megatron can be identical
+            from alpha_seed.workers.hybrid_engine.megatron_gather import MegatronDataGatherManager
+            self.gather_manager = MegatronDataGatherManager()
 
         self._model_initialized = False
 
@@ -254,21 +268,148 @@ class CriticWorker(Worker):
 
         return critic_module, critic_optimizer, critic_lr_scheduler, critic_model_config
 
+    def _build_critic_model_optimizer_mariana(self, config):
+        from alpha_seed.models.mariana.checkpoint_utils import load_partial_pretrain
+        from alpha_seed.models.mariana.config_utils import convert_hf_config_to_mariana, update_megatron_config
+        from alpha_seed.models.mariana.modeling_mariana import convert_gate_to_fp32
+        from alpha_seed.models.mariana.optimizer_utils import configure_optimizers
+        from transformers import AutoTokenizer, AutoConfig
+
+        from mariana.utils.megatron import initialize_megatron_args
+        from verl.utils.fs import copy_local_path_from_hdfs
+
+        from mariana.models.text.config import TrainConfig, MegatronConfig
+
+        log_gpu_memory_usage('Before init from HF AutoModel', logger=logger)
+        # TODO: ignore pulling model file if resuming ckpt
+        local_path = copy_local_path_from_hdfs(config.model.path)
+
+        # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect
+        # TODO(zhangchi.usc1992): 1. support create from random initialized model. 2. Support init with FSDP directly
+        self.tokenizer = AutoTokenizer.from_pretrained(local_path)
+        critic_model_config = AutoConfig.from_pretrained(local_path)
+
+        megatron_config = MegatronConfig(**self.config.mariana.megatron)
+        local_path = copy_local_path_from_hdfs(config.model.path)
+
+        model_config = convert_hf_config_to_mariana(hf_config=critic_model_config,
+                                                    model_implementation=self.config.mariana.model_implementation)
+
+        # vpp size
+        update_megatron_config(model_config,
+                               megatron_config,
+                               vpp_size=self.config.mariana.megatron.virtual_pipeline_parallel_size)
+
+        if not torch.distributed.is_initialized():
+            # Note(zhangchi.usc1992): very important! We only build megatron world once
+            initialize_megatron_args(model_config, megatron_config)
+
+        # step 3: build model and optimizer
+        def megatron_model_provider(pre_process=True, post_process=True):
+            """Build the policy model."""
+            from alpha_seed.models.mariana.modeling_mariana import MarianaForTokenClassification
+            model = MarianaForTokenClassification(model_config,
+                                                  megatron_config,
+                                                  pre_process=pre_process,
+                                                  post_process=post_process)
+            return model
+
+        from megatron.training import get_model
+        from megatron.model import ModelType
+
+        # model_kwargs
+        model_kwargs = {}
+        # this returns model chunk for each pp stage
+        # note that for reference policy, we actually don't need wrap_with_ddp. We do so that offload API can be unified.
+        models = get_model(megatron_model_provider, ModelType.encoder_or_decoder, wrap_with_ddp=True, **model_kwargs)
+        convert_gate_to_fp32(models)
+
+        # load checkpoint. Note that we should load ckpt before optimizer. Otherwise, the fp32 params will be wrong.
+        # we assume the megatron_merge_state.pt in the same folder as hf
+        # ckpt_path = 'hdfs://haruna/home/byte_data_seed/ssd_hldy/user/tiantianfan1/sft/M8_680m_SFT/checkpoints/global_epoch_2/megatron_merge_states.pt'
+        # ckpt_local_path = copy_local_path_from_hdfs(ckpt_path)
+        # load_partial_pretrain(models,
+        #                       partial_pretrain=ckpt_local_path,
+        #                       model_config=model_config,
+        #                       download_in_shards=True)
+
+        # switch to use omnistore
+        # the original ckpt is under local_path/meta_info.json
+
+        ckpt_meta_info_json_path = os.path.join(local_path, 'meta_info.json')
+        assert os.path.exists(
+            ckpt_meta_info_json_path
+        ), 'Please make sure the huggingface checkpoint stores the upstream path. If not, please re-convert it using latest seed-models'
+
+        with open(ckpt_meta_info_json_path, 'r') as f:
+            ckpt_meta_info = json.load(f)
+
+        assert 'omnistore_ckpt_path' in ckpt_meta_info
+        ckpt_path = ckpt_meta_info['omnistore_ckpt_path']
+        import omnistore
+        ckpt_state = {"model": models}
+        # load model and optimizer
+        omnistore.MegatronCheckpointer.load(
+            path=ckpt_path,
+            enable_shm_download_ckpt_tmp=False,
+            checkpoint_state=ckpt_state,
+            loader_in_split_mode=False,
+        )
+
+        # build optimizer
+        optim_config = self.config.optim
+
+        total_steps = optim_config.get('total_training_steps', 0)
+        total_steps = 100000
+
+        assert total_steps > 0
+
+        num_warmup_steps = int(optim_config.get('lr_warmup_steps', -1))
+        if num_warmup_steps < 0:
+            num_warmup_steps_ratio = optim_config.get('lr_warmup_steps_ratio', 0.)
+            num_warmup_steps = int(num_warmup_steps_ratio * total_steps)
+
+        optimizers, lr_schedulers = configure_optimizers(
+            models=models,
+            train_iters=total_steps,
+            lr_warmup_iters=num_warmup_steps,
+            lr=optim_config.lr,
+            adam_betas=optim_config.betas,
+            adam_eps=optim_config.eps,
+            weight_decay=optim_config.weight_decay,
+        )
+
+        # If resume_optimizer is false, copy bf16 weights in model to optimizer
+        # to avoid loss error issues.
+        optimizers[0].reload_model_params()
+
+        from alpha_seed.workers.actors.offload import offload_megatron_model_to_cpu
+
+        offload_megatron_model_to_cpu(models=models)  # everything is on CPU
+
+        return models, optimizers, lr_schedulers, critic_model_config
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def to(self, device: str, model=True, optimizer=True, model_empty_cache=True):
         assert device in ("cuda", "cpu")
-        if self.config.model.fsdp_config.param_offload:
-            return
-        if device == "cuda":
-            if model:
-                load_fsdp_model_to_gpu(self.critic_module)
-            if optimizer:
-                load_fsdp_optimizer(self.critic_optimizer, torch.cuda.current_device())
-        elif device == "cpu":
-            if model:
-                offload_fsdp_model_to_cpu(self.critic_module, model_empty_cache)
-            if optimizer:
-                offload_fsdp_optimizer(self.critic_optimizer)
+        if self.critic_strategy == 'fsdp':
+            if self.config.model.fsdp_config.param_offload:
+                return
+            if device == "cuda":
+                if model:
+                    load_fsdp_model_to_gpu(self.critic_module)
+                if optimizer:
+                    load_fsdp_optimizer(self.critic_optimizer, torch.cuda.current_device())
+            elif device == "cpu":
+                if model:
+                    offload_fsdp_model_to_cpu(self.critic_module, model_empty_cache)
+                if optimizer:
+                    offload_fsdp_optimizer(self.critic_optimizer)
+        elif self.critic_strategy == 'megatron':
+            if device == 'cuda':
+                load_megatron_model_to_gpu(models=self.critic_module, load_grad=optimizer)
+            elif device == 'cpu':
+                offload_megatron_model_to_cpu(models=self.critic_module)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self, remove_safetensors_after_init=False, from_scratch=True):
@@ -277,12 +418,20 @@ class CriticWorker(Worker):
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get('external_lib', None))
 
-        self.critic_module, self.critic_optimizer, self.critic_lr_scheduler, self.critic_model_config = self._build_critic_model_optimizer(
-            self.config, from_scratch=from_scratch)
+        if self.critic_strategy == 'fsdp':
+            self.critic_module, self.critic_optimizer, self.critic_lr_scheduler, self.critic_model_config = self._build_critic_model_optimizer(
+                self.config, from_scratch=from_scratch)
 
-        self.critic = DataParallelPPOCritic(config=self.config,
-                                            critic_module=self.critic_module,
-                                            critic_optimizer=self.critic_optimizer)
+            self.critic = DataParallelPPOCritic(config=self.config,
+                                                critic_module=self.critic_module,
+                                                critic_optimizer=self.critic_optimizer)
+        elif self.critic_strategy == 'megatron':
+            from alpha_seed.workers.ppo_critic_megatron import MegatronPPOCritic
+            self.critic_module, self.critic_optimizer, self.critic_lr_scheduler, self.critic_model_config = self._build_critic_model_optimizer_mariana(
+                self.config)
+            self.critic = MegatronPPOCritic(config=self.config,
+                                            module=self.critic_module,
+                                            optimizer=self.critic_optimizer)
 
         self.flops_counter = FlopsCounter(self.critic_model_config)
         if self.rank == 0:
@@ -335,7 +484,7 @@ class CriticWorker(Worker):
         # optimizer will be loaded just before the step to save
         # forward & backward memory
         if self.config.train_memory_offload:
-            self.to("cuda", model=True, optimizer=False)
+            self.to("cuda", model=True, optimizer=False if self.critic_strategy == 'fsdp' else True)
 
         with self.gather_manager:
             data = self.gather_manager.preprocess_data(data)
@@ -348,8 +497,13 @@ class CriticWorker(Worker):
             estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
             metrics['mfu/critic'] = estimated_flops * self.config.ppo_epochs / promised_flops / self.world_size
 
-            self.critic_lr_scheduler.step()
-            lr = self.critic_lr_scheduler.get_last_lr()[0]
+            if self.critic_strategy == 'fsdp':
+                self.critic_lr_scheduler.step()
+                lr = self.critic_lr_scheduler.get_last_lr()[0]
+            elif self.critic_strategy == 'megatron':
+                self.critic_lr_scheduler[0].step(1)
+                lr = self.critic_lr_scheduler[0].get_lr()
+
             metrics['critic/lr(1e-4)'] = lr * 1e4
 
             max_memory_allocated, max_memory_reserved = get_memory()
@@ -389,6 +543,10 @@ class CriticWorker(Worker):
                         global_step=0,
                         ckpt_global_uploader_ref=None,
                         enable_shm=False):
+        if self.critic_strategy == 'fsdp':
+            # TODO: implement this
+            return
+
         if self.config.train_memory_offload:
             self.to("cuda")
         self.checkpoint_manager.save_checkpoint(version=version,

@@ -3,12 +3,17 @@ Contains base modeling for mariana megatron model
 """
 
 import torch
+from torch import nn
 import logging
 
 from mariana.models.text.gpt2_megatron import MegatronGPT2LMHeadModel as PretrainMegatronGPT2LMHeadModel
 from mariana.models.layers.embedding import RotaryEmbedding
 
-from mariana.models.text.config import TrainConfig, MegatronConfig
+from mariana.models.text.config import ModelConfig, TrainConfig, MegatronConfig
+
+from verl.utils.megatron import sequence_parallel as sp_utils
+
+from megatron.core import tensor_parallel
 
 
 def convert_gate_to_fp32(gpt):
@@ -40,7 +45,21 @@ class MarianaForCausalLM(PretrainMegatronGPT2LMHeadModel):
     redundant outputs. This can represent any seed models. So, no need to distinguish version (e.g., p7, m8, m9.)
     """
 
-    def forward(self, batch: dict[str, torch.Tensor]):
+    def __init__(self, model_config: ModelConfig, megatron_config: MegatronConfig, pre_process=True, post_process=True):
+        super().__init__(model_config, megatron_config, pre_process, post_process)
+        self.rotary_embedding = RotaryEmbedding(
+            self.model_config.hidden_size // self.model_config.n_head,
+            max_seq_len=self.model_config.max_position_embeddings,
+            rope_scale=self.model_config.rope_scale,
+            base=self.model_config.rope_base,
+            mode=self.model_config.rope_mode,
+            distributed_sequence_parallel_size=self.megatron_config.distributed_sequence_parallel_size,
+            context_parallel_size=self.megatron_config.get("context_parallel_size", 1),
+            rope_cut=self.model_config.rope_cut,
+            rope_cut_head_dim=self.model_config.rope_cut_head_dim,
+            rope_force_fp32=self.model_config.rope_force_fp32)
+
+    def _forward_model(self, batch: dict[str, torch.Tensor]):
         enable_dsp = self.megatron_config.sequence_data_parallel_size > 1
         enable_sp = self.megatron_config.sequence_parallel
         # calc rope related logic
@@ -50,7 +69,11 @@ class MarianaForCausalLM(PretrainMegatronGPT2LMHeadModel):
         padded_seq_len = batch.get("padded_seq_len", None)
         seq_lens_start_end = batch.get("seq_lens_start_end", None)
 
-        # self.rotary_embedding.generate_pos_embs(host_seqlens, host_seqlens.device, s_max=padded_seq_len, seq_lens_start_end=seq_lens_start_end)
+        # TODO(zhangchi.usc1992): how should we pass s_max?
+        self.rotary_embedding.generate_pos_embs(host_seqlens,
+                                                host_seqlens.device,
+                                                s_max=padded_seq_len,
+                                                seq_lens_start_end=seq_lens_start_end)
         hidden_states, activation_stats, _ = self.transformer(
             input_ids=batch["input_ids"],  # pad to tp size
             position_ids=batch.get("position_ids", None),  # use this. remove sin/cos
@@ -65,42 +88,20 @@ class MarianaForCausalLM(PretrainMegatronGPT2LMHeadModel):
             seq_offset_q=batch.get("seq_offset_q", None),  # dsp, useless
             host_seqlens=host_seqlens,  # give None, useless
             max_seq_len=max_seq_len,  # useless
-            cos_embs_indices=None,  # TODO: remove this
-            sin_embs_indices=None  # TODO: remove this
+            cos_embs_indices=self.rotary_embedding.cos_embs,  # TODO: remove this
+            sin_embs_indices=self.rotary_embedding.sin_embs  # TODO: remove this
         )
+        return hidden_states
+
+    def _forward_head(self, hidden_states):
+        return self.lm_logits(hidden_states)
+
+    def forward(self, batch: dict[str, torch.Tensor]):
+        hidden_states = self._forward_model(batch=batch)
 
         if self.post_process:
-            lm_logits = self.lm_logits(hidden_states)
-            # shift_logits = lm_logits  # [sum_token, 1, vocab_dim/tp]
-            # shift_labels = shift_labels.unsqueeze(1).contiguous()  # [sum_token] -> [sum_token, 1]
-
-            # if self.megatron_config.sequence_parallel or enable_dsp:
-            #     shift_logits = shift_logits[:shift_labels.shape[0]]  # rm seq-para pad
-
-            # shift_logits_float = shift_logits.float()
-            # del lm_logits, hidden_states, shift_logits
-            # # NOTE sp is all-gathered before cross_entropy, but dsp is all-gathered in ce.
-            # loss = tensor_parallel.vocab_parallel_cross_entropy(shift_logits_float, shift_labels, padded_seq_len=padded_seq_len, unpad_seq_len=unpad_seq_len)
-
-            # # Padded back loss
-            # total_seq_len = word_idx.shape[0]
-            # batch_size = cu_seqlens.size(0) - 1
-            # total_seq_len = word_idx.shape[0]
-            # loss = pad_input(loss[:total_seq_len], word_idx, batch_size, max_seq_len).squeeze(2)  # [sum_token, 1] -> [bs, seqlen-1]
-            # loss = loss[:, :-1]
-            # logprobs = -loss
-
-            # Note: `clone` here is to make share logprobs._base is None.
-            # so that it can be pseudo-freed in Megatron schedule.
-            # See megatron/schedules_multiple_forward.py:deallocate_output_tensor
-            # Deallocating a tensor view will not actually free its GPU storage.
-            # logprobs = logprobs.clone()
-            out = {
-                # 'loss': loss,
-                # 'output': logprobs,
-                # 'logprobs': logprobs
-                'logits': lm_logits
-            }
+            lm_logits = self._forward_head(hidden_states=hidden_states)
+            out = {'logits': lm_logits}
         else:
             hidden_states = hidden_states * 1.0  # ?
             out = {
@@ -110,6 +111,20 @@ class MarianaForCausalLM(PretrainMegatronGPT2LMHeadModel):
         return out
 
 
-class MarianaForTokenClassification(PretrainMegatronGPT2LMHeadModel):
+class MarianaForTokenClassification(MarianaForCausalLM):
     # TODO(zhangchi.usc1992): add value model. The head should be named as score_head
-    pass
+    def __init__(self, model_config: TrainConfig, megatron_config: MegatronConfig, pre_process=True, post_process=True):
+        super().__init__(model_config, megatron_config, pre_process, post_process)
+        self.score_head = nn.Linear(in_features=self.model_config.hidden_size, out_features=1, bias=True)
+        sp_utils.mark_parameter_as_sequence_parallel(self.score_head.weight)
+        sp_utils.mark_parameter_as_sequence_parallel(self.score_head.bias)
+
+    def _forward_head(self, hidden_states):
+        """hidden_states: [total_nnz_padded // tp, 1, hidden_states]
+        """
+        values = self.score_head(hidden_states)  # [total_nnz_padded // tp, 1, 1]
+        values = torch.squeeze(values, dim=-1)  # [total_nnz_padded // tp, 1]
+        # all gather from sequence parallel region, first dim
+        values = tensor_parallel.gather_from_sequence_parallel_region(
+            values, tensor_parallel_output_grad=False)  # [total_nnz_padded, 1]
+        return values

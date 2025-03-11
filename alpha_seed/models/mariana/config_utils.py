@@ -2,10 +2,11 @@ from seed_models import M8Config
 from mariana.models.text.config import TrainConfig
 
 
-def convert_hf_config_to_mariana(hf_config: M8Config, noop_transformer_layers=None):
+def convert_hf_config_to_mariana(hf_config: M8Config, model_implementation):
     #TODO(zhangchi.usc1992):
     assert isinstance(hf_config, M8Config)
 
+    noop_transformer_layers = model_implementation.noop_transformer_layers
     if noop_transformer_layers is None:
         noop_transformer_layers = []
 
@@ -58,8 +59,8 @@ def convert_hf_config_to_mariana(hf_config: M8Config, noop_transformer_layers=No
         hidden_decoding_layers=None,  # layers which use other layers weight, such as [5,6,7,8]
         hidden_decoding_imitated_layers=None,  # layers weight used by other layers, such as [1,2,3,4]
         residual_post_ln_layers=residual_post_ln_layers,  # layers which residual using layernorm output, such as [1,2,3,4]
-        repeat_kv_heads=True,
-        sparse_attention_window_size=None,
+        repeat_kv_heads=False,
+        sparse_attention_window_size=None,  # TODO: add sparse attention
         use_query_swiglu=False,
         query_swiglu_inner_dim=8192,
         dense_ffn_layers=None,
@@ -88,7 +89,7 @@ def convert_hf_config_to_mariana(hf_config: M8Config, noop_transformer_layers=No
         query_head_scale_factor=2,
         # shared experts
         moe_pr_scale_factor=hf_config.share_expert_num,
-        moe_pr_expert_type='swiglu-default',  # whether the shared expert is chunked by tp  'swiglu-default-duplicate'
+        moe_pr_expert_type=model_implementation.moe_pr_expert_type,  # whether the shared expert is chunked by tp  'swiglu-default-duplicate'
         lora_rank=0,  # qkv_lora for continue train, legacy config, checkout qkv_lora_ranks
         rope_mode=hf_config.rope_scaling['rope_type'],  # rope mode options are: "default" "ntk" "scale"
         rope_base=hf_config.rope_theta,  # rope base.
@@ -115,9 +116,9 @@ def convert_hf_config_to_mariana(hf_config: M8Config, noop_transformer_layers=No
         force_mem_efficient_layers=None,
         noop_transformer_layers=noop_transformer_layers,
         moe_overlap_recomp_grad_comm=False,
-        moe_expert_op_version='V6',
-        janus_use_big_op=False,
-        janus_big_op_version='V1',
+        moe_expert_op_version='V6',  # not used
+        janus_use_big_op=model_implementation.janus_use_big_op,
+        janus_big_op_version=model_implementation.janus_big_op_version,
         janus_big_op_attn_grad_accum_fusion=True,
         janus_p7_big_op_mlp_fwd_rs_fp8_compression="",
         janus_p7_big_op_mlp_bwd_ag_fp8_compression="",

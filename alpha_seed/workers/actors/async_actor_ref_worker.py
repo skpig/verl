@@ -15,6 +15,7 @@
 The main entry point to run the PPO algorithm
 """
 
+import json
 from contextlib import nullcontext
 from filelock import FileLock
 import shutil
@@ -37,8 +38,10 @@ from single_controller.base.decorator import register, Dispatch
 from verl import DataProto
 from verl.utils.model import compute_position_id_with_mask
 from verl.utils.fsdp_utils import get_fsdp_wrap_policy
-from .offload import offload_fsdp_model_to_cpu, load_fsdp_model_to_gpu
-from alpha_seed.workers.actors.offload import offload_fsdp_optimizer, load_fsdp_optimizer
+from alpha_seed.workers.actors.offload import (offload_fsdp_optimizer, load_fsdp_optimizer, offload_fsdp_model_to_cpu,
+                                               load_fsdp_model_to_gpu, offload_megatron_model_to_cpu,
+                                               load_megatron_model_to_gpu, offload_megatron_optimizer,
+                                               load_megatron_optimizer)
 from verl.utils.import_utils import import_external_libs
 from verl.utils.debug import log_gpu_memory_usage
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
@@ -185,6 +188,8 @@ class AsyncActorRolloutRefWorker(Worker):
             deploy_persist_gemm(int(config.actor.get("sm_margin", 0)))
 
         self._model_initialized = False
+
+        self.binding_timer = Timer(logger=None)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def set_rollout_callback_function(self, eos_callback_fn):
@@ -434,7 +439,8 @@ class AsyncActorRolloutRefWorker(Worker):
         megatron_config = MegatronConfig(**self.config.mariana.megatron)
         local_path = copy_local_path_from_hdfs(model_path)
 
-        model_config = convert_hf_config_to_mariana(hf_config=actor_model_config)
+        model_config = convert_hf_config_to_mariana(hf_config=actor_model_config,
+                                                    model_implementation=self.config.mariana.model_implementation)
 
         # vpp size
         update_megatron_config(model_config,
@@ -461,8 +467,8 @@ class AsyncActorRolloutRefWorker(Worker):
         # model_kwargs
         model_kwargs = {}
         # this returns model chunk for each pp stage
-        models = get_model(megatron_model_provider, ModelType.encoder_or_decoder, True, **model_kwargs)
-
+        # note that for reference policy, we actually don't need wrap_with_ddp. We do so that offload API can be unified.
+        models = get_model(megatron_model_provider, ModelType.encoder_or_decoder, wrap_with_ddp=True, **model_kwargs)
         convert_gate_to_fp32(models)
 
         # load checkpoint. Note that we should load ckpt before optimizer. Otherwise, the fp32 params will be wrong.
@@ -475,7 +481,18 @@ class AsyncActorRolloutRefWorker(Worker):
         #                       download_in_shards=True)
 
         # switch to use omnistore
-        ckpt_path = 'hdfs://haruna/home/byte_data_seed/ssd_hldy/user/tiantianfan1/sft/M8_680m_SFT/checkpoints/global_step_2198'
+        # the original ckpt is under local_path/meta_info.json
+
+        ckpt_meta_info_json_path = os.path.join(local_path, 'meta_info.json')
+        assert os.path.exists(
+            ckpt_meta_info_json_path
+        ), 'Please make sure the huggingface checkpoint stores the upstream path. If not, please re-convert it using latest seed-models'
+
+        with open(ckpt_meta_info_json_path, 'r') as f:
+            ckpt_meta_info = json.load(f)
+
+        assert 'omnistore_ckpt_path' in ckpt_meta_info
+        ckpt_path = ckpt_meta_info['omnistore_ckpt_path']
         import omnistore
         ckpt_state = {"model": models}
         # load model and optimizer
@@ -491,14 +508,13 @@ class AsyncActorRolloutRefWorker(Worker):
             optim_config = self.config.actor.optim
 
             total_steps = optim_config.get('total_training_steps', 0)
+            total_steps = 100000
+            assert total_steps > 0
+
             num_warmup_steps = int(optim_config.get('lr_warmup_steps', -1))
             if num_warmup_steps < 0:
                 num_warmup_steps_ratio = optim_config.get('lr_warmup_steps_ratio', 0.)
                 num_warmup_steps = int(num_warmup_steps_ratio * total_steps)
-
-            # TODO(zhangchi.usc1992) hardcode for now
-            total_steps = 10000
-            num_warmup_steps = 10
 
             optimizers, lr_schedulers = configure_optimizers(
                 models=models,
@@ -517,6 +533,10 @@ class AsyncActorRolloutRefWorker(Worker):
         else:
             optimizers = None
             lr_schedulers = None
+
+        offload_megatron_model_to_cpu(models=models)  # everything is on CPU
+
+        log_gpu_memory_usage(head='After offload_megatron_model_to_cpu in init')
 
         return models, optimizers, lr_schedulers, actor_model_config
 
@@ -548,12 +568,13 @@ class AsyncActorRolloutRefWorker(Worker):
         from alpha_seed.workers.streaming_service.streaming_rollout import AsyncXPerfGPTRollout
         from alpha_seed.workers.hybrid_engine import FSDPXPerfGPTShardingManager, MegatronXPerfGPTShardingManager
 
-        log_gpu_memory_usage('Before AsyncXPerfGPTRollout init', logger=logger)
+        log_gpu_memory_usage('Before AsyncXPerfGPTRollout init')
+
         rollout = AsyncXPerfGPTRollout(config=self.config.rollout,
                                        tokenizer=self.tokenizer,
                                        model_hf_config=self.actor_model_config,
                                        is_standalone=self._is_standalone_rollout)
-        log_gpu_memory_usage('After AsyncXPerfGPTRollout init', logger=logger)
+        log_gpu_memory_usage('After AsyncXPerfGPTRollout init')
 
         if self.actor_strategy == 'fsdp':
             sharding_manager = FSDPXPerfGPTShardingManager(module=self.actor_module_fsdp,
@@ -577,7 +598,7 @@ class AsyncActorRolloutRefWorker(Worker):
             raise NotImplementedError
 
         sharding_manager.release_param_and_cache()
-        log_gpu_memory_usage('After AsyncXPerfGPTRollout release parameter and kv cache', logger=logger)
+        log_gpu_memory_usage('After AsyncXPerfGPTRollout release parameter and kv cache')
         return rollout, sharding_manager
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
@@ -593,16 +614,18 @@ class AsyncActorRolloutRefWorker(Worker):
                         if optimizer and self.actor_optimizer is not None:
                             load_fsdp_optimizer(self.actor_optimizer, device)
                 elif self.actor_strategy == 'megatron':
-                    return
-                    raise NotImplementedError
+                    assert model
+                    # we only load grad when we want to load optimizer for training
+                    load_megatron_model_to_gpu(models=self.actor_module_mariana, load_grad=optimizer)
 
             if self._is_ref:
                 if self.ref_strategy == 'fsdp':
                     if model and not self.config.ref.fsdp_config.param_offload:
                         load_fsdp_model_to_gpu(self.ref_module_fsdp)
                 elif self.ref_strategy == 'megatron':
-                    return
-                    raise NotImplementedError
+                    if model:
+                        # we never load grad for ref model
+                        load_megatron_model_to_gpu(self.ref_module_mariana, load_grad=False)
 
         elif device == "cpu":
             if self._is_actor or self._is_standalone_rollout or self._is_standalone_validator:
@@ -613,15 +636,15 @@ class AsyncActorRolloutRefWorker(Worker):
                         if optimizer and self.actor_optimizer is not None:
                             offload_fsdp_optimizer(self.actor_optimizer)
                 elif self.actor_strategy == 'megatron':
-                    return
-                    raise NotImplementedError
+                    if model:
+                        offload_megatron_model_to_cpu(models=self.actor_module_mariana)
             if self._is_ref:
                 if self.ref_strategy == 'fsdp':
                     if model and not self.config.ref.fsdp_config.param_offload:
                         offload_fsdp_model_to_cpu(self.ref_module_fsdp)
                 elif self.ref_strategy == 'megatron':
-                    return
-                    raise NotImplementedError
+                    if model:
+                        offload_megatron_model_to_cpu(models=self.ref_module_mariana)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def init_model(self, remove_safetensors_after_init=False, from_scratch=True):
@@ -818,11 +841,11 @@ class AsyncActorRolloutRefWorker(Worker):
         assert self._is_actor
         # data.batch = data.batch.cuda()
 
-        log_gpu_memory_usage('Before update policy', logger=logger)
+        log_gpu_memory_usage('Before update policy')
 
         # note optimizer offload will be managed inside `update_policy`
         if self.config.actor.train_memory_offload:
-            self.to("cuda", model=True, optimizer=False)
+            self.to("cuda", model=True, optimizer=False if self.actor_strategy == 'fsdp' else True)
 
         with self.actor_gather_manager:
             data = self.actor_gather_manager.preprocess_data(data)
@@ -863,6 +886,8 @@ class AsyncActorRolloutRefWorker(Worker):
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def old_log_probs(self, prompts: DataProto):
+        log_gpu_memory_usage('Before old_log_probs')
+
         prompts = prompts.to('cpu')
         # set to False if it is validation
         recompute_log_prob = prompts.meta_info.get('recompute_log_prob', True)
@@ -910,17 +935,26 @@ class AsyncActorRolloutRefWorker(Worker):
         meta_info = {'eos_token_id': self.tokenizer.eos_token_id, 'pad_token_id': self.tokenizer.pad_token_id}
         prompts.meta_info.update(meta_info)
 
+        log_gpu_memory_usage('Before load training memory')
+
         # xperf needs parameters from actor
         if self.config.actor.train_memory_offload:
             self.to("cuda", model=True, optimizer=False)
 
+        log_gpu_memory_usage('Before entering sharding manager')
+
+        self.binding_timer.start()
+
         with self.sharding_manager:
 
+            binding_time = self.binding_timer.stop()
+
+            log_gpu_memory_usage('After entering sharding manager')
             # after parameters go to xperf, offload actor model to CPU
             if self.config.actor.train_memory_offload:
                 self.to("cpu", model=True, optimizer=False)
 
-            log_gpu_memory_usage('After entering sharding manager', logger=logger)
+            log_gpu_memory_usage('After offload train parameters')
             prompts = self.sharding_manager.preprocess_data(prompts)
 
             generator = self.rollout.generate_sequences(prompts=prompts)
@@ -928,15 +962,20 @@ class AsyncActorRolloutRefWorker(Worker):
 
             output = self.sharding_manager.postprocess_data(output)
 
+            log_gpu_memory_usage('After generate sequences')
+
+        log_gpu_memory_usage('After release kv cache')
+
         max_memory_allocated, max_memory_reserved = get_memory()
         output.meta_info.update({
             'memory/gen_max_allocated': max_memory_allocated,
-            'memory/gen_max_reserved': max_memory_reserved
+            'memory/gen_max_reserved': max_memory_reserved,
+            'timing/weight_binding': binding_time
         })
         output = output.to('cpu')
         # torch.distributed.barrier()
 
-        log_gpu_memory_usage('After rollout generation', logger=logger)
+        log_gpu_memory_usage('After rollout generation')
         # clear kv cache
         torch.cuda.empty_cache()
         return output
@@ -970,6 +1009,8 @@ class AsyncActorRolloutRefWorker(Worker):
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_ref_log_prob(self, data: DataProto):
+        log_gpu_memory_usage('Before compute_ref_log_prob')
+
         torch.cuda.reset_peak_memory_stats()
         assert self._is_ref
 

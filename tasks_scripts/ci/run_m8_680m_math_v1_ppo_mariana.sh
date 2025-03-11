@@ -2,9 +2,9 @@ set -x
 
 ray stop --force
 
-export NCCL_DEBUG=WARN
 export MARIANA_DISABLE_ROPE_REGISTER_INV_FREQ=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# export CUDA_LAUNCH_BLOCKING=1
 
 NUM_STEPS="${NUM_STEPS:-2000}"
 echo $NUM_STEPS
@@ -13,43 +13,46 @@ N_GPUS_PER_NODE="${N_GPUS_PER_NODE:-8}"
 
 # ckpt和路径
 SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/M8_680m_SFT_hf_new
-RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/ssd_wlcb/user/liuxin.ai/rl/M8_680m_RM/checkpoints/global_step_308/huggingface
+# RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/ssd_wlcb/user/liuxin.ai/rl/M8_680m_RM/checkpoints/global_step_308/huggingface
+RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/M8_680m_SFT_hf_new
 TRAIN_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/train_with_ref_ans.parquet
 TEST_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/test_with_ref_ans.parquet
-default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/test/m8_680m_grpo
+default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/test/m8_680m_ppo
 
 # 训练长度
 max_prompt_length=2048
-max_response_length=4096
+max_response_length=2048
 # batch size && 训练epoch
-train_batch_size=512
-ppo_mini_batch_size=1024
+train_batch_size=1024
+ppo_mini_batch_size=128
+critic_ppo_mini_batch_size=32
+critic_warmup=10
 val_batch_size=5000
 total_epochs=100
 test_freq=5
 save_freq=-1
 # 算法相关的参数
 actor_lr=1e-6
-critic_lr=2e-6
+critic_lr=1e-5
 lr_warmup_steps=10
 kl_coef=0.00
 use_last_response=False
 use_ref_answer=True
 gae_gamma=1.0
-gae_lam=0.95
+gae_lam=1.0
 force_append_eos=True
 upgo_loss_weight=0.0
 upgo_loss_version=1
 clip_ratio2=2.0
 weight_decay=0.1
-adv_estimator=grpo
+adv_estimator=gae
 kl_loss_weight=0.00
-num_bon=8
+num_bon=1
 bon_strategy=all
 kl_penalty=low_var_kl
 # tracking实验名
 project_name='alphaseed_megatron'
-experiment_name='m8_680m'
+experiment_name='m8_680m_ppo'
 # 工程参数
 gen_micro_batch_size=512 # use_dynamic_bsz=True时仍然生效
 infer_micro_batch_size=64 # use_dynamic_bsz=True时不生效
@@ -66,12 +69,13 @@ fsdp_size=8
 xperf_tp_size=4
 offload=True
 offload_train_memory=True
-recipe=tasks_scripts/recipes/h20/m8_680m_grpo_megatron.yaml
 
 strategy=megatron
 
 python3 tasks/main_ppo.py \
-    recipe=${recipe} \
+    mariana.megatron.tensor_parallel_size=2 \
+    mariana.megatron.pipeline_parallel_size=2 \
+    mariana.megatron.virtual_pipeline_parallel_size=14 \
     actor_rollout_ref.actor.strategy=${strategy} \
     actor_rollout_ref.ref.strategy=${strategy} \
     critic.strategy=${strategy} \
@@ -108,7 +112,7 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.rollout.name=xperf_gpt \
     +actor_rollout_ref.rollout.num_slots=256 \
     +actor_rollout_ref.rollout.slot_block_size=1024 \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.9 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.4 \
     actor_rollout_ref.ref.log_prob_micro_batch_size=${infer_micro_batch_size} \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.scale_pg_by_kl=False \
@@ -123,6 +127,7 @@ python3 tasks/main_ppo.py \
     critic.model.enable_gradient_checkpointing=True \
     critic.ppo_micro_batch_size=${train_micro_batch_size} \
     critic.infer_micro_batch_size=${infer_micro_batch_size} \
+    critic.ppo_mini_batch_size=${critic_ppo_mini_batch_size} \
     +critic.model.override_config.attention_dropout=0. \
     +critic.model.override_config.embd_pdrop=0. \
     +critic.model.override_config.resid_pdrop=0. \
@@ -147,7 +152,7 @@ python3 tasks/main_ppo.py \
     algorithm.lam=${gae_lam} \
     algorithm.force_append_eos=${force_append_eos} \
     algorithm.kl_penalty=${kl_penalty} \
-    trainer.critic_warmup=0 \
+    trainer.critic_warmup=${critic_warmup} \
     trainer.logger=['console','tracking'] \
     trainer.project_name=${project_name} \
     trainer.experiment_name=${experiment_name} \
@@ -186,10 +191,10 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.rollout.micro_batch_size=${gen_micro_batch_size} \
     actor_rollout_ref.rollout.log_prob_micro_batch_size=${infer_micro_batch_size} \
     trainer.offload_train_memory=${offload_train_memory} \
-    critic.profile.enable=True \
+    critic.profile.enable=False \
     critic.profile.upload_to_mlx=True \
     critic.profile.filename=actor.tp${xperf_tp_size}.fsdp${fsdp_size} \
-    actor_rollout_ref.actor.profile.enable=True \
+    actor_rollout_ref.actor.profile.enable=False \
     actor_rollout_ref.actor.profile.upload_to_mlx=True \
     actor_rollout_ref.actor.profile.filename=actor.tp${xperf_tp_size}.fsdp${fsdp_size} \
     trainer.total_steps=${NUM_STEPS}

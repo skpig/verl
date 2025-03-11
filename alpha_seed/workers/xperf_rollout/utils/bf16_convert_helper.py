@@ -1465,7 +1465,7 @@ def _reshard_fsdp_state_dict_to_xperf_m8_megatron(tp_model, state_dict: dict, de
     ln_f_weight = broadcast_from_megatron_pp(ln_f_weight)
     ln_f_weight = ln_f_weight.to(torch.bfloat16)
     ln_f_weight = ln_f_weight.reshape(1, ln_f_weight.shape[-1])
-    tp_model.layernorm_weight.data = ln_f_weight.contiguous()
+    tp_model.layernorm_weight.data = ln_f_weight.contiguous().clone()  # clone to avoid offload by trainer
     del ln_f_weight
 
     # TODO: use xperf vocab_tp
@@ -1493,17 +1493,15 @@ def _reshard_fsdp_state_dict_to_xperf_m8_megatron(tp_model, state_dict: dict, de
     for layer_index, (ln_1, key_norm, context_norm, qkv_w, qkv_b, dense_w, dense_b, ln_2, gate_w, _, fc1_w, _, fc2_w, _,
                       share_fc1_w, share_fc2_w, *_) in enumerate(tp_model.layers_weight):
 
-        # TODO(zhangchi.usc1992) we ignore pp for now
-
         ln_1_weight = state_dict.pop(f'transformer.h.layers.{layer_index}.input_layernorm.weight', None)
-        ln_1_weight = broadcast_from_megatron_pp(ln_1_weight)
+        ln_1_weight = broadcast_from_megatron_pp(ln_1_weight).clone()  # clone to avoid offload by trainer
         ln_1_weight = torch.stack((ln_1_weight,), dim=0).to(torch.bfloat16).reshape(1, ln_1_weight.shape[-1])
         assert ln_1.data.shape == ln_1_weight.shape
         ln_1.data = ln_1_weight.contiguous()
 
         key_norm_weight = state_dict.pop(f'transformer.h.layers.{layer_index}.self_attention.key_layernorm.weight',
                                          None)
-        key_norm_weight = broadcast_from_megatron_pp(key_norm_weight)
+        key_norm_weight = broadcast_from_megatron_pp(key_norm_weight).clone()  # clone to avoid offload by trainer
         key_norm_weight = torch.stack((key_norm_weight,),
                                       dim=0).to(torch.bfloat16).reshape(1, key_norm_weight.shape[-1])
         assert key_norm.data.shape == key_norm_weight.shape
@@ -1511,7 +1509,8 @@ def _reshard_fsdp_state_dict_to_xperf_m8_megatron(tp_model, state_dict: dict, de
 
         context_norm_weight = state_dict.pop(
             f'transformer.h.layers.{layer_index}.self_attention.context_groupnorm.weight', None)
-        context_norm_weight = broadcast_from_megatron_pp(context_norm_weight)
+        context_norm_weight = broadcast_from_megatron_pp(
+            context_norm_weight).clone()  # clone to avoid offload by trainer
         context_norm_weight = torch.stack((context_norm_weight,),
                                           dim=0).to(torch.bfloat16).reshape(1, context_norm_weight.shape[-1])
         assert context_norm.data.shape == context_norm_weight.shape
@@ -1599,7 +1598,7 @@ def _reshard_fsdp_state_dict_to_xperf_m8_megatron(tp_model, state_dict: dict, de
         dense_w.data = o_proj_weight.contiguous()
 
         ln_2_weight = state_dict.pop(f'transformer.h.layers.{layer_index}.post_attention_layernorm.weight', None)
-        ln_2_weight = broadcast_from_megatron_pp(ln_2_weight)
+        ln_2_weight = broadcast_from_megatron_pp(ln_2_weight).clone()  # clone to avoid offload by trainer
         ln_2_weight = ln_2_weight.to(torch.bfloat16)
         ln_2_weight = torch.stack((ln_2_weight,), dim=0).reshape(1, ln_2_weight.shape[-1])
         assert ln_2_weight.shape == ln_2.shape
@@ -1607,11 +1606,11 @@ def _reshard_fsdp_state_dict_to_xperf_m8_megatron(tp_model, state_dict: dict, de
 
         gate_wg = state_dict.pop(f'transformer.h.layers.{layer_index}.mlp.moe.gate.wg', None)
         gate_wg = broadcast_from_megatron_pp(gate_wg)
-        gate_wg = gate_wg.T.contiguous().float()
+        gate_wg = gate_wg.T.contiguous().float().clone()  # clone to avoid offload by trainer
 
         gate_wg_ema = state_dict.pop(f'transformer.h.layers.{layer_index}.mlp.moe.gate.wg_ema', None)
         gate_wg_ema = broadcast_from_megatron_pp(gate_wg_ema)
-        gate_wg_ema = gate_wg_ema.T.contiguous().float()
+        gate_wg_ema = gate_wg_ema.T.contiguous().float().clone()  # clone to avoid offload by trainer
 
         gate_wg = (gate_wg + gate_wg_ema) * 0.5
 

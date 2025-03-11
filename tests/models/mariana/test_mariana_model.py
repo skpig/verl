@@ -23,6 +23,7 @@ import os
 os.environ['MEGATRON_NCCL_TIMEOUT_SECOND'] = '18000'
 os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "32"
 os.environ['MARIANA_DISABLE_ROPE_REGISTER_INV_FREQ'] = '1'
+os.environ['NCCL_DEBUG'] = 'WARN'
 
 import torch
 import torch.distributed as dist
@@ -40,11 +41,20 @@ from alpha_seed.models.mariana.checkpoint_utils import load_partial_pretrain
 from alpha_seed.models.mariana.config_utils import convert_hf_config_to_mariana, update_megatron_config
 from alpha_seed.models.mariana.modeling_mariana import convert_gate_to_fp32
 from alpha_seed.models.mariana.optimizer_utils import configure_optimizers
+from alpha_seed.workers.ppo_actor_megatron import MegatronPPOActor
 
 from mariana.utils.megatron import initialize_megatron_args
 from verl.utils.fs import copy_local_path_from_hdfs
+from verl.utils.debug import log_gpu_memory_usage
 
 from mariana.models.text.config import TrainConfig, MegatronConfig
+
+from alpha_seed.workers.actors.offload import (
+    offload_megatron_model_to_cpu,
+    offload_megatron_optimizer,
+    load_megatron_model_to_gpu,
+    load_megatron_optimizer,
+)
 
 
 @hydra.main(config_path='.', config_name='config', version_base=None)
@@ -54,7 +64,7 @@ def main(config: DictConfig):
     local_path = copy_local_path_from_hdfs(config.actor_rollout_ref.model.path)
     hf_config = AutoConfig.from_pretrained(local_path)
 
-    model_config = convert_hf_config_to_mariana(hf_config=hf_config)
+    model_config = convert_hf_config_to_mariana(hf_config=hf_config, model_implementation=config.model_implementation)
 
     # vpp size
     update_megatron_config(model_config, megatron_config, vpp_size=config.megatron.virtual_pipeline_parallel_size)
@@ -72,29 +82,24 @@ def main(config: DictConfig):
     from megatron.training import get_model, get_raw_model, wrap_model
     from megatron.model import ModelType
 
+    log_gpu_memory_usage(head='Before model init')
+
     # model_kwargs
     model_kwargs = {}
     # this returns model chunk for each pp stage
-    models = get_model(megatron_model_provider, ModelType.encoder_or_decoder, True, **model_kwargs)
+    models = get_model(megatron_model_provider, ModelType.encoder_or_decoder, wrap_with_ddp=True, **model_kwargs)
+
+    log_gpu_memory_usage(head='After model init')
 
     convert_gate_to_fp32(models)
+
+    log_gpu_memory_usage(head='After convert_gate_to_fp32')
 
     # load checkpoint. Note that we should load ckpt before optimizer. Otherwise, the fp32 params will be wrong.
     # we assume the megatron_merge_state.pt in the same folder as hf
     # ckpt_path = 'hdfs://haruna/home/byte_data_seed/hdd_hldy/user/huakai.dev/ckpt/moe/680M_MOE_M8_D7/680M_M8_D7_2.25T_mixCT.32K/megatron_merge_states.pt'
     # ckpt_local_path = copy_local_path_from_hdfs(ckpt_path)
     # load_partial_pretrain(models, partial_pretrain=ckpt_local_path, model_config=model_config, download_in_shards=True)
-
-    ckpt_path = 'hdfs://haruna/home/byte_data_seed/ssd_hldy/user/tiantianfan1/sft/M8_680m_SFT/checkpoints/global_step_2198'
-    import omnistore
-    ckpt_state = {"model": models}
-    # load model and optimizer
-    omnistore.MegatronCheckpointer.load(
-        path=ckpt_path,
-        enable_shm_download_ckpt_tmp=False,
-        checkpoint_state=ckpt_state,
-        loader_in_split_mode=False,
-    )
 
     # build optimizer
     optim_config = config.actor_rollout_ref.actor.optim
@@ -113,8 +118,25 @@ def main(config: DictConfig):
         weight_decay=optim_config.weight_decay,
     )
 
-    from alpha_seed.workers.ppo_actor_megatron import MegatronPPOActor
-    from torch import distributed as dist
+    log_gpu_memory_usage(head='After optimizer init')
+
+    ckpt_path = 'hdfs://haruna/home/byte_data_seed/ssd_hldy/user/tiantianfan1/sft/M8_680m_SFT/checkpoints/global_step_2198'
+    import omnistore
+
+    ckpt_state = {"model": models}
+    # load model and optimizer
+    omnistore.MegatronCheckpointer.load(
+        path=ckpt_path,
+        enable_shm_download_ckpt_tmp=False,
+        checkpoint_state=ckpt_state,
+        loader_in_split_mode=False,
+    )
+
+    log_gpu_memory_usage(head='After omnistore load')
+
+    optimizers[0].reload_model_params()
+
+    log_gpu_memory_usage(head='After optimizer reload')
 
     actor = MegatronPPOActor(config=config.actor_rollout_ref.actor, actor_module=models, actor_optimizer=optimizers)
 
@@ -125,6 +147,8 @@ def main(config: DictConfig):
     batch_size = 8
     max_prompt_length = 128
     max_response_length = 256
+
+    log_gpu_memory_usage(head='After constructing MegatronPPOActor')
 
     input_ids = torch.randint(low=0,
                               high=hf_config.vocab_size,
@@ -168,13 +192,24 @@ def main(config: DictConfig):
         print(masked_mean(entropy, response_mask))
         print(masked_mean(logprobs, response_mask))
 
-    # step 6: perform forward + backward
-    # if dist.get_rank() == 0:
-    #     from IPython import embed
-    #     embed()
-    # dist.barrier()
+    metrics = actor.update_policy(data=data)
 
-    # metrics = actor.update_policy(data=data)
+    log_gpu_memory_usage(head='Before offload_megatron_model_to_cpu')
+
+    offload_megatron_model_to_cpu(models=models)  # offload model and grad
+    # no need to offload optimizer as they are always on CPU
+
+    log_gpu_memory_usage(head='After offload_megatron_model_to_cpu')
+
+    load_megatron_model_to_gpu(models=models, load_grad=False)  # for inference
+
+    entropy, logprobs = actor.compute_log_prob(data=data)
+
+    load_megatron_model_to_gpu(models=models, load_grad=True)  # for training
+
+    metrics = actor.update_policy(data=data)
+
+    log_gpu_memory_usage(head='After second training')
 
     # if dist.get_rank() == 0:
     #     from IPython import embed

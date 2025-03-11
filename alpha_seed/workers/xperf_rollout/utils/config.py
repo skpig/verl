@@ -124,7 +124,7 @@ def _get_p6_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
         "has_mlp_gate": True,
         "rope_mode": config.rope_scaling['rope_type'],
         "rope_base": int(config.rope_theta),
-        "rope_scale": config.rope_scaling['factor']
+        "rope_scale": int(config.rope_scaling['factor'])
     }
     return xperf_config
 
@@ -156,7 +156,7 @@ def _get_p6dense_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
         "tokenizer_path": tokenizer.name_or_path,
         "rope_mode": config.rope_scaling['rope_type'],
         "rope_base": int(config.rope_theta),
-        "rope_scale": config.rope_scaling['factor']
+        "rope_scale": int(config.rope_scaling['factor'])
     }
     return xperf_config
 
@@ -219,7 +219,7 @@ def _get_p7_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
         "rope_base":
             int(config.rope_theta),
         "rope_scale":
-            config.rope_scaling['factor'],
+            int(config.rope_scaling['factor']),
         "rope_cut":
             True,
         "rope_cut_head_dim":
@@ -293,7 +293,7 @@ def _get_m8_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
         "rope_base":
             int(config.rope_theta),
         "rope_scale":
-            config.rope_scaling['factor'],
+            int(config.rope_scaling['factor']),
         "rope_cut":
             True,
         "rope_cut_head_dim":

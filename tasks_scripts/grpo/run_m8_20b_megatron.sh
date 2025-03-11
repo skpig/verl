@@ -1,29 +1,24 @@
 set -x
 
-ray stop --force
-
-export NCCL_DEBUG=WARN
-export MARIANA_DISABLE_ROPE_REGISTER_INV_FREQ=1
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-
 NUM_STEPS="${NUM_STEPS:-2000}"
 echo $NUM_STEPS
 
 N_GPUS_PER_NODE="${N_GPUS_PER_NODE:-8}"
+nnodes=18
 
 # ckpt和路径
-SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/M8_680m_SFT_hf_new
+SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/0219a1_code_turing_fix_hf_master
 RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/ssd_wlcb/user/liuxin.ai/rl/M8_680m_RM/checkpoints/global_step_308/huggingface
 TRAIN_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/train_with_ref_ans.parquet
 TEST_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/test_with_ref_ans.parquet
-default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/test/m8_680m_grpo
+default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/test/m8_20b_grpo_math
 
 # 训练长度
 max_prompt_length=2048
-max_response_length=4096
+max_response_length=8192
 # batch size && 训练epoch
-train_batch_size=512
-ppo_mini_batch_size=1024
+train_batch_size=504
+ppo_mini_batch_size=1008
 val_batch_size=5000
 total_epochs=100
 test_freq=5
@@ -49,24 +44,21 @@ bon_strategy=all
 kl_penalty=low_var_kl
 # tracking实验名
 project_name='alphaseed_megatron'
-experiment_name='m8_680m'
+experiment_name='m8_20b'
 # 工程参数
 gen_micro_batch_size=512 # use_dynamic_bsz=True时仍然生效
 infer_micro_batch_size=64 # use_dynamic_bsz=True时不生效
 train_micro_batch_size=16 # use_dynamic_bsz=True时不生效
 use_dynamic_bsz=True
-actor_ppo_max_token_len=18432
-critic_ppo_max_token_len=18432
+actor_ppo_max_token_len=10240
+critic_ppo_max_token_len=10240
 infer_ppo_max_token_len=18432
-actor_sp_size=2
-critic_sp_size=2
-ref_sp_size=1
-reward_sp_size=1
-fsdp_size=8
-xperf_tp_size=4
+xperf_tp_size=8
+gpu_memory_utilization=0.7
 offload=True
 offload_train_memory=True
-recipe=tasks_scripts/recipes/h20/m8_680m_grpo_megatron.yaml
+
+recipe=tasks_scripts/recipes/h20/m8_20b_grpo_megatron.yaml
 
 strategy=megatron
 
@@ -108,7 +100,7 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.rollout.name=xperf_gpt \
     +actor_rollout_ref.rollout.num_slots=256 \
     +actor_rollout_ref.rollout.slot_block_size=1024 \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.9 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=${gpu_memory_utilization} \
     actor_rollout_ref.ref.log_prob_micro_batch_size=${infer_micro_batch_size} \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.scale_pg_by_kl=False \
@@ -152,7 +144,7 @@ python3 tasks/main_ppo.py \
     trainer.project_name=${project_name} \
     trainer.experiment_name=${experiment_name} \
     trainer.n_gpus_per_node=${N_GPUS_PER_NODE} \
-    trainer.nnodes=1 \
+    trainer.nnodes=${nnodes} \
     trainer.default_hdfs_dir=${default_hdfs_dir} \
     trainer.save_freq=${save_freq} \
     trainer.test_freq=${test_freq} \
