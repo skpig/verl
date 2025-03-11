@@ -72,20 +72,21 @@ def process_output(input_batch, output_batch, tokenizer, ready_batch, pending_ba
 
 def record_xperf_metrics(batch_info, metrics, logger, global_step, prefix=''):
     xperf_metrics = batch_info.meta_info['xperf_metrics']
-    metrics[f'rollout/{prefix}/steps'] = len(xperf_metrics['finished_tokens_by_step'])
+    metrics[f'rollout/{prefix}/steps'] = len(xperf_metrics.get('finished_tokens_by_step', []))
     # sampling tokens
-    sample_token_num = xperf_metrics['sample_token_num']
-    metrics[f'rollout/{prefix}/prob_mean'] = xperf_metrics['prob_mean'] / sample_token_num
-    metrics[f'rollout/{prefix}/prob_lt_0.0001_ratio'] = xperf_metrics['prob_lt_0.0001'] / sample_token_num
-    metrics[f'rollout/{prefix}/prob_lt_1e-5_ratio'] = xperf_metrics['prob_lt_1e-5'] / sample_token_num
-    metrics[f'rollout/{prefix}/prob_lt_1e-6_ratio'] = xperf_metrics['prob_lt_1e-6'] / sample_token_num
-    metrics[f'rollout/{prefix}/page_swap_out_bs'] = xperf_metrics['page_swap_out_bs']
-    metrics[f'rollout/{prefix}/page_swap_out_token'] = xperf_metrics['page_swap_out_token']
-    metrics[f'rollout/{prefix}/max_off_policy_steps'] = max(max(xperf_metrics['off_policy_steps']))
+    sample_token_num = xperf_metrics.get('sample_token_num', 0)
+    metrics[f'rollout/{prefix}/prob_mean'] = xperf_metrics.get('prob_mean', 0) / (sample_token_num + 1e-6)
+    metrics[f'rollout/{prefix}/prob_lt_0.0001_ratio'] = xperf_metrics.get('prob_lt_0.0001',
+                                                                          0) / (sample_token_num + 1e-6)
+    metrics[f'rollout/{prefix}/prob_lt_1e-5_ratio'] = xperf_metrics.get('prob_lt_1e-5', 0) / (sample_token_num + 1e-6)
+    metrics[f'rollout/{prefix}/prob_lt_1e-6_ratio'] = xperf_metrics.get('prob_lt_1e-6', 0) / (sample_token_num + 1e-6)
+    metrics[f'rollout/{prefix}/page_swap_out_bs'] = xperf_metrics.get('page_swap_out_bs', 0)
+    metrics[f'rollout/{prefix}/page_swap_out_token'] = xperf_metrics.get('page_swap_out_token', 0)
+    metrics[f'rollout/{prefix}/max_off_policy_steps'] = max(max(xperf_metrics.get('off_policy_steps', [[0]])))
 
     # context + decode tokens
-    tokens_num = xperf_metrics['tokens_num']
-    per_token_latency = xperf_metrics['per_token_latency']
+    tokens_num = xperf_metrics.get('tokens_num', [])
+    per_token_latency = xperf_metrics.get('per_token_latency', [])
     total_tokens = sum(tokens_num)
     metrics[f'rollout/{prefix}/per_token_latency_avg'] = 0 if len(per_token_latency) == 0 else (sum(per_token_latency) /
                                                                                                 len(per_token_latency))
