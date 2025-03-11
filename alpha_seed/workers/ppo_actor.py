@@ -16,7 +16,7 @@ Single Process Actor
 """
 from typing import Iterable, ContextManager
 import itertools
-
+import gc
 import torch
 from tensordict import TensorDict
 from transformers import PretrainedConfig
@@ -107,7 +107,12 @@ class DataParallelPPOActor(BasePPOActor):
         self.entropy_from_logits = torch.compile(verl_F.entropy_from_logits, dynamic=True)
 
         enable_act_offload = self.config.act_offload if actor_optimizer is not None else False
-        self.act_offload_ctx = activation_offload.get_offload_context(enable_act_offload, self.actor_module)
+        offload_threshold = self.config.get('act_offload_threshold', 1024 * 1024)
+        offload_upbound = self.config.get('act_offload_upbound', None)
+        self.act_offload_ctx = activation_offload.get_offload_context(enable_act_offload,
+                                                                      self.actor_module,
+                                                                      offload_threshold=offload_threshold,
+                                                                      offload_upbound=offload_upbound)
 
     def _forward_micro_batch(self, micro_batch: TensorDict, temperature, compute_entropy):
         from flash_attn.bert_padding import index_first_axis, rearrange
@@ -466,6 +471,8 @@ class DataParallelPPOActor(BasePPOActor):
                         first_mini_ppo_kl_sum += ppo_kl_sum.detach().item()
 
                     append_to_dict(metrics, micro_data_metric)
+                    if self.config.gc_freq == "micro":
+                        gc.collect()
 
                 if minibatch_early_stop:
                     print(f'early stop at {batch_idx}!!!')
@@ -477,6 +484,9 @@ class DataParallelPPOActor(BasePPOActor):
                     append_to_dict(metrics, training_stats)
 
                 grad_norm = self._optimizer_step()
+
+                if self.config.gc_freq == "mini":
+                    gc.collect()
 
                 if self.config.get('update_gate_ema', False):
                     # update gate_ema

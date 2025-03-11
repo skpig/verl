@@ -65,6 +65,8 @@ actor_rollout_ref:
     shuffle: True
     use_ewma_loss: False
     act_offload: False
+    act_offload_upbound: null
+    gc_freq: null # null, "micro", "mini"
     train_memory_offload: ${trainer.offload_train_memory}
     optim:
       type: adam
@@ -217,6 +219,8 @@ critic:
   grad_clip: 1.0
   cliprange_value: 0.5
   act_offload: False
+  act_offload_upbound: null
+  gc_freq: null # null, "micro", "mini"
   train_memory_offload: ${trainer.offload_train_memory}
   profile:
     filename: p6_400m_ppo_critic

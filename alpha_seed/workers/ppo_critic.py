@@ -17,7 +17,7 @@ Implement a multiprocess PPOCritic
 
 from typing import Iterable
 import itertools
-
+import gc
 import torch
 import torch.distributed
 from torch import nn, optim
@@ -88,7 +88,12 @@ class DataParallelPPOCritic(BasePPOCritic):
         self.value_loss = torch.compile(core_algos.compute_value_loss, disable=True)
 
         enable_act_offload = self.config.act_offload if critic_optimizer is not None else False
-        self.act_offload_ctx = activation_offload.get_offload_context(enable_act_offload, self.critic_module)
+        offload_threshold = self.config.get('act_offload_threshold', 1024 * 1024)
+        offload_upbound = self.config.get('act_offload_upbound', None)
+        self.act_offload_ctx = activation_offload.get_offload_context(enable_act_offload,
+                                                                      self.critic_module,
+                                                                      offload_threshold=offload_threshold,
+                                                                      offload_upbound=offload_upbound)
 
     def _forward_micro_batch(self, micro_batch: TensorDict):
         from flash_attn.bert_padding import pad_input, unpad_input, index_first_axis, rearrange
@@ -288,8 +293,12 @@ class DataParallelPPOCritic(BasePPOCritic):
                     }
 
                     append_to_dict(metrics, micro_data_metric)
+                    if self.config.gc_freq == "micro":
+                        gc.collect()
 
                 grad_norm = self._optimizer_step()
+                if self.config.gc_freq == "mini":
+                    gc.collect()
 
                 if self.config.get('update_gate_ema', False):
                     # update gate_ema

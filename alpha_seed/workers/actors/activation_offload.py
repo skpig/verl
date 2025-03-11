@@ -6,19 +6,29 @@ import torch.distributed
 import torch.nn as nn
 
 act_offload_supported_layer_classes = [
-    "seed_models.models.p6.modeling_p6.P6DecoderLayer", "seed_models.models.p7.modeling_p7.P7DecoderLayer",
+    "seed_models.models.p6.modeling_p6.P6DecoderLayer",
+    "seed_models.models.p7.modeling_p7.P7DecoderLayer",
     "seed_models.models.m8.modeling_m8.M8DecoderLayer",
+    "seed_models.models.p6dense.modeling_p6d.P6DenseDecoderLayer"
     "seed_models.models.deepseek_v3.modeling_deepseek.DeepseekV3DecoderLayer"
+    "torch.nn.modules.linear.Linear",
+    "liger_kernel.transformers.rms_norm.LigerRMSNorm",
 ]
 
 
 class ActOffload(torch.autograd.graph.saved_tensors_hooks):
 
-    def __init__(self, module, layer_classes, offload_threshold=10 * 1024 * 1024, offload_last_layer=False):
+    def __init__(self,
+                 module,
+                 layer_classes,
+                 offload_threshold=10 * 1024 * 1024,
+                 offload_upbound=None,
+                 offload_last_layer=False):
         super().__init__(self.offload_pack, self.offload_unpack)
         self.offload_layers = []
         self.current_layer = []
         self.offload_threshold = offload_threshold
+        self.offload_upbound = offload_upbound
         self.is_hook = False
         self.offload_last_layer = offload_last_layer
         self.offload_stream = torch.cuda.Stream()
@@ -47,7 +57,8 @@ class ActOffload(torch.autograd.graph.saved_tensors_hooks):
                 x.is_prefetch = True
 
     def offload_pack(self, x):
-        if not isinstance(x, nn.Parameter) and x.numel() >= self.offload_threshold and x.requires_grad:
+        if not isinstance(x, nn.Parameter) and x.numel() >= self.offload_threshold and (
+                self.offload_upbound is None or x.numel() <= self.offload_upbound) and x.requires_grad:
             self.current_layer.append(x)
             x_cpu = torch.empty(x.data.size(), device=torch.device('cpu'), dtype=x.data.dtype, pin_memory=True)
             self.offload_stream.wait_stream(torch.cuda.current_stream())
@@ -93,7 +104,7 @@ class ActOffload(torch.autograd.graph.saved_tensors_hooks):
 
     def register_layer_offload_hook(self, module, layer_classes):
         for _, child in module.named_children():
-            c = type(module)
+            c = type(child)
             module_full_name = c.__module__ + '.' + c.__qualname__
             if module_full_name in layer_classes:
                 child.register_forward_hook(lambda module, _in, _out: self.layer_offload())
@@ -126,11 +137,16 @@ class ActNoOffload(nullcontext):
         pass
 
 
-def get_offload_context(enable, module, offload_threshold=1 * 1024 * 1024, offload_last_layer=False):
+def get_offload_context(enable,
+                        module,
+                        offload_threshold=1 * 1024 * 1024,
+                        offload_upbound=None,
+                        offload_last_layer=False):
     if enable:
         return ActOffload(module,
                           layer_classes=act_offload_supported_layer_classes,
                           offload_threshold=offload_threshold,
+                          offload_upbound=offload_upbound,
                           offload_last_layer=offload_last_layer)
     else:
         return ActNoOffload()
