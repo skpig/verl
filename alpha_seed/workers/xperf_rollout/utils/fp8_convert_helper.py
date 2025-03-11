@@ -36,34 +36,47 @@ def convert_fp8_weights_from_bf16(qkv_proj_weight,
         attention_proj_weight, 1 / fp8_attention_proj_weight_scale_converted)
 
     # FFN0
-    fp8_FFN0_weight_scale_converted_all = []
-    fp8_FFN0_weight_converted_all = []
-    for i in range(experts_num):
-        FFN0_weight = FFN0_weight.reshape(experts_num, -1)
-        local_FFN0_weight = FFN0_weight[i]
-        fp8_FFN0_weight_scale_converted = 1 / torch.classes.XGPT.Fp8GemmTestOp().GetPerTensorScale(local_FFN0_weight, 0)
-        fp8_FFN0_weight_converted = torch.classes.XGPT.Fp8GemmTestOp().Quant(local_FFN0_weight,
-                                                                             1 / fp8_FFN0_weight_scale_converted)
-        fp8_FFN0_weight_scale_converted_all.append(fp8_FFN0_weight_scale_converted)
-        fp8_FFN0_weight_converted_all.append(fp8_FFN0_weight_converted.cpu())
+    if experts_num == 0:
+        # dense
+        fp8_FFN0_weight_scale_converted_all = 1 / torch.classes.XGPT.Fp8GemmTestOp().GetPerTensorScale(FFN0_weight, 0)
+        fp8_FFN0_weight_converted_all = torch.classes.XGPT.Fp8GemmTestOp().Quant(
+            FFN0_weight, 1 / fp8_FFN0_weight_scale_converted_all)
+    else:
+        fp8_FFN0_weight_scale_converted_all = []
+        fp8_FFN0_weight_converted_all = []
+        for i in range(experts_num):
+            FFN0_weight = FFN0_weight.reshape(experts_num, -1)
+            local_FFN0_weight = FFN0_weight[i]
+            fp8_FFN0_weight_scale_converted = 1 / torch.classes.XGPT.Fp8GemmTestOp().GetPerTensorScale(
+                local_FFN0_weight, 0)
+            fp8_FFN0_weight_converted = torch.classes.XGPT.Fp8GemmTestOp().Quant(local_FFN0_weight,
+                                                                                 1 / fp8_FFN0_weight_scale_converted)
+            fp8_FFN0_weight_scale_converted_all.append(fp8_FFN0_weight_scale_converted)
+            fp8_FFN0_weight_converted_all.append(fp8_FFN0_weight_converted.cpu())
 
-    fp8_FFN0_weight_scale_converted_all = torch.cat(fp8_FFN0_weight_scale_converted_all)
-    fp8_FFN0_weight_converted_all = torch.cat(fp8_FFN0_weight_converted_all).cuda()
+        fp8_FFN0_weight_scale_converted_all = torch.cat(fp8_FFN0_weight_scale_converted_all)
+        fp8_FFN0_weight_converted_all = torch.cat(fp8_FFN0_weight_converted_all).cuda()
 
     # FFN1
-    fp8_FFN1_weight_scale_converted_all = []
-    fp8_FFN1_weight_converted_all = []
-    for i in range(experts_num):
-        FFN1_weight = FFN1_weight.reshape(experts_num, -1)
-        local_FFN1_weight = FFN1_weight[i]
-        fp8_FFN1_weight_scale_converted = 1 / torch.classes.XGPT.Fp8GemmTestOp().GetPerTensorScale(local_FFN1_weight, 0)
-        fp8_FFN1_weight_converted = torch.classes.XGPT.Fp8GemmTestOp().Quant(local_FFN1_weight,
-                                                                             1 / fp8_FFN1_weight_scale_converted)
-        fp8_FFN1_weight_scale_converted_all.append(fp8_FFN1_weight_scale_converted)
-        fp8_FFN1_weight_converted_all.append(fp8_FFN1_weight_converted.cpu())
+    if experts_num == 0:
+        fp8_FFN1_weight_scale_converted_all = 1 / torch.classes.XGPT.Fp8GemmTestOp().GetPerTensorScale(FFN1_weight, 0)
+        fp8_FFN1_weight_converted_all = torch.classes.XGPT.Fp8GemmTestOp().Quant(
+            FFN1_weight, 1 / fp8_FFN1_weight_scale_converted_all)
+    else:
+        fp8_FFN1_weight_scale_converted_all = []
+        fp8_FFN1_weight_converted_all = []
+        for i in range(experts_num):
+            FFN1_weight = FFN1_weight.reshape(experts_num, -1)
+            local_FFN1_weight = FFN1_weight[i]
+            fp8_FFN1_weight_scale_converted = 1 / torch.classes.XGPT.Fp8GemmTestOp().GetPerTensorScale(
+                local_FFN1_weight, 0)
+            fp8_FFN1_weight_converted = torch.classes.XGPT.Fp8GemmTestOp().Quant(local_FFN1_weight,
+                                                                                 1 / fp8_FFN1_weight_scale_converted)
+            fp8_FFN1_weight_scale_converted_all.append(fp8_FFN1_weight_scale_converted)
+            fp8_FFN1_weight_converted_all.append(fp8_FFN1_weight_converted.cpu())
 
-    fp8_FFN1_weight_scale_converted_all = torch.cat(fp8_FFN1_weight_scale_converted_all)
-    fp8_FFN1_weight_converted_all = torch.cat(fp8_FFN1_weight_converted_all).cuda()
+        fp8_FFN1_weight_scale_converted_all = torch.cat(fp8_FFN1_weight_scale_converted_all)
+        fp8_FFN1_weight_converted_all = torch.cat(fp8_FFN1_weight_converted_all).cuda()
 
     fp8_FFN0_share_weight_scale_converted_all = None
     fp8_FFN0_share_weight_converted_all = None
@@ -416,6 +429,26 @@ def _reshard_fsdp_state_dict_to_xperf_p6dense_fp8(tp_model, state_dict, device_m
         assert qkv_weight.shape == qkv_proj_weight.shape
         qkv_proj_weight.data = qkv_weight.contiguous()
 
+        if f'model.layers.{layer_index}.self_attn.q_proj.bias' in state_dict:
+            q_proj_bias = state_dict.pop(f'model.layers.{layer_index}.self_attn.q_proj.bias').full_tensor().to(
+                torch.bfloat16)
+            k_proj_bias = state_dict.pop(f'model.layers.{layer_index}.self_attn.k_proj.bias').full_tensor().to(
+                torch.bfloat16)
+            v_proj_bias = state_dict.pop(f'model.layers.{layer_index}.self_attn.v_proj.bias').full_tensor().to(
+                torch.bfloat16)
+
+            qkv_bias = torch.cat((q_proj_bias, k_proj_bias, v_proj_bias), dim=0)
+            if device_mesh is not None:
+                qkv_bias, q_heads_list = _fix_qkv_ordering(qkv_bias,
+                                                           tp_size=tp_size,
+                                                           num_heads=num_heads,
+                                                           mqa_kv_heads=mqa_kv_heads,
+                                                           interleaved_kv_shared=False)
+                qkv_bias = qkv_bias[tp_rank]
+
+            assert qkv_bias.shape == qkv_proj_bias.shape
+            qkv_proj_bias.data = qkv_bias.contiguous()
+
         o_proj_weight = state_dict.pop(f'model.layers.{layer_index}.self_attn.o_proj.weight').full_tensor().to(
             torch.bfloat16)
         if device_mesh is not None:
@@ -423,6 +456,12 @@ def _reshard_fsdp_state_dict_to_xperf_p6dense_fp8(tp_model, state_dict, device_m
 
         assert o_proj_weight.shape == attention_proj_weight.shape
         attention_proj_weight.data = o_proj_weight.contiguous()
+
+        o_proj_bias_key = f'model.layers.{layer_index}.self_attn.o_proj.bias'
+        if o_proj_bias_key in state_dict:
+            o_proj_bias = state_dict.pop(o_proj_bias_key).full_tensor().to(torch.bfloat16)
+            assert o_proj_bias.shape == attention_proj_bias.shape
+            attention_proj_bias.data = o_proj_bias.contiguous()
 
         # model.layers.0.mlp.gate_proj.weight
         gate_proj_weight = state_dict.pop(f'model.layers.{layer_index}.mlp.gate_proj.weight').full_tensor().to(
