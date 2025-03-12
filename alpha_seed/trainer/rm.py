@@ -461,12 +461,14 @@ class RMTrainer(object):
             # save checkpoint
             self.save_checkpoint(step=global_step)
 
-        if self.rank == 0:
-            local_path = os.path.join(self.config.trainer.default_local_dir, "huggingface")
-            os.makedirs(local_path, exist_ok=True)
-            self.fsdp_model.module.config.save_pretrained(local_path)
-            self.tokenizer.save_pretrained(local_path)
-            hdfs_io.copy(src=local_path, dst=self.config.trainer.default_hdfs_dir)
+            if self.rank == 0:
+                local_path = os.path.join(self.config.trainer.default_local_dir, "huggingface")
+                os.makedirs(local_path, exist_ok=True)
+                self.fsdp_model.module.config.save_pretrained(local_path)
+                self.tokenizer.save_pretrained(local_path)
+                hdfs_io.copy(src=local_path,
+                             dst=os.path.join(self.config.trainer.default_hdfs_dir, "checkpoints",
+                                              f"global_step_{global_step}"))
 
         dist.barrier()
 

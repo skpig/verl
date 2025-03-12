@@ -10,6 +10,8 @@ from omnistore.utilities.ckpt_format.merge_tool import omnistore_ckpt_to_pytorch
 from seed_models.commands.convert_to_megatron import convert_seed_models_to_megatron
 
 if __name__ == '__main__':
+    print('Warning: This script is going to be deprecated and will be removed in the near future. Please use '
+          'scripts/checkpoint/merge_checkpoint_omnistore.py instead.')
     print('Step1: prepare args and folders')
     parser = argparse.ArgumentParser()
     parser.add_argument('--load-dir', required=True)
