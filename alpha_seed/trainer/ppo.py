@@ -1197,6 +1197,7 @@ class RayPPOTrainer(object):
         metrics['rollout/hybrid_input_batch'] = len(batch)
         metrics['memory/gen_max_allocated'] = gen_batch_output.meta_info['memory/gen_max_allocated']
         metrics['memory/gen_max_reserved'] = gen_batch_output.meta_info['memory/gen_max_reserved']
+        metrics['timing/weight_binding'] = gen_batch_output.meta_info['timing/weight_binding']
 
         # for debugging purpose only. we manually set all the attention_mask to 1 to
         # test the training performance under maximum workload.

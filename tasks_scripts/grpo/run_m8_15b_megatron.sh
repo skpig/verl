@@ -54,7 +54,7 @@ actor_ppo_max_token_len=10240
 critic_ppo_max_token_len=10240
 infer_ppo_max_token_len=18432
 xperf_tp_size=8
-gpu_memory_utilization=0.7
+gpu_memory_utilization=0.9
 offload=True
 offload_train_memory=True
 

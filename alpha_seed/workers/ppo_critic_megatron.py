@@ -184,7 +184,10 @@ class MegatronPPOCritic(BasePPOCritic):
                 'cu_seqlens': cu_seqlens,
                 'max_s': max_seqlen_in_batch,
                 'total_s': total_s,
-                'position_ids': position_ids_rmpad
+                'position_ids': position_ids_rmpad,
+                'host_seqlens': cu_seqlens.cpu(),
+                'padded_seq_len':
+                    input_ids_rmpad_padded.shape[-1]  # how should we pass this?
             }
 
             output = model(batch=forward_batch)

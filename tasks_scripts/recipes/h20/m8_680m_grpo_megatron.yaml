@@ -13,3 +13,6 @@ mariana:
 actor_rollout_ref:
   actor:
     ppo_max_token_len: 18432
+
+critic:
+  ppo_max_token_len: 18432
