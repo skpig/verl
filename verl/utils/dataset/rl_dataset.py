@@ -87,6 +87,7 @@ class RLHFDataset(Dataset):
                  filter_prompts=True,
                  cache_dir='~/.cache/verl/rlhf',
                  chat_template_func=None,
+                 template_type='chat',
                  return_raw_chat=False,
                  truncation='error',
                  filter_overlong_prompts=False):
@@ -106,6 +107,7 @@ class RLHFDataset(Dataset):
 
         self.return_raw_chat = return_raw_chat
         self.chat_template_func = chat_template_func
+        self.template_type = template_type
         self.truncation = truncation
         self.filter_overlong_prompts = filter_overlong_prompts
 
@@ -136,8 +138,9 @@ class RLHFDataset(Dataset):
             tokenizer = self.tokenizer
             prompt_key = self.prompt_key
             self.dataframe = self.dataframe[self.dataframe.apply(lambda doc: len(
-                tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True)) <= self.max_prompt_length,
-                                                                 axis=1)]
+                tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True) if self.template_type == 'chat' else doc[prompt_key]
+                ) <= self.max_prompt_length,
+                axis=1)]
 
             print(f'filter dataset len: {len(self.dataframe)}')
 
@@ -161,7 +164,8 @@ class RLHFDataset(Dataset):
 
         chat = row_dict.pop(self.prompt_key)
 
-        prompt_with_chat_template = self.tokenizer.apply_chat_template(chat, add_generation_prompt=True, tokenize=False)
+        prompt_with_chat_template = self.tokenizer.apply_chat_template(chat, add_generation_prompt=True, tokenize=False) if self.template_type == 'chat' else chat
+        assert isinstance(prompt_with_chat_template, str), "prompt after applying chat template should be a string"
 
         is_multi_modal = self.image_key in row_dict
         if is_multi_modal:  # expand image token
@@ -210,7 +214,7 @@ class RLHFDataset(Dataset):
         row_dict['input_ids'] = input_ids[0]
         row_dict['attention_mask'] = attention_mask[0]
         row_dict['position_ids'] = position_ids[0]
-        row_dict['raw_prompt_ids'] = self.tokenizer.encode(raw_prompt, add_special_tokens=False)
+        row_dict['raw_prompt_ids'] = self.tokenizer.encode(raw_prompt, add_special_tokens=False) # without padding or truncation
 
         # encode prompts without chat template
         if self.return_raw_chat:

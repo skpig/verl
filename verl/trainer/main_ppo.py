@@ -72,6 +72,7 @@ def run_ppo(config) -> None:
 
 @ray.remote(num_cpus=1)  # please make sure main_task is not scheduled on head
 def main_task(config):
+    # breakpoint()
     from verl.utils.fs import copy_to_local
     # print initial config
     from pprint import pprint

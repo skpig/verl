@@ -382,6 +382,7 @@ def compute_throughout_metrics(batch, timing_raw, n_gpus):
 @contextmanager
 def _timer(name: str, timing_raw: Dict[str, float]):
     with Timer(name=name, logger=None) as timer:
+        print("Start timing of : ", name)
         yield
     timing_raw[name] = timer.last
 
@@ -549,6 +550,7 @@ class RayPPOTrainer(object):
                                          image_key=self.config.data.get('image_key', 'images'),
                                          max_prompt_length=self.config.data.max_prompt_length,
                                          filter_prompts=True,
+                                         template_type=self.config.data.template_type,
                                          return_raw_chat=self.config.data.get('return_raw_chat', False),
                                          truncation='error')
         # use sampler for better ckpt resume
@@ -1001,6 +1003,7 @@ class RayPPOTrainer(object):
                             batch = batch.union(reward_tensor)
 
                         # we combine with rule-based rm
+                        # breakpoint()
                         reward_tensor = self.reward_fn(batch)
                         batch.batch['token_level_scores'] = reward_tensor
 
