@@ -543,7 +543,7 @@ class CriticWorker(Worker):
                         global_step=0,
                         ckpt_global_uploader_ref=None,
                         enable_shm=False):
-        if self.critic_strategy == 'fsdp':
+        if self.critic_strategy == 'megatron':
             # TODO: implement this
             return
 
