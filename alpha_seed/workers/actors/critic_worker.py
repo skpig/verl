@@ -16,6 +16,7 @@ The main entry point to run the PPO algorithm
 """
 
 import json
+import gc
 from filelock import FileLock
 import shutil
 import warnings
@@ -215,7 +216,7 @@ class CriticWorker(Worker):
 
         auto_wrap_policy = get_fsdp_wrap_policy(module=critic_module, config=self.config.model.fsdp_config.wrap_policy)
 
-        log_gpu_memory_usage('Before critic FSDP', logger=logger)
+        log_gpu_memory_usage('Before critic FSDP')
 
         cpu_offload = None
         if self.config.model.fsdp_config.param_offload:
@@ -233,7 +234,8 @@ class CriticWorker(Worker):
             raise NotImplementedError(f"get device mesh ndim={self.fsdp_mesh.ndim}, but only support 1 or 2")
 
         shard_states = parallel_load_safetensors(local_path) if from_scratch else {}
-        print(f"init fsdp from_scratch={from_scratch}")
+        if torch.distributed.get_rank() == 0:
+            print(f"init fsdp from_scratch={from_scratch}")
         critic_module = FSDP(critic_module,
                              param_init_fn=parallel_init_fsdp_fn(critic_module, shard_states),
                              use_orig_params=self.config.model.fsdp_config.use_orig_params,
@@ -400,6 +402,7 @@ class CriticWorker(Worker):
                     load_fsdp_model_to_gpu(self.critic_module)
                 if optimizer:
                     load_fsdp_optimizer(self.critic_optimizer, torch.cuda.current_device())
+                gc.collect()
             elif device == "cpu":
                 if model:
                     offload_fsdp_model_to_cpu(self.critic_module, model_empty_cache)
@@ -408,6 +411,7 @@ class CriticWorker(Worker):
         elif self.critic_strategy == 'megatron':
             if device == 'cuda':
                 load_megatron_model_to_gpu(models=self.critic_module, load_grad=optimizer)
+                gc.collect()
             elif device == 'cpu':
                 offload_megatron_model_to_cpu(models=self.critic_module)
 
@@ -453,7 +457,6 @@ class CriticWorker(Worker):
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_values(self, data: DataProto):
         # data = data.to('cuda')
-
         # Note we don't offload to cpu after compute_values
         # as it next will update critic
         if self.config.train_memory_offload:
@@ -471,6 +474,7 @@ class CriticWorker(Worker):
             output = DataProto.from_dict(tensors={'values': values})
             output = self.gather_manager.postprocess_data(output)
         output = output.to('cpu')
+
         # torch.cuda.empty_cache()
         return output
 
@@ -479,7 +483,7 @@ class CriticWorker(Worker):
         torch.cuda.reset_peak_memory_stats()
         # data = data.to('cuda')
 
-        log_gpu_memory_usage('Before Critic update', logger=logger)
+        log_gpu_memory_usage('Before Critic update')
 
         # optimizer will be loaded just before the step to save
         # forward & backward memory
@@ -519,7 +523,7 @@ class CriticWorker(Worker):
             self.to("cpu", model_empty_cache=False)
         output = output.to('cpu')
 
-        log_gpu_memory_usage('After Critic update', logger=logger)
+        log_gpu_memory_usage('After Critic update')
         return output
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)

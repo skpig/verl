@@ -11,6 +11,7 @@ import numpy as np
 from pprint import pprint
 from verl import DataProto
 import random
+import ray
 
 try:
     from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
@@ -67,9 +68,11 @@ class ValidateManager(object):
                             self.logger.log(data=val_log, step=global_step, backend="tracking")
 
         if is_async:
-            self.actor_rollout_wg.update_standalone_worker("standalone_validator")
-            self.standalone_validator_wg.update_standalone_worker("standalone_validator")
+            actor_fut = self.actor_rollout_wg.update_standalone_worker("standalone_validator")
+            standalone_fut = self.standalone_validator_wg.update_standalone_worker("standalone_validator")
             validator_wg = self.standalone_validator_wg
+            ray.get(actor_fut)
+            ray.get(standalone_fut)
         else:
             validator_wg = self.actor_rollout_wg
 

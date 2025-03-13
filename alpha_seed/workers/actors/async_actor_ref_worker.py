@@ -31,6 +31,7 @@ from torch.utils.checkpoint import noop_context_fn
 from omegaconf import DictConfig, open_dict, OmegaConf
 from typing import List
 from typing import Union
+import gc
 
 import verl.utils.torch_functional as verl_F
 from single_controller.base import Worker
@@ -370,7 +371,8 @@ class AsyncActorRolloutRefWorker(Worker):
             raise NotImplementedError(f"role: {role}: get device mesh ndim={fsdp_mesh.ndim}, but only support 1 or 2")
 
         shard_states = parallel_load_safetensors(local_path) if from_scratch else {}
-        print(f"init fsdp from_scratch={from_scratch}")
+        if torch.distributed.get_rank() == 0:
+            print(f"init fsdp from_scratch={from_scratch}")
         # TODO: add transformer policy
         actor_module_fsdp = FSDP(actor_module,
                                  param_init_fn=parallel_init_fsdp_fn(actor_module, shard_states),
@@ -626,6 +628,8 @@ class AsyncActorRolloutRefWorker(Worker):
                     if model:
                         # we never load grad for ref model
                         load_megatron_model_to_gpu(self.ref_module_mariana, load_grad=False)
+            # clean cpu memory
+            gc.collect()
 
         elif device == "cpu":
             if self._is_actor or self._is_standalone_rollout or self._is_standalone_validator:
@@ -831,7 +835,12 @@ class AsyncActorRolloutRefWorker(Worker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def update_standalone_worker(self, role):
         assert self._is_rollout or self._is_standalone_rollout or self._is_standalone_validator
-        self.sharding_manager.update_standalone_worker(role)
+        if not self.sharding_manager.standalone and self.config.actor.train_memory_offload:
+            self.to("cuda", model=True, optimizer=False)
+        with self.sharding_manager:
+            self.sharding_manager.update_standalone_worker(role)
+        if not self.sharding_manager.standalone and self.config.actor.train_memory_offload:
+            self.to("cpu", model=True, optimizer=False)
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def update_actor(self, data: DataProto):

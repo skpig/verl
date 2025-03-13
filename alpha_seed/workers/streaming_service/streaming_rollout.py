@@ -44,7 +44,7 @@ import logging
 
 from alpha_seed.workers.xperf_rollout.utils import get_xperf_gpt_config
 from alpha_seed.workers.streaming_service.streaming_utils import is_multihost_model, get_gpus_per_node
-from alpha_seed.workers.xperf_rollout.utils.layout_convert_helper import init_meta
+from alpha_seed.workers.xperf_rollout.utils.layout_convert_helper import offload_to_device
 from alpha_seed.workers.streaming_service.xperf_model_prophet import XperfModelProphet
 from alpha_seed.workers.xperf_rollout.utils.logits_manipulate import logits_manipulate_fn_core, logits_manipulate_fn_eta, logits_manipulate_fn_minp, logits_manipulate_fn_clip
 from alpha_seed.utils.observility import get_profiler_context_wrapped, profile_step
@@ -312,8 +312,8 @@ class AsyncXPerfGPTRollout(object):
         self.inference_engine = inference_sess
         self.__init_sub_process()
 
-        # offload to CPU
-        init_meta(self.inference_engine.engine.module)
+        # offload to meta device
+        offload_to_device(self.inference_engine.engine.module, "meta")
         torch.cuda.empty_cache()
 
     def _set_tuner_config(self):

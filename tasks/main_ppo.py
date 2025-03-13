@@ -723,7 +723,7 @@ def validate_config(config):
         assert complete_ratio < 1.0, f'When streaming rollout is enabled, complete_ratio must be smaller than 1. Got {complete_ratio}.'
 
     # actor
-    assert real_train_batch_size % config.actor_rollout_ref.actor.ppo_mini_batch_size == 0
+    assert real_train_batch_size % config.actor_rollout_ref.actor.ppo_mini_batch_size == 0, f"{real_train_batch_size=} vs. {config.actor_rollout_ref.actor.ppo_mini_batch_size=}"
     if not config.actor_rollout_ref.actor.use_dynamic_bsz:
         ulysses = config.actor_rollout_ref.actor.ulysses_sequence_parallel_size
         assert config.actor_rollout_ref.actor.ppo_mini_batch_size % config.actor_rollout_ref.actor.ppo_micro_batch_size == 0

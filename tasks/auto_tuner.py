@@ -12,10 +12,10 @@ Example:
 torchrun --nproc_per_node=$ARNOLD_WORKER_GPU --nnodes=$ARNOLD_WORKER_NUM --node_rank=$ARNOLD_ID \
     --master_addr=$ARNOLD_WORKER_0_HOST --master_port=12321 \
     tasks/auto_tuner.py \
-    --model hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/20b_sft_summary_0131_hf \
-    --max-seqlen 18432 \
-    --nnodes 16 --ngpus-per-node 8 --gpu-type H800 \
-    --recipe-out hdfs://haruna/home/byte_data_seed/lf_lq/user/zhiqi.0/rlhf/recipes/h800_128_m8_20b_18k.yaml \
+    --model hdfs://haruna/home/byte_data_seed/ssd_hldy/user/gracexu/exp/qwen2.5_32b_instruct_mariana/qwen2.5_32b_ins_v7.1_refge3_sp_fix-chatml_250217/rl_init/1230a1 \
+    --max-seqlen 22528 \
+    --nnodes 32 --ngpus-per-node 8 --gpu-type H800 \
+    --recipe-out hdfs://haruna/home/byte_data_seed/lf_lq/user/zhiqi.0/rlhf/recipes/H800_256_qwen_32b_22k.yaml \
     2>&1 | tee log.txt
 
 cat ./auto.yaml
@@ -371,8 +371,9 @@ class AutoTuner:
         tp_size = 1
         if have_tp_implementation:
             tp_size = 2 if self.env.nvlink else 4
-        assert self.env.ngpus_per_node % tp_size == 0
-        sp_size = self.env.ngpus_per_node // tp_size
+        ngpus_per_node = min(self.env.ngpus_per_node, dist.get_world_size())
+        assert ngpus_per_node % tp_size == 0
+        sp_size = ngpus_per_node // tp_size
         return ParallelConfig(
             max_token_len=self.max_seqlen,
             fsdp_size=-1,
@@ -440,6 +441,8 @@ class AutoTuner:
         template["actor_rollout_ref"]["actor"]["tp_size"] = config.tp_size
         template["actor_rollout_ref"]["actor"]["ulysses_sequence_parallel_size"] = config.sp_size
         template["actor_rollout_ref"]["actor"]["act_offload"] = config.act_offload
+        # if config.act_offload:
+        #     template["actor_rollout_ref"]["actor"]["gc_freq"] = "micro"
 
         template["actor_rollout_ref"]["ref"]["max_token_len"] = config.max_token_len
         template["actor_rollout_ref"]["ref"]["fsdp_size"] = config.fsdp_size
@@ -451,6 +454,8 @@ class AutoTuner:
         template["critic"]["tp_size"] = config.tp_size
         template["critic"]["ulysses_sequence_parallel_size"] = config.sp_size
         template["critic"]["act_offload"] = config.act_offload
+        # if config.act_offload:
+        #     template["critic"]["gc_freq"] = "micro"
 
         # calculate rollout tp size
         tp_size = self.env.ngpus_per_node
@@ -458,6 +463,7 @@ class AutoTuner:
             tp_size = tp_size // 2
         tp_size = max(tp_size, 1)
         template["actor_rollout_ref"].setdefault("rollout", {})["tensor_model_parallel_size"] = tp_size
+        template["actor_rollout_ref"]["rollout"]["max_token_len"] = self.max_seqlen
 
         local_filepath = filepath
         if filepath.startswith("hdfs://"):

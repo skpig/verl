@@ -16,6 +16,7 @@ Contains a resharding manager that binds weights from FSDP zero3 to XPerfGPT
 """
 
 from .base import BaseShardingManager
+import gc
 
 import numpy as np
 import os
@@ -38,7 +39,7 @@ from torch.distributed._tensor import DTensor
 
 from verl import DataProto
 
-from alpha_seed.workers.xperf_rollout.utils.layout_convert_helper import offload_to_cpu, load_to_cuda
+from alpha_seed.workers.xperf_rollout.utils.layout_convert_helper import offload_to_device, load_to_cuda
 from alpha_seed.workers.xperf_rollout.utils.weight_loader import get_xperf_gpt_weight_bind_fn
 import logging
 
@@ -124,9 +125,10 @@ class ActorXPerfGPTShardingManager(BaseShardingManager):
 
     def release_param_and_cache(self):
         """Release the GPU memory occupied by xperf parameter and cache"""
-        offload_to_cpu(tp_model=self.inference_engine.engine.module)
+        device = "meta" if not self.only_bind_once else "cpu"
+        offload_to_device(tp_model=self.inference_engine.engine.module, device=device)
         torch.cuda.empty_cache()
-        log_gpu_memory_usage('After release_param_and_cache', logger=logger)
+        log_gpu_memory_usage('After release_param_and_cache')
 
     def _get_actor_state_dict(self):
         raise NotImplementedError
@@ -134,9 +136,12 @@ class ActorXPerfGPTShardingManager(BaseShardingManager):
     def __enter__(self):
         # standalone worker does not need to do this
         if self.standalone:
+            offload_to_device(self.inference_engine.engine.module, "cuda")
             return
         # gather full state_dict in CPU
         if (not self.only_bind_once) or (not self._bind_fn_called):
+            # materialize to cuda if tensors are on meta device
+            offload_to_device(self.inference_engine.engine.module, "cuda")
             state_dict = self._get_actor_state_dict()
             # prepare the state_dict into a format for xperf_gpt
             if self.model_config.model_type == 'seed_vl':
@@ -168,7 +173,8 @@ class ActorXPerfGPTShardingManager(BaseShardingManager):
         # only support to release xperf weight and kv cache
         # right after generation when there is no standalone workers
         if (not self.standalone) and (not self.has_standalone_workers):
-            offload_to_cpu(tp_model=self.inference_engine.engine.module)
+            device = "meta" if not self.only_bind_once else "cpu"
+            offload_to_device(tp_model=self.inference_engine.engine.module, device=device)
 
     def preprocess_data(self, data: DataProto) -> DataProto:
         """
@@ -257,12 +263,7 @@ class ActorXPerfGPTShardingManager(BaseShardingManager):
                 if to_rank < world_size:
                     _update_xperf_model(nccl_layer.send, to_rank)
 
-        if not self.standalone:
-            # offload to CPU
-            offload_to_cpu(tp_model=self.inference_engine.engine.module)
-            # set to train, (zhangchi.usc1992) may not be necessary because it will be set before training
-            # self.module.train()
-        else:
+        if self.standalone:
             # restore random states
             if self.device_mesh is not None:
                 torch.cuda.set_rng_state(self.gen_random_states)
