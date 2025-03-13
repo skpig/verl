@@ -25,6 +25,7 @@ import copy
 import json
 import queue
 from multiprocessing import Process
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Type, Tuple, Union, List
@@ -45,6 +46,7 @@ from alpha_seed.workers.actors.checkpoint import CkptGlobalUploader
 from alpha_seed.workers.actors.rollout_pool import RolloutPool
 from alpha_seed.utils.observility.pretty_print import pprint
 from alpha_seed.utils import ndtimeline
+from alpha_seed.utils.tracking_utils import async_process_batch_samples_to_wandb
 from alpha_seed.utils.dataset.rl_dataset import RLHFDataset
 from alpha_seed.utils.multithreads import ThreadPoolManager
 from alpha_seed.utils.ckpt import find_latest_ckpt_path_
@@ -567,6 +569,11 @@ class RayPPOTrainer(object):
         self.sample_acc_dir = config.trainer.default_hdfs_dir + "/sample_acc"
         self.is_vlm = config.data['image_key'] is not None
         self.save_batch_dir = ""
+
+        # tracking logging rl samples takes quite a long time, put it in a background processes
+        self.async_tracking_pool = ProcessPoolExecutor(max_workers=8)
+        # use this to track how many running tasks in the background processes
+        self.async_tracking_running_tasks = set()
         if config.trainer.default_hdfs_dir and config.trainer.save_cases_to_hdfs:
             self.save_batch_dir = os.path.join(config.trainer.default_hdfs_dir, "batch_data")
 
@@ -1849,17 +1856,24 @@ class RayPPOTrainer(object):
 
                             # save batch to hdfs
                             if self.save_batch_dir:
+                                # show diagnose info for background tracking
+                                finished = set()
+                                for t in self.async_tracking_running_tasks:
+                                    if t.done():
+                                        t.result()  # call this to collect the result(including error traceback)
+                                        finished.add(t)
+                                for t in finished:
+                                    self.async_tracking_running_tasks.remove(t)
+                                print(f"remaining async tracking tasks {len(self.async_tracking_running_tasks)}")
+
                                 batch_fname = f"global_step_{self.global_step}_batch.pickle"
                                 batch.save_to_disk(batch_fname)
 
-                                def async_hput(fname, dir_name):
-                                    print(f"async hcopy {fname} to {self.save_batch_dir}")
-                                    hcopy(fname, dir_name)
-                                    print(f"removing {fname}")
-                                    os.remove(fname)
-
-                                p = Process(target=async_hput, args=(batch_fname, self.save_batch_dir))
-                                p.start()
+                                async_tracking_args = (batch_fname, self.save_batch_dir, self.tokenizer,
+                                                       self.global_step)
+                                task = self.async_tracking_pool.submit(async_process_batch_samples_to_wandb,
+                                                                       *async_tracking_args)
+                                self.async_tracking_running_tasks.add(task)
 
                             advantages = batch.batch['advantages']
                             response_length = batch.batch['responses'].shape[-1]
@@ -1898,6 +1912,11 @@ class RayPPOTrainer(object):
 
                     # wait for the last ckpt to finish uploading if there are any
                     ray.get(self.ckpt_global_uploader.final_wait_all_steps.remote())
+
+                    # wait for async tracking
+                    for t in self.async_tracking_running_tasks:
+                        t.result()  # call this to collect the result(including error traceback)
+                    wandb.finish()
                     return
 
     def do_ndtimeline_action(self, *args, **kwargs):

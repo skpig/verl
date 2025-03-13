@@ -39,6 +39,7 @@ jobs:
           - git clone -b 20250103 git@code.byted.org:seed/seed_models.git
           - cd seed_models
           - pip3 install -e . --user
+          - pip3 install --upgrade byted-wandb
           - cd /opt/tiger
           - git clone git@code.byted.org:data/verl
           - cd verl

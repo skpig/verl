@@ -1,34 +1,56 @@
+import multiprocessing
+import os
+import time
 import wandb
 from concurrent.futures import ProcessPoolExecutor
+from transformers import AutoTokenizer
+from verl.protocol import DataProto
+from hdfs_io import hcopy
+
+child_tokenizer = None
 
 
-def clean_up_special_token(ids):
+def decode_worker_init(tokenizer_name_or_path, padding_side):
+    # to avoid serializing/deserializing the tokenizer object from the main process
+    # child process initializes it's own tokenizer
+    global child_tokenizer
+    child_tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path, padding_side=padding_side)
+
+
+def clean_up_special_token(tokenizer, ids):
     tokens = tokenizer.convert_ids_to_tokens(ids)
     # fixing the issue here: https://github.com/QwenLM/Qwen2.5/issues/834
     tokens = [t.translate(BYTE_TRANSLATE_MAP) if t else t for t in tokens]
     return tokens
 
 
+def decode_response(prompt, response):
+    decoded_prompt = child_tokenizer.decode(prompt, skip_special_tokens=True)
+    decoded_response = child_tokenizer.decode(response, skip_special_tokens=True)
+    decoded_response_clean = clean_up_special_token(child_tokenizer, response)
+    return decoded_prompt, decoded_response, decoded_response_clean
+
+
 def log_samples_to_wandb(batch, tokenizer, global_step):
     responses = batch.batch["responses"]
     batch_size, response_length = responses.shape
-    print(responses.shape)
+    print(time.ctime(), "sample shape", responses.shape)
 
     select_keys = [
         "rollout_log_probs", "old_log_probs", "old_entropy", "raw_scores", "returns", "values", "origin_advantages",
         "token_level_rewards", "token_level_scores", "upgo_advantages"
     ]
-    real_response_lens = batch.batch['attention_mask'][:, -response_length:].sum(-1).tolist()
-    raw_scores = batch.batch["raw_scores"].sum(-1).tolist()
+    real_response_lens = batch.batch['attention_mask'][:, -response_length:].numpy().sum(-1).tolist()
+    raw_scores = batch.batch["raw_scores"].numpy().sum(-1).tolist()
+    print(time.ctime(), "sample tolist done")
+    samples = [None for i in range(batch_size)]
 
-    samples = []
-    import time
-    s = time.time()
-    with ProcessPoolExecutor(max_workers=32) as executor:
+    max_workers = max(32, multiprocessing.cpu_count() // 2)
+    with ProcessPoolExecutor(max_workers=max_workers,
+                             initializer=decode_worker_init,
+                             initargs=(tokenizer.name_or_path, tokenizer.padding_side)) as executor:
         for i in range(batch_size):
-            prompt = tokenizer.decode(batch.batch["prompts"][i], skip_special_tokens=True)
-            response = tokenizer.decode(responses[i], skip_special_tokens=True)
-            future = executor.submit(clean_up_special_token, responses[i])
+            future = executor.submit(decode_response, batch.batch["prompts"][i], responses[i])
 
             per_token_info = {}
             for k in select_keys:
@@ -41,18 +63,17 @@ def log_samples_to_wandb(batch, tokenizer, global_step):
                 "raw_score": raw_scores[i],
                 "response_length": real_response_lens[i],
             }
-            samples.append([prompt, response, future, per_token_info, sample_info])
+            samples[i] = [future, per_token_info, sample_info]
 
-    print(time.time() - s, 1)
-    rl_samples = []
-    for item in samples:
-        item[2] = item[2].result()
-        sample = wandb.RlSample(*item)
-        rl_samples.append(sample)
-    print(time.time() - s, 2)
+    rl_samples = [None for i in range(batch_size)]
+    for i, item in enumerate(samples):
+        decoded_prompt, decoded_response, decoded_response_clean = item[0].result()
+        sample = wandb.RlSample(decoded_prompt, decoded_response, decoded_response_clean, *item[1:])
+        rl_samples[i] = sample
 
+    print(time.ctime(), "sample to RlSample done")
     wandb.log({"train_samples": rl_samples}, step=global_step)
-    return rl_samples
+    print(time.ctime(), "sample wandb.log done")
 
 
 def make_bytes_char():
@@ -83,10 +104,15 @@ def make_bytes_char():
     return byte_translate_map
 
 
-def transform(mapped_str, char_map):
-    for encoded_char, decoded_char in char_map.items():
-        mapped_str = mapped_str.replace(encoded_char, decoded_char)
-    return mapped_str
+def async_process_batch_samples_to_wandb(fname, hdfs_dir_name, tokenizer, step):
+    print(f"[{time.ctime()}]async hcopy {fname} to {hdfs_dir_name}")
+    hcopy(fname, hdfs_dir_name)
+    # load from dist to prevent IPC
+    print(f"[{time.ctime()}]logging samples from {fname} to wandb")
+    wandb_batch = DataProto.load_from_disk(fname)
+    log_samples_to_wandb(wandb_batch, tokenizer, step)
+    print(f"[{time.ctime()}]removing {fname}")
+    os.remove(fname)
 
 
 BYTE_TRANSLATE_MAP = make_bytes_char()
@@ -104,14 +130,4 @@ if __name__ == "__main__":
     import time
     s = time.time()
     log_samples_to_wandb(batch, tokenizer, step)
-    print(time.time() - s)
-
-    step += 1
-    s = time.time()
-    log_samples_to_wandb(batch.repeat(2), tokenizer, step)
-    print(time.time() - s)
-
-    s = time.time()
-    step += 1
-    log_samples_to_wandb(batch.repeat(4), tokenizer, step)
     print(time.time() - s)
