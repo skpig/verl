@@ -72,7 +72,7 @@ actor_rollout_ref:
     response_length: ${data.max_response_length}
     # for vllm rollout
     dtype: bfloat16 # should align with FSDP
-    gpu_memory_utilization: 0.5
+    gpu_memory_utilization: 0.9
     ignore_eos: False
     enforce_eager: True
     free_cache_engine: True
@@ -90,7 +90,7 @@ actor_rollout_ref:
     # for hf rollout
     do_sample: True
     # number of responses (i.e. num sample times)
-    n: 1 # > 1 for grpo
+    n: 2 # > 1 for grpo
     val_kwargs:
       # sampling parameters for validation
       top_k: -1 # 0 for hf rollout, -1 for vllm rollout

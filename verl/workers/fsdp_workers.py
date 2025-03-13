@@ -342,6 +342,7 @@ class ActorRolloutRefWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
+        # breakpoint()
         from verl.workers.actor import DataParallelPPOActor
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get('external_lib', None))
@@ -415,6 +416,7 @@ class ActorRolloutRefWorker(Worker):
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def update_actor(self, data: DataProto):
+        # breakpoint()
         # Support all hardwares
         data = data.to(torch.cuda.current_device())
 
@@ -460,6 +462,7 @@ class ActorRolloutRefWorker(Worker):
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def generate_sequences(self, prompts: DataProto):
+        # breakpoint()
         # Support all hardwares
         prompts = prompts.to(torch.cuda.current_device())
 
@@ -812,6 +815,7 @@ class CriticWorker(Worker):
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def update_critic(self, data: DataProto):
+        # breakpoint()
         # Support all hardwares
         data = data.to(torch.cuda.current_device())
         if self._is_offload_param:
