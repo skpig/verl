@@ -75,14 +75,14 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None, meth
         if do_print:
             msgs.append("No equation found")
             print("\n".join(msgs), flush=True)
-        return 0
+        return 0, "No equation found (%)"
     
     # Validate equation uses correct numbers
     if not validate_equation(equation, numbers):
         if do_print:
             msgs.append("Invalid equation")
             print("\n".join(msgs), flush=True)
-        return format_score
+        return format_score, "Invalid equation (%)"
         
     # Evaluate equation
     try:
@@ -91,20 +91,20 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None, meth
             if do_print:
                 msgs.append("Could not evaluate equation")
                 print("\n".join(msgs), flush=True)
-            return format_score
+            return format_score, "Invalid equation (%)"
             
         if abs(result - target) < 1e-5:  # Account for floating point precision
             if do_print:
                 msgs.append(f"Correct equation: {equation} = {result}")
                 print("\n".join(msgs), flush=True)
-            return score
+            return score, "Correct answer (%)"
         else:
             if do_print:
                 msgs.append(f"Wrong result: equation = {result}, target = {target}")
                 print("\n".join(msgs), flush=True)
-            return format_score
+            return format_score, "Wrong equation (%)"
     except:
         if do_print:
             msgs.append("Error evaluating equation")
             print("\n".join(msgs), flush=True)
-        return format_score 
+        return format_score, "Invalid equation (%)"

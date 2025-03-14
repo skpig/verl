@@ -22,13 +22,15 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from pprint import pprint
-from typing import Type, Dict
+from typing import Counter, Type, Dict
 from copy import deepcopy
+from collections import Counter, defaultdict
 
 import ray
 import numpy as np
 from codetiming import Timer
 from omegaconf import OmegaConf, open_dict
+from traitlets import default
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.base import Worker
@@ -575,6 +577,7 @@ class RayPPOTrainer(object):
                                        image_key=self.config.data.get('image_key', 'images'),
                                        max_prompt_length=self.config.data.max_prompt_length,
                                        filter_prompts=True,
+                                       template_type=self.config.data.template_type,
                                        return_raw_chat=self.config.data.get('return_raw_chat', False),
                                        truncation='error')
         self.val_dataloader = StatefulDataLoader(
@@ -641,6 +644,9 @@ class RayPPOTrainer(object):
         sample_outputs = []
         sample_scores = []
 
+
+        reward_meta = Counter()
+
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
 
@@ -688,7 +694,8 @@ class RayPPOTrainer(object):
             test_batch = test_batch.union(test_output_gen_batch)
 
             # evaluate using reward_function
-            reward_tensor = self.val_reward_fn(test_batch)
+            reward_tensor, reward_type_counter = self.val_reward_fn(test_batch)
+            reward_meta.update(reward_type_counter)
 
             # Store scores
             scores = reward_tensor.sum(-1).cpu().tolist()
@@ -713,6 +720,8 @@ class RayPPOTrainer(object):
         metric_dict = {}
         for data_source, rewards in data_source_reward.items():
             metric_dict[f'val/test_score/{data_source}'] = np.mean(rewards)
+        
+        metric_dict.update({f'val/test_score/reward_type/{key}': value / len(reward_tensor) for key, value in reward_meta.items()})
 
         return metric_dict
 
@@ -1004,8 +1013,9 @@ class RayPPOTrainer(object):
 
                         # we combine with rule-based rm
                         # breakpoint()
-                        reward_tensor = self.reward_fn(batch)
+                        reward_tensor, reward_type_counter = self.reward_fn(batch)
                         batch.batch['token_level_scores'] = reward_tensor
+                        metrics.update({f'reward_type/{key}': val / len(batch) for key, val in reward_type_counter.items()})
 
                         # compute rewards. apply_kl_penalty if available
                         if not self.config.actor_rollout_ref.actor.get('use_kl_loss', False):

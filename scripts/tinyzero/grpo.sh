@@ -5,11 +5,10 @@ REWARD_FILE=/home/huangbz/verl/verl/utils/reward_score/countdown.py
 REWARD_NAME=compute_score
 
 # Model settings
-ROLLOUT_N=8
+ROLLOUT_N=4
 MAX_PROMPT_LEN=256
 MAX_RESPONSE_LEN=1024
-FORWARD_MAX_TOKEN_LEN=$((6 * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN)))
-BACKWARD_MAX_TOKEN_LEN=$((3 * MAX_PROMPT_LEN + MAX_RESPONSE_LEN))
+BATCH_SIZE=512
 
 # Performance tuning
 N_GPUS=4
@@ -17,11 +16,13 @@ ROLLOUT_TP_SIZE=4
 FORWARD_BSZ=16
 BACKWARD_BSZ=8
 TOTAL_EPOCHS=1
+FORWARD_MAX_TOKEN_LEN=$((12 * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN)))
+BACKWARD_MAX_TOKEN_LEN=$((6 * MAX_PROMPT_LEN + MAX_RESPONSE_LEN))
 
 PROJ_NAME="TinyZero"
 MODEL_NAME=$(basename $BASE_MODEL)
 DATA_NAME=$(basename $DATA_DIR)
-EXPERIMENT_NAME="${DATA_NAME}_grpo_${MODEL_NAME}_n${ROLLOUT_N}_resplen${MAX_RESPONSE_LEN}"
+EXPERIMENT_NAME="${DATA_NAME}_grpo_${MODEL_NAME}_n${ROLLOUT_N}_resplen${MAX_RESPONSE_LEN}_bsz${BATCH_SIZE}"
 
 python3 data_preprocess/countdown.py \
   --local_dir $DATA_DIR \
@@ -29,18 +30,22 @@ python3 data_preprocess/countdown.py \
 
 DATA_DIR="${DATA_DIR}_${TEMPLATE_TYPE}"
 
+export VLLM_ATTENTION_BACKEND=XFORMERS
+
 PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
  custom_reward_function.path=$REWARD_FILE \
  custom_reward_function.name=$REWARD_NAME \
  algorithm.adv_estimator=grpo \
  data.train_files=$DATA_DIR/train.parquet \
  data.val_files=$DATA_DIR/test.parquet \
- data.train_batch_size=256 \
+ data.train_batch_size=512 \
  data.val_batch_size=1312 \
  data.max_prompt_length=$MAX_PROMPT_LEN \
  data.max_response_length=$MAX_RESPONSE_LEN \
  actor_rollout_ref.model.path=$BASE_MODEL \
+ actor_rollout_ref.model.use_remove_padding=True \
  actor_rollout_ref.actor.optim.lr=1e-6 \
+ actor_rollout_ref.actor.use_kl_loss=True \
  actor_rollout_ref.actor.ppo_mini_batch_size=64 \
  actor_rollout_ref.actor.use_dynamic_bsz=True \
  actor_rollout_ref.actor.ppo_max_token_len_per_gpu=$BACKWARD_MAX_TOKEN_LEN \
@@ -51,17 +56,18 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
  actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP_SIZE \
  actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
  actor_rollout_ref.rollout.n=$ROLLOUT_N \
+ actor_rollout_ref.rollout.temperature=1.2 \
+ +actor_rollout_ref.rollout.frequency_penalty=0.5 \
  actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
  actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=$FORWARD_MAX_TOKEN_LEN \
- algorithm.kl_ctrl.kl_coef=0.001 \
  data.template_type=$TEMPLATE_TYPE \
  trainer.logger=['wandb'] \
- +trainer.val_before_train=False \
+ +trainer.val_before_train=True \
  trainer.default_hdfs_dir=null \
  trainer.n_gpus_per_node=$N_GPUS \
  trainer.nnodes=1 \
- trainer.save_freq=4 \
- trainer.test_freq=4 \
+ trainer.save_freq=10 \
+ trainer.test_freq=10 \
  trainer.project_name=$PROJ_NAME \
  trainer.experiment_name=$EXPERIMENT_NAME \
  trainer.total_epochs=$TOTAL_EPOCHS

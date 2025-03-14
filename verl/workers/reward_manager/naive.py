@@ -15,6 +15,7 @@
 from verl import DataProto
 from verl.utils.reward_score import _default_compute_score
 import torch
+from collections import Counter
 
 
 class NaiveRewardManager:
@@ -72,6 +73,7 @@ class NaiveRewardManager:
         reward_tensor = torch.zeros_like(data.batch['responses'], dtype=torch.float32)
 
         already_print_data_sources = {}
+        reward_type_counter = Counter()
 
         for i in range(len(data)):
             data_item = data[i]  # DataProtoItem
@@ -97,13 +99,14 @@ class NaiveRewardManager:
 
             extra_info = data_item.non_tensor_batch.get('extra_info', None)
 
-            score = self.compute_score(
+            score, type = self.compute_score(
                 data_source=data_source,
                 solution_str=response_str,
                 ground_truth=ground_truth,
                 extra_info=extra_info,
             )
             reward_tensor[i, valid_response_length - 1] = score
+            reward_type_counter[type] += 1
 
             if data_source not in already_print_data_sources:
                 already_print_data_sources[data_source] = 0
@@ -114,5 +117,5 @@ class NaiveRewardManager:
                 print("[response]", response_str)
                 print("[ground_truth]", ground_truth)
                 print("[score]", score)
-
-        return reward_tensor
+        
+        return reward_tensor, reward_type_counter

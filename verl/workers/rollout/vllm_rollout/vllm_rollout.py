@@ -132,7 +132,7 @@ class vLLMRollout(BaseRollout):
             if hasattr(SamplingParams(), str(k)):
                 kwargs[k] = config.get(k)
 
-        print(f"kwargs: {kwargs}")
+        print(f"vllm kwargs: {kwargs}")
         self.sampling_params = SamplingParams(**kwargs)
 
         self.pad_token_id = tokenizer.pad_token_id
@@ -183,7 +183,7 @@ class vLLMRollout(BaseRollout):
                 'top_k': -1,
                 'min_p': 0.0,
                 'temperature': 0,
-                'n': 1  # if greedy, only 1 response
+                'n': 1,  # if greedy, only 1 response
             }
         elif is_validate:
             # TODO: try **
