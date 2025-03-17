@@ -372,7 +372,7 @@ class AsyncActorRolloutRefWorker(Worker):
 
         shard_states = parallel_load_safetensors(local_path) if from_scratch else {}
         if torch.distributed.get_rank() == 0:
-            print(f"init fsdp from_scratch={from_scratch}")
+            print(f"{role} init fsdp from_scratch={from_scratch}, local_path={local_path}")
         # TODO: add transformer policy
         actor_module_fsdp = FSDP(actor_module,
                                  param_init_fn=parallel_init_fsdp_fn(actor_module, shard_states),
@@ -763,6 +763,7 @@ class AsyncActorRolloutRefWorker(Worker):
                                               actor_optimizer=self.actor_optimizer)
 
         if self._is_ref:
+            from_scratch_ref = True if self.config.ref.ema == 1 else from_scratch
             if self.ref_strategy == 'fsdp':
                 self.ref_module_fsdp = self._build_model_optimizer(
                     model_path=self.config.model.path,
@@ -773,7 +774,7 @@ class AsyncActorRolloutRefWorker(Worker):
                     enable_gradient_checkpointing=self.config.model.get('enable_gradient_checkpointing', False),
                     trust_remote_code=self.config.model.get('trust_remote_code', False),
                     role='ref',
-                    from_scratch=from_scratch)[0]
+                    from_scratch=from_scratch_ref)[0]
                 self.ref_module_fsdp.eval()
 
                 OmegaConf.set_struct(self.config.ref, True)

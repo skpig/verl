@@ -835,18 +835,22 @@ class RayPPOTrainer(object):
                                       from_scratch=from_scratch)  # blocking
 
         if self.use_standalone_reference_policy:
+            if self.config.actor_rollout_ref.ref.ema == 1:
+                from_scratch_ref = True
+            else:
+                from_scratch_ref = from_scratch
             self.ref_policy_wg = self.all_wg['ref']
             init_futures.append(
                 self.ref_policy_wg.init_model(
                     remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init,
-                    from_scratch=from_scratch))
+                    from_scratch=from_scratch_ref))
         elif self.use_colocate_reference_policy:
             self.ref_policy_wg = self.all_wg['actor_rollout_ref']
 
         if self.use_rm:
             self.rm_wg = self.all_wg['rm']
             self.rm_wg.init_model(remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init,
-                                  from_scratch=from_scratch)  # blocking
+                                  from_scratch=True)  # blocking
 
         remote_reward_style = []
         if self.config.trainer.use_remote_sandbox:
