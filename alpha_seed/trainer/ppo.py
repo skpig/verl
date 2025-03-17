@@ -44,6 +44,7 @@ from alpha_seed.utils.validator.validation_manager import *
 from alpha_seed.workers.streaming_service.streaming_utils import pad, process_output
 from alpha_seed.workers.actors.checkpoint import CkptGlobalUploader
 from alpha_seed.workers.actors.rollout_pool import RolloutPool
+from alpha_seed.workers.ppo_actor import make_mini_step_dataloader
 from alpha_seed.utils.observility.pretty_print import pprint
 from alpha_seed.utils import ndtimeline
 from alpha_seed.utils.tracking_utils import async_process_batch_samples_to_wandb
@@ -262,6 +263,23 @@ def reduce_metrics(metrics: dict):
     for key, val in metrics.items():
         metrics[key] = np.mean(val)
     return metrics
+
+
+def merge_ministeps_metrics(ministeps_metrics: List[dict]):
+    merged_metrics = {}
+    for idx, metrics in enumerate(ministeps_metrics):
+        for key, val in metrics.items():
+            merged_metrics.setdefault(key, [])
+            if isinstance(val, list):
+                merged_metrics[key].extend(val)
+            elif isinstance(val, (int, float)):
+                merged_metrics[key].append(val)
+            else:
+                assert False, f"ministep{idx}[{key}]: {val} is not list/int/float"
+            merged_metrics[f"ministep{idx}/{key}"] = val
+
+    merged_metrics = reduce_metrics(merged_metrics)
+    return merged_metrics
 
 
 def compute_data_metrics(self, batch: DataProto):
@@ -1760,12 +1778,26 @@ class RayPPOTrainer(object):
 
                         # update actor
                         with Timer(name='update_actor', logger=None) as timer:
-                            actor_output = self.actor_rollout_wg.update_actor(batch)
-                        metrics['timing/update_actor'] = timer.last
+                            if os.environ.get("MINISTEPS_ON_DRIVER", "0") == "1":
+                                dataloader = make_mini_step_dataloader(
+                                    batch, self.config.actor_rollout_ref.actor.ppo_mini_batch_size, True)
+                                ministeps_metrics = []
+                                for batch_idx, mini_batch in enumerate(dataloader):
+                                    if batch_idx == (len(dataloader) - 1):
+                                        mini_batch.meta_info["lr_scheduler_step"] = True
+                                    actor_output_mini = self.actor_rollout_wg.train_actor(mini_batch)
+                                    ministeps_metrics.append(actor_output_mini.meta_info['metrics'])
+
+                                actor_output = actor_output_mini
+                                actor_output_metrics = merge_ministeps_metrics(ministeps_metrics)
+                            else:
+                                actor_output = self.actor_rollout_wg.update_actor(batch)
+                                actor_output_metrics = reduce_metrics(actor_output.meta_info['metrics'])
+
+                        metrics.update(actor_output_metrics)
                         metrics['memory/actor_max_allocated'] = actor_output.meta_info['memory/actor_max_allocated']
                         metrics['memory/actor_max_reserved'] = actor_output.meta_info['memory/actor_max_reserved']
-                        actor_output_metrics = reduce_metrics(actor_output.meta_info['metrics'])
-                        metrics.update(actor_output_metrics)
+                        metrics['timing/update_actor'] = timer.last
 
                     # phasic critic update
                     if phasic_critic_update:

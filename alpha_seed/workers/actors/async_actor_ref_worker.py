@@ -893,6 +893,60 @@ class AsyncActorRolloutRefWorker(Worker):
         torch.cuda.empty_cache()
         return output
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def set_actor_loss_fn(self, loss_fn):
+        self.acotr_loss_fn = loss_fn
+        self.actor.set_loss_fn(loss_fn)
+
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def train_actor(self, data: DataProto):
+        torch.cuda.reset_peak_memory_stats()
+        assert self._is_actor
+        log_gpu_memory_usage('Before update policy', logger=logger)
+
+        # note optimizer offload will be managed inside `update_policy`
+        if self.config.actor.train_memory_offload:
+            self.to("cuda", model=True, optimizer=False)
+
+        with self.actor_gather_manager:
+            data = self.actor_gather_manager.preprocess_data(data)
+
+            with Timer(name='train_actor', logger=None) as timer:
+                metrics = self.actor.train_one_step(data=data)
+            delta_time = timer.last
+            global_num_tokens = data.meta_info['global_token_num']
+            estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
+            metrics['mfu/actor'] = estimated_flops * self.config.actor.ppo_epochs / promised_flops / self.world_size
+
+            data = self.actor_gather_manager.postprocess_data(data)
+
+        # lr schuelder step only once every global step
+        if data.meta_info.get('lr_scheduler_step', False):
+            if self.actor_strategy == 'fsdp':
+                self.actor_lr_scheduler.step()
+                lr = self.actor_lr_scheduler.get_last_lr()[0]
+            elif self.actor_strategy == 'megatron':
+                self.actor_lr_scheduler[0].step(1)
+                lr = self.actor_lr_scheduler[0].get_lr()
+            metrics['actor/lr(1e-4)'] = lr * 1e4
+
+        log_gpu_memory_usage('After update policy', logger=logger)
+
+        # TODO: here, we should return all metrics
+        max_memory_allocated, max_memory_reserved = get_memory()
+        output = DataProto(
+            meta_info={
+                'metrics': metrics,
+                'memory/actor_max_allocated': max_memory_allocated,
+                'memory/actor_max_reserved': max_memory_reserved
+            })
+        output = output.to('cpu')
+        if self.config.actor.train_memory_offload:
+            self.to("cpu", model=True, optimizer=True)
+
+        torch.cuda.empty_cache()
+        return output
+
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def old_log_probs(self, prompts: DataProto):
         log_gpu_memory_usage('Before old_log_probs')
