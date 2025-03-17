@@ -18,6 +18,7 @@ The main entry point to run the PPO algorithm
 import logging
 import os
 import warnings
+import psutil
 
 import torch
 import torch.distributed
@@ -277,8 +278,10 @@ class ActorRolloutRefWorker(Worker):
                                           weight_decay=optim_config.get('weight_decay', 1e-2))
 
             total_steps = optim_config.get('total_training_steps', 0)
-            num_warmup_steps_ratio = optim_config.get('lr_warmup_steps_ratio', 0.)
-            num_warmup_steps = int(num_warmup_steps_ratio * total_steps)
+            num_warmup_steps = int(optim_config.get('lr_warmup_steps', -1))
+            if num_warmup_steps < 0:
+                num_warmup_steps_ratio = optim_config.get('lr_warmup_steps_ratio', 0.)
+                num_warmup_steps = int(num_warmup_steps_ratio * total_steps)
 
             print(f'Total steps: {total_steps}, num_warmup_steps: {num_warmup_steps}')
 
@@ -412,8 +415,6 @@ class ActorRolloutRefWorker(Worker):
                 lr_scheduler=self.actor_lr_scheduler,
                 processing_class=self.processor if self.processor is not None else self.tokenizer)
 
-        torch.cuda.empty_cache()
-
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def update_actor(self, data: DataProto):
         # breakpoint()
@@ -426,9 +427,6 @@ class ActorRolloutRefWorker(Worker):
         if self._is_offload_optimizer:
             load_fsdp_optimizer(optimizer=self.actor_optimizer, device_id=torch.cuda.current_device())
 
-        # Support all hardwares
-        data.batch = data.batch.to(torch.cuda.current_device())
-
         log_gpu_memory_usage('Before update policy', logger=logger)
 
         with self.ulysses_sharding_manager:
@@ -439,7 +437,11 @@ class ActorRolloutRefWorker(Worker):
             delta_time = timer.last
             global_num_tokens = data.meta_info['global_token_num']
             estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
-            metrics['mfu/actor'] = estimated_flops * self.config.actor.ppo_epochs / promised_flops / self.world_size
+            metrics[
+                'perf/mfu/actor'] = estimated_flops * self.config.actor.ppo_epochs / promised_flops / self.world_size
+            metrics['perf/max_memory_allocated_gb'] = torch.cuda.max_memory_allocated() / (1024**3)
+            metrics['perf/max_memory_reserved_gb'] = torch.cuda.max_memory_reserved() / (1024**3)
+            metrics['perf/cpu_memory_used_gb'] = psutil.virtual_memory().used / (1024**3)
 
             self.actor_lr_scheduler.step()
             lr = self.actor_lr_scheduler.get_last_lr()[0]
@@ -470,8 +472,6 @@ class ActorRolloutRefWorker(Worker):
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
-        # Support all hardwares
-        prompts.batch = prompts.batch.to(torch.cuda.current_device())
         meta_info = {
             'eos_token_id':
                 self.generation_config.eos_token_id
@@ -501,7 +501,6 @@ class ActorRolloutRefWorker(Worker):
         output = output.to('cpu')
 
         # clear kv cache
-        torch.cuda.empty_cache()
         log_gpu_memory_usage('After recompute log prob', logger=logger)
         return output
 
@@ -564,7 +563,6 @@ class ActorRolloutRefWorker(Worker):
         if self.world_size > 1:
             self.ref_policy.actor_module._handle.reshard(True)
 
-        torch.cuda.empty_cache()
         return output
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
@@ -751,8 +749,10 @@ class CriticWorker(Worker):
                                        weight_decay=config.optim.get('weight_decay', 1e-2))
 
         total_steps = config.optim.get('total_training_steps', 0)
-        num_warmup_steps_ratio = config.optim.get('lr_warmup_steps_ratio', 0.)
-        num_warmup_steps = int(num_warmup_steps_ratio * total_steps)
+        num_warmup_steps = int(config.optim.get('lr_warmup_steps', -1))
+        if num_warmup_steps < 0:
+            num_warmup_steps_ratio = config.optim.get('lr_warmup_steps_ratio', 0.)
+            num_warmup_steps = int(num_warmup_steps_ratio * total_steps)
 
         print(f'Total steps: {total_steps}, num_warmup_steps: {num_warmup_steps}')
 
@@ -786,8 +786,6 @@ class CriticWorker(Worker):
             optimizer=self.critic_optimizer,
             lr_scheduler=self.critic_lr_scheduler,
             processing_class=self.processor if self.processor is not None else self.tokenizer)
-
-        torch.cuda.empty_cache()
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_values(self, data: DataProto):
@@ -833,7 +831,7 @@ class CriticWorker(Worker):
 
             global_num_tokens = data.meta_info['global_token_num']
             estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
-            metrics['mfu/critic'] = estimated_flops * self.config.ppo_epochs / promised_flops / self.world_size
+            metrics['perf/mfu/critic'] = estimated_flops * self.config.ppo_epochs / promised_flops / self.world_size
 
             self.critic_lr_scheduler.step()
             lr = self.critic_lr_scheduler.get_last_lr()[0]
@@ -985,7 +983,6 @@ class RewardModelWorker(Worker):
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get('external_lib', None))
         self.reward_module = self._build_model(config=self.config)
-        torch.cuda.empty_cache()
 
     def _forward_micro_batch(self, micro_batch):
         from flash_attn.bert_padding import pad_input, unpad_input, index_first_axis, rearrange
@@ -1158,5 +1155,4 @@ class RewardModelWorker(Worker):
         self.reward_module._handle.reshard(True)
 
         output = output.to('cpu')
-        torch.cuda.empty_cache()
         return output
