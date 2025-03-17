@@ -173,7 +173,7 @@ class CacheManager:
                 self.cur_bs_this_run += 1
             else:
                 # release all queries afterwards
-                while len(phase1_running) >= cur_idx:
+                while len(phase1_running) > cur_idx:
                     query = phase1_running.pop()
                     waiting.append(query)
                     self.page_swap_out_bs += 1

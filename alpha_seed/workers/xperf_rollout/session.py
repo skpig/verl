@@ -476,10 +476,12 @@ class InferenceSession:
     def _select_running_queries(self):
         return self.cache_manager.update_queries(self.running, self.waiting)
 
-    def _pack_to_tensors(self, running: List[Query]):
+    def _prepare_forward_inputs(self, running: List[Query]):
         max_context_len = -1
         max_kv_index_len = -1
+        phase0_index = []  # index in running
         phase0_list = []
+        phase1_index = []
         phase1_list = []
         phase0_total_length = []
         phase1_total_length = []
@@ -511,6 +513,7 @@ class InferenceSession:
                     context_len = len(query_input_ids)
 
                 max_context_len = max(max_context_len, context_len)
+                phase0_index.append(index)
                 phase0_list.append(query_input_ids)
                 phase0_total_length.append(context_len)
                 phase0_kv_index.append(query.kv_slot_ids) if self.enable_paged_attn else phase0_kv_index.extend(
@@ -518,6 +521,7 @@ class InferenceSession:
                 context_shift.append(current_context_shift)
 
             else:
+                phase1_index.append(index)
                 phase1_list.append(query.new_token_ids[-1])
                 phase1_total_length.append(context_len + len(query.new_token_ids) + query.prefix_already_computed_len)
                 phase1_kv_index.append(query.kv_slot_ids) if self.enable_paged_attn else phase1_kv_index.extend(
@@ -533,21 +537,27 @@ class InferenceSession:
             for k, v in sample_kwargs.items():
                 v.append(getattr(query, k, None))
 
+        results = dict()
+
         # left pad context_input
         if len(phase0_list) > 0:
             for i, query in enumerate(phase0_list):
                 phase0_list[i] = [self.pad_token_id] * (max_context_len - len(query)) + query
-                running[i].cur_batch_pad_token = max_context_len - len(query)
+                running[phase0_index[i]].cur_batch_pad_token = max_context_len - len(query)
             context_input = torch.tensor(phase0_list, dtype=torch.int64).cuda()
+            results['context_input'] = context_input
         else:
-            context_input = None
+            results['context_input'] = None
 
         if len(phase1_list) > 0:
             decode_input = torch.tensor(phase1_list, dtype=torch.int64).unsqueeze(1).cuda()
             for i, code_book in enumerate(code_books_list):
                 code_books_list[i] = code_book + [self.pad_token_id] * (max_code_book_len - len(code_book))
+            results['decode_input'] = decode_input
         else:
-            decode_input = None
+            results['decode_input'] = None
+
+        results['forward_index'] = phase0_index + phase1_index
 
         # right pad the page_table (required by flash2)
         if self.enable_paged_attn:
@@ -587,7 +597,12 @@ class InferenceSession:
                 logging.debug, 0,
                 f"context_input: {context_input}\ndecode_input: {decode_input}\ntotal_length: {total_length.tolist()}\npacked_kv_index: {packed_kv_index.tolist()}\ncontext_shift: {context_shift_tensor}"
             )
-        return context_input, decode_input, total_length, packed_kv_index, context_shift_tensor, history_ids, sample_kwargs
+        results['kv_index'] = packed_kv_index
+        results['total_length'] = total_length
+        results['context_shifts'] = context_shift_tensor
+        results['history_ids'] = history_ids
+        results['sample_kwargs'] = sample_kwargs
+        return results
 
     def _should_terminate(self, prompts, complete_ratio, stop_event):
         # complete ratio break, only works when stop event not set
@@ -649,17 +664,18 @@ class InferenceSession:
             if len(self.running) == 0:
                 assert (len(self.waiting) == 0)
                 break
-            context_input, decode_input, total_length, kv_index, context_shifts, history_ids, sample_kwargs = self._pack_to_tensors(
-                self.running)
+            forward_inputs = self._prepare_forward_inputs(self.running)
+            context_input = forward_inputs['context_input']
+            decode_input = forward_inputs['decode_input']
             next_tokens, _, _, log_probs, probs_gt_threshold_num, probs_lt_threshold_sum = self.infer_scheduler.forward_and_sample(
                 context_input=context_input,
                 decode_input=decode_input,
-                total_length=total_length,
-                kv_index=kv_index,
+                total_length=forward_inputs['total_length'],
+                kv_index=forward_inputs['kv_index'],
                 orca_updated=True,
-                context_shifts=context_shifts,
-                history_ids=history_ids,
-                sample_kwargs=sample_kwargs)
+                context_shifts=forward_inputs['context_shifts'],
+                history_ids=forward_inputs['history_ids'],
+                sample_kwargs=forward_inputs['sample_kwargs'])
 
             if self.engine.module.tp_size > 1 and next_tokens is not None:
                 self.engine.module.layers_impl[0].broadcast(next_tokens)
@@ -667,6 +683,7 @@ class InferenceSession:
             self._update_running_batch(next_tokens=next_tokens,
                                        tokens_len=tokens_len,
                                        accepted_len=accepted_len,
+                                       index_in_running_batch=forward_inputs['forward_index'],
                                        log_probs=log_probs,
                                        probs_gt_threshold_num=probs_gt_threshold_num,
                                        probs_lt_threshold_sum=probs_lt_threshold_sum)
@@ -709,6 +726,7 @@ class InferenceSession:
     def _update_running_batch(self,
                               next_tokens,
                               tokens_len,
+                              index_in_running_batch,
                               accepted_len=None,
                               log_probs=None,
                               probs_gt_threshold_num=None,
@@ -726,7 +744,9 @@ class InferenceSession:
         if probs_lt_threshold_sum is not None:
             assert (probs_lt_threshold_sum.shape[0] == len(self.running))
             probs_lt_threshold_sum = probs_lt_threshold_sum.cpu().tolist()
-        for i, query in enumerate(self.running):
+            running_index_to_i = {idx: i for i, idx in enumerate(index_in_running_batch)}
+        for idx, query in enumerate(self.running):
+            i = running_index_to_i[idx]
             # decoding
             if (query._is_to_decoding_compute()):
                 # Each query might have multile next tokens when spec/ngrams is enabled
