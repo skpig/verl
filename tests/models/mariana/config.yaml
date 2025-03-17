@@ -131,7 +131,6 @@ actor_rollout_ref:
         # transformer_layer_cls_to_wrap: None
         min_num_params: 0
       param_offload: False
-      use_orig_params: ${trainer.ckpt_enable_flatten}
     profile:
       filename: p6_400m_ppo_actor
       profile_on_ranks:
@@ -222,7 +221,6 @@ critic:
       wrap_policy:
         # transformer_layer_cls_to_wrap: None
         min_num_params: 0
-      use_orig_params: ${trainer.ckpt_enable_flatten}
   ulysses_sequence_parallel_size: 1
   fsdp_size: -1
   NO_DEVICE_MESH: False # handle old critic ckpt stored as ShardedTensor
@@ -254,7 +252,6 @@ reward_model:
     fsdp_config:
       min_num_params: 0
       param_offload: True
-      use_orig_params: ${trainer.ckpt_enable_flatten}
   ulysses_sequence_parallel_size: 1
   fsdp_size: -1
   micro_batch_size: 64

@@ -137,10 +137,6 @@ class AsyncActorRolloutRefWorker(Worker):
                 print(
                     f"Created actor with fsdp_size={self.actor_fsdp_mesh.shape}, tp_size={self.actor_tp_mesh.size()}, "
                     f"actor sp_size={self.actor_sp_mesh.size()}")
-            if actor_tp_size > 1:
-                if not config.actor.fsdp_config.use_orig_params:
-                    raise ValueError(
-                        "enable tensor / expert parallelism must set actor.fsdp_config.use_orig_params=True")
         elif self.actor_strategy == 'megatron':
             # implement 3D parallel self.actor_gather_manager. We still assume that data is chunked in data parallel.
             # We first need to perform allgather in model parallel group so that data in each tp/pp/cp group is identical.
@@ -168,10 +164,6 @@ class AsyncActorRolloutRefWorker(Worker):
                     print(
                         f"Created reference with fsdp_size={self.ref_fsdp_mesh.shape}, tp_size={self.ref_tp_mesh.size()}, "
                         f"infer sp_size={self.ref_sp_mesh.size()}")
-                if ref_tp_size > 1:
-                    if not config.ref.fsdp_config.use_orig_params:
-                        raise ValueError(
-                            "enable tensor / expert parallelism must set ref.fsdp_config.use_orig_params=True")
             elif self.ref_strategy == 'megatron':
                 # we assume that ref shares the same device mesh
                 self.ref_gather_manager = self.actor_gather_manager
@@ -376,7 +368,7 @@ class AsyncActorRolloutRefWorker(Worker):
         # TODO: add transformer policy
         actor_module_fsdp = FSDP(actor_module,
                                  param_init_fn=parallel_init_fsdp_fn(actor_module, shard_states),
-                                 use_orig_params=self.config.actor.fsdp_config.use_orig_params,
+                                 use_orig_params=True,
                                  auto_wrap_policy=auto_wrap_policy,
                                  device_id=torch.cuda.current_device(),
                                  sharding_strategy=sharding_strategy,

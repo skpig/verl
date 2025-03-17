@@ -16,7 +16,6 @@ actor_rollout_ref:
     act_offload: True
     fsdp_config:
       param_offload: False
-      use_orig_params: True
     profile:
       enable: False
       upload_to_mlx: True
@@ -30,7 +29,6 @@ actor_rollout_ref:
     ulysses_sequence_parallel_size: 2
     fsdp_config:
       param_offload: True
-      use_orig_params: True
   rollout:
     max_token_len: 24576
 
@@ -39,7 +37,6 @@ critic:
     enable_gradient_checkpointing: True
     fsdp_config:
       param_offload: False
-      use_orig_params: True
   fsdp_size: -1
   tp_size: 4
   ulysses_sequence_parallel_size: 2

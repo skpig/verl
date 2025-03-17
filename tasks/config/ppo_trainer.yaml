@@ -85,7 +85,6 @@ actor_rollout_ref:
         # transformer_layer_cls_to_wrap: None
         min_num_params: 0
       param_offload: False
-      use_orig_params: True
     enable_training_stats: False
     profile:
       filename: p6_400m_ppo_actor
@@ -100,7 +99,6 @@ actor_rollout_ref:
     strategy: fsdp
     fsdp_config:
       param_offload: True
-      use_orig_params: True
       wrap_policy:
         # transformer_layer_cls_to_wrap: None
         min_num_params: 0
@@ -202,7 +200,6 @@ critic:
       wrap_policy:
         # transformer_layer_cls_to_wrap: None
         min_num_params: 0
-      use_orig_params: True
   ulysses_sequence_parallel_size: 1
   fsdp_size: -1
   tp_size: 1
@@ -244,7 +241,6 @@ reward_model:
     fsdp_config:
       min_num_params: 0
       param_offload: True
-      use_orig_params: True
   ulysses_sequence_parallel_size: 1
   fsdp_size: -1
   tp_size: 1

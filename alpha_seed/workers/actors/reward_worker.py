@@ -79,9 +79,6 @@ class RewardModelWorker(Worker):
         self.sp_mesh = meshes[2]
         self.gather_mesh = meshes[3]
         self.gather_manager = DataGatherManager(self.gather_mesh, self.sp_mesh)
-        if tp_size > 1:
-            if not self.config.model.fsdp_config.use_orig_params:
-                raise RuntimeError("enable tensor / expert parallelism requires use_orig_params=True")
 
         self.config.micro_batch_size //= (world_size // sp_size // tp_size)
 
@@ -154,7 +151,7 @@ class RewardModelWorker(Worker):
         reward_module = FSDP(
             reward_module,
             param_init_fn=parallel_init_fsdp_fn(reward_module, parallel_load_safetensors(local_path)),
-            use_orig_params=self.config.model.fsdp_config.use_orig_params,
+            use_orig_params=True,
             auto_wrap_policy=auto_wrap_policy,
             device_id=torch.cuda.current_device(),
             sharding_strategy=sharding_strategy,  # zero3
