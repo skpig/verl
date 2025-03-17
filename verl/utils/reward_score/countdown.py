@@ -2,19 +2,45 @@ import re
 import random
 import ast
 import operator
+from traceback import format_stack
 
 
 def extract_solution(solution_str):
     """Extract the equation from the solution string."""
     # Remove everything before the first "Assistant:"
     answer_pattern = r'<answer>(.*?)</answer>'
-    match = re.finditer(answer_pattern, solution_str)
+    match = re.finditer(answer_pattern, solution_str, re.DOTALL)
     matches = list(match)
     if matches:
         final_answer = matches[-1].group(1).strip()
     else:
         final_answer = None
     return final_answer
+
+def get_format_score(solution_str, ground_truth):
+    target = ground_truth['target']
+    numbers = ground_truth['numbers']
+    
+    equation = extract_solution(solution_str=solution_str)
+    if equation is None:
+        return 0
+    
+    # Validate equation uses correct numbers
+    if not validate_equation(equation, numbers):
+        return 0
+        
+    # Evaluate equation
+    try:
+        result = evaluate_equation(equation)
+        if result is None:
+            return 0
+            
+        if abs(result - target) < 1e-5:  # Account for floating point precision
+            return 1
+        else:
+            return 0
+    except:
+        return 0
 
 
 def validate_equation(equation_str, available_numbers):
@@ -48,7 +74,7 @@ def evaluate_equation(equation_str):
         return None
 
 
-def compute_score(data_source, solution_str, ground_truth, extra_info=None, method='strict', format_score=0.1, score=1.):
+def compute_score(data_source, solution_str, ground_truth, extra_info=None, method='strict'):
     """The scoring function for countdown task.
     
     Args:
@@ -66,10 +92,12 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None, meth
     msgs = [] if do_print else None
 
     if do_print:
-        msgs.append("--------------------------------")
-        msgs.append(f"Target: {target} | Numbers: {numbers}")
-        msgs.append(f"Extracted equation: {equation}")
-        msgs.append(f"Solution string: {solution_str}")
+        msgs.append("=================================")
+        msgs.append(f"---- Target: {target} | Numbers: {numbers} ----")
+        msgs.append(f"---- Extracted equation: ----\n{equation}")
+        msgs.append(f"---- Solution string: ----\n{solution_str}")
+        msgs.append(f"---- Result: ----")
+    
 
     if equation is None:
         if do_print:
@@ -77,6 +105,10 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None, meth
             print("\n".join(msgs), flush=True)
         return 0, "No equation found (%)"
     
+    format_score = 0.01
+    valid_score = 0.1
+    score = 1.0
+
     # Validate equation uses correct numbers
     if not validate_equation(equation, numbers):
         if do_print:
@@ -102,7 +134,7 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None, meth
             if do_print:
                 msgs.append(f"Wrong result: equation = {result}, target = {target}")
                 print("\n".join(msgs), flush=True)
-            return format_score, "Wrong equation (%)"
+            return valid_score, "Wrong equation (%)"
     except:
         if do_print:
             msgs.append("Error evaluating equation")

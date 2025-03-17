@@ -1,5 +1,5 @@
-BASE_MODEL=/data/pretrain/Qwen/Qwen2.5-3B
-TEMPLATE_TYPE=base # or chat
+BASE_MODEL=/data/pretrain/Qwen/Qwen2.5-3B-Instruct
+TEMPLATE_TYPE=chat # or chat
 DATA_DIR=/data/datasets/countdown
 REWARD_FILE=/home/huangbz/verl/verl/utils/reward_score/countdown.py 
 REWARD_NAME=compute_score

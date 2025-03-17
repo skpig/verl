@@ -58,7 +58,7 @@ def make_prefix(dp, template_type):
         """This works for any base model"""
         return f"""A conversation between User and Assistant. The user asks a question, and the Assistant solves it. The assistant first thinks about the reasoning process in the mind and then provides the user with the answer.
 
-###User: Using the numbers {numbers}, create an equation that equals {target}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final answer in <answer> </answer> tags, for example <answer> (1 + 2) / 3 </answer>.
+###User: Using the numbers {numbers}, create an expression that equals {target}. You can use basic arithmetic operations (+, -, *, /). Each number can only be used once, while each operation could be used for arbitrary times. Show your reasoning process in <think> </think> tags. You may conduct multiple turns of reasoning. And return the final expression in only **ONE** pair of <answer> </answer> tag (e.g. <answer>2*3+1</answer>). In summary, your response should be formatted in "<think> Your thinking process 1 </think>\n<think> Your thinking process 2 </think>\n...\n<answer> Your final expression </answer>".
 
 ###Assistant: Let me solve this step by step.
 <think>"""
@@ -66,7 +66,7 @@ def make_prefix(dp, template_type):
         """This works for Chat Models"""
         return [
             {'role': 'system', 'content': 'You are a helpful assistant. You first thinks about the reasoning process in the mind and then provides the user with the answer.'},
-            {'role': 'user', 'content': f'Using the numbers {numbers}, create an equation that equals {target}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final answer in <answer> </answer> tags, for example <answer> (1 + 2) / 3 </answer>.'},
+            {'role': 'user', 'content': f'Using the numbers {numbers}, create an expression that equals {target}. You can use basic arithmetic operations (+, -, *, /). Each number can only be used once, while each operation could be used for arbitrary times. Show your reasoning process in <think> </think> tags. You may conduct multiple turns of reasoning. And return the final expression in only **ONE** pair of <answer> </answer> tag (e.g. <answer>2*3+1</answer>). In summary, your response should be formatted in "<think> Your thinking process 1 </think>\n<think> Your thinking process 2 </think>\n...\n<answer> Your final expression </answer>".'},
         ]
 
 
