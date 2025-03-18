@@ -799,14 +799,17 @@ class AsyncActorRolloutRefWorker(Worker):
                                                                model=self.actor.actor_module,
                                                                optimizer=self.actor.actor_optimizer,
                                                                lr_scheduler=self.actor_lr_scheduler,
+                                                               hf_config=self.actor_model_config,
                                                                tokenizer=self.tokenizer)
 
         if self._is_ref:
-            self.checkpoint_manager_ref = CheckpointManagerWrapper(strategy=self.ref_strategy,
-                                                                   model=self.ref_policy.actor_module,
-                                                                   optimizer=None,
-                                                                   lr_scheduler=None,
-                                                                   tokenizer=self.tokenizer)
+            self.checkpoint_manager_ref = CheckpointManagerWrapper(
+                strategy=self.ref_strategy,
+                model=self.ref_policy.actor_module,
+                optimizer=None,
+                lr_scheduler=None,
+                hf_config=self.actor_model_config,  # same for actor and ref
+                tokenizer=self.tokenizer)
 
         ndtimeline.init_with_ray(self)
         torch.cuda.empty_cache()

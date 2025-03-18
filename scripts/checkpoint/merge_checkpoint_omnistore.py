@@ -24,12 +24,12 @@ from verl.utils.fs import copy_local_path_from_hdfs
 
 def prepare_hdfs_copy_kwargs():
     """default in SeedModelsEnvs:
-    HDFS_THREAD_NUM = int(os.getenv("HDFS_THREAD_NUM", "32"))
-    HDFS_CHUNK_THREAD_NUM = int(os.environ.get("HDFS_CHUNK_THREAD_NUM", "32"))
+    HDFS_THREAD_NUM = int(os.getenv('HDFS_THREAD_NUM', '32'))
+    HDFS_CHUNK_THREAD_NUM = int(os.environ.get('HDFS_CHUNK_THREAD_NUM', '32'))
     """
     hdfs_kwargs = {
-        "thread_num": SeedModelsEnvs.HDFS_THREAD_NUM,
-        "chunk_thread_num": SeedModelsEnvs.HDFS_CHUNK_THREAD_NUM,
+        'thread_num': SeedModelsEnvs.HDFS_THREAD_NUM,
+        'chunk_thread_num': SeedModelsEnvs.HDFS_CHUNK_THREAD_NUM,
     }
     return hdfs_kwargs
 
@@ -47,12 +47,12 @@ def simple_convert_seed_models_to_megatron(
 ):
     converted_ckpt = model.get_xperf_compatible_state_dict()
 
-    local_output_path = f"{local_path}/megatron_merge_states.pt"
+    local_output_path = f'{local_path}/megatron_merge_states.pt'
     torch.save(converted_ckpt, local_output_path)
     if output_path is not None:
         print(f'Start upload model from {local_output_path} to hdfs path {output_path}')
         if not hdfs_io.hexists(local_output_path):
-            raise ValueError(f"{local_output_path} is not found")
+            raise ValueError(f'{local_output_path} is not found')
 
         upload_thread = threading.Thread(
             target=hdfs_upload,

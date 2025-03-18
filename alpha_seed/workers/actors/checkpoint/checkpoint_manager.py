@@ -4,9 +4,11 @@ from filelock import FileLock
 import tempfile
 
 import ray
+import omegaconf
+import json
 import torch
 import torch.distributed
-from transformers import PreTrainedTokenizer
+from transformers import PretrainedConfig, PreTrainedTokenizer
 import numpy as np
 import random
 from ray.actor import ActorHandle
@@ -28,13 +30,14 @@ class BaseCheckpointManager:
     """
 
     def __init__(self, model, optimizer: torch.optim.Optimizer, lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
-                 tokenizer: PreTrainedTokenizer):
+                 hf_config: PretrainedConfig, tokenizer: PreTrainedTokenizer):
         self.previous_global_step = None
         self.previous_save_local_path = None
 
         self.model = model
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
+        self.hf_config = hf_config
         self.tokenizer = tokenizer
 
         self.rank = torch.distributed.get_rank()
@@ -85,15 +88,11 @@ class BaseCheckpointManager:
         np.random.set_state(rng_state['numpy'])
         random.setstate(rng_state['random'])
 
-    def save_hf_configs(self, local_path: str, hdfs_path: str, role: str, strategy: str, global_step: int,
+    def save_hf_configs(self, local_path: str, hdfs_path: str, role: str, global_step: int,
                         ckpt_global_uploader_ref: ActorHandle):
         hf_local_path = os.path.join(local_path, 'huggingface')
         os.makedirs(hf_local_path, exist_ok=True)
-        if strategy == 'fsdp':
-            self.model._fsdp_wrapped_module.config.save_pretrained(hf_local_path)
-        elif strategy == 'megatron':
-            # TODO need implementation
-            pass
+        self.hf_config.save_pretrained(hf_local_path)
         self.tokenizer.save_pretrained(hf_local_path)
         if hdfs_path is not None:
             ray.get(
@@ -101,3 +100,59 @@ class BaseCheckpointManager:
                                                                      ray.get_runtime_context().get_node_id(),
                                                                      hf_local_path, hdfs_path))
             print(f'[rank-{self.rank}]: register upload ckpt task of path {hf_local_path} to hdfs {hdfs_path} done')
+
+    def save_megatron_configs(self, local_path: str, hdfs_path: str, role: str, global_step: int,
+                              ckpt_global_uploader_ref: ActorHandle):
+        model_config, megatron_config = self.get_megatron_configs_from_model()
+        print(f'model config: {model_config}')
+        print(f'megatron config: {megatron_config}')
+        megatron_configs_local_path = os.path.join(local_path, 'megatron')
+        os.makedirs(megatron_configs_local_path, exist_ok=True)
+        self.save_json(model_config, os.path.join(megatron_configs_local_path, 'model_config.json'))
+        self.save_json(megatron_config, os.path.join(megatron_configs_local_path, 'megatron_config.json'))
+        if hdfs_path is not None:
+            ray.get(
+                ckpt_global_uploader_ref.register_upload_task.remote(role, global_step,
+                                                                     ray.get_runtime_context().get_node_id(),
+                                                                     megatron_configs_local_path, hdfs_path))
+            print(
+                f'[rank-{self.rank}]: register upload ckpt task of path {megatron_configs_local_path} to hdfs {hdfs_path} done'
+            )
+        return
+
+    def get_megatron_configs_from_model(self):
+        get_module = self.model[0]
+        while hasattr(get_module, 'module'):
+            get_module = get_module.module
+        return self.convert_transformers_config(get_module.model_config), self.convert_transformers_config(
+            get_module.megatron_config)
+
+    @staticmethod
+    def convert_transformers_config(config):
+
+        def traverse_and_convert(obj):
+            if isinstance(obj, dict):
+                return {k: traverse_and_convert(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [traverse_and_convert(item) for item in obj]
+            elif isinstance(obj, (omegaconf.DictConfig, omegaconf.ListConfig)):
+                return BaseCheckpointManager.omegaconf_config_to_py_obj(obj)
+            return obj
+
+        config_dict = config.to_dict()
+        converted_dict = traverse_and_convert(config_dict)
+        return converted_dict
+
+    @staticmethod
+    def omegaconf_config_to_py_obj(config):
+        if isinstance(config, omegaconf.DictConfig):
+            return {k: BaseCheckpointManager.omegaconf_config_to_py_obj(v) for k, v in config.items()}
+        elif isinstance(config, omegaconf.ListConfig):
+            return [BaseCheckpointManager.omegaconf_config_to_py_obj(item) for item in config]
+        else:
+            return config
+
+    @staticmethod
+    def save_json(config, local_path):
+        with open(local_path, 'w') as f:
+            json.dump(config, f)

@@ -14,6 +14,7 @@ from mariana.models.text.config import ModelConfig, TrainConfig, MegatronConfig
 from verl.utils.megatron import sequence_parallel as sp_utils
 
 from megatron.core import tensor_parallel
+from megatron.core.dist_checkpointing import make_sharded_tensor_for_checkpoint
 
 
 def convert_gate_to_fp32(gpt):
@@ -115,9 +116,10 @@ class MarianaForTokenClassification(MarianaForCausalLM):
     # TODO(zhangchi.usc1992): add value model. The head should be named as score_head
     def __init__(self, model_config: TrainConfig, megatron_config: MegatronConfig, pre_process=True, post_process=True):
         super().__init__(model_config, megatron_config, pre_process, post_process)
-        self.score_head = nn.Linear(in_features=self.model_config.hidden_size, out_features=1, bias=True)
-        sp_utils.mark_parameter_as_sequence_parallel(self.score_head.weight)
-        sp_utils.mark_parameter_as_sequence_parallel(self.score_head.bias)
+        if self.post_process:
+            self.score_head = nn.Linear(in_features=self.model_config.hidden_size, out_features=1, bias=True)
+            sp_utils.mark_parameter_as_sequence_parallel(self.score_head.weight)
+            sp_utils.mark_parameter_as_sequence_parallel(self.score_head.bias)
 
     def _forward_head(self, hidden_states):
         """hidden_states: [total_nnz_padded // tp, 1, hidden_states]
@@ -128,3 +130,22 @@ class MarianaForTokenClassification(MarianaForCausalLM):
         values = tensor_parallel.gather_from_sequence_parallel_region(
             values, tensor_parallel_output_grad=False)  # [total_nnz_padded, 1]
         return values
+
+    def state_dict_for_save_checkpoint(self,
+                                       prefix='',
+                                       keep_vars=False,
+                                       keep_frozen_weights=True,
+                                       distributed_checkpoint=False):
+        state_dict_ = super().state_dict_for_save_checkpoint(prefix, keep_vars, keep_frozen_weights,
+                                                             distributed_checkpoint)
+        # score_head
+        if self.post_process and self.score_head is not None:
+            if keep_frozen_weights:
+                state_dict_['score_head'] = self.score_head.state_dict(prefix=prefix, keep_vars=keep_vars)
+                if distributed_checkpoint:
+                    state_dict_['score_head']['weight'] = make_sharded_tensor_for_checkpoint(
+                        state_dict_['score_head']['weight'], 'score_head.weight')
+                    if 'bias' in state_dict_['score_head']:
+                        state_dict_['score_head']['bias'] = make_sharded_tensor_for_checkpoint(
+                            state_dict_['score_head']['bias'], 'score_head.bias')
+        return state_dict_

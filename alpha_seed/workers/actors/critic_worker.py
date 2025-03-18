@@ -441,9 +441,11 @@ class CriticWorker(Worker):
         if self.rank == 0:
             print(self.critic_model_config)
 
-        self.checkpoint_manager = CheckpointManagerWrapper(model=self.critic_module,
+        self.checkpoint_manager = CheckpointManagerWrapper(strategy=self.critic_strategy,
+                                                           model=self.critic_module,
                                                            optimizer=self.critic_optimizer,
                                                            lr_scheduler=self.critic_lr_scheduler,
+                                                           hf_config=self.critic_model_config,
                                                            tokenizer=self.tokenizer)
 
         if self.config.train_memory_offload:
@@ -532,9 +534,9 @@ class CriticWorker(Worker):
             self.to("cuda")
         self.checkpoint_manager.load_checkpoint(version=version,
                                                 hdfs_path=hdfs_path,
-                                                device_mesh=self.fsdp_mesh,
+                                                device_mesh=self.fsdp_mesh if self.critic_strategy == 'fsdp' else None,
                                                 role='critic',
-                                                strategy='fsdp',
+                                                strategy=self.critic_strategy,
                                                 enable_shm=enable_shm)
         if self.config.train_memory_offload:
             self.to("cpu")
@@ -547,18 +549,14 @@ class CriticWorker(Worker):
                         global_step=0,
                         ckpt_global_uploader_ref=None,
                         enable_shm=False):
-        if self.critic_strategy == 'megatron':
-            # TODO: implement this
-            return
-
         if self.config.train_memory_offload:
             self.to("cuda")
         self.checkpoint_manager.save_checkpoint(version=version,
                                                 local_path=local_path,
                                                 hdfs_path=hdfs_path,
-                                                device_mesh=self.fsdp_mesh,
+                                                device_mesh=self.fsdp_mesh if self.critic_strategy == 'fsdp' else None,
                                                 role='critic',
-                                                strategy='fsdp',
+                                                strategy=self.critic_strategy,
                                                 global_step=global_step,
                                                 ckpt_global_uploader_ref=ckpt_global_uploader_ref,
                                                 enable_shm=enable_shm)

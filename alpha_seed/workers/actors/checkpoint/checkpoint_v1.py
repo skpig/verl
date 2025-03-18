@@ -10,7 +10,7 @@ from torch.distributed.fsdp import ShardedStateDictConfig, ShardedOptimStateDict
 
 from verl.utils.fs import copy_local_path_from_hdfs
 
-from transformers import PreTrainedTokenizer
+from transformers import PretrainedConfig, PreTrainedTokenizer
 
 from .checkpoint_manager import BaseCheckpointManager
 from ray.actor import ActorHandle
@@ -32,8 +32,9 @@ class CheckpointManagerV1(BaseCheckpointManager):
     """
 
     def __init__(self, model: FSDP, optimizer: torch.optim.Optimizer,
-                 lr_scheduler: torch.optim.lr_scheduler.LRScheduler, tokenizer: PreTrainedTokenizer, *args, **kwargs):
-        super().__init__(model, optimizer, lr_scheduler, tokenizer)
+                 lr_scheduler: torch.optim.lr_scheduler.LRScheduler, hf_config: PretrainedConfig,
+                 tokenizer: PreTrainedTokenizer, *args, **kwargs):
+        super().__init__(model, optimizer, lr_scheduler, hf_config, tokenizer)
 
     def load_checkpoint(self, hdfs_path=None, *args, **kwargs):
         if hdfs_path is None:
@@ -117,7 +118,7 @@ class CheckpointManagerV1(BaseCheckpointManager):
         torch.distributed.barrier()
 
         if self.rank == 0:
-            self.save_hf_configs(local_path, hdfs_path, role, 'fsdp', global_step, ckpt_global_uploader_ref)
+            self.save_hf_configs(local_path, hdfs_path, role, global_step, ckpt_global_uploader_ref)
             if hdfs_path:
                 ckpt_global_uploader_ref.start_uploading.remote(role, global_step)
                 print(f'[rank-{self.rank}]: start uploading ckpt')

@@ -10,7 +10,7 @@ from packaging.version import Version
 import torch
 import torch.distributed
 
-from transformers import PreTrainedTokenizer
+from transformers import PretrainedConfig, PreTrainedTokenizer
 import importlib.metadata
 
 from .checkpoint_manager import BaseCheckpointManager
@@ -65,8 +65,8 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
     """
 
     def __init__(self, model, optimizer: torch.optim.Optimizer, lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
-                 tokenizer: PreTrainedTokenizer):
-        super().__init__(model, optimizer, lr_scheduler, tokenizer)
+                 hf_config: PretrainedConfig, tokenizer: PreTrainedTokenizer):
+        super().__init__(model, optimizer, lr_scheduler, hf_config, tokenizer)
         if self.rank == 0:
             print(f'OmniStore ckpt manager initialized, byted-omnistore version: {ACTUAL_OMNISTORE_VERSION}')
 
@@ -206,7 +206,9 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
         torch.distributed.barrier()
 
         if self.rank == 0:
-            self.save_hf_configs(path, hdfs_path, role, strategy, global_step, ckpt_global_uploader_ref)
+            self.save_hf_configs(path, hdfs_path, role, global_step, ckpt_global_uploader_ref)
+            if strategy == 'megatron':
+                self.save_megatron_configs(path, hdfs_path, role, global_step, ckpt_global_uploader_ref)
             if hdfs_path:
                 ckpt_global_uploader_ref.start_uploading.remote(role, global_step)
                 print(f'[rank-{self.rank}]: start uploading ckpt')
