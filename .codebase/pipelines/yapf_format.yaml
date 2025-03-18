@@ -19,4 +19,28 @@ jobs:
       - name: Python codestyle
         commands:
           - yapf -r -vv -d --style=./.style.yapf ./alpha_seed ./tasks ./scripts ./tests
+      - &forbbiden_manual_event
+        name: Manually triggered event is forbbiden
+        if: ${{ Event.Name == "manual" }}
+        commands:
+          - echo "::add-message level=error::Event.name = ${{ Event.Name }}"
+          - echo "::add-message level=error::Manually triggering this job is forbbiden. Please close MR and reopen it."
+          - exit 1
 
+  check_no_wip:
+    # mariana_pt2 v9
+    image: hub.byted.org/base/lab.pytorch2:2.1.0.post3
+    runs-on:
+      docker:
+        shared-memory: 1024
+    depends: [ yapf_format ]
+    auto-checkout: false
+    steps:
+      - name: check no WIP
+        if: ${{ contains(Event.Change.Title, "WIP") }}
+        commands:
+          - echo "::add-message level=error::title name=${{ Event.Change.Title }}"
+          - echo "::add-message level=error::MR with WIP in title is forbbiden to be merged. Please remove WIP in title and reopen MR."
+          - echo "::add-message level=error::If you have removed WIP from the title, please close and reopen MR to automatically trigger ci pipeline again."
+          - exit 1
+      - *forbbiden_manual_event
