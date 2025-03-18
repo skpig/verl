@@ -373,7 +373,8 @@ def compute_entropy_loss(logits, eos_mask):
     return entropy_loss
 
 
-def compute_value_loss(vpreds, returns, values, eos_mask, cliprange_value, overlong_mask):
+def compute_value_loss(vpreds, returns, values, eos_mask, cliprange_value_low, cliprange_value_high, overlong_mask,
+                       loss_average_method):
     """Compute the value loss. Copied from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py#L1151
 
     Args:
@@ -391,15 +392,24 @@ def compute_value_loss(vpreds, returns, values, eos_mask, cliprange_value, overl
             The ratio of vf being clipped
 
     """
-    vpredclipped = verl_F.clip_by_value(vpreds, values - cliprange_value, values + cliprange_value)
+    vpredclipped = verl_F.clip_by_value(vpreds, values - cliprange_value_low, values + cliprange_value_high)
     vf_losses1 = (vpreds - returns)**2
     vf_losses2 = (vpredclipped - returns)**2
     seq_len_per_sample = torch.clamp(torch.sum(eos_mask, dim=1), min=1.0)
-    if overlong_mask is not None:
-        vf_loss = 0.5 * torch.mean(
-            torch.sum(torch.max(vf_losses1, vf_losses2) * eos_mask, dim=1) / seq_len_per_sample * overlong_mask)
+    if loss_average_method == 'token':
+        if overlong_mask is not None:
+            vf_loss = verl_F.masked_mean(torch.max(vf_losses1, vf_losses2), eos_mask * overlong_mask.unsqueeze(1))
+        else:
+            vf_loss = verl_F.masked_mean(torch.max(vf_losses1, vf_losses2), eos_mask)
+    elif loss_average_method == 'sample':
+        if overlong_mask is not None:
+            vf_loss = 0.5 * torch.mean(
+                torch.sum(torch.max(vf_losses1, vf_losses2) * eos_mask, dim=1) / seq_len_per_sample * overlong_mask)
+        else:
+            vf_loss = 0.5 * torch.mean(
+                torch.sum(torch.max(vf_losses1, vf_losses2) * eos_mask, dim=1) / seq_len_per_sample)
     else:
-        vf_loss = 0.5 * torch.mean(torch.sum(torch.max(vf_losses1, vf_losses2) * eos_mask, dim=1) / seq_len_per_sample)
+        raise NotImplementedError
     vf_clipfrac = verl_F.masked_mean(torch.gt(vf_losses2, vf_losses1).float(), eos_mask)
     vf_loss = vf_loss
     return vf_loss, vf_clipfrac

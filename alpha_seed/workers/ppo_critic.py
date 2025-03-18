@@ -263,12 +263,20 @@ class DataParallelPPOCritic(BasePPOCritic):
 
                     # assert not torch.any(torch.isnan(vpreds)).item()
 
+                    cliprange_value_low = self.config.cliprange_value
+                    cliprange_value_high = self.config.cliprange_value
+                    if self.config.cliprange_value_low:
+                        cliprange_value_low = self.config.cliprange_value_low
+                    if self.config.cliprange_value_high:
+                        cliprange_value_high = self.config.cliprange_value_high
                     vf_loss, vf_clipfrac = self.value_loss(vpreds=vpreds,
                                                            values=values,
                                                            returns=returns,
                                                            eos_mask=eos_mask,
-                                                           cliprange_value=self.config.cliprange_value,
-                                                           overlong_mask=overlong_mask)
+                                                           cliprange_value_low=cliprange_value_low,
+                                                           cliprange_value_high=cliprange_value_high,
+                                                           overlong_mask=overlong_mask,
+                                                           loss_average_method=self.config.loss_average_method)
                     if self.config.use_dynamic_bsz:
                         loss = vf_loss * (len(micro_data) / self.config.ppo_mini_batch_size)
                     else:

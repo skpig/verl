@@ -216,6 +216,9 @@ critic:
   shuffle: ${actor_rollout_ref.actor.shuffle}
   grad_clip: 1.0
   cliprange_value: 0.5
+  cliprange_value_low: null
+  cliprange_value_high: null
+  loss_average_method: "sample"
   act_offload: False
   act_offload_upbound: null
   act_offload_buff_size: 40
