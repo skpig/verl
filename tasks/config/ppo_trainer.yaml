@@ -66,6 +66,7 @@ actor_rollout_ref:
     use_ewma_loss: False
     act_offload: False
     act_offload_upbound: null
+    act_offload_buff_size: 40
     gc_freq: null # null, "micro", "mini"
     train_memory_offload: ${trainer.offload_train_memory}
     optim:
@@ -217,6 +218,7 @@ critic:
   cliprange_value: 0.5
   act_offload: False
   act_offload_upbound: null
+  act_offload_buff_size: 40
   gc_freq: null # null, "micro", "mini"
   train_memory_offload: ${trainer.offload_train_memory}
   profile:

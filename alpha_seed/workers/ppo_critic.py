@@ -37,7 +37,6 @@ from alpha_seed.workers.hybrid_engine.fsdp_gather import ulysses_pad_and_slice_i
 from alpha_seed.models.transformers.ops import clip_grad_norm_
 from alpha_seed import core_algos
 from alpha_seed.workers.actors.offload import offload_fsdp_optimizer, load_fsdp_optimizer
-from alpha_seed.workers.actors.activation_offload import reset_cpu_buffer
 
 from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
 from dist_attn.ulysses.ops import gather_outputs
@@ -88,14 +87,6 @@ class DataParallelPPOCritic(BasePPOCritic):
 
         self.value_loss = torch.compile(core_algos.compute_value_loss, disable=True)
 
-        enable_act_offload = self.config.act_offload if critic_optimizer is not None else False
-        offload_threshold = self.config.get('act_offload_threshold', 1024 * 1024)
-        offload_upbound = self.config.get('act_offload_upbound', None)
-        self.act_offload_ctx = activation_offload.get_offload_context(enable_act_offload,
-                                                                      self.critic_module,
-                                                                      offload_threshold=offload_threshold,
-                                                                      offload_upbound=offload_upbound)
-
     def _forward_micro_batch(self, micro_batch: TensorDict):
         from flash_attn.bert_padding import pad_input, unpad_input, index_first_axis, rearrange
 
@@ -120,10 +111,9 @@ class DataParallelPPOCritic(BasePPOCritic):
                     input_ids_rmpad, position_ids_rmpad, sp_size)
                 seqlen_rmpad = input_ids_rmpad.size(1)
                 # forward
-                with self.act_offload_ctx:
-                    values_rmpad = self.critic_module(input_ids=input_ids_rmpad,
-                                                      position_ids=position_ids_rmpad,
-                                                      use_cache=False).logits  # (1, total_nnz / sp_size, 1)
+                values_rmpad = self.critic_module(input_ids=input_ids_rmpad,
+                                                  position_ids=position_ids_rmpad,
+                                                  use_cache=False).logits  # (1, total_nnz / sp_size, 1)
                 values_rmpad = values_rmpad.squeeze(0).squeeze(-1)  # (total_nnz / sp_size)
                 # handle ulysses sequence parallelism
                 if sp_size > 1:
@@ -296,8 +286,6 @@ class DataParallelPPOCritic(BasePPOCritic):
                     append_to_dict(metrics, micro_data_metric)
                     if self.config.gc_freq == "micro":
                         gc.collect()
-                    if self.config.act_offload:
-                        reset_cpu_buffer()
 
                 grad_norm = self._optimizer_step()
                 if self.config.gc_freq == "mini":

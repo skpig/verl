@@ -12,11 +12,11 @@ Example:
 torchrun --nproc_per_node=$ARNOLD_WORKER_GPU --nnodes=$ARNOLD_WORKER_NUM --node_rank=$ARNOLD_ID \
     --master_addr=$ARNOLD_WORKER_0_HOST --master_port=12321 \
     tasks/auto_tuner.py \
-    --model hdfs://haruna/home/byte_data_seed/ssd_hldy/user/gracexu/exp/qwen2.5_32b_instruct_mariana/qwen2.5_32b_ins_v7.1_refge3_sp_fix-chatml_250217/rl_init/1230a1 \
-    --max-seqlen 22528 \
-    --nnodes 32 --ngpus-per-node 8 --gpu-type H800 \
-    --recipe-out hdfs://haruna/home/byte_data_seed/lf_lq/user/zhiqi.0/rlhf/recipes/H800_256_qwen_32b_22k.yaml \
-    2>&1 | tee log.txt
+    --model hdfs://haruna/home/byte_data_seed/ssd_hl/user/chensiqian/models/alphaseed/m8_sft_0314a_all_code_merged_v1/checkpoints/global_epoch_2/rl_init/M8_2B5_MoE_hf_0317a1 \
+    --max-seqlen 34816 \
+    --nnodes 64 --ngpus-per-node 8 --gpu-type H20 \
+    --recipe-out hdfs://haruna/home/byte_data_seed/lf_lq/user/zhiqi.0/rlhf/recipes/h20_512_15b_34k.yaml \
+    2>&1 | tee h20_512_15b_34k.yaml.txt
 
 cat ./auto.yaml
 ```

@@ -47,7 +47,6 @@ from verl.utils.seqlen_balancing import rearrange_micro_batches, get_reverse_idx
 
 from alpha_seed.workers.actors import activation_offload
 from alpha_seed.workers.actors.offload import offload_fsdp_optimizer, load_fsdp_optimizer
-from alpha_seed.workers.actors.activation_offload import reset_cpu_buffer
 
 from contextlib import nullcontext
 import ray
@@ -106,15 +105,6 @@ class DataParallelPPOActor(BasePPOActor):
 
         self.compute_entropy_loss = torch.compile(core_algos.compute_entropy_loss, dynamic=True)
         self.entropy_from_logits = torch.compile(verl_F.entropy_from_logits, dynamic=True)
-
-        enable_act_offload = self.config.act_offload if actor_optimizer is not None else False
-        offload_threshold = self.config.get('act_offload_threshold', 1024 * 1024)
-        offload_upbound = self.config.get('act_offload_upbound', None)
-        self.act_offload_ctx = activation_offload.get_offload_context(enable_act_offload,
-                                                                      self.actor_module,
-                                                                      offload_threshold=offload_threshold,
-                                                                      offload_upbound=offload_upbound)
-
         self.loss_fn = default_loss_fn
 
     def _forward_micro_batch(self, micro_batch: TensorDict, temperature, compute_entropy):
@@ -157,18 +147,14 @@ class DataParallelPPOActor(BasePPOActor):
                     'temperature': temperature,
                     'fuse_lm_head_ce_loss': True,
                 }
-                with self.act_offload_ctx:
-                    output = self.actor_module(
-                        **kwargs,
-                        use_cache=False,
-                        output_hidden_states=False,
-                    )
+                output = self.actor_module(
+                    **kwargs,
+                    use_cache=False,
+                    output_hidden_states=False,
+                )
                 full_log_probs_rmpad = output.loss * (-1.0)
             else:
-                with self.act_offload_ctx:
-                    output = self.actor_module(input_ids=input_ids_rmpad,
-                                               position_ids=position_ids_rmpad,
-                                               use_cache=False)
+                output = self.actor_module(input_ids=input_ids_rmpad, position_ids=position_ids_rmpad, use_cache=False)
 
                 if self.config.get('logits_clamp', 0) != 0:
                     from alpha_seed.utils.functional import clip_by_value_preserve_gradient
@@ -437,8 +423,6 @@ class DataParallelPPOActor(BasePPOActor):
                     append_to_dict(metrics, micro_data_metric)
                     if self.config.gc_freq == "micro":
                         gc.collect()
-                    if self.config.act_offload:
-                        reset_cpu_buffer()
 
                 if minibatch_early_stop:
                     print(f'early stop at {batch_idx}!!!')

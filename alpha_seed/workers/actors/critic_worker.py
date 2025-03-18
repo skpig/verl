@@ -41,6 +41,7 @@ from .checkpoint.extensions import register_dtensor_save_hook
 from .offload import (offload_fsdp_model_to_cpu, load_fsdp_model_to_gpu, offload_megatron_model_to_cpu,
                       load_megatron_model_to_gpu)
 from alpha_seed.workers.actors.offload import offload_fsdp_optimizer, load_fsdp_optimizer
+from alpha_seed.workers.actors import activation_offload
 from verl.utils.import_utils import import_external_libs
 from verl.utils.debug import log_gpu_memory_usage
 
@@ -246,6 +247,25 @@ class CriticWorker(Worker):
                              cpu_offload=cpu_offload)
 
         register_dtensor_save_hook(critic_module, shard_plan, self.config.tp_outside)
+
+        if self.config.act_offload:
+            context = activation_offload.get_offload_context(True,
+                                                             critic_module,
+                                                             offload_threshold=self.config.get(
+                                                                 'act_offload_threshold', 1024 * 1024),
+                                                             offload_upbound=self.config.act_offload_upbound,
+                                                             buffer_size=self.config.act_offload_buff_size)
+
+            def enter_act_offload(module: torch.nn.Module, input):
+                if torch.is_grad_enabled():
+                    context.__enter__()
+
+            def exit_act_offload(module: torch.nn.Module, input, output):
+                if torch.is_grad_enabled():
+                    context.__exit__()
+
+            critic_module.register_forward_pre_hook(enter_act_offload, prepend=True)
+            critic_module.register_forward_hook(exit_act_offload, prepend=False)
 
         log_gpu_memory_usage('After critic FSDP', logger=logger)
 

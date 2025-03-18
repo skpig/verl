@@ -54,6 +54,7 @@ from alpha_seed.workers.hybrid_engine.fsdp_gather import DataGatherManager
 from alpha_seed.models.transformers.parallel import apply_parallel_plan
 from .initialize import (create_mesh, parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init,
                          cleanup_local_tmp_folder_safetensors_files)
+from alpha_seed.workers.actors import activation_offload
 from .checkpoint.extensions import register_dtensor_save_hook
 from alpha_seed.workers.ppo_actor import DataParallelPPOActor
 from alpha_seed.utils.kernels.persist_gemm import deploy_persist_gemm, undelopy_persist_gemm
@@ -274,8 +275,6 @@ class AsyncActorRolloutRefWorker(Worker):
             if enable_gradient_checkpointing:
                 use_reentrant = self.config.actor.act_offload
                 if self.config.actor.act_offload:
-                    # doc link: https://bytedance.us.larkoffice.com/docx/NiWVd0QgoopepBxBXmDuHJKwsNe
-                    from alpha_seed.workers.actors import activation_offload
                     torch.utils.checkpoint.CheckpointFunction = activation_offload.CheckpointFunction
 
                 actor_module.gradient_checkpointing_enable(
@@ -380,6 +379,25 @@ class AsyncActorRolloutRefWorker(Worker):
 
         tp_outside = self.config.ref.tp_outside if role == "ref" else self.config.actor.tp_outside
         register_dtensor_save_hook(actor_module_fsdp, shard_plan, tp_outside)
+
+        if role == 'actor' and self.config.actor.act_offload:
+            context = activation_offload.get_offload_context(True,
+                                                             actor_module_fsdp,
+                                                             offload_threshold=self.config.actor.get(
+                                                                 'act_offload_threshold', 1024 * 1024),
+                                                             offload_upbound=self.config.actor.act_offload_upbound,
+                                                             buffer_size=self.config.actor.act_offload_buff_size)
+
+            def enter_act_offload(module: torch.nn.Module, input):
+                if torch.is_grad_enabled():
+                    context.__enter__()
+
+            def exit_act_offload(module: torch.nn.Module, input, output):
+                if torch.is_grad_enabled():
+                    context.__exit__()
+
+            actor_module_fsdp.register_forward_pre_hook(enter_act_offload, prepend=True)
+            actor_module_fsdp.register_forward_hook(exit_act_offload, prepend=False)
 
         log_gpu_memory_usage('After Actor FSDP init', logger=logger)
 
