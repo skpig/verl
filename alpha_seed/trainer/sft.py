@@ -22,7 +22,7 @@ from typing import Optional, Tuple
 import torch
 import torch.distributed as dist
 from torch import nn, optim
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, MixedPrecision, ShardingStrategy
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, MixedPrecision, ShardingStrategy, BackwardPrefetch, CPUOffload
 from torch.distributed.fsdp._runtime_utils import _lazy_init
 from torch.utils.data import DataLoader, DistributedSampler
 from codetiming import Timer
@@ -136,6 +136,8 @@ class SFTTrainer(object):
 
         self.train_batch_size = self.config.data.train_batch_size // self.dp_size
         self.micro_batch_size = self.config.data.micro_batch_size // self.dp_size
+        if self.config.model.fsdp_config.cpu_offload:
+            assert self.train_batch_size == 1
 
     def _build_dataloader(self):
         config = self.config
@@ -223,14 +225,16 @@ class SFTTrainer(object):
         shards = parallel_load_safetensors(local_model_path) if self.config.model.omnistore_path is None else {}
         init_fn = parallel_init_fsdp_fn(model, shards)
 
+        enable_prefetch = self.config.model.fsdp_config.enable_prefetch
         self.fsdp_model = FSDP(model,
                                use_orig_params=True,
                                param_init_fn=init_fn,
                                auto_wrap_policy=auto_wrap_policy,
                                sharding_strategy=ShardingStrategy.FULL_SHARD,
                                mixed_precision=mixed_precision,
-                               cpu_offload=None,
-                               forward_prefetch=True,
+                               cpu_offload=CPUOffload(offload_params=self.config.model.fsdp_config.cpu_offload),
+                               forward_prefetch=enable_prefetch,
+                               backward_prefetch=BackwardPrefetch.BACKWARD_PRE if enable_prefetch else None,
                                sync_module_states=False,
                                device_id=torch.cuda.current_device(),
                                device_mesh=self.fsdp_mesh)
@@ -348,14 +352,14 @@ class SFTTrainer(object):
                 loss.backward()
                 total_loss += loss.item()
 
-            if self.config.optim.state_offload:
+            if self.config.optim.state_offload and not self.config.model.fsdp_config.cpu_offload:
                 load_fsdp_optimizer(self.optimizer, torch.cuda.current_device())
 
             grad_norm = clip_grad_norm_(self.fsdp_model, max_norm=self.config.optim.max_grad_norm).item()
             self.optimizer.step()
             self.lr_scheduler.step()
 
-            if self.config.optim.state_offload:
+            if self.config.optim.state_offload and not self.config.model.fsdp_config.cpu_offload:
                 offload_fsdp_optimizer(self.optimizer)
 
         delta_time = timer.last
@@ -395,7 +399,7 @@ class SFTTrainer(object):
                                 experiment_name=self.config.trainer.experiment_name,
                                 default_backend=self.config.trainer.logger)
 
-        global_step = 0
+        global_step = 1
         for epoch in range(self.config.trainer.total_epochs):
             self.train_sampler.set_epoch(epoch=epoch)
             for data in self.train_dataloader:
@@ -404,6 +408,8 @@ class SFTTrainer(object):
                     metric = self.training_step(batch)
 
                 metric.update({"train/elapsed_time_per_step": timer.last})
+                if global_step % self.config.trainer.save_steps == 0:
+                    self.save_checkpoint(step=global_step)
 
                 # validation
                 if global_step % self.config.trainer.eval_interval == 0:

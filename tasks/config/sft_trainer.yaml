@@ -15,6 +15,9 @@ model:
   enable_gradient_checkpointing: False
   act_offload: False
   override_config: {}
+  fsdp_config:
+    cpu_offload: False
+    enable_prefetch: True
   fuse_lm_head_ce_loss: True
   trust_remote_code: True
   sp_size: 1
@@ -39,6 +42,7 @@ trainer:
   experiment_name: test
   total_epochs: 2
   logger: ['console']
+  save_steps: 100
   eval_interval: 5  
   nnodes: 1
   n_gpus_per_node: 8
