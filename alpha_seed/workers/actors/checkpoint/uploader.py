@@ -132,4 +132,13 @@ def upload_ckpt(local_path, remote_path):
         hdfs_io.copy(src=local_path, dst=remote_path)
     except Exception:
         return False
+    if os.path.exists(local_path):
+        if os.path.isfile(local_path):
+            try:
+                os.remove(local_path)
+            except Exception as e:
+                print(f"remove {local_path} failed. error: ", e)
+        else:
+            import shutil
+            shutil.rmtree(local_path, ignore_errors=True)
     return True
