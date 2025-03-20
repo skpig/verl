@@ -111,7 +111,6 @@ class CkptGlobalUploader:
 @ray.remote
 def upload_ckpt_with_retry(local_path, remote_path, upload_retry_count):
     local_path = os.path.abspath(local_path)
-    print(f'Start uploading checkpoint with retry from {local_path} to {remote_path}', flush=True)
 
     result = False
     for current_retry_count in range(upload_retry_count):
@@ -122,8 +121,6 @@ def upload_ckpt_with_retry(local_path, remote_path, upload_retry_count):
             f'Uploading checkpoint from {local_path} to {remote_path} failed, current retry count '
             f'{current_retry_count}, max retry count {upload_retry_count}',
             flush=True)
-    print(f'Finish uploading checkpoint with retry from {local_path} to {remote_path}, final result: {result}',
-          flush=True)
     return result
 
 
