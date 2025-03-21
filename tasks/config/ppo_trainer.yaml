@@ -370,6 +370,7 @@ convert_ckpt_to_omnistore_task:
   enable: False
 
 recipe: null
+recipe_hub: hdfs://haruna/home/byte_data_seed/lf_lq/user/zhiqi.0/alphaseed/recipe_hub
 
 server_client:
   role: null # [server,client]

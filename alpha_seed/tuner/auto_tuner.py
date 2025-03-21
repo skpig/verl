@@ -1,38 +1,38 @@
 """
-Generate runtime parallel configuration for specific models and hardware
+Generate runtime parallel configuration for specific models and hardware.
+
+Note if you run it standalone, you should not involve a pure-cpu head
 
 Example:
 
 ```sh
-# Recommanded recipe format: gpu_ngpus_model_size_seqlen.yaml, e.g.,
+# Recommended recipe format: gpu_ngpus_model_size_seqlen.yaml, e.g.,
 `h800_128_m8_20b_18k.yaml`
 
+python3 -m alpha_seed.tuner.auto_tuner \
+    --model hdfs://haruna/home/byte_data_seed/ssd_hldy/user/gracexu/exp/qwen2.5_32b_instruct_mariana/qwen2.5_32b_ins_v7.1_refge3_sp_fix-chatml_250217/rl_init/1230a1 \
+    --max-seqlen 22528 \
+    --gpu-type H800 \
+    --nnodes 32 \
+    --ngpus-per-node 8 \
+    --export hdfs://haruna/home/byte_data_seed/lf_lq/user/zhiqi.0/rlhf/recipes/h20_256_qwen_32b_18k.yaml \
+    2>&1 | tee log.txt
 
-# Generate using torchrun
-torchrun --nproc_per_node=$ARNOLD_WORKER_GPU --nnodes=$ARNOLD_WORKER_NUM --node_rank=$ARNOLD_ID \
-    --master_addr=$ARNOLD_WORKER_0_HOST --master_port=12321 \
-    tasks/auto_tuner.py \
-    --model hdfs://haruna/home/byte_data_seed/ssd_hl/user/chensiqian/models/alphaseed/m8_sft_0314a_all_code_merged_v1/checkpoints/global_epoch_2/rl_init/M8_2B5_MoE_hf_0317a1 \
-    --max-seqlen 34816 \
-    --nnodes 64 --ngpus-per-node 8 --gpu-type H20 \
-    --recipe-out hdfs://haruna/home/byte_data_seed/lf_lq/user/zhiqi.0/rlhf/recipes/h20_512_15b_34k.yaml \
-    2>&1 | tee h20_512_15b_34k.yaml.txt
-
-cat ./auto.yaml
 ```
 
 * Run with generated recipe
+
 ```sh
 python3 main_ppo.py \
-    recipe=./auto.yaml \
+    recipe=hdfs://xxx.yaml \
     ...
 ```
 """
 
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from dataclasses import dataclass
 from verl.utils.fs import copy_local_path_from_hdfs
-import argparse
+from argparse import Namespace
 import yaml
 import numpy as np
 import copy
@@ -53,7 +53,6 @@ from alpha_seed.models.transformers.parallel import apply_parallel_plan
 from alpha_seed.models.transformers.ops import clip_grad_norm_
 from alpha_seed.workers.actors.offload import offload_fsdp_optimizer, load_fsdp_optimizer
 from verl.utils.fsdp_utils import get_fsdp_wrap_policy
-from tests.hybrid_engine.utils import print_each_rank
 from tests.hybrid_engine.test_parallel import init_random_data
 from alpha_seed.workers.actors import activation_offload
 import hdfs_io
@@ -61,27 +60,15 @@ import verl.utils.torch_functional as verl_F
 import torch.distributed as dist
 import matplotlib.pyplot as plt
 
+import ray
+from single_controller.base.worker import Worker
+from single_controller.base.decorator import register, Dispatch
+from single_controller.ray.base import RayResourcePool, RayClassWithInitArgs, RayWorkerGroup
+
 import logging
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
-
-import os
-
-os.environ['TRITON_CACHE_MANAGER'] = 'triton.runtime.cache:RemoteCacheManager'
-os.environ['TRITON_REMOTE_CACHE_BACKEND'] = 'alpha_seed.utils.redis.triton_redis:BytedRedisRemoteCacheBackend'
-os.environ['BPEX_NO_WARN_ON_UNTUNED_CASE'] = '1'
-
-parser = argparse.ArgumentParser()
-parser.add_argument("--model", type=str, required=True)
-parser.add_argument("--max-seqlen", type=int, default=16384, help="max sequence length of a sample")
-parser.add_argument("--nnodes", type=int)
-parser.add_argument("--ngpus-per-node", type=int)
-parser.add_argument("--gpu-type", type=str, choices=["H20", "H800", "H100", "L20"])
-parser.add_argument("--mem-margin", type=float, default=0.15, help="ratio of reserved memory in GB of total memory")
-parser.add_argument("--recipe-output", type=str, default='./auto.yaml', help="can be local or hdfs path")
-args = parser.parse_args()
-print(args)
 
 GpuMemorySpec = {
     "H100": 80.0,
@@ -94,6 +81,12 @@ HaveNVLink = {
     "H800": True,
     "H20": True,
     "L20": False,
+}
+GpusPerNode = {
+    "H100": 8,
+    "H800": 8,
+    "H20": 8,
+    "L20": 16,
 }
 
 
@@ -121,6 +114,11 @@ class ParallelConfig:
 
 
 @dataclass
+class Constraints:
+    tp_size: Optional[int]
+
+
+@dataclass
 class Env:
     gpu_type: str
     nnodes: int
@@ -142,12 +140,28 @@ class AutoTuner:
         self.env = env
         self.model_path = copy_local_path_from_hdfs(model_path)
         self.config = AutoConfig.from_pretrained(self.model_path)
-        self.total_params = None  # will be set in init_model_and_optimizer
-        self.root_params = None  # will be set in init_model_and_optimizer
         self.max_seqlen: int = max_seqlen
+        self.total_params = None  # will be set in init_model_info
+        self.root_params = None  # will be set in init_model_info
+        self.default_filename = None  # will be set in init_model_info
+        self.init_model_info()
         self.seed = 42
         # runtime config
         self.act_offload_ctx = None  # set in profiling
+
+    def init_model_info(self):
+        # init original model
+        with meta_device_init(), warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model = AutoModelForCausalLM.from_config(config=self.config,
+                                                     torch_dtype=torch.float32,
+                                                     attn_implementation="flash_attention_2")
+            self.total_params = sum(p.numel() for p in model.parameters())
+            self.root_params = sum(p.numel() for p in model.parameters(recurse=False))
+            nparams = self.total_params / (1e9)
+            nparams_str = f"{int(nparams)}B" if nparams > 1 else f"{int(nparams*1000)}M"
+            print0(f"total parameters of the model: {self.total_params / (1024 ** 3):.2f} B")
+            self.default_filename = f"{self.env.gpu_type}.{self.env.ngpus}.{self.config.model_type}.{nparams_str}.seq{self.max_seqlen//1024}k.yaml"
 
     def init_model_and_optimizer(self, parallel_config: ParallelConfig, num_layers: int = 10):
         meshes = create_mesh(parallel_config.fsdp_size, parallel_config.tp_size, parallel_config.sp_size)
@@ -157,16 +171,6 @@ class AutoTuner:
         setattr(self.config, 'embd_pdrop', 0.0)
         setattr(self.config, 'attention_dropout', 0.0)
         setattr(self.config, 'resid_pdrop', 0.0)
-
-        # init original model
-        with meta_device_init(), warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            model = AutoModelForCausalLM.from_config(config=self.config,
-                                                     torch_dtype=torch.float32,
-                                                     attn_implementation="flash_attention_2")
-            self.total_params = sum(p.numel() for p in model.parameters())
-            self.root_params = sum(p.numel() for p in model.parameters(recurse=False))
-            print_each_rank(f"total parameters of the model: {self.total_params / (1024 ** 3):.2f} B")
 
         # init a layer-shrinked model for evaluation
         with meta_device_init(), warnings.catch_warnings():
@@ -216,10 +220,10 @@ class AutoTuner:
         register_dtensor_save_hook(model, shard_plan)
 
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, fused=True)
-        print_each_rank(f"after init model: {torch.cuda.memory_allocated() / (1024**3):.2f} GB | "
-                        f"max allocated: {torch.cuda.max_memory_allocated() / (1024**3):.2f} GB")
+        print0(f"after init model: {torch.cuda.memory_allocated() / (1024**3):.2f} GB | "
+               f"max allocated: {torch.cuda.max_memory_allocated() / (1024**3):.2f} GB")
         torch.cuda.reset_peak_memory_stats()
-        print_each_rank(f"after reset peak memory states: {torch.cuda.max_memory_allocated() / (1024**3):.2f} GB")
+        print0(f"after reset peak memory states: {torch.cuda.max_memory_allocated() / (1024**3):.2f} GB")
         return model, optimizer, meshes
 
     def train_one_step(self, model, optimizer, meshes, max_token, accum_steps: int = -1):
@@ -275,13 +279,14 @@ class AutoTuner:
         self,
         token_stop: int = 256 * 1024,
         token_step_per_gpu: int = 4096,
+        constraints: Constraints = None,
     ):
         """
         Generate estimate memory function
         """
         model: FSDP
         token_stop = max(self.max_seqlen * 2, token_stop)
-        config = self.empirical_config()
+        config = self.empirical_config(constraints)
         model, optimizer, meshes = self.init_model_and_optimizer(config)
         fsdp_mesh, tp_mesh, sp_mesh, gather_mesh = meshes
         fsdp_size = fsdp_mesh.size()
@@ -362,17 +367,22 @@ class AutoTuner:
 
         return estimate_memory
 
-    def empirical_config(self):
+    def empirical_config(self, constraints: Constraints = None):
         have_tp_implementation = self.config.model_type in (
             "seed_m8",
             "deepseek_v3",
             "seed_p6dense",
         )
-        tp_size = 1
-        if have_tp_implementation:
-            tp_size = 2 if self.env.nvlink else 4
+        # determine tp size
+        if (not constraints) or (constraints.tp_size is None):
+            tp_size = 1
+            # we only enable tp for models > 60B
+            if have_tp_implementation and (self.total_params / 1e9) > 60:
+                tp_size = 2 if self.env.nvlink else 4
+        else:
+            tp_size = constraints.tp_size
         ngpus_per_node = min(self.env.ngpus_per_node, dist.get_world_size())
-        assert ngpus_per_node % tp_size == 0
+        assert ngpus_per_node % tp_size == 0, f"{ngpus_per_node=}, {tp_size=}"
         sp_size = ngpus_per_node // tp_size
         return ParallelConfig(
             max_token_len=self.max_seqlen,
@@ -382,10 +392,25 @@ class AutoTuner:
             act_offload=True,
         )
 
-    def search(self, step: int = 512, plot_file: str = None) -> ParallelConfig:
+    def search(
+        self,
+        constraints: Constraints = None,
+        step: int = 512,
+        export_path: str = None,
+        plot_file: str = None,
+    ) -> ParallelConfig:
 
-        memory_fn = self.gen_memory_est_fn()
-        curr_config = self.empirical_config()
+        # check if search file exists
+        if export_path:
+            if export_path.startswith("hdfs://") and hdfs_io.exists(export_path):
+                print(f"{export_path} exists, search stopped.")
+                return export_path
+            elif os.path.exists(export_path):
+                print(f"{export_path} exists, search stopped.")
+                return export_path
+
+        memory_fn = self.gen_memory_est_fn(constraints=constraints)
+        curr_config = self.empirical_config(constraints)
         init_memory = memory_fn(curr_config.max_token_len)
         assert init_memory < self.env.memory, f"No solution found. (Init memory: {init_memory:.2f} GB)"
         tokens = []
@@ -406,7 +431,13 @@ class AutoTuner:
             plt.ylabel('Memory Usage (GB)')
             plt.savefig(plot_file)
             plt.close()
-        return curr_config
+
+        if export_path:
+            if dist.get_rank() == 0:
+                print(f"Find solution: {config}")
+                self.export_recipe(curr_config, export_path)
+        dist.barrier()
+        return export_path
 
     def predict(self, tokens: List[int], memories: List[int], plot_filepath: str = None) -> Tuple[float, float]:
         """
@@ -479,31 +510,119 @@ class AutoTuner:
         return template
 
 
+@ray.remote
+class RayAutoTuner(Worker):
+
+    def __init__(self, model_path: str, max_seqlen: int, env: Env = None, mem_margin: float = 0.15):
+        super().__init__()
+
+        if not dist.is_initialized():
+            dist.init_process_group(backend='nccl')
+            torch.cuda.set_device(int(os.environ.get('LOCAL_RANK', 0)))
+
+        ngpus = dist.get_world_size()
+        if not env:
+            # get from runtime
+            gpu_type = torch.cuda.get_device_name().split()[-1]
+            env = Env(
+                gpu_type,
+                min(ngpus // GpusPerNode.get(gpu_type, 8), 1),
+                min(GpusPerNode.get(gpu_type, 8), ngpus),
+                ngpus,
+                torch.cuda.get_device_properties(0).total_memory / (1024**3) * (1 - mem_margin),
+                HaveNVLink[gpu_type],
+            )
+
+        self.tuner = AutoTuner(model_path=model_path, max_seqlen=max_seqlen, env=env)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def search(self, constraints: Constraints = None, export_path: str = None, export_dir: str = None):
+        if export_path is None:
+            if export_dir:
+                export_path = os.path.join(export_dir, self.tuner.default_filename)
+            else:
+                export_path = self.tuner.default_filename
+        return self.tuner.search(
+            constraints=constraints,
+            export_path=export_path,
+            plot_file="search.png",
+        )
+
+
+@ray.remote
+def auto_tune_task(config, ngpus_per_node: int, nnodes: int, save_dir: str = None):
+
+    # standalone run
+    if isinstance(config, Namespace):
+        env = Env(
+            args.gpu_type,
+            args.nnodes,
+            args.ngpus_per_node,
+            args.nnodes * args.ngpus_per_node,
+            GpuMemorySpec[args.gpu_type] * (1.0 - args.mem_margin),
+            HaveNVLink[args.gpu_type],
+        )
+        constraints = Constraints(tp_size=args.tp_size)
+        model_path = args.model
+        max_seqlen = args.max_seqlen
+        export_path = args.export
+    # alphaseed rl job run
+    else:
+        env = None  # infer by runtime
+        constraints = None
+        model_path = config.actor_rollout_ref.model.path
+        max_seqlen = config.data.max_prompt_length + config.data.max_response_length
+        export_path = None  # will be constructed at runtime
+
+    print(f"creating resource group for tuner: {ngpus_per_node}x{nnodes}")
+    resource_pool = RayResourcePool([ngpus_per_node] * nnodes, use_gpu=True)
+    class_with_args = RayClassWithInitArgs(
+        RayAutoTuner,
+        model_path,
+        max_seqlen,
+        env,
+    )
+    tuner = RayWorkerGroup(resource_pool, class_with_args, name_prefix="autotuner")
+    filepath = tuner.search(constraints, export_path, save_dir)
+    # release resources
+    for pg in resource_pool.get_placement_groups():
+        ray.util.remove_placement_group(pg)
+    return filepath
+
+
 if __name__ == '__main__':
 
-    dist.init_process_group(backend='nccl')
-    torch.cuda.set_device(int(os.environ['LOCAL_RANK']))
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", type=str, required=True)
+    parser.add_argument("--max-seqlen", type=int, default=16384, help="max sequence length of a sample")
+    parser.add_argument("--nnodes", type=int)
+    parser.add_argument("--ngpus-per-node", type=int)
+    parser.add_argument("--gpu-type", type=str, choices=["H20", "H800", "H100", "L20"])
+    parser.add_argument("--mem-margin", type=float, default=0.15, help="ratio of reserved memory in GB of total memory")
+    parser.add_argument("--export", type=str, default='./auto.yaml', help="can be local or hdfs path")
+    parser.add_argument("--tp-size", type=int, default=None, help="constraints of tensor parallelism size")
+    args = parser.parse_args()
+    print(args)
 
-    filepath: str = args.recipe_output
-    if filepath.startswith("hdfs://"):
-        if hdfs_io.exists(filepath):
-            print(f"{filepath} exists, search stopped.")
-            dist.destroy_process_group()
-            exit(0)
+    ngpus = torch.cuda.device_count()
+    if ngpus == 0:
+        raise NotImplementedError("Ray cluster with head is not supported. "
+                                  "Please create trial without ray configuration")
 
-    env = Env(
-        args.gpu_type,
-        args.nnodes,
-        args.ngpus_per_node,
-        args.nnodes * args.ngpus_per_node,
-        GpuMemorySpec[args.gpu_type] * (1.0 - args.mem_margin),
-        HaveNVLink[args.gpu_type],
-    )
-    tuner = AutoTuner(args.model, args.max_seqlen, env)
-
-    config = tuner.search(plot_file="search.png")
-    if dist.get_rank() == 0:
-        print(f"Find solution: {config}")
-        recipe = tuner.export_recipe(config, filepath)
-
-    dist.destroy_process_group()
+    # init ray
+    if not ray.is_initialized():
+        runtime_env = {
+            'env_vars': {
+                # redis server for triton
+                'TRITON_CACHE_MANAGER': 'triton.runtime.cache:RemoteCacheManager',
+                'TRITON_REMOTE_CACHE_BACKEND': 'alpha_seed.utils.redis.triton_redis:BytedRedisRemoteCacheBackend',
+                # variables
+                'NCCL_DEBUG': '0',
+                'BPEX_NO_WARN_ON_UNTUNED_CASE': '1',
+                'TORCH_NCCL_AVOID_RECORD_STREAMS': '1'
+            }
+        }
+        ray.init(runtime_env=runtime_env)
+    # run the task
+    ray.get(auto_tune_task.remote(args, ngpus, 1))
