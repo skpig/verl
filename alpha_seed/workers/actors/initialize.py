@@ -321,7 +321,7 @@ def parallel_init_fsdp_fn(module: torch.nn.Module, shard_states: Dict[str, torch
         else:  # buffer
             param = torch.empty_like(state.data, device=device)
         if param_name not in shard_states:
-            warnings.warn(f"{param_name} not found in shard states, init it from random")
+            warnings.warn(f"state not found in shard states: {param_name}, init it from random")
             assert is_param
             if dist.get_rank() == 0:
                 initializer_range = (2.5 * max(state.shape))**-0.5

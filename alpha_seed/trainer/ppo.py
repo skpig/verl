@@ -15,6 +15,9 @@
 FSDP PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
+from alpha_seed.logging import refine_log
+
+refine_log()
 
 import time
 import uuid

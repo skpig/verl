@@ -361,7 +361,12 @@ class AsyncActorRolloutRefWorker(Worker):
         else:
             raise NotImplementedError(f"role: {role}: get device mesh ndim={fsdp_mesh.ndim}, but only support 1 or 2")
 
-        shard_states = parallel_load_safetensors(local_path) if from_scratch else {}
+        if from_scratch:
+            shard_states = parallel_load_safetensors(local_path)
+        else:
+            shard_states = {}
+            warnings.filterwarnings("ignore", "state not found in", category=UserWarning)
+
         if torch.distributed.get_rank() == 0:
             print(f"{role} init fsdp from_scratch={from_scratch}, local_path={local_path}")
         # TODO: add transformer policy

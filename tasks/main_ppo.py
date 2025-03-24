@@ -15,6 +15,10 @@
 Note that we don't combine the main with ray_trainer as ray_trainer is used by other main.
 """
 
+from alpha_seed.logging import refine_log
+
+refine_log()
+
 import time
 import warnings
 import contextlib
@@ -158,7 +162,7 @@ try:
     from nltk.util import ngrams
 except ImportError:
     ngrams = None
-    print('nltk not installed, please install nltk. Disable diversity metrics.')
+    warnings.warn('nltk not installed, please install nltk. Disable diversity metrics.')
 
 import math
 
@@ -928,6 +932,7 @@ def check_all_workers_alive(workers):
 
 
 def main_task(config):
+
     metric_collection_context = MegavisionMetricsCtx().collect_setup_trainer_duration() \
         if MegavisionMetricsCtx else contextlib.nullcontext()
 
