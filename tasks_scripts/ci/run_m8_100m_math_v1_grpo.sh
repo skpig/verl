@@ -72,7 +72,6 @@ ref_sp_size=1
 reward_sp_size=1
 fsdp_size=8
 xperf_tp_size=2
-offload=True
 offload_train_memory=True
 act_offload=True
 
@@ -113,7 +112,6 @@ python3 tasks/main_ppo.py \
     +actor_rollout_ref.rollout.num_slots=256 \
     +actor_rollout_ref.rollout.slot_block_size=256 \
     actor_rollout_ref.ref.log_prob_micro_batch_size=${infer_micro_batch_size} \
-    actor_rollout_ref.ref.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.act_offload=${act_offload} \
     actor_rollout_ref.actor.scale_pg_by_kl=False \
     actor_rollout_ref.actor.upgo_loss_weight=${upgo_loss_weight} \
@@ -175,11 +173,7 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.ref.fsdp_size=${fsdp_size} \
     critic.fsdp_size=${fsdp_size} \
     reward_model.fsdp_size=${fsdp_size} \
-    actor_rollout_ref.actor.fsdp_config.param_offload=${offload} \
-    actor_rollout_ref.ref.fsdp_config.param_offload=True \
-    critic.model.fsdp_config.param_offload=${offload} \
     critic.act_offload=${act_offload} \
-    reward_model.model.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=${actor_sp_size} \
     actor_rollout_ref.ref.ulysses_sequence_parallel_size=${ref_sp_size} \
     actor_rollout_ref.actor.kl_loss_weight=${kl_loss_weight} \

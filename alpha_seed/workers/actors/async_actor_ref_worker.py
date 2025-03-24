@@ -344,7 +344,7 @@ class AsyncActorRolloutRefWorker(Worker):
                 # NOTE: CPUOffload needs to cooperate with FSDP.no_sync() in gradient accumulation,
                 # which will lead to more memory consumption as gradients keep unshard in between micro-batches.
                 # temporarily disbale this for more investigation
-                cpu_offload = CPUOffload(offload_params=False)
+                raise NotImplementedError("CPUOffload for trainable model is not supported")
         elif role == 'ref':
             if self.config.ref.fsdp_config.param_offload:
                 cpu_offload = CPUOffload(offload_params=True)
@@ -404,7 +404,7 @@ class AsyncActorRolloutRefWorker(Worker):
             actor_module_fsdp.register_forward_pre_hook(enter_act_offload, prepend=True)
             actor_module_fsdp.register_forward_hook(exit_act_offload, prepend=False)
 
-        log_gpu_memory_usage('After Actor FSDP init', logger=logger)
+        log_gpu_memory_usage('After Actor FSDP init')
 
         # TODO: add more optimizer args into config
         if role == 'actor':
@@ -747,9 +747,8 @@ class AsyncActorRolloutRefWorker(Worker):
                     from_scratch=from_scratch)
 
                 # get the original unwrapped module
-                self.actor_module = self.actor_module_fsdp._fsdp_wrapped_module
-                assert self.actor_module.config.num_attention_heads % self.config.actor.ulysses_sequence_parallel_size == 0, \
-                    f'invalid ulysses sequence parallel size: {self.actor_module.config.num_attention_heads=} % {self.config.actor.ulysses_sequence_parallel_size=} != 0'
+                assert self.actor_model_config.num_attention_heads % self.config.actor.ulysses_sequence_parallel_size == 0, \
+                    f'invalid ulysses sequence parallel size: {self.actor_model_config.num_attention_heads=} % {self.config.actor.ulysses_sequence_parallel_size=} != 0'
 
             elif self.actor_strategy == 'megatron':
                 # TODO: build megatron model
@@ -776,6 +775,10 @@ class AsyncActorRolloutRefWorker(Worker):
                 self.actor = MegatronPPOActor(config=self.config.actor,
                                               actor_module=self.actor_module_mariana,
                                               actor_optimizer=self.actor_optimizer)
+
+        if self.config.actor.train_memory_offload:
+            self.to("cpu")
+        log_gpu_memory_usage("After actor initialized")
 
         if self._is_ref:
             from_scratch_ref = True if self.config.ref.ema == 1 else from_scratch

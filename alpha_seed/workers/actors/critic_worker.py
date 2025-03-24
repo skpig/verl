@@ -222,7 +222,7 @@ class CriticWorker(Worker):
             # NOTE: CPUOffload needs to cooperate with FSDP.no_sync() in gradient accumulation,
             # which will lead to more memory consumption as gradients keep unshard in between micro-batches.
             # temporarily disbale this for more investigation
-            cpu_offload = CPUOffload(offload_params=False)
+            raise NotImplementedError("CPUOffload is not supported for trainable model")
 
         # we only support ZeRO3 of hybrid DP+FSDP or full FSDP
         if self.fsdp_mesh is None or self.fsdp_mesh.ndim == 1:
