@@ -77,7 +77,9 @@ class DataLoaderMgr:
     def _create_dataloaders(self):
         from torch.utils.data import DataLoader
 
-        train_batch_size = self.config.data.train_batch_size
+        train_batch_size = self.config.data.train_batch_size if (
+            not self.config.algorithm.priority_sample
+        ) else self.config.data.train_batch_size * self.config.algorithm.get('priority_buffer_size', 4)
         if self.config.trainer.league_training_config.enable:
             train_batch_size *= self.config.trainer.league_training_config.buffer_size
 

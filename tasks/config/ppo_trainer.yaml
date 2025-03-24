@@ -308,6 +308,8 @@ algorithm:
     kl_coef: 0.001
   bon_filter_high_acc_data: False
   group_mode: "normal"
+  priority_sample: False
+  TD_priority_ratio: 0.0
 
 trainer:
   total_epochs: 30

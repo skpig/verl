@@ -137,14 +137,15 @@ class MegatronPPOCritic(BasePPOCritic):
                 cliprange_value_low = self.config.cliprange_value_low
             if self.config.cliprange_value_high:
                 cliprange_value_high = self.config.cliprange_value_high
-            vf_loss, vf_clipfrac = core_algos.compute_value_loss(vpreds=vpreds,
-                                                                 values=values,
-                                                                 returns=returns,
-                                                                 eos_mask=eos_mask,
-                                                                 cliprange_value_low=cliprange_value_low,
-                                                                 cliprange_value_high=cliprange_value_high,
-                                                                 overlong_mask=overlong_mask,
-                                                                 loss_average_method=self.config.loss_average_method)
+            vf_loss, vf_clipfrac, seq_vf = core_algos.compute_value_loss(
+                vpreds=vpreds,
+                values=values,
+                returns=returns,
+                eos_mask=eos_mask,
+                cliprange_value_low=cliprange_value_low,
+                cliprange_value_high=cliprange_value_high,
+                overlong_mask=overlong_mask,
+                loss_average_method=self.config.loss_average_method)
 
             # correctly scale policy_loss
             loss = vf_loss * (len(micro_batch) / self.config.ppo_mini_batch_size)
@@ -320,6 +321,7 @@ class MegatronPPOCritic(BasePPOCritic):
         num_mini_batches = len(dataloader)
 
         # TODO(zhangchi.usc1992): fix metrics. enable dp_overlap
+        seq_level_vf_lst = []
         metrics = {}
         for batch_idx, mini_batch in enumerate(dataloader):
             self._optimizer_zero_grad()
@@ -336,4 +338,4 @@ class MegatronPPOCritic(BasePPOCritic):
             optimizer_metrics = self._optimizer_step(is_last_mini_batch=batch_idx == num_mini_batches - 1)
             append_to_dict(metrics, optimizer_metrics)
 
-        return metrics
+        return None, metrics

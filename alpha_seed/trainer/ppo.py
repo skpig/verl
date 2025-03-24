@@ -52,6 +52,7 @@ from alpha_seed.utils.dataset.rl_dataset import RLHFDataset
 from alpha_seed.utils.multithreads import ThreadPoolManager
 from alpha_seed.utils.ckpt import find_latest_ckpt_path_
 from alpha_seed.trainer.utils.dataloader_mgr import DataLoaderMgr
+from alpha_seed.workers.actors.sample_pool import SamplePool
 
 from single_controller.base import Worker
 from single_controller.ray import RayResourcePool, RayWorkerGroup, RayClassWithInitArgs
@@ -701,6 +702,8 @@ class RayPPOTrainer(object):
         self.rollout_pool_warmup_step = self.config.actor_rollout_ref.rollout.rollout_pool.get("warmup_step", 0)
 
         server_client_split = self.config.server_client.role in ["server", "client"]
+        self.sample_pool = SamplePool(self.config)
+
         # initialize WorkerGroup
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
             # no role allocated to this resource pool
@@ -970,6 +973,30 @@ class RayPPOTrainer(object):
         dataloader_local_path = os.path.join(local_global_step_folder, 'data.pt')
         import dill
         torch.save(self.train_dataloader, dataloader_local_path, pickle_module=dill)
+        # save repaly buffer
+        if self.config.algorithm.get('replay', False):
+            replay_buffer_path = os.path.join(local_global_step_folder, 'replay_buffer.pt')
+            replay_buffer_count_path = os.path.join(local_global_step_folder, 'replay_buffer_count.pt')
+            torch.save(self.replay_buffer, replay_buffer_path)
+            torch.save(self.replay_buffer_count, replay_buffer_count_path)
+            # upload to hdfs
+            ray.get(
+                self.ckpt_global_uploader.register_upload_task.remote("default", self.global_step,
+                                                                      ray.get_runtime_context().get_node_id(),
+                                                                      replay_buffer_path, remote_global_step_folder))
+            ray.get(
+                self.ckpt_global_uploader.register_upload_task.remote("default", self.global_step,
+                                                                      ray.get_runtime_context().get_node_id(),
+                                                                      replay_buffer_count_path,
+                                                                      remote_global_step_folder))
+        if self.config.algorithm.priority_sample:
+            sample_pool_path = os.path.join(local_global_step_folder, 'sample_pool.pickle')
+            with open(sample_pool_path, 'wb') as f:
+                pkl.dump(self.sample_pool, f)
+            ray.get(
+                self.ckpt_global_uploader.register_upload_task.remote("default", self.global_step,
+                                                                      ray.get_runtime_context().get_node_id(),
+                                                                      sample_pool_path, remote_global_step_folder))
         # upload to hdfs
         ray.get(
             self.ckpt_global_uploader.register_upload_task.remote("default", self.global_step,
@@ -1059,6 +1086,25 @@ class RayPPOTrainer(object):
 
         # load dataloader
         self.train_dataloader = self.dataloader_mgr._load_dataloader(remote_global_step_folder)
+
+        # load replay buffer
+        if self.config.algorithm.get('replay', False):
+            replay_buffer_remote_path = os.path.join(remote_global_step_folder, 'replay_buffer.pt')
+            replay_buffer_count_remote_path = os.path.join(remote_global_step_folder, 'replay_buffer_count.pt')
+            replay_buffer_local_path = copy_local_path_from_hdfs(replay_buffer_remote_path)
+            replay_buffer_count_local_path = copy_local_path_from_hdfs(replay_buffer_count_remote_path)
+            self.replay_buffer = torch.load(replay_buffer_local_path)
+            self.replay_buffer_count = torch.load(replay_buffer_count_local_path)
+        if self.config.algorithm.priority_sample:
+            sample_pool_remote_path = os.path.join(remote_global_step_folder, 'sample_pool.pickle')
+            sample_pool_local_path = copy_local_path_from_hdfs(sample_pool_remote_path)
+            with open(sample_pool_local_path, 'rb') as f:
+                self.sample_pool = pkl.load(f)
+
+        try:
+            os.remove(dataloader_local_path)
+        except Exception as e:
+            print(f'remove local dataloader ckpt file after loading failed, exception {e} will be ignored')
 
         # resume data_len info
         data_len_per_query_remote_path = os.path.join(remote_global_step_folder, 'data_len_per_query.pkl')
@@ -1571,6 +1617,13 @@ class RayPPOTrainer(object):
                     if self.config.trainer.load_train_batch_path is None:
                         batch: DataProto = DataProto.from_single_dict(batch_dict)
 
+                        if self.config.algorithm.priority_sample:
+                            self.sample_pool.fill_sample_pool(batch)
+                            self.sample_pool.rearrange_sample_pool()
+                            if self.config.algorithm.TD_priority_ratio > 0:
+                                self.sample_pool.rearrange_TD_sample_pool(
+                                    int(self.config.data.train_batch_size * self.config.algorithm.TD_priority_ratio))
+                            batch = self.sample_pool.get_gen_batch(self.config.data.train_batch_size)
                         self.get_mean_max_len_per_query(batch, metrics)
 
                         batch, standalone_batch, pending_batch = self._generate(batch=batch,
@@ -1630,6 +1683,9 @@ class RayPPOTrainer(object):
                             self.logger.log(data={"score/length_score": wandb.Histogram(length_scores)},
                                             step=self.global_step)
                     metrics['timing/reward_fn'] = timer.last
+
+                    if self.config.algorithm.priority_sample:
+                        self.sample_pool.update_priority_dict(batch)
 
                     if self.config.algorithm.mask_overlong:
                         prompt_length = self.config.data.max_prompt_length
@@ -1763,6 +1819,7 @@ class RayPPOTrainer(object):
                     if self.use_critic:
                         with Timer(name='update_critic', logger=None) as timer:
                             critic_output = self.critic_wg.update_critic(batch)
+                        batch.batch['seq_vf'] = critic_output.batch['seq_vf']
                         metrics['timing/update_critic'] = timer.last
                         metrics['memory/critic_max_allocated'] = critic_output.meta_info['memory/critic_max_allocated']
                         metrics['memory/critic_max_reserved'] = critic_output.meta_info['memory/critic_max_reserved']
@@ -1776,6 +1833,10 @@ class RayPPOTrainer(object):
                             self.phasic_critic_buffer = buffer_batch
                         else:
                             self.phasic_critic_buffer = DataProto.concat([self.phasic_critic_buffer, buffer_batch])
+
+                    # priority use TD-error
+                    if self.config.algorithm.priority_sample and self.config.algorithm.TD_priority_ratio > 0:
+                        self.sample_pool.update_TD_priority_dict(batch)
 
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_step and self.global_step % self.config.trainer.actor_update_freq == 0:

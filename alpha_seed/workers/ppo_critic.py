@@ -233,6 +233,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                 )
 
         global_step = data.meta_info.get('global_step')
+        seq_level_vf_lst = []
         for batch_idx, mini_batch in enumerate(dataloader):
             if self.config.shuffle:
                 mini_batch = mini_batch.batch
@@ -269,14 +270,15 @@ class DataParallelPPOCritic(BasePPOCritic):
                         cliprange_value_low = self.config.cliprange_value_low
                     if self.config.cliprange_value_high:
                         cliprange_value_high = self.config.cliprange_value_high
-                    vf_loss, vf_clipfrac = self.value_loss(vpreds=vpreds,
-                                                           values=values,
-                                                           returns=returns,
-                                                           eos_mask=eos_mask,
-                                                           cliprange_value_low=cliprange_value_low,
-                                                           cliprange_value_high=cliprange_value_high,
-                                                           overlong_mask=overlong_mask,
-                                                           loss_average_method=self.config.loss_average_method)
+                    vf_loss, vf_clipfrac, seq_vf = self.value_loss(vpreds=vpreds,
+                                                                   values=values,
+                                                                   returns=returns,
+                                                                   eos_mask=eos_mask,
+                                                                   cliprange_value_low=cliprange_value_low,
+                                                                   cliprange_value_high=cliprange_value_high,
+                                                                   overlong_mask=overlong_mask,
+                                                                   loss_average_method=self.config.loss_average_method)
+                    seq_level_vf_lst.append(seq_vf)
                     if self.config.use_dynamic_bsz:
                         loss = vf_loss * (len(micro_data) / self.config.ppo_mini_batch_size)
                     else:
@@ -312,6 +314,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                 profile_step(p, global_step)
                 self.memory_profiler.step()
 
+        seq_vf = torch.cat(seq_level_vf_lst)
         self._optimizer_zero_grad()
 
-        return metrics
+        return seq_vf, metrics

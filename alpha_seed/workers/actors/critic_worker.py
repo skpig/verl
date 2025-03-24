@@ -57,6 +57,7 @@ from codetiming import Timer
 from datetime import timedelta
 
 from .checkpoint import CheckpointManagerWrapper
+from tensordict import TensorDict
 
 logger = logging.getLogger(__file__)
 
@@ -513,7 +514,7 @@ class CriticWorker(Worker):
             data = self.gather_manager.preprocess_data(data)
 
             with Timer(name='update_critic', logger=None) as timer:
-                metrics = self.critic.update_critic(data=data)
+                seq_vf, metrics = self.critic.update_critic(data=data)
             delta_time = timer.last
 
             global_num_tokens = data.meta_info['global_token_num']
@@ -530,7 +531,7 @@ class CriticWorker(Worker):
             metrics['critic/lr(1e-4)'] = lr * 1e4
 
             max_memory_allocated, max_memory_reserved = get_memory()
-            output = DataProto(batch=None,
+            output = DataProto(batch=TensorDict(source={'seq_vf': seq_vf}, batch_size=(seq_vf.shape[0],)),
                                meta_info={
                                    'metrics': metrics,
                                    'memory/critic_max_allocated': max_memory_allocated,

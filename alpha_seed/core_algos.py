@@ -412,7 +412,8 @@ def compute_value_loss(vpreds, returns, values, eos_mask, cliprange_value_low, c
         raise NotImplementedError
     vf_clipfrac = verl_F.masked_mean(torch.gt(vf_losses2, vf_losses1).float(), eos_mask)
     vf_loss = vf_loss
-    return vf_loss, vf_clipfrac
+    seq_level_vf_loss = torch.sum(torch.max(vf_losses1, vf_losses2) * eos_mask, dim=1) / seq_len_per_sample
+    return vf_loss, vf_clipfrac, seq_level_vf_loss
 
 
 def compute_kl_loss(log_prob, ref_log_prob, eos_mask, kl_penalty_):
