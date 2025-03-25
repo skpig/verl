@@ -582,9 +582,9 @@ class DataParallelOnlineRFTActor(BasePPOActor):
                     shift_labels = responses[:, 1:].contiguous()
                     loss = nn.functional.cross_entropy(shift_logits.view(-1, shift_logits.size(-1)),
                                                        shift_labels.view(-1),
-                                                       reduction='none').view(shift_labels.size(0), -1) # (bsz, response_len)
-                    nll_loss = (loss * seq_level_reward.unsqueeze(-1)).mean()
-
+                                                       reduction='none').view(shift_labels.size(0), -1) # (bsz, response_len-1)
+                    nll_loss = (loss * seq_level_reward.unsqueeze(-1)) # (bsz, response_len-1)
+                    nll_loss = verl_F.masked_mean(nll_loss, response_mask[:, 1:]) # (bsz, )
                     # compute entropy loss from entropy
                     entropy_loss = verl_F.masked_mean(entropy, response_mask)
 
