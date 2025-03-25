@@ -12,5 +12,5 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .naive import NaiveRewardManager
+from .naive import NaiveRewardManager, SequenceLevelRewardManager
 from .prime import PrimeRewardManager

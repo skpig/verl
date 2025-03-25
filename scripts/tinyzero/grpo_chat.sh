@@ -1,6 +1,6 @@
-BASE_MODEL=/data/pretrain/Qwen/Qwen2.5-3B-Instruct
+BASE_MODEL=${MY_MODEL_DIR}Qwen/Qwen2.5-3B-Instruct
 TEMPLATE_TYPE=chat # or chat
-DATA_DIR=/data/datasets/countdown
+DATA_DIR=${MY_DATA_DIR}countdown
 REWARD_FILE=/home/huangbz/verl/verl/utils/reward_score/countdown.py 
 REWARD_NAME=compute_score
 
@@ -66,7 +66,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
  trainer.default_hdfs_dir=null \
  trainer.n_gpus_per_node=$N_GPUS \
  trainer.nnodes=1 \
- trainer.save_freq=50 \
+ trainer.save_freq=-1 \
  trainer.test_freq=10 \
  trainer.project_name=$PROJ_NAME \
  trainer.experiment_name=$EXPERIMENT_NAME \
