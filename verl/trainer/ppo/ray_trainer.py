@@ -25,6 +25,7 @@ from pprint import pprint
 from typing import Counter, Type, Dict
 from copy import deepcopy
 from collections import Counter, defaultdict
+from tqdm import tqdm
 
 import ray
 import numpy as np
@@ -800,6 +801,9 @@ class RayPPOTrainer(object):
             if self.config.trainer.get('val_only', False):
                 return
 
+        # add tqdm
+        progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
+
         # we start from step 1
         self.global_steps += 1
         last_val_metrics = None
@@ -950,6 +954,8 @@ class RayPPOTrainer(object):
 
                 if is_last_step:
                     pprint(f'Final validation metrics: {last_val_metrics}')
+                    progress_bar.close()
                     return
 
+                progress_bar.update(1)
                 self.global_steps += 1
