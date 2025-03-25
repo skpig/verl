@@ -804,10 +804,6 @@ class AsyncActorRolloutRefWorker(Worker):
                                               actor_module=self.actor_module_mariana,
                                               actor_optimizer=self.actor_optimizer)
 
-        if self.config.actor.train_memory_offload:
-            self.to("cpu")
-        log_gpu_memory_usage("After actor initialized")
-
         if self._is_ref:
             from_scratch_ref = True if self.config.ref.ema == 1 else from_scratch
             if self.ref_strategy == 'fsdp':
@@ -835,6 +831,10 @@ class AsyncActorRolloutRefWorker(Worker):
                 # TODO: make it eval
                 # for each model chunk
                 self.ref_policy = MegatronPPOActor(config=self.config.ref, actor_module=self.ref_module_mariana)
+
+        if self.config.actor.train_memory_offload:
+            self.to("cpu")
+        log_gpu_memory_usage("After actor initialized")
 
         if self._is_rollout or self._is_standalone_rollout or self._is_standalone_validator:
             self.rollout, self.sharding_manager = self._build_rollout()
