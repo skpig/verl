@@ -61,6 +61,8 @@ class ActorXPerfGPTShardingManager(BaseShardingManager):
         self.inference_engine = inference_engine
         self.device_mesh = device_mesh
         self.model_config = model_config
+
+        # here standalone means standalone validator or standalone validator
         self.standalone = standalone
 
         self.bind_fn = get_xperf_gpt_weight_bind_fn(model_config,
@@ -172,7 +174,7 @@ class ActorXPerfGPTShardingManager(BaseShardingManager):
             torch.cuda.set_rng_state(self.torch_random_states)
         # only support to release xperf weight and kv cache
         # right after generation when there is no standalone workers
-        if (not self.standalone) and (not self.has_standalone_workers):
+        if (not self.standalone):
             device = "meta" if not self.only_bind_once else "cpu"
             offload_to_device(tp_model=self.inference_engine.engine.module, device=device)
 
@@ -268,7 +270,7 @@ class ActorXPerfGPTShardingManager(BaseShardingManager):
             if self.device_mesh is not None:
                 torch.cuda.set_rng_state(self.gen_random_states)
 
-        log_gpu_memory_usage(f'After {role} update', logger=logger)
+        log_gpu_memory_usage(f'After {role} update')
 
 
 class FSDPXPerfGPTShardingManager(ActorXPerfGPTShardingManager):

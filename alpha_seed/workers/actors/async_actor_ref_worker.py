@@ -243,6 +243,15 @@ class AsyncActorRolloutRefWorker(Worker):
         if self.rank == 0:
             print(f'Model config after override: {actor_model_config}')
 
+        actor_module_fsdp = None
+        actor_optimizer = None
+        actor_lr_scheduler = None
+        metrics_context = None
+
+        # we only need actor_model_config in rollout
+        if self._is_standalone_rollout or self._is_standalone_validator:
+            return actor_module_fsdp, actor_optimizer, actor_lr_scheduler, actor_model_config, metrics_context
+
         if use_rmpad:
             # optimize the model via rmpad
             from alpha_seed.models.transformers.monkey_patch import apply_monkey_patch
@@ -427,6 +436,11 @@ class AsyncActorRolloutRefWorker(Worker):
             actor_optimizer = None
             actor_lr_scheduler = None
 
+        # get the original unwrapped module
+        self.actor_module = actor_module_fsdp._fsdp_wrapped_module
+        assert self.actor_module.config.num_attention_heads % self.config.actor.ulysses_sequence_parallel_size == 0, \
+            f'invalid ulysses sequence parallel size: {self.actor_module.config.num_attention_heads=} % {self.config.actor.ulysses_sequence_parallel_size=} != 0'
+
         log_gpu_memory_usage('After actor optimizer init', logger=logger)
 
         return actor_module_fsdp, actor_optimizer, actor_lr_scheduler, actor_model_config, metrics_context
@@ -448,13 +462,34 @@ class AsyncActorRolloutRefWorker(Worker):
         # TODO: ignore pulling model file if resuming ckpt
         local_path = copy_local_path_from_hdfs(model_path)
 
+        # TODO(zhangchi.usc1992): this logic is VERY VERY hacky as the upstream mariana
+        # lacks huggingface folder checkpoint format
+        ckpt_meta_info_json_path = os.path.join(local_path, 'meta_info.json')
+
+        if os.path.exists(ckpt_meta_info_json_path):
+            # we read from huggingface
+            with open(ckpt_meta_info_json_path, 'r') as f:
+                ckpt_meta_info = json.load(f)
+            assert 'omnistore_ckpt_path' in ckpt_meta_info
+            ckpt_path = ckpt_meta_info['omnistore_ckpt_path']
+            config_path = local_path
+        else:
+            config_path = local_path
+            # Note(zhangchi.usc1992) make sure the config_path does not end with '/', which is guaranteed by copy_local_path_from_hdfs
+            ckpt_path = os.path.dirname(model_path)
+            # config_path = os.path.join(local_path, 'huggingface')
+            assert os.path.exists(config_path), \
+                'Please make sure the huggingface checkpoint stores the upstream path. If not, please re-convert it using 0306 seed-models'
+
         # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect
         # TODO(zhangchi.usc1992): 1. support create from random initialized model. 2. Support init with FSDP directly
-        self.tokenizer = AutoTokenizer.from_pretrained(local_path)
-        actor_model_config = AutoConfig.from_pretrained(local_path)
+        self.tokenizer = AutoTokenizer.from_pretrained(config_path)
+        actor_model_config = AutoConfig.from_pretrained(config_path)
+
+        if self._is_standalone_rollout or self._is_standalone_validator:
+            return None, None, None, actor_model_config
 
         megatron_config = MegatronConfig(**self.config.mariana.megatron)
-        local_path = copy_local_path_from_hdfs(model_path)
 
         model_config = convert_hf_config_to_mariana(hf_config=actor_model_config,
                                                     model_implementation=self.config.mariana.model_implementation)
@@ -500,16 +535,6 @@ class AsyncActorRolloutRefWorker(Worker):
         # switch to use omnistore
         # the original ckpt is under local_path/meta_info.json
 
-        ckpt_meta_info_json_path = os.path.join(local_path, 'meta_info.json')
-        assert os.path.exists(
-            ckpt_meta_info_json_path
-        ), 'Please make sure the huggingface checkpoint stores the upstream path. If not, please re-convert it using latest seed-models'
-
-        with open(ckpt_meta_info_json_path, 'r') as f:
-            ckpt_meta_info = json.load(f)
-
-        assert 'omnistore_ckpt_path' in ckpt_meta_info
-        ckpt_path = ckpt_meta_info['omnistore_ckpt_path']
         import omnistore
         ckpt_state = {"model": models}
         # load model and optimizer
@@ -587,12 +612,14 @@ class AsyncActorRolloutRefWorker(Worker):
 
         log_gpu_memory_usage('Before AsyncXPerfGPTRollout init')
 
+        # actually, we just need hf_config in order to build rollout
         rollout = AsyncXPerfGPTRollout(config=self.config.rollout,
                                        tokenizer=self.tokenizer,
                                        model_hf_config=self.actor_model_config,
                                        is_standalone=self._is_standalone_rollout)
         log_gpu_memory_usage('After AsyncXPerfGPTRollout init')
 
+        # Note that in standalone case, model is None.
         if self.actor_strategy == 'fsdp':
             sharding_manager = FSDPXPerfGPTShardingManager(module=self.actor_module_fsdp,
                                                            model_config=self.actor_model_config,
@@ -623,7 +650,7 @@ class AsyncActorRolloutRefWorker(Worker):
         assert device in ("cuda", "cpu")
         if device == "cuda":
             device = torch.cuda.current_device()
-            if self._is_actor or self._is_standalone_rollout or self._is_standalone_validator:
+            if self._is_actor:
                 if self.actor_strategy == 'fsdp':
                     if not self.config.actor.fsdp_config.param_offload:
                         if model:
@@ -647,7 +674,7 @@ class AsyncActorRolloutRefWorker(Worker):
             gc.collect()
 
         elif device == "cpu":
-            if self._is_actor or self._is_standalone_rollout or self._is_standalone_validator:
+            if self._is_actor:
                 if self.actor_strategy == 'fsdp':
                     if not self.config.actor.fsdp_config.param_offload:
                         if model:
@@ -697,15 +724,16 @@ class AsyncActorRolloutRefWorker(Worker):
                 self.config.actor.ppo_mini_batch_size //= dp_size
                 self.config.actor.ppo_micro_batch_size //= dp_size
 
-        if self._is_rollout or self._is_standalone_rollout:
-            if self.actor_strategy == 'fsdp':
-                sp_size = config.actor.ulysses_sequence_parallel_size
-                self.config.rollout.micro_batch_size //= world_size  # for xperf-gpt
-                self.config.rollout.log_prob_micro_batch_size //= (world_size // sp_size // actor_tp_size)
-            elif self.actor_strategy == 'megatron':
-                dp_size = mpu.get_data_parallel_world_size()
-                self.config.rollout.micro_batch_size //= world_size  # for xperf-gpt
-                self.config.rollout.log_prob_micro_batch_size //= dp_size
+        # TODO(zhangchi.usc1992): this is useless. correct me if this is wrong
+        # if self._is_rollout or self._is_standalone_rollout:
+        #     if self.actor_strategy == 'fsdp':
+        #         sp_size = config.actor.ulysses_sequence_parallel_size
+        #         self.config.rollout.micro_batch_size //= world_size  # for xperf-gpt
+        #         self.config.rollout.log_prob_micro_batch_size //= (world_size // sp_size // actor_tp_size)
+        #     elif self.actor_strategy == 'megatron':
+        #         dp_size = mpu.get_data_parallel_world_size()
+        #         self.config.rollout.micro_batch_size //= world_size  # for xperf-gpt
+        #         self.config.rollout.log_prob_micro_batch_size //= dp_size
 
         if self._is_ref:
             if self.ref_strategy == 'fsdp':
@@ -856,13 +884,23 @@ class AsyncActorRolloutRefWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def update_standalone_worker(self, role):
+        # Note(zhangchi.usc1992)
+        # self.sharding_manager.standalone indicates that it is a standalone_rollout or standalone_validator
+        # if it is streaming rollout, the weight is latest, so no need to bind weight again.
+
+        log_gpu_memory_usage(f'Before update_standalone_worker {role=}')
         assert self._is_rollout or self._is_standalone_rollout or self._is_standalone_validator
         if not self.sharding_manager.standalone and self.config.actor.train_memory_offload:
             self.to("cuda", model=True, optimizer=False)
+
+        # TODO(zhangchi.usc1992): we have a redundant weight binding here for standalone validator
+        # Try to remove it by introduing an argument
         with self.sharding_manager:
             self.sharding_manager.update_standalone_worker(role)
         if not self.sharding_manager.standalone and self.config.actor.train_memory_offload:
             self.to("cpu", model=True, optimizer=False)
+
+        log_gpu_memory_usage(f'After update_standalone_worker {role=}')
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def update_actor(self, data: DataProto):
@@ -1006,7 +1044,7 @@ class AsyncActorRolloutRefWorker(Worker):
         output = output.to('cpu')
 
         # clear kv cache
-        log_gpu_memory_usage('After recompute log prob', logger=logger)
+        log_gpu_memory_usage('After recompute log prob')
         return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)

@@ -22,6 +22,8 @@ from functools import partial
 from typing import Dict
 import itertools
 
+from .ppo_actor import make_mini_step_dataloader, default_loss_fn
+
 
 class MegatronPPOActor(BasePPOActor):
 
@@ -32,6 +34,8 @@ class MegatronPPOActor(BasePPOActor):
         self.actor_optimizer = actor_optimizer
         self.module = self.actor_module
         self.optimizer = self.actor_optimizer
+
+        self.loss_fn = default_loss_fn
 
     def _optimizer_step(self, is_last_mini_batch):
         """
@@ -99,7 +103,7 @@ class MegatronPPOActor(BasePPOActor):
                     partition.zero_grad_buffer()
         optimizers[0].zero_grad()
 
-    def _forward_backward_batch(self, batches: list[TensorDict], response_length, forward_only=False):
+    def _forward_backward_batch(self, batches: list[TensorDict], forward_only=False):
         from megatron import get_args
         from flash_attn.bert_padding import unpad_input
         from verl.utils.megatron.sequence_parallel import pad_to_sequence_parallel
@@ -113,8 +117,6 @@ class MegatronPPOActor(BasePPOActor):
         # TODO: select pipeline strategy here. Force to use Any1F1B to support any num_micro_batches
         forward_backward_func = get_forward_backward_func(pipeline_strategy='Any1F1B')
 
-        use_rollout_log_probs = self.config.get("use_rollout_log_probs", False)
-
         def loss_func(output, micro_batch):
             if forward_only:
                 return 1.0, output
@@ -122,98 +124,14 @@ class MegatronPPOActor(BasePPOActor):
             log_prob = output['log_probs']
             assert output['entropy'] is None
 
-            # compute logprobs and entropy here. We only compute entropy when forward_only=True
-            attention_mask = micro_batch['attention_mask']
-            response_mask = attention_mask[:, -response_length:]
-
-            if use_rollout_log_probs:
-                # use ewma if use_rollout_log_probs: importance sampling by rollout_logp)rob, clip by old_log_prob
-                use_ewma_loss = True
-                old_log_prob = micro_batch['rollout_log_probs']
-                ref_log_prob = micro_batch['old_log_probs']
-            else:
-                use_ewma_loss = self.config.use_ewma_loss
-                old_log_prob = micro_batch['old_log_probs']
-                ref_log_prob = micro_batch.get('ref_log_prob', None)
-
-            old_log_prob = micro_batch['old_log_probs']
-            advantages = micro_batch['advantages']
-            ref_log_prob = micro_batch.get('ref_log_prob', None)
-            upgo_advantages = micro_batch['upgo_advantages']
-            overlong_mask = micro_batch.get('overlong_mask', None)
-
-            clip_ratio = self.config.clip_ratio
-            clip_ratio_low = clip_ratio
-            clip_ratio_high = clip_ratio
-            if self.config.clip_ratio_low:
-                clip_ratio_low = self.config.clip_ratio_low
-            if self.config.clip_ratio_high:
-                clip_ratio_high = self.config.clip_ratio_high
-            clip_ratio2 = self.config.clip_ratio2
-            scale_pg_by_kl = self.config.scale_pg_by_kl
-            scale_pg_by_local_kl = self.config.scale_pg_by_local_kl
-            entropy_coeff = self.config.entropy_coeff
-            upgo_loss_weight = self.config.upgo_loss_weight
-            kl_loss_weight = self.config.kl_loss_weight
-            lm_loss_weight = self.config.lm_loss_weight
-            kl_penalty_type = self.config.kl_penalty
-            loss_average_method = self.config.loss_average_method
-
-            total_loss, pg_loss, upgo_loss, pg_clipfrac, pg_clipfrac_hi, pg_clipfrac_lo, pg_clipfrac2, ppo_kl, ppo_kl_sum = core_algos.compute_policy_loss(
-                old_log_prob=old_log_prob,
-                ref_log_prob=ref_log_prob,
-                log_prob=log_prob,
-                advantages=advantages,
-                upgo_advantages=upgo_advantages,
-                eos_mask=response_mask,
-                cliprange_low=clip_ratio_low,
-                cliprange_high=clip_ratio_high,
-                cliprange2=clip_ratio2,
-                scale_pg_by_kl=scale_pg_by_kl,
-                scale_pg_by_local_kl=scale_pg_by_local_kl,
-                upgo_loss_weight=upgo_loss_weight,
-                use_ewma_loss=use_ewma_loss,
-                kl_penalty_type=kl_penalty_type,
-                overlong_mask=overlong_mask,
-                loss_average_method=loss_average_method)
-
-            # if self.config.early_stop_by_kl != 0 and ppo_kl > self.config.early_stop_by_kl and batch_idx > 0:
-            #     minibatch_early_stop = True
-            #     break
-
-            if kl_loss_weight > 0.0:
-                kl_loss = core_algos.compute_kl_loss(log_prob, ref_log_prob, response_mask, kl_penalty_type)
-            else:
-                kl_loss = torch.zeros((), device=pg_loss.device)
-
-            if lm_loss_weight > 0.0:
-                eos_ids = micro_batch['eos_ids']
-                raw_scores = micro_batch['token_level_scores']
-                lm_loss = core_algos.compute_lm_loss(log_prob, raw_scores, eos_ids)
-            else:
-                lm_loss = torch.zeros((), device=pg_loss.device)
-
-            policy_loss = total_loss - kl_loss_weight * kl_loss + lm_loss_weight * lm_loss
+            seqlen = output['seqlen']
+            policy_loss, stats = self.loss_fn(self.config, micro_data=micro_batch, full_entropy=None, log_prob=log_prob)
+            stats['actor/seqlen'] = seqlen
 
             # correctly scale policy_loss
             loss = policy_loss * (len(micro_batch) / self.config.ppo_mini_batch_size)
             #(zhangchi.usc1992) we do this because in megatron pp schedule, the loss will be divided by num_microbatches
             loss = loss * num_microbatches
-
-            # return loss and stats
-            stats = {
-                'actor/pg_loss': pg_loss.detach().item(),
-                'actor/upgo_loss': upgo_loss.detach().item(),
-                'actor/kl_loss': kl_loss.detach().item(),
-                'actor/pg_clipfrac': pg_clipfrac.detach().item(),
-                'actor/pg_clipfrac_hi': pg_clipfrac_hi.detach().item(),
-                'actor/pg_clipfrac_lo': pg_clipfrac_lo.detach().item(),
-                'actor/pg_clipfrac2': pg_clipfrac2.detach().item(),
-                'actor/ppo_kl': ppo_kl.detach().item(),
-                'actor/ppo_kl_sum': ppo_kl_sum.detach().item(),
-                'actor/tokens_per_micro_batch_update': attention_mask.sum().detach().item(),
-                # 'actor/seqlen': seqlen,
-            }
             return loss, stats
 
         def forward_step(batch_iter, model):
@@ -222,6 +140,7 @@ class MegatronPPOActor(BasePPOActor):
             attention_mask = micro_batch['attention_mask']
             input_ids = micro_batch['input_ids'].to(torch.int64)
             attention_mask = micro_batch['attention_mask'].to(torch.int64)
+            response_length = micro_batch['responses'].size(-1)
 
             position_ids = compute_position_id_with_mask(attention_mask)
 
@@ -259,14 +178,16 @@ class MegatronPPOActor(BasePPOActor):
                 labels = torch.roll(input_ids_rmpad_padded, shifts=-1, dims=1).squeeze(dim=0)  # (total_nnz + pad_size,)
                 logits = output['logits'].squeeze(dim=1)  # (total_nnz_padded, vocab_size // tp)
 
-                # TODO(zhangchi.usc1992) optimize accurate entropy computation
-                # if forward_only:
-                #     entropy = vocab_parallel_entropy(logits)  # (total_nnz + pad_size,)
-                #     entropy = entropy[:total_s]
-                #     entropy = pad_input(entropy.unsqueeze(-1), indices, batch_size, sequence_length).squeeze(-1)
-                #     entropy = entropy[:, -response_length - 1:-1]
-                # else:
-                #     entropy = None
+                # TODO(zhangchi.usc1992) switch to using accurate entropy computation
+                # because -log_prob is not unbias estimator of entropy when there is off-policy
+                if forward_only:
+                    # Note (zhangchi.usc1992) that we have to compute entropy before log_prob as later will alter logits
+                    entropy = vocab_parallel_entropy(logits)  # (total_nnz + pad_size,)
+                    entropy = entropy[:total_s]
+                    entropy = pad_input(entropy.unsqueeze(-1), indices, batch_size, sequence_length).squeeze(-1)
+                    entropy = entropy[:, -response_length - 1:-1]
+                else:
+                    entropy = None
 
                 # vocab_parallel logprobs and vocab_parallel entropy
                 # Note(zhangchi.usc1992) very important. This function will modify logits inplace
@@ -278,13 +199,7 @@ class MegatronPPOActor(BasePPOActor):
                                      sequence_length).squeeze(-1)  # (batch_size, sequence_length)
                 log_prob = log_prob[:, -response_length - 1:-1]
 
-                # TODO(zhangchi.usc1992) switch to using accurate entropy computation
-                if forward_only:
-                    entropy = -log_prob
-                else:
-                    entropy = None
-
-                output = {'log_probs': log_prob, 'entropy': entropy}
+                output = {'log_probs': log_prob, 'entropy': entropy, 'seqlen': total_s}
 
                 return output, partial(loss_func, micro_batch=micro_batch)
             else:
@@ -351,7 +266,7 @@ class MegatronPPOActor(BasePPOActor):
                                                                             dp_group=mpu.get_data_parallel_group())
 
         with torch.no_grad():
-            output = self._forward_backward_batch(micro_batches, response_length=response_length, forward_only=True)
+            output = self._forward_backward_batch(micro_batches, forward_only=True)
             if mpu.is_pipeline_last_stage(ignore_virtual=True):
                 # only on last rank. It should be on every tp rank
                 log_probs = torch.cat([o['log_probs'] for o in output], dim=0)  # (bs, seq_size)
@@ -388,6 +303,9 @@ class MegatronPPOActor(BasePPOActor):
 
         return entropy, log_probs
 
+    def set_loss_fn(self, loss_fn):
+        self.loss_fn = loss_fn
+
     def update_policy(self, data: DataProto) -> Dict:
         """
         We have to make sure that data is identical in tp/pp region
@@ -395,24 +313,9 @@ class MegatronPPOActor(BasePPOActor):
 
         # TODO: optimize this
         data = data.to(torch.cuda.current_device())
-
-        select_keys = ['responses', 'input_ids', 'attention_mask', 'old_log_probs', 'advantages', 'upgo_advantages']
-        if 'ref_log_prob' in data.batch.keys():
-            select_keys.append('ref_log_prob')
-        if 'rollout_log_probs' in data.batch.keys():
-            select_keys.append('rollout_log_probs')
-        if 'overlong_mask' in data.batch.keys():
-            select_keys.append('overlong_mask')
-        if 'eos_ids' in data.batch.keys():
-            select_keys.append('eos_ids')
-        if 'token_level_scores' in data.batch.keys():
-            select_keys.append('token_level_scores')
-        batch = data.select(batch_keys=select_keys).batch
-
-        response = batch['responses']
-        response_length = response.size(1)
-
-        dataloader = batch.split(self.config.ppo_mini_batch_size)
+        dataloader = make_mini_step_dataloader(data,
+                                               ppo_mini_batch_size=self.config.ppo_mini_batch_size,
+                                               return_dataproto=False)
 
         num_mini_batches = len(dataloader)
 
@@ -425,12 +328,19 @@ class MegatronPPOActor(BasePPOActor):
                                                           max_token_len=self.config.ppo_max_token_len,
                                                           dp_group=mpu.get_data_parallel_group())
 
-            metric_micro_batch = self._forward_backward_batch(micro_batches,
-                                                              response_length=response_length,
-                                                              forward_only=False)
+            metric_micro_batch = self._forward_backward_batch(micro_batches, forward_only=False)
             for metric in metric_micro_batch:
                 append_to_dict(metrics, metric)  # append the metric from this micro-batch to global metrics.
             optimizer_metrics = self._optimizer_step(is_last_mini_batch=batch_idx == num_mini_batches - 1)
             append_to_dict(metrics, optimizer_metrics)
 
+        if mpu.get_pipeline_model_parallel_world_size() > 1:
+            # note that metrics is only available on last pp rank. We have to broadcast to every pp rank
+            object_list = [None] * mpu.get_pipeline_model_parallel_world_size()
+            object_list[-1] = metrics
+            torch.distributed.broadcast_object_list(object_list=object_list,
+                                                    src=mpu.get_pipeline_model_parallel_last_rank(),
+                                                    group=mpu.get_pipeline_model_parallel_group())
+
+            metrics = object_list[-1]  # take from last pp
         return metrics

@@ -304,13 +304,31 @@ class CriticWorker(Worker):
         # TODO: ignore pulling model file if resuming ckpt
         local_path = copy_local_path_from_hdfs(config.model.path)
 
+        # TODO(zhangchi.usc1992): this logic is VERY VERY hacky as the upstream mariana
+        # lacks huggingface folder checkpoint format
+        ckpt_meta_info_json_path = os.path.join(local_path, 'meta_info.json')
+
+        if os.path.exists(ckpt_meta_info_json_path):
+            # we read from huggingface
+            with open(ckpt_meta_info_json_path, 'r') as f:
+                ckpt_meta_info = json.load(f)
+            assert 'omnistore_ckpt_path' in ckpt_meta_info
+            ckpt_path = ckpt_meta_info['omnistore_ckpt_path']
+            config_path = local_path
+        else:
+            config_path = local_path
+            # Note(zhangchi.usc1992) make sure the config_path does not end with '/', which is guaranteed by copy_local_path_from_hdfs
+            ckpt_path = os.path.dirname(config.model.path)
+            # config_path = os.path.join(local_path, 'huggingface')
+            assert os.path.exists(config_path), \
+                'Please make sure the huggingface checkpoint stores the upstream path. If not, please re-convert it using 0306 seed-models'
+
         # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect
         # TODO(zhangchi.usc1992): 1. support create from random initialized model. 2. Support init with FSDP directly
-        self.tokenizer = AutoTokenizer.from_pretrained(local_path)
-        critic_model_config = AutoConfig.from_pretrained(local_path)
+        self.tokenizer = AutoTokenizer.from_pretrained(config_path)
+        critic_model_config = AutoConfig.from_pretrained(config_path)
 
         megatron_config = MegatronConfig(**self.config.mariana.megatron)
-        local_path = copy_local_path_from_hdfs(config.model.path)
 
         model_config = convert_hf_config_to_mariana(hf_config=critic_model_config,
                                                     model_implementation=self.config.mariana.model_implementation)
@@ -344,28 +362,6 @@ class CriticWorker(Worker):
         models = get_model(megatron_model_provider, ModelType.encoder_or_decoder, wrap_with_ddp=True, **model_kwargs)
         convert_gate_to_fp32(models)
 
-        # load checkpoint. Note that we should load ckpt before optimizer. Otherwise, the fp32 params will be wrong.
-        # we assume the megatron_merge_state.pt in the same folder as hf
-        # ckpt_path = 'hdfs://haruna/home/byte_data_seed/ssd_hldy/user/tiantianfan1/sft/M8_680m_SFT/checkpoints/global_epoch_2/megatron_merge_states.pt'
-        # ckpt_local_path = copy_local_path_from_hdfs(ckpt_path)
-        # load_partial_pretrain(models,
-        #                       partial_pretrain=ckpt_local_path,
-        #                       model_config=model_config,
-        #                       download_in_shards=True)
-
-        # switch to use omnistore
-        # the original ckpt is under local_path/meta_info.json
-
-        ckpt_meta_info_json_path = os.path.join(local_path, 'meta_info.json')
-        assert os.path.exists(
-            ckpt_meta_info_json_path
-        ), 'Please make sure the huggingface checkpoint stores the upstream path. If not, please re-convert it using latest seed-models'
-
-        with open(ckpt_meta_info_json_path, 'r') as f:
-            ckpt_meta_info = json.load(f)
-
-        assert 'omnistore_ckpt_path' in ckpt_meta_info
-        ckpt_path = ckpt_meta_info['omnistore_ckpt_path']
         import omnistore
         ckpt_state = {"model": models}
         # load model and optimizer

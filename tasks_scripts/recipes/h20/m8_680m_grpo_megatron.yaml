@@ -13,6 +13,17 @@ mariana:
 actor_rollout_ref:
   actor:
     ppo_max_token_len: 18432
+    strategy: megatron
+  ref:
+    max_token_len: 18432
+    strategy: megatron
+  rollout:
+    max_token_len: 18432
+    tensor_model_parallel_size: 2
 
 critic:
   ppo_max_token_len: 18432
+  strategy: megatron
+
+trainer:
+  offload_train_memory: True

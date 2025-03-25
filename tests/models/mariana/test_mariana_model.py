@@ -182,8 +182,14 @@ def main(config: DictConfig):
         'old_log_probs': torch.randn(batch_size, max_response_length, dtype=torch.float32, device='cuda'),
         'advantages': torch.randn(batch_size, max_response_length, dtype=torch.float32, device='cuda'),
         'upgo_advantages': torch.randn(batch_size, max_response_length, dtype=torch.float32, device='cuda'),
+        'off_policy_steps': torch.randn(batch_size, max_response_length, dtype=torch.float32, device='cuda'),
     }
-    data = DataProto.from_single_dict(data=data, meta_info={'response_length': max_response_length})
+    data = DataProto.from_single_dict(data=data,
+                                      meta_info={
+                                          'response_length': max_response_length,
+                                          'use_dynamic_bsz': True,
+                                          'max_token_len': 512
+                                      })
 
     # step 5: perform forward
     entropy, logprobs = actor.compute_log_prob(data=data)

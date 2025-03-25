@@ -444,7 +444,8 @@ mariana:
     scale_loss_in_gradient: false
     pipeline_strategy: ''
     param_alignment_in_bytes: 16  # this is necessary for H20/H800
-
+    offload_activations: False
+    offload_ratio: 1.0
 
   # this set of config determines how the mariana model is implemented. The model structure is defined by huggingface config
   model_implementation:

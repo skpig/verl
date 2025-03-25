@@ -1354,8 +1354,11 @@ class RayPPOTrainer(object):
         # update standalone rollout weights
         with Timer(name='update_standalone', logger=None) as timer:
             if self.standalone_rollout_wg is not None:
-                self.actor_rollout_wg.update_standalone_worker("standalone_rollout")
-                self.standalone_rollout_wg.update_standalone_worker("standalone_rollout")
+                actor_fut = self.actor_rollout_wg.update_standalone_worker("standalone_rollout")
+                standalone_fut = self.standalone_rollout_wg.update_standalone_worker("standalone_rollout")
+                # note that we should wait for the weight sync to be completed to avoid standalone fail and driver continues
+                ray.get(actor_fut)
+                ray.get(standalone_fut)
         self.actor_rollout_wg.release_param_and_cache()
         metrics['timing/update_standalone'] = timer.last
 

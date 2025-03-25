@@ -39,7 +39,7 @@ def init_meta(tp_model):
         tp_model.layers_impl[i].free_kv_cache()
 
 
-def offload_to_device(tp_model, device="cpu"):
+def offload_param_to_device(tp_model, device):
     param_list = [tp_model.layernorm_weight, tp_model.wte_weight, tp_model.lm_head_weight] + \
                     [p for layer in tp_model.layers_weight for p in layer if isinstance(p, torch.Tensor)]
     if hasattr(tp_model, 'wpe'):
@@ -50,9 +50,16 @@ def offload_to_device(tp_model, device="cpu"):
         else:
             out = param.to(device)
         torch.utils.swap_tensors(param, out)
+
+
+def free_kv_cache(tp_model):
     for i in range(tp_model.num_layers):
         tp_model.layers_impl[i].free_kv_cache()
 
+
+def offload_to_device(tp_model, device="cpu"):
+    offload_param_to_device(tp_model=tp_model, device=device)
+    free_kv_cache(tp_model=tp_model)
     torch.cuda.empty_cache()
 
 

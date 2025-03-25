@@ -1,3 +1,4 @@
+**/*.pickle
 **/debug.txt
 jobs/
 trash/

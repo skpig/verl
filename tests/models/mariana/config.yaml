@@ -24,8 +24,8 @@ data:
 # During that time, the megatron config will be copied to the namespace under each model
 megatron:
   tensor_parallel_size: 2
-  pipeline_parallel_size: 4
-  virtual_pipeline_parallel_size: 7
+  pipeline_parallel_size: 2
+  virtual_pipeline_parallel_size: 14
   distributed_sequence_parallel_size: 1
   expert_parallel_size: ${megatron.tensor_parallel_size}  # hardcode for now
   micro_batch_size: 1
@@ -86,6 +86,9 @@ megatron:
 # this set of config determines how the mariana model is implemented. The model structure is defined by huggingface config
 model_implementation:
   noop_transformer_layers: []
+  janus_use_big_op: false
+  janus_big_op_version: V1
+  moe_pr_expert_type: swiglu-default
 
 actor_rollout_ref:
   hybrid_engine: True
@@ -101,10 +104,12 @@ actor_rollout_ref:
     fsdp_size: -1
     ppo_micro_batch_size: 1
     use_dynamic_bsz: True
-    ppo_max_token_len: -1
+    ppo_max_token_len: 512
     grad_clip: 1.0
     clip_ratio: 0.2
     clip_ratio2: 10.0
+    clip_ratio_low: 0.2
+    clip_ratio_high: 0.2
     scale_pg_by_kl: False
     scale_pg_by_local_kl: False
     lm_loss_weight: 0.
@@ -112,10 +117,11 @@ actor_rollout_ref:
     upgo_loss_version: 1
     kl_loss_weight: 0.0
     kl_penalty: ${algorithm.kl_penalty}
-    entropy_coeff: 0.001
+    entropy_coeff: 0.0
     ppo_epochs: 1
     shuffle: True
     use_ewma_loss: False
+    loss_average_method: sample
     optim:
       lr: 1e-5
       betas: [0.9, 0.95]

@@ -338,4 +338,12 @@ class MegatronPPOCritic(BasePPOCritic):
             optimizer_metrics = self._optimizer_step(is_last_mini_batch=batch_idx == num_mini_batches - 1)
             append_to_dict(metrics, optimizer_metrics)
 
+        if mpu.get_pipeline_model_parallel_world_size() > 1:
+            # note that metrics is only available on last pp rank. We have to broadcast to every pp rank
+            object_list = [None] * mpu.get_pipeline_model_parallel_world_size()
+            object_list[-1] = metrics
+            torch.distributed.broadcast_object_list(object_list=object_list,
+                                                    src=mpu.get_pipeline_model_parallel_last_rank(),
+                                                    group=mpu.get_pipeline_model_parallel_group())
+            metrics = object_list[-1]  # take from last pp
         return None, metrics

@@ -333,8 +333,10 @@ class AsyncXPerfGPTRollout(object):
 
             if model_type == "dense_70b":
                 os.environ["XPERF_TUNER_ONLINE_VERSION"] = "1.9.7a1+xgpt"
-            else:
+            elif model_type in ['m8_2b5', 'm8_14b', 'm8_20b']:
                 os.environ["XPERF_TUNER_ONLINE_VERSION"] = "1.9.7a3+xgpt"
+            else:
+                os.environ["XPERF_TUNER_ONLINE_VERSION"] = ""
 
             use_ep = self.config.get('use_ep', False)
             parallel = ("tp" if not use_ep else "ep") + str(self.config.get('tensor_model_parallel_size', 1))
