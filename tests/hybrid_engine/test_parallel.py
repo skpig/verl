@@ -150,7 +150,8 @@ def init_model(model_path: str, fsdp_size: int, tp_size: int, sp_size: int, opti
         "betas": [0.9, 0.95],
     }
     from omegaconf import DictConfig
-    optimizer = get_optimizer_from_config(model.parameters(), DictConfig(optim_config))
+    optimizer = get_optimizer_from_config([param for param in model.parameters() if param.requires_grad],
+                                          DictConfig(optim_config))
     print_each_rank(f"After FSDP init: memory: {torch.cuda.memory_allocated() / (1024**3):.2f} GB")
     torch.cuda.reset_peak_memory_stats()
     return model, optimizer, meshes

@@ -271,7 +271,8 @@ class CriticWorker(Worker):
         log_gpu_memory_usage('After critic FSDP', logger=logger)
 
         from alpha_seed.trainer.optim import get_optimizer_from_config
-        critic_optimizer = get_optimizer_from_config(critic_module.parameters(), config.optim)
+        critic_optimizer = get_optimizer_from_config(
+            [param for param in critic_module.parameters() if param.requires_grad], config.optim)
 
         total_steps = config.optim.get('total_training_steps', 0)
         num_warmup_steps = int(config.optim.get('lr_warmup_steps', -1))

@@ -75,7 +75,8 @@ def build_model(fsdp_size: int, tp_size: int, optimizer_type: str):
         "betas": [0.9, 0.95],
     }
     from omegaconf import DictConfig
-    optimizer = get_optimizer_from_config(model.parameters(), DictConfig(optim_config))
+    optimizer = get_optimizer_from_config([param for param in model.parameters() if param.requires_grad],
+                                          DictConfig(optim_config))
     return model, optimizer, meshes
 
 

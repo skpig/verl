@@ -78,7 +78,8 @@ def get_model(use_orig_params: bool, optimizer_type: str):
         "betas": [0.9, 0.95],
     }
     from omegaconf import DictConfig
-    optimizer = get_optimizer_from_config(actor_module_fsdp.parameters(), DictConfig(optim_config))
+    optimizer = get_optimizer_from_config([param for param in actor_module_fsdp.parameters() if param.requires_grad],
+                                          DictConfig(optim_config))
     return actor_module_fsdp, optimizer
 
 

@@ -253,7 +253,7 @@ class RMTrainer(object):
 
         register_dtensor_save_hook(self.fsdp_model, shard_plan)
 
-        self.optimizer = optim.AdamW(self.fsdp_model.parameters(),
+        self.optimizer = optim.AdamW([param for param in self.fsdp_model.parameters() if param.requires_grad],
                                      lr=self.config.optim.lr,
                                      betas=self.config.optim.betas,
                                      weight_decay=self.config.optim.weight_decay,

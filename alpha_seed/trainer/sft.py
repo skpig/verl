@@ -253,7 +253,8 @@ class SFTTrainer(object):
             })
 
         from alpha_seed.trainer.optim import get_optimizer_from_config
-        self.optimizer = get_optimizer_from_config(self.fsdp_model.parameters(), self.config.optim)
+        self.optimizer = get_optimizer_from_config(
+            [param for param in self.fsdp_model.parameters() if param.requires_grad], self.config.optim)
 
         self.act_offload_ctx = activation_offload.get_offload_context(self.config.model.act_offload, self.fsdp_model)
 
