@@ -373,17 +373,29 @@ class AutoTuner:
             "deepseek_v3",
             "seed_p6dense",
         )
+        # get num heads
+        num_heads = getattr(self.config, "num_attention_heads", None)
+        if num_heads is None:
+            warnings.warn(f"Cannot get num_attention_heads in {self.config.model_type}, assume to be 1")
+            num_heads = 1
+        num_heads = max(num_heads, 1)
         # determine tp size
         if (not constraints) or (constraints.tp_size is None):
             tp_size = 1
             # we only enable tp for models > 60B
             if have_tp_implementation and (self.total_params / 1e9) > 60:
                 tp_size = 2 if self.env.nvlink else 4
+            # shrink tp size to be divisible to num_heads
+            while num_heads % tp_size != 0:
+                tp_size = max(tp_size // 2, 1)
         else:
             tp_size = constraints.tp_size
+        # determine sp size
         ngpus_per_node = min(self.env.ngpus_per_node, dist.get_world_size())
         assert ngpus_per_node % tp_size == 0, f"{ngpus_per_node=}, {tp_size=}"
         sp_size = ngpus_per_node // tp_size
+        while num_heads % sp_size != 0:
+            sp_size = max(sp_size // 2, 1)
         return ParallelConfig(
             max_token_len=self.max_seqlen,
             fsdp_size=-1,
