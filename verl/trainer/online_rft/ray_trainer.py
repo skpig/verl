@@ -721,8 +721,6 @@ class RayOnlineRFTTrainer(object):
                     if self.config.trainer.balance_batch:
                         self._balance_batch(batch, metrics=metrics)
 
-                    # compute global_valid tokens
-                    batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask'], dim=-1).tolist()
 
 
                     if self.use_reference_policy:
@@ -759,6 +757,15 @@ class RayOnlineRFTTrainer(object):
                         reward_tensor, reward_type_counter = self.reward_fn(batch)
                         batch.batch['seq_level_scores'] = reward_tensor
                         metrics.update({f'reward_type/{key}': val / len(batch) for key, val in reward_type_counter.items()})
+
+                        # only keep valid indices with rewards 1
+                        valid_indices = torch.nonzero(reward_tensor).squeeze(-1) # (n,)
+                        # make sure #valid_indices is divisible by dp_size
+                        valid_indices = valid_indices[:len(valid_indices) // self.actor_rollout_wg.world_size * self.actor_rollout_wg.world_size]
+                        batch = batch.index_select(valid_indices)
+
+                    # compute global_valid tokens
+                    batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask'], dim=-1).tolist()
 
                     # update actor
                     with _timer('update_actor', timing_raw):
