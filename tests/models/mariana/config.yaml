@@ -24,6 +24,7 @@ data:
 # During that time, the megatron config will be copied to the namespace under each model
 megatron:
   tensor_parallel_size: 2
+  context_parallel_size: 1
   pipeline_parallel_size: 2
   virtual_pipeline_parallel_size: 14
   distributed_sequence_parallel_size: 1
@@ -86,8 +87,8 @@ megatron:
 # this set of config determines how the mariana model is implemented. The model structure is defined by huggingface config
 model_implementation:
   noop_transformer_layers: []
-  janus_use_big_op: false
-  janus_big_op_version: V1
+  janus_use_big_op: true
+  janus_big_op_version: P7V3
   moe_pr_expert_type: swiglu-default
 
 actor_rollout_ref:

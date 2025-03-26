@@ -2,6 +2,7 @@ set -x
 
 ray stop --force
 
+export OMNISTORE_LOAD_STRICT_MODE=0
 export MARIANA_DISABLE_ROPE_REGISTER_INV_FREQ=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # export CUDA_LAUNCH_BLOCKING=1
@@ -73,6 +74,7 @@ strategy=megatron
 
 python3 tasks/main_ppo.py \
     mariana.megatron.tensor_parallel_size=2 \
+    mariana.megatron.context_parallel_size=2 \
     mariana.megatron.pipeline_parallel_size=2 \
     mariana.megatron.virtual_pipeline_parallel_size=14 \
     actor_rollout_ref.actor.strategy=${strategy} \

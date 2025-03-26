@@ -99,14 +99,116 @@ class MegatronPPOCritic(BasePPOCritic):
                     partition.zero_grad_buffer()
         optimizers[0].zero_grad()
 
-    def _forward_backward_batch(self, batches: list[TensorDict], response_length, forward_only=False):
-        from megatron import get_args
-        from flash_attn.bert_padding import unpad_input
+    def _preprocess_micro_batches(self, micro_batches: list[TensorDict]):
+        """
+        Preprocess a list of micro_batches into (forward_batch, input_shapes), 
+        where forward_batch is a dictionary that is directly passed into the model,
+        and input_shapes is a list of torch.Size that used for pp communication shapes
+        """
+        from flash_attn.bert_padding import unpad_input, index_first_axis, rearrange
         from verl.utils.megatron.sequence_parallel import pad_to_sequence_parallel
         from verl.utils.model import compute_position_id_with_mask
-        from verl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_parallel_log_probs_from_logits
+        from megatron import get_args
+
+        args = get_args()
+        cp_size = mpu.get_context_parallel_world_size()
+        tp_size = mpu.get_tensor_model_parallel_world_size()
+
+        micro_batches_with_inputs = []
+        input_shapes = []
+
+        for micro_batch in micro_batches:
+
+            input_ids = micro_batch['input_ids']
+            attention_mask = micro_batch['attention_mask']
+            input_ids = micro_batch['input_ids'].to(torch.int64)
+            attention_mask = micro_batch['attention_mask'].to(torch.int64)
+            response_length = micro_batch['responses'].size(-1)
+
+            position_ids = compute_position_id_with_mask(attention_mask)
+            # remove padding here
+            input_ids_rmpad, indices, cu_seqlens, max_seqlen_in_batch = unpad_input(input_ids.unsqueeze(-1),
+                                                                                    attention_mask=attention_mask)
+            # TODO(zhangchi.usc1992): optimize this
+            position_ids_rmpad = index_first_axis(rearrange(position_ids.unsqueeze(-1), "b s ... -> (b s) ..."),
+                                                  indices)  # (total_nnz, 1)
+
+            total_s = input_ids_rmpad.shape[0]
+
+            if cp_size > 1:
+                # CP manager
+                from mariana.data.text.transforms.text_microbatch_transform import ContextParallelProcessor
+
+                cp_processor = ContextParallelProcessor(
+                    pad_idx=1,  # TODO(zhangchi.usc1992) harcode for seed tokenizer for now
+                    tp_size=mpu.get_tensor_model_parallel_world_size(),
+                    cp_size=mpu.get_context_parallel_world_size(),
+                    cp_rank=mpu.get_context_parallel_rank(),
+                    hidden_size=-1)
+
+                cp_forward_batch = {
+                    'input_ids': input_ids_rmpad.squeeze(-1),
+                    'seq_lens': cu_seqlens,
+                    'cu_seqlens': cu_seqlens,
+                    'loss_mask': torch.ones_like(input_ids_rmpad).squeeze(-1)
+                }
+
+                forward_batch = cp_processor(data=cp_forward_batch)
+                # cp_manager'tensor stay in cpu originally, a liitle bit cheated; move them to cuda
+                forward_batch['cu_seqlens_splited'] = forward_batch['cp_manager'].cu_seqlens_splited.cuda()
+                # for non-bigOps
+                # note that cp_manager.cu_seqlens_splited_rmpad is a list of tensor
+                for i in range(len(forward_batch['cp_manager'].cu_seqlens_splited_rmpad)):
+                    forward_batch['cp_manager'].cu_seqlens_splited_rmpad[i] = forward_batch[
+                        'cp_manager'].cu_seqlens_splited_rmpad[i].cuda()
+                # for bigOps
+                # note that cp_manager.cu_seqlens_splited is a tensor
+                forward_batch['cp_manager'].cu_seqlens_splited = forward_batch['cp_manager'].cu_seqlens_splited.cuda()
+                forward_batch['cp_manager'].cu_seqlens = forward_batch['cp_manager'].cu_seqlens.cuda()
+                forward_batch['cp_manager'].cu_seqlens_rmpad = forward_batch['cp_manager'].cu_seqlens_rmpad.cuda()
+                forward_batch['input_ids'] = forward_batch['input_ids'].unsqueeze(0)
+                forward_batch['position_ids'] = forward_batch['position_ids'].cuda()
+
+                input_shape = torch.Size([forward_batch['input_ids'].shape[-1] // tp_size, 1, args.hidden_size])
+
+            else:
+                # pad to sequence parallel size
+                input_ids_rmpad_padded = pad_to_sequence_parallel(input_ids_rmpad)  # (total_nnz + pad_size, 1)
+                input_ids_rmpad_padded = input_ids_rmpad_padded.transpose(0, 1)  # (1, total_nnz + pad_size)
+                position_ids_rmpad_padded = pad_to_sequence_parallel(position_ids_rmpad)  # (total_nnz + pad_size, 1)
+                position_ids_rmpad_padded = position_ids_rmpad_padded.transpose(0, 1)  # (1, total_nnz + pad_size)
+
+                # form a batch and feed into the model
+                forward_batch = {
+                    'input_ids': input_ids_rmpad_padded,
+                    'cu_seqlens': cu_seqlens,
+                    'max_s': max_seqlen_in_batch,
+                    'total_s': total_s,
+                    'position_ids': position_ids_rmpad_padded.squeeze(0),
+                    'host_seqlens': cu_seqlens.cpu(),
+                }
+
+                input_shape = torch.Size([input_ids_rmpad_padded.shape[-1] // tp_size, 1, args.hidden_size])
+
+            input_shapes.append(input_shape)
+
+            forward_batch['indices'] = indices
+            micro_batches_with_inputs.append({'forward_batch': forward_batch, 'micro_batch': micro_batch})
+
+        return micro_batches_with_inputs, input_shapes
+
+    def _forward_backward_batch(self, batches: list[TensorDict], response_length, forward_only=False):
+        from megatron import get_args
+        from dist_attn import context_parallel
 
         num_microbatches = len(batches)
+
+        pp_size = mpu.get_pipeline_model_parallel_world_size()
+        cp_size = mpu.get_context_parallel_world_size()
+        cp_group = mpu.get_context_parallel_group()
+
+        assert num_microbatches >= pp_size, \
+            f'num_microbatches must be greater or equal to pp size. Got {num_microbatches=}, {pp_size=}'
 
         args = get_args()
         assert not args.scale_loss_in_gradient
@@ -158,52 +260,43 @@ class MegatronPPOCritic(BasePPOCritic):
                 'critic/vf_clipfrac': vf_clipfrac.detach().item(),
                 'critic/vpred_mean': masked_mean(vpreds, eos_mask).detach().item(),
                 'critic/tokens_per_micro_batch_update': attention_mask.sum().detach().item(),
+                'seq_vf': seq_vf
                 # 'critic/seqlen': seqlen,
             }
             return loss, stats
 
         def forward_step(batch_iter, model):
-            micro_batch = next(batch_iter)
+            micro_batch_with_inputs = next(batch_iter)
+            micro_batch = micro_batch_with_inputs['micro_batch']
+            forward_batch = micro_batch_with_inputs['forward_batch']
+
             input_ids = micro_batch['input_ids']
-            attention_mask = micro_batch['attention_mask']
-            input_ids = micro_batch['input_ids'].to(torch.int64)
-            attention_mask = micro_batch['attention_mask'].to(torch.int64)
-
-            position_ids = compute_position_id_with_mask(attention_mask)
-
+            responses = micro_batch['responses']
+            indices = forward_batch['indices']
+            total_s = forward_batch['total_s']
+            response_length = responses.size(1)
             batch_size, sequence_length = input_ids.shape
-
-            # remove padding here
-            input_ids_rmpad, indices, cu_seqlens, max_seqlen_in_batch = unpad_input(input_ids.unsqueeze(-1),
-                                                                                    attention_mask=attention_mask)
-            # TODO(zhangchi.usc1992): optimize this
-            position_ids_rmpad = unpad_input(position_ids.unsqueeze(-1),
-                                             attention_mask=attention_mask)[0]  # (total_nnz, 1)
-
-            total_s = input_ids_rmpad.shape[0]
-
-            # pad to sequence parallel size
-            input_ids_rmpad_padded = pad_to_sequence_parallel(input_ids_rmpad)  # (total_nnz + pad_size, 1)
-            input_ids_rmpad_padded = input_ids_rmpad_padded.transpose(0, 1)  # (1, total_nnz + pad_size)
-            position_ids_rmpad = position_ids_rmpad.transpose(0, 1)
-
-            # form a batch and feed into the model
-            forward_batch = {
-                'input_ids': input_ids_rmpad_padded,
-                'cu_seqlens': cu_seqlens,
-                'max_s': max_seqlen_in_batch,
-                'total_s': total_s,
-                'position_ids': position_ids_rmpad,
-                'host_seqlens': cu_seqlens.cpu(),
-                'padded_seq_len':
-                    input_ids_rmpad_padded.shape[-1]  # how should we pass this?
-            }
 
             output = model(batch=forward_batch)
 
             if mpu.is_pipeline_last_stage():
-                values = output['logits'].squeeze(dim=1)  # (total_nnz_padded,)
-                values = values[:total_s]
+                values = output['logits'].squeeze(dim=1).float()  # (total_nnz_padded,)
+
+                if cp_size > 1:
+                    loss_mask = forward_batch['loss_mask']
+                    cu_seqlens_splited = forward_batch.get("cu_seqlens_splited", None)
+                    max_s = forward_batch.get("max_s", None)
+                    values = context_parallel.get_context_parallel_output(values, cp_group, 0, cu_seqlens_splited,
+                                                                          max_s, True, True)
+
+                    loss_mask = context_parallel.get_context_parallel_output(loss_mask, cp_group, 0, cu_seqlens_splited,
+                                                                             max_s, True, True)
+                    # remove padding of cp/tp
+                    values = torch.masked_select(values, loss_mask.bool())
+
+                else:
+                    # remove padding of tp
+                    values = values[:total_s]
 
                 # pad log_prob into full
                 values = pad_input(values.unsqueeze(-1), indices, batch_size,
@@ -217,16 +310,10 @@ class MegatronPPOCritic(BasePPOCritic):
                 hidden_states = output['hidden_states']
                 return hidden_states, partial(loss_func, micro_batch=micro_batch)
 
-        from verl.utils.megatron.pipeline_parallel import make_batch_generator, compute_transformers_input_shapes
-        batch_generator = make_batch_generator(batches, vpp_size=len(self.module))
+        from verl.utils.megatron.pipeline_parallel import make_batch_generator
 
-        input_shapes = compute_transformers_input_shapes(
-            batches,
-            meta_info={
-                'sequence_parallel': True,
-                'hidden_size':
-                    args.hidden_size  # bad! we assume this is universal
-            })
+        micro_batches_with_inputs, input_shapes = self._preprocess_micro_batches(batches)
+        batch_generator = make_batch_generator(micro_batches_with_inputs, vpp_size=len(self.module))
 
         assert args.use_distributed_optimizer
 
@@ -333,7 +420,10 @@ class MegatronPPOCritic(BasePPOCritic):
             metric_micro_batch = self._forward_backward_batch(micro_batches,
                                                               response_length=response_length,
                                                               forward_only=False)
+
             for metric in metric_micro_batch:
+                seq_vf = metric.pop('seq_vf')
+                seq_level_vf_lst.append(seq_vf)
                 append_to_dict(metrics, metric)  # append the metric from this micro-batch to global metrics.
             optimizer_metrics = self._optimizer_step(is_last_mini_batch=batch_idx == num_mini_batches - 1)
             append_to_dict(metrics, optimizer_metrics)
@@ -346,4 +436,14 @@ class MegatronPPOCritic(BasePPOCritic):
                                                     src=mpu.get_pipeline_model_parallel_last_rank(),
                                                     group=mpu.get_pipeline_model_parallel_group())
             metrics = object_list[-1]  # take from last pp
-        return None, metrics
+
+            ret_list = [None] * mpu.get_pipeline_model_parallel_world_size()
+            ret_list[-1] = seq_level_vf_lst
+            torch.distributed.broadcast_object_list(object_list=ret_list,
+                                                    src=mpu.get_pipeline_model_parallel_last_rank(),
+                                                    group=mpu.get_pipeline_model_parallel_group())
+            seq_level_vf_lst = ret_list[-1]  # take from last pp
+
+        seq_vf = torch.cat(seq_level_vf_lst, dim=0)
+
+        return seq_vf, metrics

@@ -20,6 +20,7 @@ TEST_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlh
 default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/test/m8_680m_ppo
 recipe=tasks_scripts/recipes/h20/m8_680m_grpo_megatron.yaml
 
+
 # 训练长度
 max_prompt_length=2048
 max_response_length=2048

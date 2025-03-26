@@ -36,10 +36,15 @@ class MegatronDataGatherManager(BaseShardingManager):
 
     def preprocess_data(self, data: DataProto) -> DataProto:
         """
-        AllGather data from tp/pp region
+        AllGather data from tp/pp/cp region
         """
-        group = mpu.get_model_parallel_group()
-        group_size = mpu.get_tensor_model_parallel_world_size() * mpu.get_pipeline_model_parallel_world_size()
+
+        # Note(zhangchi.usc1992): the naming here is very confusing
+        group = mpu.get_model_parallel_group(with_context_parallel=False)
+        group_size = mpu.get_tensor_model_parallel_world_size() * mpu.get_pipeline_model_parallel_world_size() \
+            * mpu.get_context_parallel_world_size()
+
+        assert torch.distributed.get_world_size(group=group) == group_size
 
         if group_size > 1:
             prev_device = data.batch.device
@@ -55,8 +60,9 @@ class MegatronDataGatherManager(BaseShardingManager):
         return data
 
     def postprocess_data(self, data: DataProto) -> DataProto:
-        group = mpu.get_model_parallel_group()
-        group_size = mpu.get_tensor_model_parallel_world_size() * mpu.get_pipeline_model_parallel_world_size()
+        group = mpu.get_model_parallel_group(with_context_parallel=False)
+        group_size = mpu.get_tensor_model_parallel_world_size() * mpu.get_pipeline_model_parallel_world_size() \
+            * mpu.get_context_parallel_world_size()
         local_rank = torch.distributed.get_rank(group=group)
 
         if group_size > 1:

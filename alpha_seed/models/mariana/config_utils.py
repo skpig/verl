@@ -127,7 +127,7 @@ def convert_hf_config_to_mariana(hf_config: M8Config, model_implementation):
         context_parallel_use_all_gather = False,
         enable_hybrid_data_parallel = False,
         cross_entropy_fusion = 'none',
-        rope_gen_method = 'loader',
+        rope_gen_method = 'fast',
         fp8_use_bf16_layers='',
         # ========== configurations for training algos ========
         skip_n_iters=-1,

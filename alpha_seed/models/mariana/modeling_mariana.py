@@ -46,20 +46,6 @@ class MarianaForCausalLM(PretrainMegatronGPT2LMHeadModel):
     redundant outputs. This can represent any seed models. So, no need to distinguish version (e.g., p7, m8, m9.)
     """
 
-    def __init__(self, model_config: ModelConfig, megatron_config: MegatronConfig, pre_process=True, post_process=True):
-        super().__init__(model_config, megatron_config, pre_process, post_process)
-        self.rotary_embedding = RotaryEmbedding(
-            self.model_config.hidden_size // self.model_config.n_head,
-            max_seq_len=self.model_config.max_position_embeddings,
-            rope_scale=self.model_config.rope_scale,
-            base=self.model_config.rope_base,
-            mode=self.model_config.rope_mode,
-            distributed_sequence_parallel_size=self.megatron_config.distributed_sequence_parallel_size,
-            context_parallel_size=self.megatron_config.get("context_parallel_size", 1),
-            rope_cut=self.model_config.rope_cut,
-            rope_cut_head_dim=self.model_config.rope_cut_head_dim,
-            rope_force_fp32=self.model_config.rope_force_fp32)
-
     def _forward_model(self, batch: dict[str, torch.Tensor]):
         enable_dsp = self.megatron_config.sequence_data_parallel_size > 1
         enable_sp = self.megatron_config.sequence_parallel
@@ -69,13 +55,9 @@ class MarianaForCausalLM(PretrainMegatronGPT2LMHeadModel):
         cu_seqlens = batch.get("cu_seqlens", None)
         padded_seq_len = batch.get("padded_seq_len", None)
         seq_lens_start_end = batch.get("seq_lens_start_end", None)
+        cp_manager = batch.get("cp_manager", None)
 
-        # TODO(zhangchi.usc1992): how should we pass s_max?
-        self.rotary_embedding.generate_pos_embs(host_seqlens,
-                                                host_seqlens.device,
-                                                s_max=padded_seq_len,
-                                                seq_lens_start_end=seq_lens_start_end)
-        hidden_states, activation_stats, _ = self.transformer(
+        hidden_states, activation_stats, cp_manager = self.transformer(
             input_ids=batch["input_ids"],  # pad to tp size
             position_ids=batch.get("position_ids", None),  # use this. remove sin/cos
             cu_seqlens=cu_seqlens,  # do not pad tp region
@@ -89,9 +71,7 @@ class MarianaForCausalLM(PretrainMegatronGPT2LMHeadModel):
             seq_offset_q=batch.get("seq_offset_q", None),  # dsp, useless
             host_seqlens=host_seqlens,  # give None, useless
             max_seq_len=max_seq_len,  # useless
-            cos_embs_indices=self.rotary_embedding.cos_embs,  # TODO: remove this
-            sin_embs_indices=self.rotary_embedding.sin_embs  # TODO: remove this
-        )
+            cp_manager=cp_manager)
         return hidden_states
 
     def _forward_head(self, hidden_states):
@@ -117,6 +97,7 @@ class MarianaForTokenClassification(MarianaForCausalLM):
     def __init__(self, model_config: TrainConfig, megatron_config: MegatronConfig, pre_process=True, post_process=True):
         super().__init__(model_config, megatron_config, pre_process, post_process)
         if self.post_process:
+            # TODO: make sure all the rank contains the same value. Maybe add broadcast
             self.score_head = nn.Linear(in_features=self.model_config.hidden_size, out_features=1, bias=True)
             sp_utils.mark_parameter_as_sequence_parallel(self.score_head.weight)
             sp_utils.mark_parameter_as_sequence_parallel(self.score_head.bias)

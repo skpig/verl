@@ -1,7 +1,7 @@
 """
 This script runs a mariana model forward and forward + backward + optimizer step
 
-torchrun --nproc_per_node 8 --standalone tests/models/mariana/test_mariana_model.py
+torchrun --nproc_per_node 4 --standalone tests/models/mariana/test_mariana_model.py
 """
 
 # Copyright 2024 Bytedance Ltd. and/or its affiliates
@@ -144,9 +144,9 @@ def main(config: DictConfig):
     from verl.utils.model import compute_position_id_with_mask, create_random_mask
     from verl.utils.torch_functional import masked_mean
 
-    batch_size = 8
-    max_prompt_length = 128
-    max_response_length = 256
+    batch_size = 2
+    max_prompt_length = 4
+    max_response_length = 4
 
     log_gpu_memory_usage(head='After constructing MegatronPPOActor')
 
@@ -161,17 +161,22 @@ def main(config: DictConfig):
                                         max_ratio_of_left_padding=0.2,
                                         min_ratio_of_valid_token=0.6)
 
-    dist.broadcast(input_ids, src=mpu.get_tensor_model_parallel_src_rank(), group=mpu.get_tensor_model_parallel_group())
-    dist.broadcast(attention_mask,
-                   src=mpu.get_tensor_model_parallel_src_rank(),
-                   group=mpu.get_tensor_model_parallel_group())
+    dist.broadcast(input_ids, src=0)
+    dist.broadcast(attention_mask, src=0)
 
-    dist.broadcast(input_ids,
-                   src=mpu.get_pipeline_model_parallel_first_rank(),
-                   group=mpu.get_pipeline_model_parallel_group())
-    dist.broadcast(attention_mask,
-                   src=mpu.get_pipeline_model_parallel_first_rank(),
-                   group=mpu.get_pipeline_model_parallel_group())
+    # dist.broadcast(input_ids, src=mpu.get_tensor_model_parallel_src_rank(), group=mpu.get_tensor_model_parallel_group())
+    # dist.broadcast(attention_mask,
+    #                src=mpu.get_tensor_model_parallel_src_rank(),
+    #                group=mpu.get_tensor_model_parallel_group())
+
+    # dist.broadcast(input_ids,
+    #                src=mpu.get_pipeline_model_parallel_first_rank(),
+    #                group=mpu.get_pipeline_model_parallel_group())
+    # dist.broadcast(attention_mask,
+    #                src=mpu.get_pipeline_model_parallel_first_rank(),
+    #                group=mpu.get_pipeline_model_parallel_group())
+
+    # dist.broadcast(input_ids, src=mpu.get_context_parallel_global_ranks())
 
     response_mask = attention_mask[:, -max_response_length:]
 
@@ -188,8 +193,9 @@ def main(config: DictConfig):
                                       meta_info={
                                           'response_length': max_response_length,
                                           'use_dynamic_bsz': True,
-                                          'max_token_len': 512
+                                          'max_token_len': 8
                                       })
+    config.actor_rollout_ref.actor.ppo_max_token_len = 8
 
     # step 5: perform forward
     entropy, logprobs = actor.compute_log_prob(data=data)
