@@ -63,7 +63,7 @@ import matplotlib.pyplot as plt
 import ray
 from single_controller.base.worker import Worker
 from single_controller.base.decorator import register, Dispatch
-from single_controller.ray.base import RayResourcePool, RayClassWithInitArgs, RayWorkerGroup
+from single_controller.ray import RayResourcePool, RayClassWithInitArgs, RayWorkerGroup
 
 import logging
 
