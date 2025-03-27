@@ -1,6 +1,7 @@
 import ray
 import os
 import re
+import inspect
 
 import hdfs_io
 
@@ -96,13 +97,24 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
             else:
                 ckpt_state['optimizer'] = self.optimizer
         if strategy == 'fsdp':
+            sig = inspect.signature(omnistore.FSDPCheckpointer.load)
+            if "kwargs" in sig.parameters:
+                additional_kwargs_dict = {"metrics_supplement": {"ray_actor_name": self.ray_actor_name, "role": role}}
+            else:
+                additional_kwargs_dict = {}
             omnistore.FSDPCheckpointer.load(
                 hdfs_path,
                 ckpt_state,
                 enable_shm_download_ckpt_tmp=enable_shm,
                 role=role,
+                **additional_kwargs_dict,
             )
         elif strategy == 'megatron':
+            sig = inspect.signature(omnistore.MegatronCheckpointer.load)
+            if "kwargs" in sig.parameters:
+                additional_kwargs_dict = {"metrics_supplement": {"ray_actor_name": self.ray_actor_name, "role": role}}
+            else:
+                additional_kwargs_dict = {}
             omnistore.MegatronCheckpointer.load(
                 hdfs_path,
                 ckpt_state,
@@ -110,6 +122,7 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
                 allow_extra_state_not_exists=True,
                 allow_client_state_not_exists=True,
                 role=role,
+                **additional_kwargs_dict,
             )
         else:
             raise NotImplementedError(f'Alpha-seed OmniStore checkpointer does not support strategy {strategy}')
@@ -161,6 +174,16 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
 
             print(f'[rank-{self.rank}]: Saving checkpoint to {os.path.abspath(path)} with omnistore')
             if strategy == 'fsdp':
+                sig = inspect.signature(omnistore.FSDPCheckpointer.save)
+                if "kwargs" in sig.parameters:
+                    additional_kwargs_dict = {
+                        "metrics_supplement": {
+                            "ray_actor_name": self.ray_actor_name,
+                            "role": role
+                        }
+                    }
+                else:
+                    additional_kwargs_dict = {}
                 omnistore.FSDPCheckpointer.save(
                     path,
                     ckpt_state,
@@ -170,8 +193,19 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
                     global_steps=global_step,
                     role=role,
                     ignore_append_global_steps_to_folder=True,
+                    **additional_kwargs_dict,
                 )
             elif strategy == 'megatron':
+                sig = inspect.signature(omnistore.MegatronCheckpointer.save)
+                if "kwargs" in sig.parameters:
+                    additional_kwargs_dict = {
+                        "metrics_supplement": {
+                            "ray_actor_name": self.ray_actor_name,
+                            "role": role
+                        }
+                    }
+                else:
+                    additional_kwargs_dict = {}
                 omnistore.MegatronCheckpointer.save(
                     path,
                     ckpt_state,
@@ -181,6 +215,7 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
                     global_steps=global_step,
                     role=role,
                     ignore_append_global_steps_to_folder=True,
+                    **additional_kwargs_dict,
                 )
             else:
                 raise NotImplementedError(f'Alpha-seed OmniStore checkpointer does not support strategy {strategy}')

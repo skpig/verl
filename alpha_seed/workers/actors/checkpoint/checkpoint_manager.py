@@ -39,7 +39,7 @@ class BaseCheckpointManager:
         self.lr_scheduler = lr_scheduler
         self.hf_config = hf_config
         self.tokenizer = tokenizer
-
+        self.ray_actor_name = ray.get_runtime_context().get_actor_name()
         self.rank = torch.distributed.get_rank()
 
     def load_checkpoint(self, *args, **kwargs):
