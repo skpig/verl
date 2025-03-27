@@ -455,6 +455,7 @@ class InferenceSession:
     def empty_cache(self):
         self.cache_manager.empty_cache()
         self.infer_scheduler.empty_cache()
+        self.stop_signal_tensor = torch.tensor([0.0]).float().cuda()
         self.waiting = []
         self.running = []
         self.finished = {}
