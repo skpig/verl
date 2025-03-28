@@ -340,7 +340,7 @@ trainer:
   # auto: find the last ckpt to resume. If can't find, start from scratch
   resume_steps: auto
   auto_over_others: False
-  ckpt_version: v1
+  ckpt_version: omnistore
   ckpt_enable_shm: False
   ckpt_upload_retry_count: 3
   remove_safetensors_after_init: False
