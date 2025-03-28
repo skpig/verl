@@ -371,6 +371,8 @@ class CriticWorker(Worker):
             enable_shm_download_ckpt_tmp=False,
             checkpoint_state=ckpt_state,
             loader_in_split_mode=False,
+            ignore_model_keys={r'.*\.score_head\.weight$', r'.*\.score_head\.bias$'}
+            if self.config.load_score_head is False else None,
         )
 
         # build optimizer
