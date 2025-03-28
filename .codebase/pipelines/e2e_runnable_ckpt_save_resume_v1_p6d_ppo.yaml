@@ -45,7 +45,7 @@ jobs:
           - cd verl
           - pip3 install -e . --user
           - pip3 install bytedance.ndtimeline --upgrade
-          - pip3 install byted-omnistore==0.7.11
+          - pip3 install byted-omnistore==0.7.12
           - pip3 install pylatexenc
 
       - name: p6d ppo ckpt save resume v1

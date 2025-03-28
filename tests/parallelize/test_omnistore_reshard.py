@@ -11,7 +11,7 @@ from torch.distributed._tensor import DTensor
 
 from tests.parallelize.test_save_load import build_model, train_one_step, save_omnistore, load_omnistore
 from omnistore.utilities.ckpt_format.merge_tool import omnistore_ckpt_to_pytorch_ckpt
-from omnistore import RLFSDPCheckpointer
+from omnistore.planner.common import GLOBAL_PLAN_CACHE
 
 
 def diff(x1, x2, prefix=()):
@@ -84,7 +84,7 @@ def model_save_load_fsdp_hsdp_tp_omnistore_reshard(fsdp_size_save: int,
     model_load, optim_load, meshes = build_model(fsdp_size=fsdp_size_load,
                                                  tp_size=tp_size_load,
                                                  optimizer_type=optimizer_type)
-    RLFSDPCheckpointer._RLFSDPCheckpointer__cleanup()
+    GLOBAL_PLAN_CACHE.clear()
     # load
     load_omnistore(model_load, optim_load, f"/tmp/ckpt/fsdp_{fsdp_size_save}_tp_{tp_size_save}")
     # save again

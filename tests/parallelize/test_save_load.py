@@ -25,7 +25,7 @@ import os
 from .test_parallel_init import DummyModel, tp_plan, MLP
 from alpha_seed.models.transformers.parallel.parallelize import parallelize_module
 import torch.distributed.checkpoint as dcp
-from omnistore import RLFSDPCheckpointer
+from omnistore import FSDPCheckpointer
 
 os.environ['NCCL_DEBUG'] = '0'
 
@@ -190,7 +190,7 @@ def save_omnistore(model, optimizer, folder):
         'random': random.getstate(),
     }
     ckpt_dict = {"model": model, "optimizer": optimizer, "extra_state": {"rng_state": rng}}
-    RLFSDPCheckpointer.save(
+    FSDPCheckpointer.save(
         folder,
         ckpt_dict,
     )
@@ -198,7 +198,7 @@ def save_omnistore(model, optimizer, folder):
 
 def load_omnistore(model, optimizer, folder):
     ckpt_dict = {"model": model, "optimizer": optimizer, "extra_state": {}}
-    RLFSDPCheckpointer.load(folder, ckpt_dict)
+    FSDPCheckpointer.load(folder, ckpt_dict)
     rng = ckpt_dict["extra_state"]["rng_state"]
     torch.cuda.random.set_rng_state(rng['cuda'])
     torch.random.set_rng_state(rng['cpu'])

@@ -32,7 +32,7 @@ def check_omnistore_version():
             f'{REQUIRED_OMNISTORE_VERSION} or higher. Example command: pip3 install --upgrade byted-omnistore.'
     except importlib.metadata.PackageNotFoundError as e:
         print(f'byted-omnistore not installed. Please install it and upgrade to version {REQUIRED_OMNISTORE_VERSION} '
-              'or higher. Example command: pip3 install --upgrade byted-omnistore.')
+              f'or higher. Example command: pip3 install byted-omnistore=={REQUIRED_OMNISTORE_VERSION}.')
         raise e
 
 
