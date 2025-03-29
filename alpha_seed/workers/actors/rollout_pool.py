@@ -1,3 +1,5 @@
+import numpy as np
+from collections import defaultdict
 import ray
 import queue
 import random
@@ -21,6 +23,9 @@ class RolloutPool:
         self.history_pool = dict()
         self.bon_ready_batch = queue.Queue()
 
+        self.pool_with_grad = queue.Queue()
+        # self.pool_with_grad_ready_batch = queue.Queue()
+
     def get_train_batch(self, return_batch_size):
         return self.fn_map[self.strategy](return_batch_size)
 
@@ -36,6 +41,46 @@ class RolloutPool:
                 self.bon_ready_batch.put(index)
         print("[fill_rollout_pool] fill_batch:", len(batch_lst), "bon_ready_batch:",
               self.bon_ready_batch.qsize() * self.num_bon, "pool_size:", self.pool_size)
+
+    def fill_rollout_pool_dynamic_sampling(self, batch):
+        batch_lst = batch.chunk(len(batch))
+        # score，根据score来判定要不要进pool_with_grad
+        id2data = defaultdict(list)
+        id2acc = defaultdict(list)
+
+        size_before_fill = self.pool_with_grad.qsize()
+
+        # get acc
+        for item in batch_lst:
+            score = item.batch['token_level_scores'].sum(-1).item()
+            id2acc[item.non_tensor_batch['rollout_id'][0]].append(score)
+            id2data[item.non_tensor_batch['rollout_id'][0]].append(item)
+        for k, v in id2acc.items():
+            id2acc[k] = np.mean(v)
+
+        for k, v in id2acc.items():
+            if self.config.algorithm.dynamic_sampling.strategy == 'v1':
+                if v != self.config.algorithm.dynamic_sampling.min_score and v != self.config.algorithm.dynamic_sampling.max_score:
+                    for item in id2data[k]:
+                        self.pool_with_grad.put(item)
+            elif self.config.algorithm.dynamic_sampling.strategy == 'v2':
+                if v >= self.config.algorithm.dynamic_sampling.min_score and v <= self.config.algorithm.dynamic_sampling.max_score:
+                    for item in id2data[k]:
+                        self.pool_with_grad.put(item)
+            elif self.config.algorithm.dynamic_sampling.strategy == 'v3':
+                if v > self.config.algorithm.dynamic_sampling.min_score and v < self.config.algorithm.dynamic_sampling.max_score:
+                    for item in id2data[k]:
+                        self.pool_with_grad.put(item)
+
+        print("[fill_rollout_pool_dynamic_sampling] fill_batch:", len(batch_lst), "pool_size before fill:",
+              size_before_fill, "pool_size after fill:", self.pool_with_grad.qsize())
+        return self.pool_with_grad.qsize() - size_before_fill, self.pool_with_grad.qsize()
+
+    def get_dynamic_sampling_pool_size(self):
+        return self.pool_with_grad.qsize()
+
+    def pool_with_grad_clear(self):
+        self.pool_with_grad = queue.Queue()
 
     def get_train_batch_default(self, return_batch_size):
         return_batch = []
@@ -64,6 +109,14 @@ class RolloutPool:
         print("[get_train_batch] total_train_bsz:", return_batch_size, "complete_bon_bsz:", complete_bon_bsz,
               "incomplete_bon_bsz:", incomplete_bon_bsz, "pool size:", self.pool_size, "history_pool size:",
               len(self.history_pool) * self.num_bon)
+        return return_batch
+
+    def get_train_batch_grad(self, return_batch_size):
+        return_batch = []
+        while return_batch_size > 0:
+            item = self.pool_with_grad.get()
+            return_batch.append(item)
+            return_batch_size -= 1
         return return_batch
 
     @staticmethod

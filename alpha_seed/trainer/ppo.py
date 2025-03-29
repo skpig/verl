@@ -269,6 +269,36 @@ def reduce_metrics(metrics: dict):
     return metrics
 
 
+def calculate_batch_bon_metrics(batch: DataProto, prefix):
+    id2acc = defaultdict(list)
+    cur_bsz = batch.batch.batch_size[0]
+    for i in range(cur_bsz):
+        index = batch.non_tensor_batch['index'][i]
+        score = batch.batch['token_level_scores'][i].sum().item()
+        id2acc[index].append(score)
+    for key, val_lst in id2acc.items():
+        acc = (np.mean(val_lst).item() + 1) / 2
+        id2acc[key] = acc
+    metrics = {
+        f"{prefix}/acc_100": len(list(filter(lambda x: x == 1.0, id2acc.values()))) / len(id2acc),
+        f"{prefix}/acc_80+": len(list(filter(lambda x: x > 0.8, id2acc.values()))) / len(id2acc),
+        f"{prefix}/acc_50+": len(list(filter(lambda x: x > 0.5, id2acc.values()))) / len(id2acc),
+        f"{prefix}/acc_20+": len(list(filter(lambda x: x > 0.2, id2acc.values()))) / len(id2acc),
+        f"{prefix}/acc_10+": len(list(filter(lambda x: x > 0.1, id2acc.values()))) / len(id2acc),
+        f"{prefix}/acc_0": len(list(filter(lambda x: x == 0, id2acc.values()))) / len(id2acc),
+    }
+    return metrics
+
+
+def merge_metrics(merged_metrics, metrics2):
+    for key, val in metrics2.items():
+        if key not in merged_metrics:
+            merged_metrics[key] = val
+        else:
+            merged_metrics[key] += val
+    return merge_metrics
+
+
 def merge_ministeps_metrics(ministeps_metrics: List[dict]):
     merged_metrics = {}
     for idx, metrics in enumerate(ministeps_metrics):
@@ -1615,6 +1645,8 @@ class RayPPOTrainer(object):
         # TODO: add staleness
         standalone_batch = []
         pending_batch = []
+        rollout_counter = 0
+        rollout_pool_metrics = {}
         while True:
             for batch_dict in self.train_dataloader:
                 metrics = {}
@@ -1693,6 +1725,50 @@ class RayPPOTrainer(object):
                     if self.config.algorithm.priority_sample:
                         self.sample_pool.update_priority_dict(batch)
 
+                    with Timer(name='dynamic_sampling', logger=None) as timer:
+                        if self.config.algorithm.dynamic_sampling.enable:
+                            batch_metrics_before_fill = calculate_batch_bon_metrics(batch, "rollout_pool")
+                            merge_metrics(rollout_pool_metrics, batch_metrics_before_fill)
+
+                            # fill rollout out pool with grad
+                            fill_size, pool_size = ray.get(
+                                self.rollout_pool.fill_rollout_pool_dynamic_sampling.remote(batch))
+                            return_batch_size = self.config.data.actor_training_batch_size * self.num_bon
+                            rollout_counter += 1
+                            if ray.get(self.rollout_pool.get_dynamic_sampling_pool_size.remote()) < return_batch_size:
+                                print(
+                                    f'[RolloutPool] pool_with_grad_size: {ray.get(self.rollout_pool.get_dynamic_sampling_pool_size.remote())}'
+                                )
+                                metrics[f'rollout_pool/fill_size_{rollout_counter}'] = fill_size
+                                metrics[f'rollout_pool/pool_size_{rollout_counter}'] = pool_size
+                                if rollout_counter > 10:
+                                    assert False, 'Do not make sense. Check Your DATA!!!'
+                                continue
+                            else:
+                                train_batch = ray.get(self.rollout_pool.get_train_batch_grad.remote(return_batch_size))
+                                batch = DataProto.concat(train_batch)
+                                batch.meta_info[
+                                    'generation_kwargs'] = self.config.actor_rollout_ref.rollout.train_generate_kwargs
+                                batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask'],
+                                                                                dim=-1).tolist()
+                                metrics['rollout/training_batch'] = len(batch)
+                                for key in rollout_pool_metrics:  # fix: mean acc for each rollout batch
+                                    if '/acc_' in key and type(rollout_pool_metrics[key]) in [float, int]:
+                                        rollout_pool_metrics[key] /= rollout_counter
+                                print(
+                                    f'[RolloutPool] BeginTraining pool_with_grad_size: {ray.get(self.rollout_pool.get_dynamic_sampling_pool_size.remote())}'
+                                )
+                            if self.config.algorithm.dynamic_sampling.sync:
+                                ray.get(self.rollout_pool.pool_with_grad_clear.remote())
+                                print(
+                                    f'[RolloutPool] AfterClear pool_with_grad_size: {ray.get(self.rollout_pool.get_dynamic_sampling_pool_size.remote())}'
+                                )
+                            rollout_pool_metrics['rollout_pool/fill_counter'] = rollout_counter
+                            metrics.update(rollout_pool_metrics)
+                            rollout_pool_metrics = {}
+                            rollout_counter = 0
+                    metrics['timing/dynamic_sampling'] = timer.last
+
                     if self.config.algorithm.mask_overlong:
                         prompt_length = self.config.data.max_prompt_length
                         if 'max_new_tokens' in batch.non_tensor_batch:
@@ -1700,7 +1776,8 @@ class RayPPOTrainer(object):
                         else:
                             response_length = self.config.data.max_response_length
                         valid_response_length = batch.batch['attention_mask'][:, prompt_length:].sum(-1)
-                        is_overlong = (response_length == valid_response_length) & (raw_scores_log == -1)
+                        is_overlong = (response_length == valid_response_length) & (batch.batch['raw_scores'].sum(-1)
+                                                                                    < 0)
                         # batch.batch['attention_mask'][is_overlong] = 0
                         # batch.batch['answer_attention_mask'][is_overlong] = 0
                         batch.batch['overlong_mask'] = (~is_overlong).int()

@@ -19,6 +19,7 @@ data:
   num_prompts_per_data: 1
   BITWISE_RESUME: True  # this enables by default. If you seed checkpoint load fails, set to false
   data_auto_repeat: False # Set to true and automatically repeat the dataset by total_epochs times, mainly for no drop_last
+  actor_training_batch_size: ${data.train_batch_size}
 
 
 actor_rollout_ref:
@@ -277,7 +278,16 @@ reward_model:
   length_ema_method: mean
 
 algorithm:
+  group_shuffle: False
+
   shuffle_sample_batch: False
+
+  dynamic_sampling:
+    enable: False
+    sync: True
+    strategy: v3
+    min_score: -1
+    max_score: 1
 
   prior_sampling: 
     enable: False

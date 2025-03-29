@@ -158,6 +158,17 @@ def select_training_samples_v2(batch, strategy, config):
             final_samples = final_samples[:final_bsz]
     final_samples = sorted(final_samples, key=lambda x: x["index"])
 
+    if config.algorithm.group_shuffle:
+        index_list = list(map(lambda x: x["index"][0], final_samples))
+        from itertools import groupby
+        indices = np.arange(len(index_list))
+        grouped_indices = [
+            list(map(lambda x: x[0], group)) for key, group in groupby(enumerate(index_list), key=lambda x: x[1])
+        ]
+        np.random.shuffle(grouped_indices)
+        shuffled_indices = np.concatenate(grouped_indices)
+        final_samples = [final_samples[i] for i in shuffled_indices]
+
     # step4, 处理成DataProto格式
     tensors = defaultdict(list)
     final_non_tensor_batch = defaultdict(list)
