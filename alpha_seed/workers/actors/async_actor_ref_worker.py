@@ -52,10 +52,10 @@ import numpy as np
 from alpha_seed.utils import ndtimeline
 from alpha_seed.workers.hybrid_engine.fsdp_gather import DataGatherManager
 from alpha_seed.models.transformers.parallel import apply_parallel_plan
-from .initialize import (create_mesh, parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init,
-                         cleanup_local_tmp_folder_safetensors_files)
-from alpha_seed.workers.actors import activation_offload
-from .checkpoint.extensions import register_dtensor_save_hook
+from ..fsdp.initialize import (create_mesh, parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init,
+                               cleanup_local_tmp_folder_safetensors_files)
+from alpha_seed.workers.fsdp.offload import activation_offload
+from ..fsdp.extensions import register_dtensor_save_hook
 from alpha_seed.workers.ppo_actor import DataParallelPPOActor
 from alpha_seed.utils.kernels.persist_gemm import deploy_persist_gemm, undelopy_persist_gemm
 from alpha_seed.models.transformers.parallel.collectives import get_memory

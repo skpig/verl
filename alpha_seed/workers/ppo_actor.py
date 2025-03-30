@@ -38,14 +38,13 @@ from verl.utils.model import compute_position_id_with_mask
 from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
 from dist_attn.ulysses.ops import gather_outputs
 from alpha_seed.workers.hybrid_engine.fsdp_gather import ulysses_pad_and_slice_inputs
-from alpha_seed.models.transformers.ops import clip_grad_norm_
+from alpha_seed.workers.fsdp.clip_grad_norm import clip_grad_norm_
 from alpha_seed.utils.observility.training_stats import sync_training_stats
 from alpha_seed.utils.observility import get_profiler_context_wrapped, profile_step
 from alpha_seed import core_algos
 from alpha_seed.models.transformers.monkey_patch import update_gate_ema
 from verl.utils.seqlen_balancing import rearrange_micro_batches, get_reverse_idx
 
-from alpha_seed.workers.actors import activation_offload
 from alpha_seed.workers.actors.offload import offload_fsdp_optimizer, load_fsdp_optimizer
 
 from contextlib import nullcontext

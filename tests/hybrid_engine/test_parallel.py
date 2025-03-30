@@ -46,16 +46,16 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import StateDictType
 from torch.distributed.fsdp.api import ShardingStrategy, MixedPrecision
 from transformers import AutoConfig, AutoModelForCausalLM
-from alpha_seed.workers.actors.initialize import create_mesh, parallel_load_safetensors, parallel_init_fsdp_fn, meta_device_init
+from alpha_seed.workers.fsdp.initialize import create_mesh, parallel_load_safetensors, parallel_init_fsdp_fn, meta_device_init
 from alpha_seed.workers.hybrid_engine.fsdp_gather import ulysses_pad_and_slice_inputs
 from dist_attn.ulysses.parallel_states import set_ulysses_sequence_parallel_group
 from dist_attn.ulysses.ops import gather_outputs
 from alpha_seed.models.transformers.monkey_patch import apply_monkey_patch
-from alpha_seed.workers.actors.checkpoint.extensions import register_dtensor_save_hook
+from alpha_seed.workers.fsdp.extensions import register_dtensor_save_hook
 from alpha_seed.models.transformers.parallel import apply_parallel_plan
-from alpha_seed.models.transformers.ops import clip_grad_norm_
+from alpha_seed.workers.fsdp.clip_grad_norm import clip_grad_norm_
 from alpha_seed.workers.actors.offload import offload_fsdp_optimizer, load_fsdp_optimizer
-from alpha_seed.workers.actors import activation_offload
+from alpha_seed.workers.fsdp.offload import activation_offload
 
 from verl.utils.debug import get_profiler_context, MemoryProfiler
 from verl.utils.fs import copy_local_path_from_hdfs

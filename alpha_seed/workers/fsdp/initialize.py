@@ -38,21 +38,20 @@ This module speeds up the loading process and
 addresses the issues of shared parameters in HF accelerate.
 """
 from typing import Callable, Dict
+import os
+import json
+import math
+import itertools
+import warnings
 from contextlib import contextmanager
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-import os
-import json
-import math
-from safetensors.torch import load_file
-import hdfs_io
-import itertools
-from verl.utils.fs import copy_local_path_from_hdfs
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed._tensor import Replicate, Shard
-from alpha_seed.models.transformers.parallel import TPSpec
-import warnings
+from safetensors.torch import load_file
+from verl.utils.fs import copy_local_path_from_hdfs
+from .extensions import TPSpec
 
 
 def calculate_device_mesh_shape(parallel_size):

@@ -1,4 +1,4 @@
-from alpha_seed.workers.actors.initialize import create_mesh
+from alpha_seed.workers.fsdp.initialize import create_mesh
 import torch.distributed as dist
 from ..launch import torchrun
 from functools import partial

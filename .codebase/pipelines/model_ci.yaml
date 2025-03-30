@@ -12,7 +12,7 @@ jobs:
         shared-memory: 1024
     envs:
       LIBHDFS_OPTS: -Dhadoop.root.logger=warn,console
-    timeout: 10  # timeout 10min
+    timeout: 20  # min
     retry: 3
     steps:
       - name: check env

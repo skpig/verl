@@ -5,7 +5,7 @@ import torch
 import torch.distributed
 import torch.nn as nn
 import warnings
-from .initialize import singleton
+from ..initialize import singleton
 import logging
 import math
 

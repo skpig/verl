@@ -1,7 +1,7 @@
 import torch
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp.fully_sharded_data_parallel import _get_grad_norm, _lazy_init
-from ..parallel.parallelize import TPSpec, Replicate
+from torch.distributed.fsdp.fully_sharded_data_parallel import _get_grad_norm
+from .extensions import TPSpec, Replicate
 import math
 import torch.distributed as dist
 import functools

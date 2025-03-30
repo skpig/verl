@@ -28,7 +28,7 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.api import ShardingStrategy, MixedPrecision
 
 from torch.distributed.device_mesh import init_device_mesh
-from alpha_seed.workers.actors.initialize import parallel_load_safetensors, parallel_init_fsdp_fn, meta_device_init
+from alpha_seed.workers.fsdp.initialize import parallel_load_safetensors, parallel_init_fsdp_fn, meta_device_init
 
 from verl.utils.fs import copy_local_path_from_hdfs
 from alpha_seed.workers.actors.offload import offload_fsdp_model_to_cpu, load_fsdp_model_to_gpu

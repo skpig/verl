@@ -25,7 +25,7 @@ from transformers import AutoConfig, AutoModelForCausalLM
 
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.api import ShardingStrategy, MixedPrecision, CPUOffload
-from alpha_seed.workers.actors.initialize import parallel_load_safetensors, parallel_init_fsdp_fn, meta_device_init, create_init_fn
+from alpha_seed.workers.fsdp.initialize import parallel_load_safetensors, parallel_init_fsdp_fn, meta_device_init, create_init_fn
 from omnistore import FSDPCheckpointer
 
 import time

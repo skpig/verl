@@ -9,11 +9,11 @@ from torch.distributed.fsdp import StateDictType, CPUOffload
 from torch.distributed.fsdp.api import ShardingStrategy, MixedPrecision
 from torch.distributed.fsdp import ShardedStateDictConfig, ShardedOptimStateDictConfig
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
-from alpha_seed.workers.actors.initialize import create_mesh, parallel_load_safetensors, parallel_init_fsdp_fn, meta_device_init
+from alpha_seed.workers.fsdp.initialize import create_mesh, parallel_load_safetensors, parallel_init_fsdp_fn, meta_device_init
 
-from alpha_seed.workers.actors.checkpoint.extensions import register_dtensor_save_hook
+from alpha_seed.workers.fsdp.extensions import register_dtensor_save_hook
 from tests.hybrid_engine.utils import print_each_rank
-from alpha_seed.models.transformers.ops import clip_grad_norm_
+from alpha_seed.workers.fsdp.clip_grad_norm import clip_grad_norm_
 
 import numpy as np
 import random

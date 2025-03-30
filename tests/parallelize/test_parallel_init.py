@@ -2,7 +2,7 @@ import torch
 from torch.distributed._tensor import Shard
 import torch.distributed as dist
 from alpha_seed.models.transformers.parallel.parallelize import parallelize_module
-from alpha_seed.workers.actors.initialize import meta_device_init
+from alpha_seed.workers.fsdp.initialize import meta_device_init
 from torch.distributed.device_mesh import init_device_mesh
 from alpha_seed.models.transformers.parallel.collectives import identity_allreduce, allreduce_identity
 

@@ -35,13 +35,13 @@ from verl.utils.fs import copy_local_path_from_hdfs
 from verl.utils.fsdp_utils import get_fsdp_wrap_policy
 from alpha_seed.models.transformers.parallel import apply_parallel_plan
 from alpha_seed.models.transformers.parallel.collectives import get_memory
-from .initialize import create_mesh
-from .initialize import parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init, cleanup_local_tmp_folder_safetensors_files
-from .checkpoint.extensions import register_dtensor_save_hook
+from ..fsdp.initialize import create_mesh
+from ..fsdp.initialize import parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init, cleanup_local_tmp_folder_safetensors_files
+from ..fsdp.extensions import register_dtensor_save_hook
 from .offload import (offload_fsdp_model_to_cpu, load_fsdp_model_to_gpu, offload_megatron_model_to_cpu,
                       load_megatron_model_to_gpu)
 from alpha_seed.workers.actors.offload import offload_fsdp_optimizer, load_fsdp_optimizer
-from alpha_seed.workers.actors import activation_offload
+from alpha_seed.workers.fsdp.offload import activation_offload
 from verl.utils.import_utils import import_external_libs
 from verl.utils.debug import log_gpu_memory_usage
 

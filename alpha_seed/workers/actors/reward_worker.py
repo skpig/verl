@@ -39,8 +39,8 @@ from alpha_seed.models.transformers.parallel import apply_parallel_plan
 from verl.utils.seqlen_balancing import rearrange_micro_batches
 from alpha_seed.utils import ndtimeline
 from alpha_seed.models.transformers.parallel.collectives import get_memory
-from .initialize import create_mesh, parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init, cleanup_local_tmp_folder_safetensors_files
-from .checkpoint.extensions import register_dtensor_save_hook
+from ..fsdp.initialize import create_mesh, parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init, cleanup_local_tmp_folder_safetensors_files
+from ..fsdp.extensions import register_dtensor_save_hook
 from dist_attn.ulysses.ops import gather_outputs
 from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
 

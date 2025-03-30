@@ -32,9 +32,8 @@ from verl.utils.model import compute_position_id_with_mask
 
 from tensordict import TensorDict
 
-from alpha_seed.workers.actors import activation_offload
 from alpha_seed.workers.hybrid_engine.fsdp_gather import ulysses_pad_and_slice_inputs
-from alpha_seed.models.transformers.ops import clip_grad_norm_
+from alpha_seed.workers.fsdp.clip_grad_norm import clip_grad_norm_
 from alpha_seed import core_algos
 from alpha_seed.workers.actors.offload import offload_fsdp_optimizer, load_fsdp_optimizer
 
