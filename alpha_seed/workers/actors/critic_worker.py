@@ -158,6 +158,14 @@ class CriticWorker(Worker):
             # some parameters may not in torch_dtype
             critic_module.to(torch_dtype)
 
+            if self.config.freeze_gate:
+                from seed_models import M8ForTokenClassification, M8ForSequenceClassification
+                if isinstance(critic_module, M8ForTokenClassification) or isinstance(
+                        critic_module, M8ForSequenceClassification):
+                    for layer in critic_module.transformer.h:
+                        if layer.mlp.moe.gate is not None:
+                            layer.mlp.moe.gate.requires_grad = False
+
         if self.rank == 0:
             print(f'Critic overriding config {override_config_kwargs}')
             print_model_size(critic_module)

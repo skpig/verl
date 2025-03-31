@@ -24,6 +24,7 @@ data:
 
 actor_rollout_ref:
   remove_o_bias: False
+  freeze_gate: False
   update_gate_ema: False
   hybrid_engine: True
   model:
@@ -176,6 +177,7 @@ actor_rollout_ref:
 
 critic:
   remove_o_bias: False
+  freeze_gate: False
   update_gate_ema: False
   load_score_head: True
   strategy: fsdp

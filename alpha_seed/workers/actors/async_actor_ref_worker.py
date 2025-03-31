@@ -254,6 +254,13 @@ class AsyncActorRolloutRefWorker(Worker):
                         if layer.self_attn.o_proj.bias is not None:
                             layer.self_attn.o_proj.bias.requires_grad = False
 
+            if self.config.freeze_gate:
+                from seed_models import M8ForCausalLM
+                if isinstance(actor_module, M8ForCausalLM):
+                    for layer in actor_module.transformer.h:
+                        if layer.mlp.moe.gate is not None:
+                            layer.mlp.moe.gate.requires_grad = False
+
             enable_training_stats = self.config.actor.enable_training_stats
             metrics_context = MetricsTorchDispatchMode() if enable_training_stats else nullcontext()
 
