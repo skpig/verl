@@ -1166,7 +1166,10 @@ class RayPPOTrainer(object):
                 print("acc_per_query RESUMED!!!!!!")
 
         # async resume
-        if hexists(f"{remote_global_step_folder}/standalone_gen_batch_output.batch.pt"):
+        # we only resume standalone buffer when the number of warmup steps is zero. This is reasonable because
+        # 1. warmup and load old standalone is conflict. 2. when the prompt/response length changes, we can't load
+        if self.rollout_pool_warmup_step == 0 and hexists(
+                f"{remote_global_step_folder}/standalone_gen_batch_output.batch.pt"):
             pprint('resume standalone rollout.')
             self.standalone_gen_batch_output_resume = load_dataproto(path=remote_global_step_folder,
                                                                      prefix='standalone_gen_batch_output')
