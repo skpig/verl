@@ -2,6 +2,7 @@ import os
 from verl.utils.fs import copy_local_path_from_hdfs, md5_encode
 from hdfs_io import copy
 from filelock import FileLock
+from seed_models.utils.envs import SeedModelsEnvs
 
 cache_dir = "/var/tmp"
 
@@ -56,3 +57,15 @@ def copy_local_path_from_hdfs_files(src: str, files: list, cache_dir=None, filel
                 print(f"copying file {remote_path} to {local_folder_path}")
                 copy(remote_path, local_folder_path)
     return local_folder_path
+
+
+def prepare_hdfs_copy_kwargs():
+    """default in SeedModelsEnvs:
+    HDFS_THREAD_NUM = int(os.getenv('HDFS_THREAD_NUM', '32'))
+    HDFS_CHUNK_THREAD_NUM = int(os.environ.get('HDFS_CHUNK_THREAD_NUM', '32'))
+    """
+    hdfs_kwargs = {
+        'thread_num': SeedModelsEnvs.HDFS_THREAD_NUM,
+        'chunk_thread_num': SeedModelsEnvs.HDFS_CHUNK_THREAD_NUM,
+    }
+    return hdfs_kwargs

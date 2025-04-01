@@ -13,25 +13,13 @@ from typing import Optional
 import hdfs_io
 import torch
 from omnistore.utilities.ckpt_format.merge_tool import omnistore_ckpt_to_pytorch_ckpt
-from seed_models.utils.envs import SeedModelsEnvs
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
     AutoModelForTokenClassification,
 )
+from alpha_seed.utils.ckpt.hdfs import prepare_hdfs_copy_kwargs
 from verl.utils.fs import copy_local_path_from_hdfs
-
-
-def prepare_hdfs_copy_kwargs():
-    """default in SeedModelsEnvs:
-    HDFS_THREAD_NUM = int(os.getenv('HDFS_THREAD_NUM', '32'))
-    HDFS_CHUNK_THREAD_NUM = int(os.environ.get('HDFS_CHUNK_THREAD_NUM', '32'))
-    """
-    hdfs_kwargs = {
-        'thread_num': SeedModelsEnvs.HDFS_THREAD_NUM,
-        'chunk_thread_num': SeedModelsEnvs.HDFS_CHUNK_THREAD_NUM,
-    }
-    return hdfs_kwargs
 
 
 def hdfs_upload(local_path, remote_path, log_text):
