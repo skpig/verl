@@ -122,12 +122,14 @@ def compute_timing_metrics(batch: DataProto, timing_raw: Dict[str, float]) -> Di
 
 def compute_throughout_metrics(batch: DataProto, timing_raw: Dict[str, float], n_gpus: int) -> Dict[str, Any]:
     total_num_tokens = sum(batch.meta_info['global_token_num'])
+    total_num_seqs = len(batch.meta_info['global_token_num'])
     time = timing_raw['step']
     # estimated_flops, promised_flops = flops_function.estimate_flops(num_tokens, time)
     # f'Actual TFLOPs/s/GPU​': estimated_flops/(n_gpus),
     # f'Theoretical TFLOPs/s/GPU​': promised_flops,
     return {
         'perf/total_num_tokens': total_num_tokens,
+        'perf/total_num_seqs': total_num_seqs,
         'perf/time_per_step': time,
         'perf/throughput': total_num_tokens / (time * n_gpus),
     }

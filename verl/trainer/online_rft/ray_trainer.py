@@ -211,7 +211,7 @@ class RayOnlineRFTTrainer(object):
         self.use_reference_policy = Role.RefPolicy in role_worker_mapping
         self.use_rm = Role.RewardModel in role_worker_mapping
         self.ray_worker_group_cls = ray_worker_group_cls
-        self.validation_generations_logger = ValidationGenerationsLogger()
+        self.generations_logger = ValidationGenerationsLogger()
 
         # define KL control
         if self.use_reference_policy:
@@ -406,7 +406,41 @@ class RayOnlineRFTTrainer(object):
         samples = samples[:generations_to_log]
 
         # Log to each configured logger
-        self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
+        self.generations_logger.log(self.config.trainer.logger, 'val', samples, self.global_steps)
+    
+
+    def _maybe_log_train_generations(self, batch):
+        """Log a table of validation samples to the configured logger (wandb or swanlab)"""
+        input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in batch.batch['input_ids']] # (bsz,)
+        response_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in batch.batch['responses']] # (bsz,)
+
+
+        """Add more statistics here"""
+
+
+        
+        if self.global_steps % 5 != 0:
+            return
+
+        import numpy as np
+
+        generations_to_log = self.config.trainer.val_generations_to_log_to_wandb
+
+        if generations_to_log == 0:
+            return
+
+        # randomly sample `generations_to_log` samples
+        indices = np.random.choice(len(input_texts), generations_to_log)
+        input_texts = [input_texts[i] for i in indices]
+        response_texts = [response_texts[i] for i in indices]
+        seq_level_scores = [batch.batch['seq_level_scores'][i] for i in indices]
+
+        # Create tuples of (input, output, score) and sort by input text
+        samples = list(zip(input_texts, response_texts, seq_level_scores))
+
+        # Log to each configured logger
+        self.generations_logger.log(self.config.trainer.logger, 'train', samples, self.global_steps)
+
 
     def _validate(self):
         reward_tensor_lst = []
@@ -759,13 +793,16 @@ class RayOnlineRFTTrainer(object):
                         metrics.update({f'reward_type/{key}': val / len(batch) for key, val in reward_type_counter.items()})
 
                         # only keep valid indices with rewards 1
-                        valid_indices = torch.nonzero(reward_tensor).squeeze(-1) # (n,)
+                        # breakpoint()
+                        valid_indices = torch.nonzero(reward_tensor == 1).squeeze(-1) # (n,)
                         # make sure #valid_indices is divisible by dp_size
                         valid_indices = valid_indices[:len(valid_indices) // self.actor_rollout_wg.world_size * self.actor_rollout_wg.world_size]
                         batch = batch.index_select(valid_indices)
 
+                    """Statistics"""
                     # compute global_valid tokens
                     batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask'], dim=-1).tolist()
+                    self._maybe_log_train_generations(batch)
 
                     # update actor
                     with _timer('update_actor', timing_raw):
