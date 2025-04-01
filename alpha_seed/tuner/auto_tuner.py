@@ -40,19 +40,15 @@ import warnings
 import torch
 import os
 
-from torch.distributed.fsdp.api import ShardingStrategy, MixedPrecision
 from transformers import AutoConfig, AutoModelForCausalLM
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from alpha_seed.workers.fsdp.initialize import create_mesh, parallel_load_safetensors, parallel_init_fsdp_fn, meta_device_init
+from alpha_seed.workers.fsdp.initialize import create_mesh, meta_device_init
 from alpha_seed.workers.hybrid_engine.fsdp_gather import ulysses_pad_and_slice_inputs
 from dist_attn.ulysses.parallel_states import set_ulysses_sequence_parallel_group
 from dist_attn.ulysses.ops import gather_outputs
-from alpha_seed.models.transformers.monkey_patch import apply_monkey_patch
-from alpha_seed.workers.fsdp.extensions import register_dtensor_save_hook
-from alpha_seed.models.transformers.parallel import apply_parallel_plan
-from alpha_seed.workers.fsdp.clip_grad_norm import clip_grad_norm_
-from alpha_seed.workers.actors.offload import offload_fsdp_optimizer, load_fsdp_optimizer
-from verl.utils.fsdp_utils import get_fsdp_wrap_policy
+from alpha_seed.models.transformers.monkey_patch import apply_monkey_patch, get_parallel_plan
+from alpha_seed.workers.fsdp import fully_shard
+from alpha_seed.workers.fsdp.offload import offload_fsdp_optimizer, load_fsdp_optimizer
 from tests.hybrid_engine.test_parallel import init_random_data
 from alpha_seed.workers.fsdp.offload import activation_offload
 import hdfs_io
@@ -190,34 +186,19 @@ class AutoTuner:
             model = AutoModelForCausalLM.from_config(config=config,
                                                      torch_dtype=torch.float32,
                                                      attn_implementation="flash_attention_2")
-            # recompute and act offload
-            torch.utils.checkpoint.CheckpointFunction = activation_offload.CheckpointFunction
-            model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': True})
-            # parallelize model
-            shard_plan = apply_parallel_plan(model, config, tp_mesh)
-
-        mixed_precision = MixedPrecision(param_dtype=torch.bfloat16,
-                                         reduce_dtype=torch.float32,
-                                         buffer_dtype=torch.float32)
-        auto_wrap_policy = get_fsdp_wrap_policy(module=model)
-        shards = parallel_load_safetensors(self.model_path)
-        init_fn = parallel_init_fsdp_fn(model, shards)
-        strategy = ShardingStrategy.HYBRID_SHARD if fsdp_mesh.ndim > 1 and fsdp_mesh.size(
-        ) > 1 else ShardingStrategy.FULL_SHARD
-
-        model = FSDP(model,
-                     use_orig_params=True,
-                     param_init_fn=init_fn,
-                     auto_wrap_policy=auto_wrap_policy,
-                     sharding_strategy=strategy,
-                     mixed_precision=mixed_precision,
-                     cpu_offload=None,
-                     forward_prefetch=True,
-                     sync_module_states=False,
-                     device_id=torch.cuda.current_device(),
-                     device_mesh=fsdp_mesh)
-        shards.clear()
-        register_dtensor_save_hook(model, shard_plan)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model, _ = fully_shard(
+                model=model,
+                block_cls=model._no_split_modules[0],
+                fsdp_mesh=fsdp_mesh,
+                tp_plan=get_parallel_plan(config, tp_mesh),
+                tp_mesh=tp_mesh,
+                recompute=True,
+                act_offload=True,
+                param_offload=False,
+                weights=self.model_path,
+            )
 
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, fused=True)
         print0(f"after init model: {torch.cuda.memory_allocated() / (1024**3):.2f} GB | "
@@ -226,7 +207,7 @@ class AutoTuner:
         print0(f"after reset peak memory states: {torch.cuda.max_memory_allocated() / (1024**3):.2f} GB")
         return model, optimizer, meshes
 
-    def train_one_step(self, model, optimizer, meshes, max_token, accum_steps: int = -1):
+    def train_one_step(self, model: FSDP, optimizer, meshes, max_token, accum_steps: int = -1):
 
         fsdp_mesh, tp_mesh, sp_mesh, gather_mesh = meshes
         self.act_offload_ctx = activation_offload.get_offload_context(True, model)
@@ -243,21 +224,20 @@ class AutoTuner:
 
         for _ in range(max(2, accum_steps)):
             # forward
-            with self.act_offload_ctx:
-                output = model(input_ids=input_ids,
-                               position_ids=position_ids,
-                               use_cache=False,
-                               labels=input_ids_rolled,
-                               temperature=1.0,
-                               fuse_lm_head_ce_loss=True)
-                log_probs = output.loss
+            output = model(input_ids=input_ids,
+                           position_ids=position_ids,
+                           use_cache=False,
+                           labels=input_ids_rolled,
+                           temperature=1.0,
+                           fuse_lm_head_ce_loss=True)
+            log_probs = output.loss
             if sp_mesh.size() > 1:
                 log_probs = gather_outputs(log_probs, gather_dim=0, padding_dim=0, unpad_dim_size=unpad_size)
             loss = verl_F.masked_mean(log_probs, masks)
             # backward
             loss.backward()
 
-        clip_grad_norm_(model, max_norm=1.0).item()
+        model.clip_grad_norm_(max_norm=1.0).item()
         # zero out grad to get avoid of token dispatch randomness
         for param in model.parameters():
             if param.grad is not None:

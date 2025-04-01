@@ -17,40 +17,37 @@ The main entry point to run the PPO algorithm
 
 import json
 import gc
-from filelock import FileLock
-import shutil
 import warnings
 import os
 import logging
-import hdfs_io
 import ray
 import torch
 import torch.distributed
 
-import verl.utils.torch_functional as verl_F
 from single_controller.base import Worker
 from single_controller.base.decorator import register, Dispatch
 from verl import DataProto
 from verl.utils.fs import copy_local_path_from_hdfs
-from verl.utils.fsdp_utils import get_fsdp_wrap_policy
-from alpha_seed.models.transformers.parallel import apply_parallel_plan
-from alpha_seed.models.transformers.parallel.collectives import get_memory
-from ..fsdp.initialize import create_mesh
-from ..fsdp.initialize import parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init, cleanup_local_tmp_folder_safetensors_files
-from ..fsdp.extensions import register_dtensor_save_hook
-from .offload import (offload_fsdp_model_to_cpu, load_fsdp_model_to_gpu, offload_megatron_model_to_cpu,
-                      load_megatron_model_to_gpu)
-from alpha_seed.workers.actors.offload import offload_fsdp_optimizer, load_fsdp_optimizer
-from alpha_seed.workers.fsdp.offload import activation_offload
 from verl.utils.import_utils import import_external_libs
 from verl.utils.debug import log_gpu_memory_usage
-
+from verl.utils.torch_dtypes import PrecisionType
+from verl.utils.torch_functional import get_constant_schedule_with_warmup
+from verl.utils.model import print_model_size
+from alpha_seed.models.transformers.parallel.collectives import get_memory
+from alpha_seed.models.transformers.monkey_patch import apply_monkey_patch, get_parallel_plan
+from alpha_seed.workers.fsdp.initialize import (create_mesh, meta_device_init,
+                                                cleanup_local_tmp_folder_safetensors_files)
+from alpha_seed.trainer.optim import get_optimizer_from_config
+from alpha_seed.workers.fsdp.offload import offload_fsdp_optimizer, load_fsdp_optimizer, offload_fsdp_model_to_cpu, load_fsdp_model_to_gpu
+from alpha_seed.workers.fsdp import fully_shard
+from alpha_seed.workers.megatron.offload import offload_megatron_model_to_cpu, load_megatron_model_to_gpu
 from alpha_seed.workers.hybrid_engine.fsdp_gather import DataGatherManager
 from alpha_seed.workers.ppo_critic import DataParallelPPOCritic
 from alpha_seed.utils import ndtimeline
 from alpha_seed.utils.ckpt import download_minimal_required_files
 
 from seed_models.utils.count_flops import FlopsCounter
+from transformers import AutoConfig, AutoModelForTokenClassification, AutoTokenizer
 
 from codetiming import Timer
 
@@ -113,20 +110,10 @@ class CriticWorker(Worker):
         self._model_initialized = False
 
     def _build_critic_model_optimizer(self, config, from_scratch=True):
-        # the following line is necessary
-        from verl.utils.model import LambdaLayer, print_model_size, squeeze
-        from verl.utils.torch_dtypes import PrecisionType
-        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, ShardingStrategy, MixedPrecision, \
-            CPUOffload
-        from torch import optim
-
         local_path = download_minimal_required_files(config.model.path, from_scratch, torch.distributed.get_rank(),
                                                      torch.distributed.get_world_size())
         # note that the tokenizer between actor and critic may be different. So override tokenizer info with actor info
         # using random initialized model from any architecture. May not be the same as Actor.
-        # TODO: support loading critic weights from RM. Support using AutoModelForTokenClassification
-        from transformers import AutoTokenizer
-
         tokenizer_path = copy_local_path_from_hdfs(config.model.tokenizer_path)
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path,
                                                        trust_remote_code=config.model.get('trust_remote_code', False))
@@ -142,17 +129,12 @@ class CriticWorker(Worker):
 
         torch_dtype = self.config.model.fsdp_config.get('model_dtype', 'fp32')
         torch_dtype = PrecisionType.to_dtype(torch_dtype)
-
-        from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForTokenClassification
-        from torch import nn
-
         trust_remote_code = False
         critic_model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code)
 
         use_rmpad = self.config.get('use_rmpad', False)
         if use_rmpad:
             # optimize the model via rmpad
-            from alpha_seed.models.transformers.monkey_patch import apply_monkey_patch
             assert apply_monkey_patch(
                 config=critic_model_config,
                 verbose=self.rank == 0), f'Cannot find rmpad version of {critic_model_config.model_type}'
@@ -173,104 +155,38 @@ class CriticWorker(Worker):
             # some parameters may not in torch_dtype
             critic_module.to(torch_dtype)
 
-            if config.model.enable_gradient_checkpointing:
-                # doc link: https://bytedance.us.larkoffice.com/docx/NiWVd0QgoopepBxBXmDuHJKwsNe
-                use_reentrant = self.config.act_offload
-                critic_module.gradient_checkpointing_enable(
-                    gradient_checkpointing_kwargs={'use_reentrant': use_reentrant})
-                critic_module.train()
-                if self.rank == 0:
-                    print(critic_module)
-                    if hasattr(critic_module, 'transformer'):
-                        model = critic_module.transformer
-                    elif hasattr(critic_module, 'model'):
-                        model = critic_module.model
-                    else:
-                        model = None
-                    if model is not None:
-                        print(
-                            f'{model.gradient_checkpointing=}, {model.training=}, {model._gradient_checkpointing_func=}'
-                        )
-        shard_plan = apply_parallel_plan(critic_module, critic_module.config, self.tp_mesh)
-
         if self.rank == 0:
             print(f'Critic overriding config {override_config_kwargs}')
-
-        if self.rank == 0:
             print_model_size(critic_module)
 
-        fsdp_config = self.config.model.fsdp_config
-
-        mixed_precision_config = fsdp_config.get('mixed_precision', None)
-        if mixed_precision_config is not None:
-            param_dtype = PrecisionType.to_dtype(mixed_precision_config.get('param_dtype', 'bf16'))
-            reduce_dtype = PrecisionType.to_dtype(mixed_precision_config.get('reduce_dtype', 'fp32'))
-            buffer_dtype = PrecisionType.to_dtype(mixed_precision_config.get('buffer_dtype', 'fp32'))
-        else:
-            param_dtype = torch.bfloat16
-            reduce_dtype = torch.float32
-            buffer_dtype = torch.float32
-
-        mixed_precision = MixedPrecision(param_dtype=param_dtype, reduce_dtype=reduce_dtype, buffer_dtype=buffer_dtype)
-
-        auto_wrap_policy = get_fsdp_wrap_policy(module=critic_module, config=self.config.model.fsdp_config.wrap_policy)
-
-        log_gpu_memory_usage('Before critic FSDP')
-
-        cpu_offload = None
-        if self.config.model.fsdp_config.param_offload:
+        if config.model.fsdp_config.param_offload:
             # NOTE: CPUOffload needs to cooperate with FSDP.no_sync() in gradient accumulation,
             # which will lead to more memory consumption as gradients keep unshard in between micro-batches.
             # temporarily disbale this for more investigation
             raise NotImplementedError("CPUOffload is not supported for trainable model")
 
-        # we only support ZeRO3 of hybrid DP+FSDP or full FSDP
-        if self.fsdp_mesh is None or self.fsdp_mesh.ndim == 1:
-            sharding_strategy = ShardingStrategy.FULL_SHARD
-        elif self.fsdp_mesh.ndim == 2:
-            sharding_strategy = ShardingStrategy.HYBRID_SHARD
-        else:
-            raise NotImplementedError(f"get device mesh ndim={self.fsdp_mesh.ndim}, but only support 1 or 2")
+        act_offload_kwargs = dict(
+            offload_threshold=config.get('act_offload_threshold', 1024 * 1024),
+            offload_upbound=config.act_offload_upbound,
+            buffer_size=config.act_offload_buff_size,
+        )
 
-        shard_states = parallel_load_safetensors(local_path) if from_scratch else {}
-        if torch.distributed.get_rank() == 0:
-            print(f"init fsdp from_scratch={from_scratch}")
-        critic_module = FSDP(critic_module,
-                             param_init_fn=parallel_init_fsdp_fn(critic_module, shard_states),
-                             use_orig_params=True,
-                             auto_wrap_policy=auto_wrap_policy,
-                             device_id=torch.cuda.current_device(),
-                             sharding_strategy=sharding_strategy,
-                             device_mesh=self.fsdp_mesh,
-                             mixed_precision=mixed_precision,
-                             forward_prefetch=True,
-                             sync_module_states=False,
-                             cpu_offload=cpu_offload)
+        critic_module, _ = fully_shard(
+            model=critic_module,
+            block_cls=critic_module._no_split_modules[0],
+            fsdp_mesh=self.fsdp_mesh,
+            tp_plan=get_parallel_plan(critic_model_config, self.tp_mesh),
+            tp_mesh=self.tp_mesh,
+            tp_outside=config.tp_outside,
+            recompute=config.model.enable_gradient_checkpointing,
+            act_offload=config.act_offload,
+            param_offload=config.model.fsdp_config.param_offload,
+            weights=local_path if from_scratch else None,
+            act_offload_kwargs=act_offload_kwargs,
+        )
+        log_gpu_memory_usage('After critic FSDP')
 
-        register_dtensor_save_hook(critic_module, shard_plan, self.config.tp_outside)
-
-        if self.config.act_offload:
-            context = activation_offload.get_offload_context(True,
-                                                             critic_module,
-                                                             offload_threshold=self.config.get(
-                                                                 'act_offload_threshold', 1024 * 1024),
-                                                             offload_upbound=self.config.act_offload_upbound,
-                                                             buffer_size=self.config.act_offload_buff_size)
-
-            def enter_act_offload(module: torch.nn.Module, input):
-                if torch.is_grad_enabled():
-                    context.__enter__()
-
-            def exit_act_offload(module: torch.nn.Module, input, output):
-                if torch.is_grad_enabled():
-                    context.__exit__()
-
-            critic_module.register_forward_pre_hook(enter_act_offload, prepend=True)
-            critic_module.register_forward_hook(exit_act_offload, prepend=False)
-
-        log_gpu_memory_usage('After critic FSDP', logger=logger)
-
-        from alpha_seed.trainer.optim import get_optimizer_from_config
+        # create critic optimizer
         critic_optimizer = get_optimizer_from_config(
             [param for param in critic_module.parameters() if param.requires_grad], config.optim)
 
@@ -283,7 +199,6 @@ class CriticWorker(Worker):
         if self.rank == 0:
             print(f'Total steps: {total_steps}, num_warmup_steps: {num_warmup_steps}')
 
-        from verl.utils.torch_functional import get_constant_schedule_with_warmup
         critic_lr_scheduler = get_constant_schedule_with_warmup(optimizer=critic_optimizer,
                                                                 num_warmup_steps=num_warmup_steps)
 
@@ -402,7 +317,7 @@ class CriticWorker(Worker):
         # to avoid loss error issues.
         optimizers[0].reload_model_params()
 
-        from alpha_seed.workers.actors.offload import offload_megatron_model_to_cpu
+        from alpha_seed.workers.megatron.offload import offload_megatron_model_to_cpu
 
         offload_megatron_model_to_cpu(models=models)  # everything is on CPU
 

@@ -6,6 +6,7 @@ import types
 import warnings
 import functools
 import torch
+import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
@@ -37,21 +38,51 @@ def fully_shard(
     weights: str = None,
     enable_training_stats: bool = False,
     ignored_modules: Tuple = None,
+    fsdp_kwargs: dict = None,
     act_offload_kwargs: dict = None,
-) -> FSDP:
+) -> Tuple[FSDP, Optional[MetricsTorchDispatchMode]]:
     """
     Create FSDP/HSDP with tensor parallelism extension.
 
+    By default, the model will use mixed-precision traiing (i.e., BF16 for forward/backward 
+    and FP32 for gradient reduction).
+
+    If ``tp_plan`` is provided, each module will be registered by a `_tp_mesh` attribute
+    that refers to ``tp_mesh``, and parameters are partitioned according to ``tp_plan``.
+    
+    It's the user obligation to customize the forward / backward propagation for tensor parallelism.
+
     Args:
-        model (PreTrainedModel): HuggingFace model that is initialized in meta device
-        block_cls (type | str): unit (usually a decoder layer class)
-            that is used to wrap into FSDPModule
-        fsdp_mesh (DeviceMesh): 1-dim or 2-dim device mesh for FSDP or HSDP, can only be 1-dim or 2-d
+        model (PreTrainedModel): A HuggingFace model initialized on a meta device.
+        block_cls (type | str): A unit (usually a decoder layer class) used to wrap into an FSDPModule.
+        fsdp_mesh (DeviceMesh): A 1D or 2D device mesh for FSDP or HSDP.
+        tp_plan (Dict[str, Placement] | None): A tensor parallelism plan specifying the shard placement of parameter names. 
+            The names can be simplified, and all full parameter names containing the specified name will be matched and parallelized.
+        tp_mesh (DeviceMesh | None): A 1D tensor parallelism device mesh when tp_plan is specified.
+        tp_outside (bool): Whether the tp_mesh is the outermost device mesh dimension relative to the fsdp mesh.
+        recompute (bool): Whether to apply recomputation using the HuggingFace interface.
+        act_offload (bool): Whether to apply activation offloading.
+        param_offload (bool): Whether to apply parameter CPU offloading.
+        weights (str or None): The checkpoint file path. Default is None, meaning the parameters will be initialized with random values.
+        enable_training_state (bool): Whether to enable training state tracking.
+        ignored_modules (tuple): Modules to be ignored in mixed precision.
+        fsdp_kwargs (dict): Other keyword arguments for FSDP initialization passed to FSDP.
+        act_offload_kwargs (dict): Special keyword arguments for activation offloading.
+
+    Returns:
+        FSDP: The model wrapped by FSDP.
+        MetricsTorchDispatchMode: A context manager to track the forward propagation status.
     """
     # parallelize model
     if tp_plan is not None:
+        nparams = sum(p.numel() for p in model.parameters())
+        if dist.get_rank() == 0:
+            print(f"Before parallelization: model size {nparams/1e9:.2f} B")
         assert tp_mesh is not None
         tp_plan = parallelize_module(model, tp_plan, tp_mesh)
+        nparams = sum(p.numel() for p in model.parameters())
+        if dist.get_rank() == 0:
+            print(f"After parallelization: model size {nparams/1e9:.2f} B")
 
     assert not (enable_training_stats and act_offload), f"act offload and training stats can not be enabled together"
 
@@ -73,15 +104,20 @@ def fully_shard(
                         enable_training_stats and not use_reentrant) else noop_context_fn,
             })
 
+    fsdp_kwargs = {} if fsdp_kwargs is None else fsdp_kwargs
     # set mixed precision
-    mp_config = dict(
-        param_dtype=torch.bfloat16,
-        reduce_dtype=torch.float32,
-        buffer_dtype=torch.float32,
-    )
-    if ignored_modules is not None:
-        mp_config['_module_classes_to_ignore'] = tuple(ignored_modules)
-    mixed_precision = MixedPrecision(**mp_config)
+    if "mixed_precision" not in fsdp_kwargs:
+        mp_config = dict(
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+            buffer_dtype=torch.float32,
+        )
+        if ignored_modules is not None:
+            mp_config['_module_classes_to_ignore'] = tuple(ignored_modules)
+        fsdp_kwargs['mixed_precision'] = MixedPrecision(**mp_config)
+    # set forward prefetch
+    if "forward_prefetch" not in fsdp_kwargs:
+        fsdp_kwargs["forward_prefetch"] = True
 
     # set module wrap class
     if isinstance(block_cls, str):
@@ -107,19 +143,17 @@ def fully_shard(
     # load pretrained weights
     shards = parallel_load_safetensors(weights) if weights else {}
     init_fn = parallel_init_fsdp_fn(model, shards)
-
     # wrap to fsdp
     model: FSDP = FSDP(model,
                        use_orig_params=True,
                        param_init_fn=init_fn,
                        auto_wrap_policy=auto_wrap_policy,
                        sharding_strategy=strategy,
-                       mixed_precision=mixed_precision,
                        cpu_offload=offload,
-                       forward_prefetch=True,
                        sync_module_states=False,
                        device_id=torch.cuda.current_device(),
-                       device_mesh=fsdp_mesh)
+                       device_mesh=fsdp_mesh,
+                       **fsdp_kwargs)
     if len(shards) > 0:
         warnings.warn(
             "detected some parameter is not loaded in the model. Ignore this warning if you changed the model structure."

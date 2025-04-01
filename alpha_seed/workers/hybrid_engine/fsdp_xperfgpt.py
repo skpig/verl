@@ -276,13 +276,10 @@ class ActorXPerfGPTShardingManager(BaseShardingManager):
 class FSDPXPerfGPTShardingManager(ActorXPerfGPTShardingManager):
 
     def _get_actor_state_dict(self):
-        # TODO: optimize this. Since state_dict is a copy, there are actually two copies in the GPU memory
-        # We need to switch to FSDP2 to handle this.
-        cfg = ShardedStateDictConfig(offload_to_cpu=False)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            with FSDP.state_dict_type(self.module, StateDictType.SHARDED_STATE_DICT, cfg):
-                state_dict = self.module.state_dict()
+            # note FSDP module is already set state dict type at initialization
+            state_dict = self.module.state_dict()
         return state_dict
 
 

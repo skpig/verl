@@ -49,7 +49,7 @@ from verl.utils.debug import log_gpu_memory_usage
 
 from mariana.models.text.config import TrainConfig, MegatronConfig
 
-from alpha_seed.workers.actors.offload import (
+from alpha_seed.workers.megatron.offload import (
     offload_megatron_model_to_cpu,
     offload_megatron_optimizer,
     load_megatron_model_to_gpu,

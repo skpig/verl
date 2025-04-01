@@ -9,7 +9,7 @@ from torch.distributed.fsdp import StateDictType, CPUOffload
 from torch.distributed.fsdp.api import ShardingStrategy, MixedPrecision
 from torch.distributed.fsdp import ShardedStateDictConfig, ShardedOptimStateDictConfig
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
-from alpha_seed.workers.fsdp.initialize import create_mesh, parallel_load_safetensors, parallel_init_fsdp_fn, meta_device_init
+from alpha_seed.workers.fsdp.initialize import create_mesh
 
 from alpha_seed.workers.fsdp.extensions import register_dtensor_save_hook
 from tests.hybrid_engine.utils import print_each_rank
@@ -23,7 +23,7 @@ from functools import partial
 
 import os
 from .test_parallel_init import DummyModel, tp_plan, MLP
-from alpha_seed.models.transformers.parallel.parallelize import parallelize_module
+from alpha_seed.workers.fsdp.extensions import parallelize_module
 import torch.distributed.checkpoint as dcp
 from omnistore import FSDPCheckpointer
 

@@ -15,7 +15,7 @@ def clip_grad_norm_(fsdp_model: FSDP, max_norm, norm_type=2.0) -> torch.Tensor:
     tp_group = None if tp_mesh is None else tp_mesh.get_group()
 
     if tp_group is None or dist.get_world_size(tp_group) == 1:
-        return fsdp_model.clip_grad_norm_(max_norm, norm_type)
+        return FSDP.clip_grad_norm_(fsdp_model, max_norm, norm_type)
 
     assert fsdp_model._is_root
     # use dict as ordered set to make param order consistent among

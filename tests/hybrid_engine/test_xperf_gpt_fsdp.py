@@ -34,7 +34,7 @@ from torch.distributed.device_mesh import init_device_mesh
 
 import hydra
 
-from alpha_seed.workers.actors.offload import offload_megatron_model_to_cpu, load_megatron_model_to_gpu
+from alpha_seed.workers.megatron.offload import offload_megatron_model_to_cpu, load_megatron_model_to_gpu
 
 
 @hydra.main(config_path='../../tasks/config', config_name='ppo_trainer')

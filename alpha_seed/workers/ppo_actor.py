@@ -38,14 +38,13 @@ from verl.utils.model import compute_position_id_with_mask
 from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
 from dist_attn.ulysses.ops import gather_outputs
 from alpha_seed.workers.hybrid_engine.fsdp_gather import ulysses_pad_and_slice_inputs
-from alpha_seed.workers.fsdp.clip_grad_norm import clip_grad_norm_
 from alpha_seed.utils.observility.training_stats import sync_training_stats
 from alpha_seed.utils.observility import get_profiler_context_wrapped, profile_step
 from alpha_seed import core_algos
 from alpha_seed.models.transformers.monkey_patch import update_gate_ema
 from verl.utils.seqlen_balancing import rearrange_micro_batches, get_reverse_idx
 
-from alpha_seed.workers.actors.offload import offload_fsdp_optimizer, load_fsdp_optimizer
+from alpha_seed.workers.fsdp.offload import offload_fsdp_optimizer, load_fsdp_optimizer
 
 from contextlib import nullcontext
 import ray
@@ -219,7 +218,7 @@ class DataParallelPPOActor(BasePPOActor):
             load_fsdp_optimizer(self.actor_optimizer, torch.cuda.current_device())
 
         assert self.config.grad_clip is not None
-        grad_norm = clip_grad_norm_(self.actor_module, max_norm=self.config.grad_clip)
+        grad_norm = self.actor_module.clip_grad_norm_(max_norm=self.config.grad_clip)
         self.actor_optimizer.step()
 
         if self.config.train_memory_offload:

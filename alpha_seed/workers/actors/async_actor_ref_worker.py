@@ -14,52 +14,39 @@
 """
 The main entry point to run the PPO algorithm
 """
-
+from typing import Union
 import json
 from contextlib import nullcontext
-from filelock import FileLock
-import shutil
 import warnings
 import os
 import logging
-import hdfs_io
-from functools import partial
 import ray
 import torch
 import torch.distributed
-from torch.utils.checkpoint import noop_context_fn
-from omegaconf import DictConfig, open_dict, OmegaConf
-from typing import List
-from typing import Union
+from omegaconf import DictConfig, open_dict
 import gc
 
-import verl.utils.torch_functional as verl_F
 from single_controller.base import Worker
 from single_controller.base.decorator import register, Dispatch
 from verl import DataProto
-from verl.utils.model import compute_position_id_with_mask
-from verl.utils.fsdp_utils import get_fsdp_wrap_policy
-from alpha_seed.workers.actors.offload import (offload_fsdp_optimizer, load_fsdp_optimizer, offload_fsdp_model_to_cpu,
-                                               load_fsdp_model_to_gpu, offload_megatron_model_to_cpu,
-                                               load_megatron_model_to_gpu, offload_megatron_optimizer,
-                                               load_megatron_optimizer)
+from verl.utils.model import print_model_size, update_model_config
+from alpha_seed.workers.fsdp.offload import (offload_fsdp_optimizer, load_fsdp_optimizer, offload_fsdp_model_to_cpu,
+                                             load_fsdp_model_to_gpu)
+from alpha_seed.workers.megatron.offload import (offload_megatron_model_to_cpu, load_megatron_model_to_gpu,
+                                                 offload_megatron_optimizer, load_megatron_optimizer)
+from alpha_seed.models.transformers.monkey_patch import apply_monkey_patch, get_parallel_plan, get_ignore_modules_in_mixed_precision
 from verl.utils.import_utils import import_external_libs
 from verl.utils.debug import log_gpu_memory_usage
-from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
-from verl.utils.torch_functional import broadcast_dict_tensor, allgather_dict_tensors
-import numpy as np
 
 from alpha_seed.utils import ndtimeline
 from alpha_seed.workers.hybrid_engine.fsdp_gather import DataGatherManager
-from alpha_seed.models.transformers.parallel import apply_parallel_plan
-from ..fsdp.initialize import (create_mesh, parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init,
-                               cleanup_local_tmp_folder_safetensors_files)
-from alpha_seed.workers.fsdp.offload import activation_offload
-from ..fsdp.extensions import register_dtensor_save_hook
+from alpha_seed.workers.fsdp.initialize import (create_mesh, meta_device_init,
+                                                cleanup_local_tmp_folder_safetensors_files)
 from alpha_seed.workers.ppo_actor import DataParallelPPOActor
-from alpha_seed.utils.kernels.persist_gemm import deploy_persist_gemm, undelopy_persist_gemm
+from alpha_seed.workers.fsdp import fully_shard
+from alpha_seed.utils.kernels.persist_gemm import deploy_persist_gemm
 from alpha_seed.models.transformers.parallel.collectives import get_memory
-from alpha_seed.utils.observility.training_stats import MetricsTorchDispatchMode, metrics_context_fn
+from alpha_seed.utils.observility.training_stats import MetricsTorchDispatchMode
 from alpha_seed.utils.observility import get_profiler_context_wrapped
 from alpha_seed.utils.ckpt import download_minimal_required_files
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig, AutoModelForVision2Seq
@@ -208,36 +195,23 @@ class AsyncActorRolloutRefWorker(Worker):
         if self.rank == 0:
             print(f'Build model and optimizer for {role}')
 
-        from verl.utils.model import print_model_size, update_model_config
-        from verl.utils.torch_dtypes import PrecisionType
-        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, ShardingStrategy, MixedPrecision, \
-            CPUOffload
-        from torch import optim
-
         log_gpu_memory_usage('Before init from HF AutoModel', logger=logger)
         # TODO: ignore pulling model file if resuming ckpt
         local_path = download_minimal_required_files(model_path, from_scratch, torch.distributed.get_rank(),
                                                      torch.distributed.get_world_size())
 
         # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect
-        # TODO(zhangchi.usc1992): 1. support create from random initialized model. 2. Support init with FSDP directly
         self.tokenizer = AutoTokenizer.from_pretrained(local_path, trust_remote_code=trust_remote_code)
-        torch_dtype = fsdp_config.get('model_dtype', None)
-        if torch_dtype is None:
-            torch_dtype = torch.float32 if self._is_actor else torch.bfloat16
-        else:
-            torch_dtype = PrecisionType.to_dtype(torch_dtype)
+        torch_dtype = torch.float32 if self._is_actor else torch.bfloat16
 
         # override model kwargs
         actor_model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code)
-
         override_config_kwargs = {
             'bos_token_id': self.tokenizer.bos_token_id,
             'eos_token_id': self.tokenizer.eos_token_id,
             'pad_token_id': self.tokenizer.pad_token_id,
         }
         override_config_kwargs.update(override_model_config)
-
         update_model_config(actor_model_config, override_config_kwargs=override_config_kwargs)
         setattr(actor_model_config, '_moe_implementation', 'fused')
         if self.rank == 0:
@@ -254,7 +228,6 @@ class AsyncActorRolloutRefWorker(Worker):
 
         if use_rmpad:
             # optimize the model via rmpad
-            from alpha_seed.models.transformers.monkey_patch import apply_monkey_patch
             assert apply_monkey_patch(
                 config=actor_model_config,
                 verbose=self.rank == 0), f'Cannot find rmpad version of {actor_model_config.model_type}'
@@ -281,141 +254,53 @@ class AsyncActorRolloutRefWorker(Worker):
             enable_training_stats = self.config.actor.enable_training_stats
             metrics_context = MetricsTorchDispatchMode() if enable_training_stats else nullcontext()
 
-            if enable_gradient_checkpointing:
-                use_reentrant = self.config.actor.act_offload
-                if self.config.actor.act_offload:
-                    torch.utils.checkpoint.CheckpointFunction = activation_offload.CheckpointFunction
-
-                actor_module.gradient_checkpointing_enable(
-                    gradient_checkpointing_kwargs={
-                        'use_reentrant':
-                            use_reentrant,
-                        "context_fn":
-                            partial(metrics_context_fn, metrics_context) if (
-                                enable_training_stats and not use_reentrant) else noop_context_fn,
-                    })
-                actor_module.train()
-                if self.rank == 0:
-                    print(actor_module)
-                    print('Enable actor gradient checkpointing')
-                    if hasattr(actor_module, 'transformer'):
-                        model = actor_module.transformer
-                    elif hasattr(actor_module, 'model'):
-                        model = actor_module.model
-                    else:
-                        model = None
-                    if model is not None:
-                        print(
-                            f'{model.gradient_checkpointing=}, {model.training=}, {model._gradient_checkpointing_func=}'
-                        )
-        # use shard plan
-        tp_mesh = self.ref_tp_mesh if role == 'ref' else self.actor_tp_mesh
-        shard_plan = apply_parallel_plan(actor_module, actor_module.config, tp_mesh)
-
-        torch.distributed.barrier()
-
+        log_gpu_memory_usage('After init from HF AutoModel', logger=logger)
         if self.rank == 0:
+            print(actor_module)
             print_model_size(actor_module)
 
-        log_gpu_memory_usage('After init from HF AutoModel', logger=logger)
+        fsdp_mesh = self.ref_fsdp_mesh if role == 'ref' else self.actor_fsdp_mesh
+        tp_mesh = self.ref_tp_mesh if role == 'ref' else self.actor_tp_mesh
+        tp_outside = self.config.ref.tp_outside if role == "ref" else self.config.actor.tp_outside
 
-        mixed_precision_config = fsdp_config.get('mixed_precision', None)
-        if mixed_precision_config is not None:
-            param_dtype = PrecisionType.to_dtype(mixed_precision_config.get('param_dtype', 'bf16'))
-            reduce_dtype = PrecisionType.to_dtype(mixed_precision_config.get('reduce_dtype', 'fp32'))
-            buffer_dtype = PrecisionType.to_dtype(mixed_precision_config.get('buffer_dtype', 'fp32'))
-        else:
-            param_dtype = torch.bfloat16
-            reduce_dtype = torch.float32
-            buffer_dtype = torch.float32
-
-        from alpha_seed.models.transformers.monkey_patch import get_ignore_modules_in_mixed_precision
-
-        mp_config = dict(
-            param_dtype=param_dtype,
-            reduce_dtype=reduce_dtype,
-            buffer_dtype=buffer_dtype,
-        )
-        if self.config.update_gate_ema:
-            mp_config['_module_classes_to_ignore'] = get_ignore_modules_in_mixed_precision(
-                actor_model_config.model_type)
-        mixed_precision = MixedPrecision(**mp_config)
-
-        auto_wrap_policy = get_fsdp_wrap_policy(module=actor_module, config=fsdp_config.get('wrap_policy', None))
-
-        if self.rank == 0:
-            print(f'wrap_policy: {auto_wrap_policy}')
-
-        cpu_offload = None
-
+        # set up parameter cpu offload: rollout: always True, actor: always False
         if role == 'actor':
             if self.config.actor.fsdp_config.param_offload:
                 # NOTE: CPUOffload needs to cooperate with FSDP.no_sync() in gradient accumulation,
                 # which will lead to more memory consumption as gradients keep unshard in between micro-batches.
                 # temporarily disbale this for more investigation
                 raise NotImplementedError("CPUOffload for trainable model is not supported")
-        elif role == 'ref':
-            if self.config.ref.fsdp_config.param_offload:
-                cpu_offload = CPUOffload(offload_params=True)
-        elif role == 'rollout':
-            # rollout only, requires cpu_offload
-            cpu_offload = CPUOffload(offload_params=True)
+        param_offload = (role == 'rollout')
+        if role == 'ref':
+            param_offload = self.config.ref.fsdp_config.param_offload
 
-        # we only support ZeRO3 of hybrid DP+FSDP or full FSDP
-        fsdp_mesh = self.ref_fsdp_mesh if role == 'ref' else self.actor_fsdp_mesh
-        if fsdp_mesh.ndim == 1:
-            sharding_strategy = ShardingStrategy.FULL_SHARD
-        elif fsdp_mesh.ndim == 2:
-            sharding_strategy = ShardingStrategy.HYBRID_SHARD
-        else:
-            raise NotImplementedError(f"role: {role}: get device mesh ndim={fsdp_mesh.ndim}, but only support 1 or 2")
+        # get ignored modules
+        ignored_modules = None
+        if self.config.update_gate_ema:
+            ignored_modules = get_ignore_modules_in_mixed_precision(actor_model_config.model_type)
 
-        if from_scratch:
-            shard_states = parallel_load_safetensors(local_path)
-        else:
-            shard_states = {}
+        if not from_scratch:
             warnings.filterwarnings("ignore", "state not found in", category=UserWarning)
 
-        if torch.distributed.get_rank() == 0:
-            print(f"{role} init fsdp from_scratch={from_scratch}, local_path={local_path}")
-        # TODO: add transformer policy
-        actor_module_fsdp = FSDP(actor_module,
-                                 param_init_fn=parallel_init_fsdp_fn(actor_module, shard_states),
-                                 use_orig_params=True,
-                                 auto_wrap_policy=auto_wrap_policy,
-                                 device_id=torch.cuda.current_device(),
-                                 sharding_strategy=sharding_strategy,
-                                 mixed_precision=mixed_precision,
-                                 sync_module_states=False,
-                                 forward_prefetch=True,
-                                 device_mesh=fsdp_mesh,
-                                 cpu_offload=cpu_offload)
+        actor_module_fsdp, metrics_context = fully_shard(
+            model=actor_module,
+            block_cls=actor_module._no_split_modules[0],
+            fsdp_mesh=fsdp_mesh,
+            tp_plan=get_parallel_plan(actor_model_config, tp_mesh),
+            tp_mesh=tp_mesh,
+            tp_outside=tp_outside,
+            recompute=enable_gradient_checkpointing,
+            act_offload=self.config.actor.act_offload if role == 'actor' else False,
+            param_offload=param_offload,
+            weights=local_path if from_scratch else None,
+            ignored_modules=ignored_modules,
+            enable_training_stats=enable_training_stats,
+        )
+        log_gpu_memory_usage(f'After {role} FSDP init')
 
-        tp_outside = self.config.ref.tp_outside if role == "ref" else self.config.actor.tp_outside
-        register_dtensor_save_hook(actor_module_fsdp, shard_plan, tp_outside)
-
-        if role == 'actor' and self.config.actor.act_offload:
-            context = activation_offload.get_offload_context(True,
-                                                             actor_module_fsdp,
-                                                             offload_threshold=self.config.actor.get(
-                                                                 'act_offload_threshold', 1024 * 1024),
-                                                             offload_upbound=self.config.actor.act_offload_upbound,
-                                                             buffer_size=self.config.actor.act_offload_buff_size)
-
-            def enter_act_offload(module: torch.nn.Module, input):
-                if torch.is_grad_enabled():
-                    context.__enter__()
-
-            def exit_act_offload(module: torch.nn.Module, input, output):
-                if torch.is_grad_enabled():
-                    context.__exit__()
-
-            actor_module_fsdp.register_forward_pre_hook(enter_act_offload, prepend=True)
-            actor_module_fsdp.register_forward_hook(exit_act_offload, prepend=False)
-
-        log_gpu_memory_usage('After Actor FSDP init')
-
-        # TODO: add more optimizer args into config
+        # create optimizer for actor
+        actor_optimizer = None
+        actor_lr_scheduler = None
         if role == 'actor':
             from verl.utils.torch_functional import get_constant_schedule_with_warmup
             from alpha_seed.trainer.optim import get_optimizer_from_config
@@ -433,17 +318,11 @@ class AsyncActorRolloutRefWorker(Worker):
 
             actor_lr_scheduler = get_constant_schedule_with_warmup(optimizer=actor_optimizer,
                                                                    num_warmup_steps=num_warmup_steps)
-        else:
-            actor_optimizer = None
-            actor_lr_scheduler = None
 
-        # get the original unwrapped module
-        self.actor_module = actor_module_fsdp._fsdp_wrapped_module
-        assert self.actor_module.config.num_attention_heads % self.config.actor.ulysses_sequence_parallel_size == 0, \
-            f'invalid ulysses sequence parallel size: {self.actor_module.config.num_attention_heads=} % {self.config.actor.ulysses_sequence_parallel_size=} != 0'
+        assert actor_model_config.num_attention_heads % self.config.actor.ulysses_sequence_parallel_size == 0, \
+            f'invalid ulysses sequence parallel size: {actor_model_config.num_attention_heads=} % {self.config.actor.ulysses_sequence_parallel_size=} != 0'
 
-        log_gpu_memory_usage('After actor optimizer init', logger=logger)
-
+        log_gpu_memory_usage('After actor optimizer init')
         return actor_module_fsdp, actor_optimizer, actor_lr_scheduler, actor_model_config, metrics_context
 
     def _build_model_optimizer_mariana(self, model_path, role='actor'):

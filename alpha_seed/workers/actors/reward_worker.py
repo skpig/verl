@@ -35,12 +35,12 @@ from verl.utils.import_utils import import_external_libs
 from verl.utils.model import compute_position_id_with_mask
 
 from alpha_seed.workers.hybrid_engine.fsdp_gather import DataGatherManager, ulysses_pad_and_slice_inputs
-from alpha_seed.models.transformers.parallel import apply_parallel_plan
+from alpha_seed.models.transformers.monkey_patch import apply_monkey_patch, get_parallel_plan
 from verl.utils.seqlen_balancing import rearrange_micro_batches
 from alpha_seed.utils import ndtimeline
 from alpha_seed.models.transformers.parallel.collectives import get_memory
-from ..fsdp.initialize import create_mesh, parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init, cleanup_local_tmp_folder_safetensors_files
-from ..fsdp.extensions import register_dtensor_save_hook
+from alpha_seed.workers.fsdp.initialize import create_mesh, parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init, cleanup_local_tmp_folder_safetensors_files
+from alpha_seed.workers.fsdp.extensions import register_dtensor_save_hook, parallelize_module
 from dist_attn.ulysses.ops import gather_outputs
 from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
 
@@ -113,7 +113,6 @@ class RewardModelWorker(Worker):
         use_rmpad = self.config.get('use_rmpad', False)
         if use_rmpad:
             # optimize the model via rmpad
-            from alpha_seed.models.transformers.monkey_patch import apply_monkey_patch
             assert apply_monkey_patch(config=model_config,
                                       verbose=self.rank == 0), f'Cannot find rmpad version of {model_config.model_type}'
 
@@ -132,7 +131,8 @@ class RewardModelWorker(Worker):
             if self.rank == 0:
                 print(reward_module)
 
-        shard_plan = apply_parallel_plan(reward_module, reward_module.config, self.tp_mesh)
+        shard_plan = get_parallel_plan(model_config, self.tp_mesh)
+        shard_plan = parallelize_module(reward_module, shard_plan, self.tp_mesh)
 
         auto_wrap_policy = get_fsdp_wrap_policy(module=reward_module, config=self.config.model.fsdp_config)
 

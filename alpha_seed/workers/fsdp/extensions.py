@@ -70,10 +70,12 @@ def parallelize_module(model: torch.nn.Module, plan: Dict[str, Shard], tp_mesh: 
             raise RuntimeError(f"{plan_name} is not found in model")
 
     # make shure all parameters are sharded
-    for param in model.parameters():
+    full_shard_plan = {}
+    for fqn, param in model.named_parameters(remove_duplicate=False):
         assert hasattr(param, "_spec"), f"Internal Error: {param} is omitted"
+        full_shard_plan[fqn] = param._spec
 
-    return model
+    return full_shard_plan
 
 
 orig_optim_state_dict = FSDP.optim_state_dict

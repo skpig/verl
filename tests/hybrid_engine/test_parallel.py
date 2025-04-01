@@ -44,23 +44,21 @@ import torch.distributed as dist
 from torch.distributed._tensor import DTensor, Shard
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import StateDictType
-from torch.distributed.fsdp.api import ShardingStrategy, MixedPrecision
 from transformers import AutoConfig, AutoModelForCausalLM
-from alpha_seed.workers.fsdp.initialize import create_mesh, parallel_load_safetensors, parallel_init_fsdp_fn, meta_device_init
+from alpha_seed.workers.fsdp.initialize import create_mesh, meta_device_init
 from alpha_seed.workers.hybrid_engine.fsdp_gather import ulysses_pad_and_slice_inputs
 from dist_attn.ulysses.parallel_states import set_ulysses_sequence_parallel_group
 from dist_attn.ulysses.ops import gather_outputs
-from alpha_seed.models.transformers.monkey_patch import apply_monkey_patch
-from alpha_seed.workers.fsdp.extensions import register_dtensor_save_hook
-from alpha_seed.models.transformers.parallel import apply_parallel_plan
+from alpha_seed.models.transformers.monkey_patch import apply_monkey_patch, get_parallel_plan
 from alpha_seed.workers.fsdp.clip_grad_norm import clip_grad_norm_
-from alpha_seed.workers.actors.offload import offload_fsdp_optimizer, load_fsdp_optimizer
+from alpha_seed.workers.fsdp.offload import offload_fsdp_optimizer, load_fsdp_optimizer
+from alpha_seed.workers.fsdp import fully_shard
 from alpha_seed.workers.fsdp.offload import activation_offload
+from alpha_seed.trainer.optim import get_optimizer_from_config
 
 from verl.utils.debug import get_profiler_context, MemoryProfiler
 from verl.utils.fs import copy_local_path_from_hdfs
-from verl.utils.fsdp_utils import get_fsdp_wrap_policy
-from tests.hybrid_engine.utils import prepare_data, print_each_rank, ref_loss_fn
+from tests.hybrid_engine.utils import print_each_rank
 from flash_attn.ops.triton.cross_entropy import cross_entropy_loss
 import time
 from tqdm import trange
@@ -99,51 +97,18 @@ def init_model(model_path: str, fsdp_size: int, tp_size: int, sp_size: int, opti
                                                  torch_dtype=torch.float32,
                                                  attn_implementation="flash_attention_2")
 
-        use_reentrant = False
-        if args.act_offload:
-            torch.utils.checkpoint.CheckpointFunction = activation_offload.CheckpointFunction
-            use_reentrant = True
-
-        # enable recompute
-        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': use_reentrant})
-
-        nparams = sum(p.numel() for p in model.parameters())
-        print_each_rank(f"number of parameters before parallelization: {nparams / (1e9):.2f}B")
-
-        shard_plan = apply_parallel_plan(model, config, tp_mesh)
-
-        nparams = sum(p.numel() for p in model.parameters())
-        print_each_rank(f"number of parameters after parallelization: {nparams / (1e9):.2f}B")
-
     print_each_rank(f"After init from HF model: {torch.cuda.memory_allocated() / (1024**3):.2f} GB")
 
-    mixed_precision = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.float32, buffer_dtype=torch.float32)
-    auto_wrap_policy = get_fsdp_wrap_policy(module=model)
+    model, _ = fully_shard(model=model,
+                           block_cls=model._no_split_modules[0],
+                           fsdp_mesh=fsdp_mesh,
+                           tp_plan=get_parallel_plan(config, tp_mesh),
+                           tp_mesh=tp_mesh,
+                           recompute=True,
+                           act_offload=args.act_offload,
+                           param_offload=False,
+                           weights=model_path)
 
-    shards = parallel_load_safetensors(model_path)
-    init_fn = parallel_init_fsdp_fn(model, shards)
-    strategy = ShardingStrategy.HYBRID_SHARD if fsdp_mesh.ndim > 1 and fsdp_mesh.size(
-    ) > 1 else ShardingStrategy.FULL_SHARD
-
-    model = FSDP(model,
-                 use_orig_params=True,
-                 param_init_fn=init_fn,
-                 auto_wrap_policy=auto_wrap_policy,
-                 sharding_strategy=strategy,
-                 mixed_precision=mixed_precision,
-                 cpu_offload=None,
-                 forward_prefetch=True,
-                 sync_module_states=False,
-                 device_id=torch.cuda.current_device(),
-                 device_mesh=fsdp_mesh)
-    if len(shards) > 0:
-        warnings.warn(
-            "detected some parameter is not loaded in the model. Ignore this warning if you shrink the model layers.")
-        shards.clear()
-
-    register_dtensor_save_hook(model, shard_plan)
-
-    from alpha_seed.trainer.optim import get_optimizer_from_config
     optim_config = {
         "type": optimizer_type,
         "lr": 1e-4,

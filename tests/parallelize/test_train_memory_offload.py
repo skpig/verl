@@ -31,7 +31,7 @@ from torch.distributed.device_mesh import init_device_mesh
 from alpha_seed.workers.fsdp.initialize import parallel_load_safetensors, parallel_init_fsdp_fn, meta_device_init
 
 from verl.utils.fs import copy_local_path_from_hdfs
-from alpha_seed.workers.actors.offload import offload_fsdp_model_to_cpu, load_fsdp_model_to_gpu
+from alpha_seed.workers.fsdp.offload import offload_fsdp_model_to_cpu, load_fsdp_model_to_gpu
 
 from tests.hybrid_engine.utils import prepare_data, print_each_rank, to_random, ref_loss_fn
 from ..launch import torchrun
@@ -156,5 +156,5 @@ test_offload_memory_not_orig_param = partial(torchrun, 4, offload_and_load, Fals
 # test_offload_bitwise_correctness_not_orig_param = partial(torchrun, 4, offload_and_load_correctness, False)
 
 # test byted_optimizer
-test_offload_memory_orig_param = partial(torchrun, 4, offload_and_load, True, 'lion')
-test_offload_memory_not_orig_param = partial(torchrun, 4, offload_and_load, False, 'lion')
+test_offload_memory_orig_param_lion = partial(torchrun, 4, offload_and_load, True, 'lion')
+test_offload_memory_not_orig_param_lion = partial(torchrun, 4, offload_and_load, False, 'lion')

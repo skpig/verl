@@ -16,10 +16,12 @@
 """
 Apply monkey-patch function to models
 """
-
+from typing import Dict
 import torch
 from torch import distributed as dist
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed._tensor.placement_types import Placement
+from torch.distributed.device_mesh import DeviceMesh
 from collections import defaultdict
 from seed_models import M8Config
 
@@ -136,3 +138,27 @@ def apply_monkey_patch(config: PretrainedConfig, verbose=True):
         print(f'Applying monkey patch to model {model_type}')
 
     return success_apply_monkey_patch
+
+
+def get_parallel_plan(config, tp_mesh: DeviceMesh) -> Dict[str, Placement]:
+    """
+    Get tensor parallel plan for the model
+    """
+    make_plan_fn = None
+    if config.model_type == 'seed_m8' or \
+            (hasattr(config, "text_config") and config.text_config.model_type == 'seed_m8'):
+        from .modeling_m8 import make_m8_plan
+        make_plan_fn = make_m8_plan
+    if config.model_type == "deepseek_v3":
+        from .modeling_ds import make_dsv3_plan
+        make_plan_fn = make_dsv3_plan
+    if "P6Dense" in config.architectures[0]:
+        from .modeling_p6d import make_p6d_plan
+        make_plan_fn = make_p6d_plan
+
+    if make_plan_fn is None:
+        assert tp_mesh.size() == 1, f"tensor parallelism is not support for model: {config.model_type}"
+        return {}
+    plan: Dict = make_plan_fn()
+    assert all(isinstance(p, Placement) for p in plan.values()), "Parallel plan must described as fqn:Placement"
+    return plan
