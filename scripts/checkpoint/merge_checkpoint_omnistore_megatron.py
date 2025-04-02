@@ -50,6 +50,9 @@ def save_local_and_upload_merged_megatron_ckpt(pt_state_dict, merged_model_save_
     with tempfile.TemporaryDirectory() as local_tmp_dir:
         local_megatron_merge_path = os.path.join(local_tmp_dir, 'megatron_merge_states.pt')
         torch.save(pt_state_dict, local_megatron_merge_path)
+
+        if not hdfs_io.exists(merged_model_save_path):
+            hdfs_io.makedirs(merged_model_save_path)
         hdfs_io.copy(local_megatron_merge_path, merged_model_save_path, **prepare_hdfs_copy_kwargs())
     print(f'Save to local and upload merged megatron ckpt cost time: {time.time() - time_begin}s')
 

@@ -42,6 +42,8 @@ def simple_convert_seed_models_to_megatron(
         if not hdfs_io.hexists(local_output_path):
             raise ValueError(f'{local_output_path} is not found')
 
+        if not hdfs_io.exists(output_path):
+            hdfs_io.makedirs(output_path)
         upload_thread = threading.Thread(
             target=hdfs_upload,
             args=(local_output_path, output_path, 'Async upload converted xperf model'),
@@ -103,11 +105,12 @@ if __name__ == '__main__':
         with torch.device('meta'):
             model = auto_model.from_config(config, torch_dtype=torch.bfloat16)
         model.to_empty(device='cpu')
+        model.load_state_dict(state_dict['model'], strict=True, assign=True)
         print(f'Load state_dict to huggingface model cost time: {time.time() - time_begin}s')
 
         print(f'Step4: save merged huggingface model to local {hf_path}')
         time_begin = time.time()
-        model.save_pretrained(hf_path, state_dict=state_dict['model'])
+        model.save_pretrained(hf_path)
         print(f'Save merged huggingface model to local cost time: {time.time() - time_begin}s')
 
         del state_dict
