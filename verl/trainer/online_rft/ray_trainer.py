@@ -25,6 +25,7 @@ from pprint import pprint
 from typing import Counter, Type, Dict
 from copy import deepcopy
 from collections import Counter, defaultdict
+import torch
 
 import ray
 import numpy as np
@@ -36,8 +37,9 @@ from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.base import Worker
 from verl.single_controller.ray import RayResourcePool, RayWorkerGroup, RayClassWithInitArgs
 from verl.single_controller.ray.base import create_colocated_worker_cls
-from verl.trainer.online_rft import core_algos
+from verl.trainer.ppo import core_algos
 from verl.trainer.online_rft.metric_utils import compute_data_metrics, compute_throughout_metrics, compute_timing_metrics, reduce_metrics
+from verl.trainer.ppo.ray_trainer import RayPPOTrainer, WorkerType, Role, AdvantageEstimator, ResourcePoolManager, apply_kl_penalty, _timer
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
@@ -45,137 +47,137 @@ from verl.utils.tracking import ValidationGenerationsLogger
 from torch.utils.data import RandomSampler, SequentialSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 
-WorkerType = Type[Worker]
+# WorkerType = Type[Worker]
 
 
-class Role(Enum):
-    """
-    To create more roles dynamically, you can subclass Role and add new members
-    """
-    Actor = 0
-    Rollout = 1
-    ActorRollout = 2
-    Critic = 3
-    RefPolicy = 4
-    RewardModel = 5
-    ActorRolloutRef = 6
+# class Role(Enum):
+#     """
+#     To create more roles dynamically, you can subclass Role and add new members
+#     """
+#     Actor = 0
+#     Rollout = 1
+#     ActorRollout = 2
+#     Critic = 3
+#     RefPolicy = 4
+#     RewardModel = 5
+#     ActorRolloutRef = 6
 
 
-class AdvantageEstimator(str, Enum):
-    """
-    Using an enumeration class to avoid spelling errors in adv_estimator
-    """
-    GAE = 'gae'
-    GRPO = 'grpo'
-    REINFORCE_PLUS_PLUS = 'reinforce_plus_plus'
-    REMAX = 'remax'
-    RLOO = 'rloo'
+# class AdvantageEstimator(str, Enum):
+#     """
+#     Using an enumeration class to avoid spelling errors in adv_estimator
+#     """
+#     GAE = 'gae'
+#     GRPO = 'grpo'
+#     REINFORCE_PLUS_PLUS = 'reinforce_plus_plus'
+#     REMAX = 'remax'
+#     RLOO = 'rloo'
 
 
-@dataclass
-class ResourcePoolManager:
-    """
-    Define a resource pool specification. Resource pool will be initialized first.
-    Mapping
-    """
-    resource_pool_spec: dict[str, list[int]]
-    mapping: dict[Role, str]
-    resource_pool_dict: dict[str, RayResourcePool] = field(default_factory=dict)
+# @dataclass
+# class ResourcePoolManager:
+#     """
+#     Define a resource pool specification. Resource pool will be initialized first.
+#     Mapping
+#     """
+#     resource_pool_spec: dict[str, list[int]]
+#     mapping: dict[Role, str]
+#     resource_pool_dict: dict[str, RayResourcePool] = field(default_factory=dict)
 
-    def create_resource_pool(self):
-        for resource_pool_name, process_on_nodes in self.resource_pool_spec.items():
-            # max_colocate_count means the number of WorkerGroups (i.e. processes) in each RayResourcePool
-            # For FSDP backend, we recommend using max_colocate_count=1 that merge all WorkerGroups into one.
-            # For Megatron backend, we recommend using max_colocate_count>1 that can utilize different WorkerGroup for differnt models
-            resource_pool = RayResourcePool(process_on_nodes=process_on_nodes,
-                                            use_gpu=True,
-                                            max_colocate_count=1,
-                                            name_prefix=resource_pool_name)
-            self.resource_pool_dict[resource_pool_name] = resource_pool
+#     def create_resource_pool(self):
+#         for resource_pool_name, process_on_nodes in self.resource_pool_spec.items():
+#             # max_colocate_count means the number of WorkerGroups (i.e. processes) in each RayResourcePool
+#             # For FSDP backend, we recommend using max_colocate_count=1 that merge all WorkerGroups into one.
+#             # For Megatron backend, we recommend using max_colocate_count>1 that can utilize different WorkerGroup for differnt models
+#             resource_pool = RayResourcePool(process_on_nodes=process_on_nodes,
+#                                             use_gpu=True,
+#                                             max_colocate_count=1,
+#                                             name_prefix=resource_pool_name)
+#             self.resource_pool_dict[resource_pool_name] = resource_pool
 
-        self._check_resource_available()
+#         self._check_resource_available()
 
-    def get_resource_pool(self, role: Role) -> RayResourcePool:
-        """Get the resource pool of the worker_cls"""
-        return self.resource_pool_dict[self.mapping[role]]
+#     def get_resource_pool(self, role: Role) -> RayResourcePool:
+#         """Get the resource pool of the worker_cls"""
+#         return self.resource_pool_dict[self.mapping[role]]
 
-    def get_n_gpus(self) -> int:
-        """Get the number of gpus in this cluster."""
-        return sum([n_gpus for process_on_nodes in self.resource_pool_spec.values() for n_gpus in process_on_nodes])
+#     def get_n_gpus(self) -> int:
+#         """Get the number of gpus in this cluster."""
+#         return sum([n_gpus for process_on_nodes in self.resource_pool_spec.values() for n_gpus in process_on_nodes])
 
-    def _check_resource_available(self):
-        """Check if the resource pool can be satisfied in this ray cluster."""
-        node_available_resources = ray.state.available_resources_per_node()
-        node_available_gpus = {node: node_info.get('GPU', 0) for node, node_info in node_available_resources.items()}
+#     def _check_resource_available(self):
+#         """Check if the resource pool can be satisfied in this ray cluster."""
+#         node_available_resources = ray.state.available_resources_per_node()
+#         node_available_gpus = {node: node_info.get('GPU', 0) for node, node_info in node_available_resources.items()}
 
-        # check total required gpus can be satisfied
-        total_available_gpus = sum(node_available_gpus.values())
-        total_required_gpus = sum(
-            [n_gpus for process_on_nodes in self.resource_pool_spec.values() for n_gpus in process_on_nodes])
-        if total_available_gpus < total_required_gpus:
-            raise ValueError(
-                f"Total available GPUs {total_available_gpus} is less than total desired GPUs {total_required_gpus}")
+#         # check total required gpus can be satisfied
+#         total_available_gpus = sum(node_available_gpus.values())
+#         total_required_gpus = sum(
+#             [n_gpus for process_on_nodes in self.resource_pool_spec.values() for n_gpus in process_on_nodes])
+#         if total_available_gpus < total_required_gpus:
+#             raise ValueError(
+#                 f"Total available GPUs {total_available_gpus} is less than total desired GPUs {total_required_gpus}")
 
-        # check each resource pool can be satisfied, O(#resource_pools * #nodes)
-        for resource_pool_name, process_on_nodes in self.resource_pool_spec.items():
-            num_gpus, num_nodes = process_on_nodes[0], len(process_on_nodes)
-            for node, available_gpus in node_available_gpus.items():
-                if available_gpus >= num_gpus:
-                    node_available_gpus[node] -= num_gpus
-                    num_nodes -= 1
-                    if num_nodes == 0:
-                        break
-            if num_nodes > 0:
-                raise ValueError(
-                    f"Resource pool {resource_pool_name}: {num_gpus}*{num_nodes} cannot be satisfied in this ray cluster"
-                )
-
-
-import torch
-from verl.utils.torch_functional import masked_mean
+#         # check each resource pool can be satisfied, O(#resource_pools * #nodes)
+#         for resource_pool_name, process_on_nodes in self.resource_pool_spec.items():
+#             num_gpus, num_nodes = process_on_nodes[0], len(process_on_nodes)
+#             for node, available_gpus in node_available_gpus.items():
+#                 if available_gpus >= num_gpus:
+#                     node_available_gpus[node] -= num_gpus
+#                     num_nodes -= 1
+#                     if num_nodes == 0:
+#                         break
+#             if num_nodes > 0:
+#                 raise ValueError(
+#                     f"Resource pool {resource_pool_name}: {num_gpus}*{num_nodes} cannot be satisfied in this ray cluster"
+#                 )
 
 
-def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty='kl'):
-    responses = data.batch['responses']
-    response_length = responses.size(1)
-    token_level_scores = data.batch['token_level_scores']
-    batch_size = data.batch.batch_size[0]
-    attention_mask = data.batch['attention_mask']
-    response_mask = attention_mask[:, -response_length:]
-
-    # compute kl between ref_policy and current policy
-    if 'ref_log_prob' in data.batch.keys():
-        kld = core_algos.kl_penalty(data.batch['old_log_probs'], data.batch['ref_log_prob'],
-                                    kl_penalty=kl_penalty)  # (batch_size, response_length)
-        kld = kld * response_mask
-        beta = kl_ctrl.value
-    else:
-        beta = 0
-        kld = torch.zeros_like(response_mask, dtype=torch.float32)
-
-    token_level_rewards = token_level_scores - beta * kld
-
-    current_kl = masked_mean(kld, mask=response_mask, axis=-1)  # average over sequence
-    current_kl = torch.mean(current_kl, dim=0).item()
-
-    # according to https://github.com/huggingface/trl/blob/951ca1841f29114b969b57b26c7d3e80a39f75a0/trl/trainer/ppo_trainer.py#L837
-    kl_ctrl.update(current_kl=current_kl, n_steps=batch_size)
-    data.batch['token_level_rewards'] = token_level_rewards
-
-    metrics = {'critic/kl': current_kl, 'critic/kl_coeff': beta}
-
-    return data, metrics
+# import torch
+# from verl.utils.torch_functional import masked_mean
 
 
-@contextmanager
-def _timer(name: str, timing_raw: Dict[str, float]):
-    with Timer(name=name, logger=None) as timer:
-        print("Start timing of : ", name)
-        yield
-    timing_raw[name] = timer.last
+# def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty='kl'):
+#     responses = data.batch['responses']
+#     response_length = responses.size(1)
+#     token_level_scores = data.batch['token_level_scores']
+#     batch_size = data.batch.batch_size[0]
+#     attention_mask = data.batch['attention_mask']
+#     response_mask = attention_mask[:, -response_length:]
+
+#     # compute kl between ref_policy and current policy
+#     if 'ref_log_prob' in data.batch.keys():
+#         kld = core_algos.kl_penalty(data.batch['old_log_probs'], data.batch['ref_log_prob'],
+#                                     kl_penalty=kl_penalty)  # (batch_size, response_length)
+#         kld = kld * response_mask
+#         beta = kl_ctrl.value
+#     else:
+#         beta = 0
+#         kld = torch.zeros_like(response_mask, dtype=torch.float32)
+
+#     token_level_rewards = token_level_scores - beta * kld
+
+#     current_kl = masked_mean(kld, mask=response_mask, axis=-1)  # average over sequence
+#     current_kl = torch.mean(current_kl, dim=0).item()
+
+#     # according to https://github.com/huggingface/trl/blob/951ca1841f29114b969b57b26c7d3e80a39f75a0/trl/trainer/ppo_trainer.py#L837
+#     kl_ctrl.update(current_kl=current_kl, n_steps=batch_size)
+#     data.batch['token_level_rewards'] = token_level_rewards
+
+#     metrics = {'critic/kl': current_kl, 'critic/kl_coeff': beta}
+
+#     return data, metrics
 
 
-class RayOnlineRFTTrainer(object):
+# @contextmanager
+# def _timer(name: str, timing_raw: Dict[str, float]):
+#     with Timer(name=name, logger=None) as timer:
+#         print("Start timing of : ", name)
+#         yield
+#     timing_raw[name] = timer.last
+
+
+class RayOnlineRFTTrainer(RayPPOTrainer):
     """
     Note that this trainer runs on the driver process on a single CPU/GPU node.
     """
@@ -211,21 +213,12 @@ class RayOnlineRFTTrainer(object):
         self.use_reference_policy = Role.RefPolicy in role_worker_mapping
         self.use_rm = Role.RewardModel in role_worker_mapping
         self.ray_worker_group_cls = ray_worker_group_cls
-        self.generations_logger = ValidationGenerationsLogger()
+        self.validation_generations_logger = ValidationGenerationsLogger()
 
-        # define KL control
-        if self.use_reference_policy:
-            if config.algorithm.kl_ctrl.type == 'fixed':
-                self.kl_ctrl = core_algos.FixedKLController(kl_coef=config.algorithm.kl_ctrl.kl_coef)
-            elif config.algorithm.kl_ctrl.type == 'adaptive':
-                assert config.algorithm.kl_ctrl.horizon > 0, f'horizon must be larger than 0. Got {config.critic.kl_ctrl.horizon}'
-                self.kl_ctrl = core_algos.AdaptiveKLController(init_kl_coef=config.algorithm.kl_ctrl.kl_coef,
-                                                               target_kl=config.algorithm.kl_ctrl.target_kl,
-                                                               horizon=config.algorithm.kl_ctrl.horizon)
-            else:
-                raise NotImplementedError
-        else:
-            self.kl_ctrl = core_algos.FixedKLController(kl_coef=0.)
+        # define in-reward KL control
+        # kl loss control currently not suppoorted
+        if config.algorithm.use_kl_in_reward:
+            self.kl_ctrl_in_reward = core_algos.get_kl_controller(config.algorithm.kl_ctrl)
 
         # if self.config.algorithm.adv_estimator == AdvantageEstimator.GAE:
         #     self.use_critic = True
@@ -237,9 +230,13 @@ class RayOnlineRFTTrainer(object):
         # else:
         #     raise NotImplementedError
 
+        self.use_critic = False
+        self.use_rm = False
+
         self._validate_config()
         self._create_dataloader()
 
+    # NO NEED
     def _validate_config(self):
         config = self.config
         # number of GPUs total
@@ -253,14 +250,27 @@ class RayOnlineRFTTrainer(object):
         # A helper function to check "micro_batch_size" vs "micro_batch_size_per_gpu"
         # We throw an error if the user sets both. The new convention is "..._micro_batch_size_per_gpu".
         def check_mutually_exclusive(mbs, mbs_per_gpu, name: str):
-            if mbs is None and mbs_per_gpu is None:
-                raise ValueError(f"[{name}] Please set at least one of '{name}.micro_batch_size' or "
-                                 f"'{name}.micro_batch_size_per_gpu'.")
+            settings = {
+                "actor_rollout_ref.actor": "micro_batch_size",
+                "critic": "micro_batch_size",
+                "reward_model": "micro_batch_size",
+                "actor_rollout_ref.ref": "log_prob_micro_batch_size",
+                "actor_rollout_ref.rollout": "log_prob_micro_batch_size",
+            }
 
-            if mbs is not None and mbs_per_gpu is not None:
-                raise ValueError(f"[{name}] You have set both '{name}.micro_batch_size' AND "
-                                 f"'{name}.micro_batch_size_per_gpu'. Please remove '{name}.micro_batch_size' "
-                                 f"because only '*_micro_batch_size_per_gpu' is supported (the former is deprecated).")
+            if name in settings:
+                param = settings[name]
+                param_per_gpu = f"{param}_per_gpu"
+
+                if mbs is None and mbs_per_gpu is None:
+                    raise ValueError(
+                        f"[{name}] Please set at least one of '{name}.{param}' or '{name}.{param_per_gpu}'.")
+
+                if mbs is not None and mbs_per_gpu is not None:
+                    raise ValueError(
+                        f"[{name}] You have set both '{name}.{param}' AND '{name}.{param_per_gpu}'. "
+                        f"Please remove '{name}.{param}' because only '*_{param_per_gpu}' is supported (the former is deprecated)."
+                    )
 
         if not config.actor_rollout_ref.actor.use_dynamic_bsz:
             # actor: ppo_micro_batch_size vs. ppo_micro_batch_size_per_gpu
@@ -268,16 +278,21 @@ class RayOnlineRFTTrainer(object):
                                      config.actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu,
                                      "actor_rollout_ref.actor")
 
-            # reference: log_prob_micro_batch_size vs. log_prob_micro_batch_size_per_gpu
-            check_mutually_exclusive(config.actor_rollout_ref.ref.log_prob_micro_batch_size,
-                                     config.actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu,
-                                     "actor_rollout_ref.ref")
+            if self.use_reference_policy:
+                # reference: log_prob_micro_batch_size vs. log_prob_micro_batch_size_per_gpu
+                check_mutually_exclusive(config.actor_rollout_ref.ref.log_prob_micro_batch_size,
+                                         config.actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu,
+                                         "actor_rollout_ref.ref")
 
-        if not config.actor_rollout_ref.rollout.log_prob_use_dynamic_bsz:
             #  The rollout section also has log_prob_micro_batch_size vs. log_prob_micro_batch_size_per_gpu
             check_mutually_exclusive(config.actor_rollout_ref.rollout.log_prob_micro_batch_size,
                                      config.actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu,
                                      "actor_rollout_ref.rollout")
+
+        if self.use_critic and not config.critic.use_dynamic_bsz:
+            # Check for critic micro-batch size conflicts
+            check_mutually_exclusive(config.critic.ppo_micro_batch_size, config.critic.ppo_micro_batch_size_per_gpu,
+                                     "critic")
 
         # Check for reward model micro-batch size conflicts
         if config.reward_model.enable and not config.reward_model.use_dynamic_bsz:
@@ -296,12 +311,28 @@ class RayOnlineRFTTrainer(object):
                 assert config.actor_rollout_ref.actor.ppo_mini_batch_size % config.actor_rollout_ref.actor.ppo_micro_batch_size == 0
                 assert config.actor_rollout_ref.actor.ppo_micro_batch_size * sp_size >= n_gpus
 
+        if config.algorithm.use_kl_in_reward and config.actor_rollout_ref.actor.use_kl_loss:
+            print(f"NOTICE: You have both enabled in-reward kl and kl loss.")
+
+        # critic
+        if self.use_critic and not config.critic.use_dynamic_bsz:
+            assert config.data.train_batch_size >= config.critic.ppo_mini_batch_size
+            sp_size = config.critic.get('ulysses_sequence_parallel_size', 1)
+            if config.critic.ppo_micro_batch_size is not None:
+                assert config.critic.ppo_mini_batch_size % config.critic.ppo_micro_batch_size == 0
+                assert config.critic.ppo_micro_batch_size * sp_size >= n_gpus
+
         # Check if use_remove_padding is enabled when using sequence parallelism for fsdp
         if config.actor_rollout_ref.actor.strategy == 'fsdp':
             if config.actor_rollout_ref.actor.get('ulysses_sequence_parallel_size', 1) > 1 or \
                     config.actor_rollout_ref.ref.get('ulysses_sequence_parallel_size', 1) > 1:
                 assert config.actor_rollout_ref.model.use_remove_padding, \
                     "When using sequence parallelism for actor/ref policy, you must enable `use_remove_padding`."
+
+        if self.use_critic and config.critic.strategy == 'fsdp':
+            if config.critic.get('ulysses_sequence_parallel_size', 1) > 1:
+                assert config.critic.model.use_remove_padding, \
+                    "When using sequence parallelism for critic, you must enable `use_remove_padding`."
 
         if config.data.get('val_batch_size', None) is not None:
             print(
@@ -315,6 +346,7 @@ class RayOnlineRFTTrainer(object):
 
         print("[validate_config] All configuration checks passed successfully!")
 
+    # NO NEED
     def _create_dataloader(self):
         # TODO: we have to make sure the batch size is divisible by the dp size
         self.train_dataset = RLHFDataset(parquet_files=self.config.data.train_files,
@@ -326,8 +358,11 @@ class RayOnlineRFTTrainer(object):
                                          filter_prompts=True,
                                          template_type=self.config.data.template_type,
                                          return_raw_chat=self.config.data.get('return_raw_chat', False),
-                                         truncation='error',
+                                         truncation=self.config.data.get('truncation', 'error'),
                                          filter_overlong_prompts=self.config.data.filter_overlong_prompts)
+        assert self.train_dataset.truncation == self.config.data.get(
+            'truncation', 'error'
+        ), f'dataset truncation {self.train_dataset.truncation} must be the same as config {self.config.data.get("truncation", "error")}'
         # use sampler for better ckpt resume
         if self.config.data.shuffle:
             train_dataloader_generator = torch.Generator()
@@ -352,8 +387,11 @@ class RayOnlineRFTTrainer(object):
                                        filter_prompts=True,
                                        template_type=self.config.data.template_type,
                                        return_raw_chat=self.config.data.get('return_raw_chat', False),
-                                       truncation='error',
+                                       truncation=self.config.data.get('truncation', 'error'),
                                        filter_overlong_prompts=self.config.data.filter_overlong_prompts)
+        assert self.val_dataset.truncation == self.config.data.get(
+            'truncation', 'error'
+        ), f'dataset truncation {self.val_dataset.truncation} must be the same as config {self.config.data.get("truncation", "error")}'
         self.val_dataloader = StatefulDataLoader(
             dataset=self.val_dataset,
             # Validation datasets are sent to inference engines as a whole batch,
@@ -383,11 +421,12 @@ class RayOnlineRFTTrainer(object):
         OmegaConf.set_struct(self.config, True)
         with open_dict(self.config):
             self.config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
+            self.config.critic.optim.total_training_steps = total_training_steps
 
     def _maybe_log_val_generations(self, inputs, outputs, scores):
         """Log a table of validation samples to the configured logger (wandb or swanlab)"""
 
-        generations_to_log = self.config.trainer.val_generations_to_log_to_wandb
+        generations_to_log = self.config.trainer.log_val_generations
 
         if generations_to_log == 0:
             return
@@ -424,7 +463,7 @@ class RayOnlineRFTTrainer(object):
 
         import numpy as np
 
-        generations_to_log = self.config.trainer.val_generations_to_log_to_wandb
+        generations_to_log = self.config.trainer.log_val_generations
 
         if generations_to_log == 0:
             return
@@ -506,37 +545,38 @@ class RayOnlineRFTTrainer(object):
             test_batch = test_batch.union(test_output_gen_batch)
 
             # evaluate using reward_function
-            seq_reward_tensor, reward_type_counter = self.val_reward_fn(test_batch) # (bsz,), dict
+            reward_tensor, reward_type_counter = self.val_reward_fn(test_batch)
             reward_meta.update(reward_type_counter)
 
             # Store scores
-            scores = seq_reward_tensor.cpu().tolist()
+            scores = reward_tensor.sum(-1).cpu().tolist()
             sample_scores.extend(scores)
 
-            reward_tensor_lst.append(seq_reward_tensor)
-            data_source_lst.append(test_batch.non_tensor_batch.get('data_source', ['unknown'] * seq_reward_tensor.shape[0]))
+            reward_tensor_lst.append(reward_tensor)
+            data_source_lst.append(test_batch.non_tensor_batch.get('data_source', ['unknown'] * reward_tensor.shape[0]))
 
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
 
-        seq_reward_tensor = torch.cat(reward_tensor_lst, dim=0).cpu()  # (batch_size,)
+        reward_tensor = torch.cat(reward_tensor_lst, dim=0).sum(-1).cpu()  # (batch_size,)
         data_sources = np.concatenate(data_source_lst, axis=0)
 
         # evaluate test_score based on data source
         data_source_reward = {}
-        for i in range(seq_reward_tensor.shape[0]):
+        for i in range(reward_tensor.shape[0]):
             data_source = data_sources[i]
             if data_source not in data_source_reward:
                 data_source_reward[data_source] = []
-            data_source_reward[data_source].append(seq_reward_tensor[i].item())
+            data_source_reward[data_source].append(reward_tensor[i].item())
 
         metric_dict = {}
         for data_source, rewards in data_source_reward.items():
             metric_dict[f'val/test_score/{data_source}'] = np.mean(rewards)
         
-        metric_dict.update({f'val/test_score/reward_type/{key}': value / len(seq_reward_tensor) for key, value in reward_meta.items()})
+        metric_dict.update({f'val/test_score/reward_type/{key}': value / len(reward_tensor) for key, value in reward_meta.items()})
 
         return metric_dict
 
+    # NO NEED
     def init_workers(self):
         """Init resource pool and worker group"""
         self.resource_pool_manager.create_resource_pool()
@@ -553,6 +593,11 @@ class RayOnlineRFTTrainer(object):
         else:
             raise NotImplementedError
 
+        # create critic
+        if self.use_critic:
+            resource_pool = self.resource_pool_manager.get_resource_pool(Role.Critic)
+            critic_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Critic], config=self.config.critic)
+            self.resource_pool_to_cls[resource_pool]['critic'] = critic_cls
 
         # create reference policy if needed
         if self.use_reference_policy:
@@ -583,6 +628,10 @@ class RayOnlineRFTTrainer(object):
             # keep the referece of WorkerDict to support ray >= 2.31. Ref: https://github.com/ray-project/ray/pull/45699
             self.wg_dicts.append(wg_dict)
 
+        if self.use_critic:
+            self.critic_wg = all_wg['critic']
+            self.critic_wg.init_model()
+
         if self.use_reference_policy:
             self.ref_policy_wg = all_wg['ref']
             self.ref_policy_wg.init_model()
@@ -595,18 +644,41 @@ class RayOnlineRFTTrainer(object):
         self.actor_rollout_wg = all_wg['actor_rollout']
         self.actor_rollout_wg.init_model()
 
+    # NO NEED
     def _save_checkpoint(self):
         # path: given_path + `/global_step_{global_steps}` + `/actor`
         local_global_step_folder = os.path.join(self.config.trainer.default_local_dir,
                                                 f'global_step_{self.global_steps}')
+
+        print(f'local_global_step_folder: {local_global_step_folder}')
         actor_local_path = os.path.join(local_global_step_folder, 'actor')
 
         actor_remote_path = None if self.config.trainer.default_hdfs_dir is None else os.path.join(
             self.config.trainer.default_hdfs_dir, f'global_step_{self.global_steps}', 'actor')
+
+        remove_previous_ckpt_in_save = self.config.trainer.get('remove_previous_ckpt_in_save', False)
+        if remove_previous_ckpt_in_save:
+            print(
+                'Warning: remove_previous_ckpt_in_save is deprecated, set max_actor_ckpt_to_keep=1 and max_critic_ckpt_to_keep=1 instead'
+            )
+        max_actor_ckpt_to_keep = self.config.trainer.get('max_actor_ckpt_to_keep',
+                                                         None) if not remove_previous_ckpt_in_save else 1
+        max_critic_ckpt_to_keep = self.config.trainer.get('max_critic_ckpt_to_keep',
+                                                          None) if not remove_previous_ckpt_in_save else 1
+
         self.actor_rollout_wg.save_checkpoint(actor_local_path,
                                               actor_remote_path,
                                               self.global_steps,
-                                              remove_previous_ckpt=self.config.trainer.remove_previous_ckpt_in_save)
+                                              max_ckpt_to_keep=max_actor_ckpt_to_keep)
+
+        if self.use_critic:
+            critic_local_path = os.path.join(local_global_step_folder, 'critic')
+            critic_remote_path = None if self.config.trainer.default_hdfs_dir is None else os.path.join(
+                self.config.trainer.default_hdfs_dir, f'global_step_{self.global_steps}', 'critic')
+            self.critic_wg.save_checkpoint(critic_local_path,
+                                           critic_remote_path,
+                                           self.global_steps,
+                                           max_ckpt_to_keep=max_critic_ckpt_to_keep)
 
         # save dataloader
         dataloader_local_path = os.path.join(local_global_step_folder, 'data.pt')
@@ -619,6 +691,7 @@ class RayOnlineRFTTrainer(object):
         with open(local_latest_checkpointed_iteration, 'w') as f:
             f.write(str(self.global_steps))
 
+    # NO NEED
     def _load_checkpoint(self):
         if self.config.trainer.resume_mode == 'disable':
             return 0
@@ -639,10 +712,10 @@ class RayOnlineRFTTrainer(object):
                 print('Training from scratch')
                 return 0
         else:
-            if not (self.config.trainer.resume_from_path and global_step_folder is not None):
-                assert isinstance(self.config.trainer.resume_mode, str), "resume ckpt must be str type"
-                assert 'global_step_' in self.config.trainer.resume_mode, "resume ckpt must specify the global_steps"
-                global_step_folder = self.config.trainer.resume_mode
+            if self.config.trainer.resume_mode == "resume_path":
+                assert isinstance(self.config.trainer.resume_from_path, str), "resume ckpt must be str type"
+                assert 'global_step_' in self.config.trainer.resume_from_path, "resume ckpt must specify the global_steps"
+                global_step_folder = self.config.trainer.resume_from_path
                 if not os.path.isabs(global_step_folder):
                     working_dir = os.getcwd()
                     global_step_folder = os.path.join(working_dir, global_step_folder)
@@ -654,15 +727,20 @@ class RayOnlineRFTTrainer(object):
         print(f'Resuming from {global_step_folder}')
 
         actor_path = os.path.join(global_step_folder, 'actor')
+        critic_path = os.path.join(global_step_folder, 'critic')
         # load actor
         self.actor_rollout_wg.load_checkpoint(actor_path,
                                               del_local_after_load=self.config.trainer.del_local_ckpt_after_load)
+        # load critic
+        if self.use_critic:
+            self.critic_wg.load_checkpoint(critic_path,
+                                           del_local_after_load=self.config.trainer.del_local_ckpt_after_load)
 
         # load dataloader,
         # TODO: from remote not implemented yet
         dataloader_local_path = os.path.join(global_step_folder, 'data.pt')
         if os.path.exists(dataloader_local_path):
-            dataloader_state_dict = torch.load(dataloader_local_path)
+            dataloader_state_dict = torch.load(dataloader_local_path, weights_only=False)
             self.train_dataloader.load_state_dict(dataloader_state_dict)
         else:
             print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")

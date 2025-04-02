@@ -19,28 +19,31 @@ import torch
 from typing import Any, Dict, List
 import numpy as np
 from verl import DataProto
+from verl.trainer.ppo.metric_utils import reduce_metrics, _compute_response_info
 
 
-def reduce_metrics(metrics: Dict[str, List[Any]]) -> Dict[str, Any]:
-    for key, val in metrics.items():
-        metrics[key] = np.mean(val)
-    return metrics
+# # no need
+# def reduce_metrics(metrics: Dict[str, List[Any]]) -> Dict[str, Any]:
+#     for key, val in metrics.items():
+#         metrics[key] = np.mean(val)
+#     return metrics
 
 
-def _compute_response_info(batch: DataProto) -> Dict[str, Any]:
-    response_length = batch.batch['responses'].shape[-1]
+# # no need
+# def _compute_response_info(batch: DataProto) -> Dict[str, Any]:
+#     response_length = batch.batch['responses'].shape[-1]
 
-    prompt_mask = batch.batch['attention_mask'][:, :-response_length]
-    response_mask = batch.batch['attention_mask'][:, -response_length:]
+#     prompt_mask = batch.batch['attention_mask'][:, :-response_length]
+#     response_mask = batch.batch['attention_mask'][:, -response_length:]
 
-    prompt_length = prompt_mask.sum(-1).float()
-    response_length = response_mask.sum(-1).float()  # (batch_size,)
+#     prompt_length = prompt_mask.sum(-1).float()
+#     response_length = response_mask.sum(-1).float()  # (batch_size,)
 
-    return dict(
-        response_mask=response_mask,
-        prompt_length=prompt_length,
-        response_length=response_length,
-    )
+#     return dict(
+#         response_mask=response_mask,
+#         prompt_length=prompt_length,
+#         response_length=response_length,
+#     )
 
 
 def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str, Any]:
@@ -58,6 +61,15 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
     prompt_length = response_info['prompt_length']
     response_length = response_info['response_length']
 
+    # valid_adv = torch.masked_select(advantages, response_mask)
+    # valid_returns = torch.masked_select(returns, response_mask)
+
+    # if use_critic:
+    #     values = batch.batch['values']
+    #     valid_values = torch.masked_select(values, response_mask)
+    #     return_diff_var = torch.var(valid_returns - valid_values)
+    #     return_var = torch.var(valid_returns)
+
     metrics = {
         # # score
         # 'critic/score/mean':
@@ -73,6 +85,28 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
             torch.max(sequence_reward).detach().item(),
         'critic/rewards/min':
             torch.min(sequence_reward).detach().item(),
+        # # adv
+        # 'critic/advantages/mean':
+        #     torch.mean(valid_adv).detach().item(),
+        # 'critic/advantages/max':
+        #     torch.max(valid_adv).detach().item(),
+        # 'critic/advantages/min':
+        #     torch.min(valid_adv).detach().item(),
+        # # returns
+        # 'critic/returns/mean':
+        #     torch.mean(valid_returns).detach().item(),
+        # 'critic/returns/max':
+        #     torch.max(valid_returns).detach().item(),
+        # 'critic/returns/min':
+        #     torch.min(valid_returns).detach().item(),
+        # **({
+        #     # values
+        #     'critic/values/mean': torch.mean(valid_values).detach().item(),
+        #     'critic/values/max': torch.max(valid_values).detach().item(),
+        #     'critic/values/min': torch.min(valid_values).detach().item(),
+        #     # vf explained var
+        #     'critic/vf_explained_var': (1.0 - return_diff_var / (return_var + 1e-5)).detach().item(),
+        # } if use_critic else {}),
 
         # response length
         'response_length/mean':
