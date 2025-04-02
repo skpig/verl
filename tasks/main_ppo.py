@@ -613,7 +613,7 @@ def main(config):
                 auto_tune_task.remote(config, config.trainer.n_gpus_per_node, config.trainer.nnodes,
                                       config.recipe_hub))[0]
             print(f"get auto-tuned recipe at {config.recipe}")
-        filepath = copy_local_path_from_hdfs(config.recipe)
+        filepath = copy_local_path_from_hdfs(config.recipe, always_recopy=True)
         recipe = omegaconf.OmegaConf.load(filepath)
         print(f"recipe found: {config.recipe}, overriding with config: {recipe}")
         override(config, recipe, skips)

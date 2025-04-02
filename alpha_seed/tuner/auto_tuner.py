@@ -355,6 +355,10 @@ class AutoTuner:
         )
         # get num heads
         num_heads = getattr(self.config, "num_attention_heads", None)
+        # TODO(zhiqi.0): remove this constraints after the codebase supports
+        # tp / sp on num heads for qwen
+        if self.config.model_type == "seed_p6dense":
+            num_heads = getattr(self.config, "num_key_value_heads", None)
         if num_heads is None:
             warnings.warn(f"Cannot get num_attention_heads in {self.config.model_type}, assume to be 1")
             num_heads = 1
@@ -482,7 +486,14 @@ class AutoTuner:
 
         # calculate rollout tp size
         tp_size = self.env.ngpus_per_node
-        while tp_size > 1 and self.config.num_attention_heads % tp_size != 0:
+        num_heads = getattr(self.config, "num_attention_heads", None)
+        # TODO(zhiqi.0): remove this constraints after the codebase supports
+        # tp / sp on num_attention_heads for qwen
+        if self.config.model_type == "seed_p6dense":
+            num_heads = getattr(self.config, "num_key_value_heads", None)
+        if num_heads is None:
+            num_heads = 1
+        while tp_size > 1 and num_heads % tp_size != 0:
             tp_size = tp_size // 2
         tp_size = max(tp_size, 1)
         template["actor_rollout_ref"].setdefault("rollout", {})["tensor_model_parallel_size"] = tp_size
