@@ -106,6 +106,8 @@ class ActOffload(torch.autograd.graph.saved_tensors_hooks):
         return x_cpu
 
     def offload_pack(self, x: torch.Tensor):
+        if not x.is_cuda:
+            return x
         numel = x.numel()
         min_numel = numel if self.offload_min_numel is None else self.offload_min_numel
         max_numel = numel if self.offload_max_numel is None else self.offload_max_numel

@@ -84,24 +84,18 @@ def fully_shard(
         if dist.get_rank() == 0:
             print(f"After parallelization: model size {nparams/1e9:.2f} B")
 
-    assert not (enable_training_stats and act_offload), f"act offload and training stats can not be enabled together"
-
-    if enable_training_stats or act_offload:
-        assert recompute, f"Detected training stats or act_offload is enabled, must open gradient checkpointing"
-
     # apply recompute for each layer
     metrics_context = MetricsTorchDispatchMode() if enable_training_stats else nullcontext()
     if recompute:
-        use_reentrant = act_offload
         if not isinstance(model, PreTrainedModel):
             raise RuntimeError(f"Recompute only works with HF PreTrainedModel")
         model.gradient_checkpointing_enable(
             gradient_checkpointing_kwargs={
                 'use_reentrant':
-                    use_reentrant,
+                    False,
                 "context_fn":
-                    functools.partial(metrics_context_fn, metrics_context) if (
-                        enable_training_stats and not use_reentrant) else noop_context_fn,
+                    functools.partial(metrics_context_fn, metrics_context
+                                     ) if enable_training_stats else noop_context_fn,
             })
 
     fsdp_kwargs = {} if fsdp_kwargs is None else fsdp_kwargs
