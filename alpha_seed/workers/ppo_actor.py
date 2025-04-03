@@ -22,6 +22,7 @@ from tensordict import TensorDict
 from transformers import PretrainedConfig
 
 from torch import nn
+import torch.distributed as dist
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 from flash_attn.bert_padding import unpad_input, pad_input
@@ -213,16 +214,9 @@ class DataParallelPPOActor(BasePPOActor):
         # release kv mirror memory for m8
         if hasattr(self.actor_module, 'release_act_memory'):
             self.actor_module.release_act_memory()
-
-        if self.config.train_memory_offload:
-            load_fsdp_optimizer(self.actor_optimizer, torch.cuda.current_device())
-
         assert self.config.grad_clip is not None
         grad_norm = self.actor_module.clip_grad_norm_(max_norm=self.config.grad_clip)
         self.actor_optimizer.step()
-
-        if self.config.train_memory_offload:
-            offload_fsdp_optimizer(self.actor_optimizer)
         return grad_norm
 
     def _optimizer_zero_grad(self):
@@ -230,7 +224,7 @@ class DataParallelPPOActor(BasePPOActor):
         # FlatParam. The param.grad is a view of FlatParam.grad. Therefore, optimizer.zero_grad()
         # only removes tensor views of gradients, but cannot remove the FlatParam.grad.
         self.actor_optimizer.zero_grad()
-        if self.actor_module._use_orig_params:
+        if isinstance(self.actor_module, FSDP):
             for module in FSDP.fsdp_modules(self.actor_module):
                 module._flat_param.grad = None
 
@@ -273,7 +267,8 @@ class DataParallelPPOActor(BasePPOActor):
                     mini_batch_log_prob.append(log_probs)
                     mini_batch_entropy.append(entropy)
             # release root module unshard memory
-            self.actor_module._handle.reshard(True)
+            if isinstance(self.actor_module, FSDP):
+                self.actor_module._handle.reshard(True)
 
             mini_log_prob = torch.cat(mini_batch_log_prob, dim=0)
             mini_entropy = torch.cat(mini_batch_entropy, dim=0)
@@ -367,7 +362,6 @@ class DataParallelPPOActor(BasePPOActor):
                 )
         temperature = data.meta_info['temperature']  # temperature must be in the data.meta_info to avoid slient error
         global_step = data.meta_info.get('global_step')
-
         dataloader = make_mini_step_dataloader(data, self.config.ppo_mini_batch_size)
         metrics = {}
 
@@ -388,9 +382,9 @@ class DataParallelPPOActor(BasePPOActor):
                 minibatch_early_stop = False
 
                 for i, micro_data in enumerate(micro_batches):
+
                     assert micro_data.device == torch.device('cpu')
                     micro_data = micro_data.cuda()  # actor device is cpu when using offload
-
                     entropy_coeff = self.config.entropy_coeff
                     if entropy_coeff <= 0.:
                         compute_entropy = False
@@ -400,6 +394,7 @@ class DataParallelPPOActor(BasePPOActor):
                     full_entropy, log_prob, seqlen = self._forward_micro_batch(micro_batch=micro_data,
                                                                                temperature=temperature,
                                                                                compute_entropy=compute_entropy)
+
                     policy_loss, micro_data_metric = self.loss_fn(self.config, micro_data, full_entropy, log_prob)
 
                     if self.config.early_stop_by_kl != 0 and micro_data_metric[
@@ -452,7 +447,6 @@ class DataParallelPPOActor(BasePPOActor):
         append_to_dict(metrics, {'first_mini_ppo_kl_sum': first_mini_ppo_kl_sum})
 
         self._optimizer_zero_grad()
-
         return metrics
 
 

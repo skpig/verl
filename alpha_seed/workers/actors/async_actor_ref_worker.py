@@ -37,13 +37,14 @@ from alpha_seed.workers.megatron.offload import (offload_megatron_model_to_cpu, 
 from alpha_seed.models.transformers.monkey_patch import apply_monkey_patch, get_parallel_plan, get_ignore_modules_in_mixed_precision
 from verl.utils.import_utils import import_external_libs
 from verl.utils.debug import log_gpu_memory_usage
+from verl.utils.torch_functional import get_constant_schedule_with_warmup
+from alpha_seed.trainer.optim import get_optimizer_from_config
 
 from alpha_seed.utils import ndtimeline
 from alpha_seed.workers.hybrid_engine.fsdp_gather import DataGatherManager
 from alpha_seed.workers.fsdp.initialize import (create_mesh, meta_device_init,
                                                 cleanup_local_tmp_folder_safetensors_files)
 from alpha_seed.workers.ppo_actor import DataParallelPPOActor
-from alpha_seed.workers.fsdp import fully_shard
 from alpha_seed.utils.kernels.persist_gemm import deploy_persist_gemm
 from alpha_seed.models.transformers.parallel.collectives import get_memory
 from alpha_seed.utils.observility.training_stats import MetricsTorchDispatchMode
@@ -108,7 +109,7 @@ class AsyncActorRolloutRefWorker(Worker):
         self.ref_strategy = config.ref.strategy
 
         # actor model
-        if self.actor_strategy == 'fsdp':
+        if self.actor_strategy in ('fsdp', 'vescale-fsdp2'):
             actor_fsdp_size = config.actor.fsdp_size
             actor_sp_size = config.actor.ulysses_sequence_parallel_size
             actor_tp_size = config.actor.tp_size
@@ -135,7 +136,7 @@ class AsyncActorRolloutRefWorker(Worker):
 
         # reference model
         if self._is_ref:
-            if self.ref_strategy == 'fsdp':
+            if self.ref_strategy in ('fsdp', 'vescale-fsdp2'):
                 ref_fsdp_size = config.ref.fsdp_size
                 ref_sp_size = config.ref.ulysses_sequence_parallel_size
                 ref_tp_size = config.ref.tp_size
@@ -263,16 +264,27 @@ class AsyncActorRolloutRefWorker(Worker):
         tp_mesh = self.ref_tp_mesh if role == 'ref' else self.actor_tp_mesh
         tp_outside = self.config.ref.tp_outside if role == "ref" else self.config.actor.tp_outside
 
-        # set up parameter cpu offload: rollout: always True, actor: always False
+        strategy = self.ref_strategy if role == "ref" else self.actor_strategy
+        if strategy == 'fsdp':
+            from alpha_seed.workers.fsdp.fully_shard import fully_shard
+        elif strategy == 'vescale-fsdp2':
+            from alpha_seed.workers.vescale.fully_shard import fully_shard
+        else:
+            raise RuntimeError(f"[{role}]: Unknown strategy for fsdp: {strategy}")
+
+        # set up parameter cpu offload
         if role == 'actor':
-            if self.config.actor.fsdp_config.param_offload:
+            if strategy == 'fsdp' and self.config.actor.fsdp_config.param_offload:
                 # NOTE: CPUOffload needs to cooperate with FSDP.no_sync() in gradient accumulation,
                 # which will lead to more memory consumption as gradients keep unshard in between micro-batches.
                 # temporarily disbale this for more investigation
-                raise NotImplementedError("CPUOffload for trainable model is not supported")
-        param_offload = (role == 'rollout')
-        if role == 'ref':
+                raise NotImplementedError("CPUOffload for trainable model is not supported in torch FSDP, "
+                                          "please use strategy=vescale-fsdp2 instead.")
+            param_offload = self.config.actor.fsdp_config.param_offload
+        elif role == 'ref':
             param_offload = self.config.ref.fsdp_config.param_offload
+        elif role == 'rollout':
+            param_offload = True
 
         # get ignored modules
         ignored_modules = None
@@ -281,6 +293,12 @@ class AsyncActorRolloutRefWorker(Worker):
 
         if not from_scratch:
             warnings.filterwarnings("ignore", "state not found in", category=UserWarning)
+
+        act_offload_kwargs = dict(
+            offload_threshold=self.config.get('act_offload_threshold', 1024 * 1024),
+            offload_upbound=self.config.get('act_offload_upbound', None),
+            buffer_size=self.config.get('act_offload_buff_size', 40),
+        )
 
         actor_module_fsdp, metrics_context = fully_shard(
             model=actor_module,
@@ -295,17 +313,29 @@ class AsyncActorRolloutRefWorker(Worker):
             weights=local_path if from_scratch else None,
             ignored_modules=ignored_modules,
             enable_training_stats=enable_training_stats,
-        )
+            act_offload_kwargs=act_offload_kwargs)
         log_gpu_memory_usage(f'After {role} FSDP init')
 
         # create optimizer for actor
         actor_optimizer = None
         actor_lr_scheduler = None
         if role == 'actor':
-            from verl.utils.torch_functional import get_constant_schedule_with_warmup
-            from alpha_seed.trainer.optim import get_optimizer_from_config
             actor_optimizer = get_optimizer_from_config(
                 [param for param in actor_module_fsdp.parameters() if param.requires_grad], optim_config)
+
+            # enable optimizer offload
+            if strategy == 'fsdp' and not param_offload:
+                actor_optimizer.register_step_pre_hook(
+                    lambda optim, args, kwargs: load_fsdp_optimizer(optim, torch.cuda.current_device()))
+                actor_optimizer.register_step_post_hook(lambda optim, args, kwargs: offload_fsdp_optimizer(optim))
+            elif strategy == 'vescale-fsdp2':
+                from alpha_seed.workers.vescale.fully_shard import register_dtensor_hook
+                from vescale.parallel.fsdp2.extension.optimizer_offload import apply_optimizer_offload
+                register_dtensor_hook(actor_module_fsdp, actor_optimizer)
+                if not param_offload:
+                    apply_optimizer_offload(actor_module_fsdp,
+                                            actor_optimizer,
+                                            get_seqlen_fn=lambda args, kwargs: kwargs["input_ids"].numel())
 
             total_steps = optim_config.get('total_training_steps', 0)
             num_warmup_steps = int(optim_config.get('lr_warmup_steps', -1))
@@ -500,7 +530,7 @@ class AsyncActorRolloutRefWorker(Worker):
         log_gpu_memory_usage('After AsyncXPerfGPTRollout init')
 
         # Note that in standalone case, model is None.
-        if self.actor_strategy == 'fsdp':
+        if self.actor_strategy in ('fsdp', 'vescale-fsdp2'):
             sharding_manager = FSDPXPerfGPTShardingManager(module=self.actor_module_fsdp,
                                                            model_config=self.actor_model_config,
                                                            inference_engine=rollout.inference_engine,
@@ -537,6 +567,12 @@ class AsyncActorRolloutRefWorker(Worker):
                             load_fsdp_model_to_gpu(self.actor_module_fsdp)
                         if optimizer and self.actor_optimizer is not None:
                             load_fsdp_optimizer(self.actor_optimizer, device)
+                elif self.actor_strategy == 'vescale-fsdp2':
+                    if not self.config.actor.fsdp_config.param_offload:
+                        if model:
+                            self.actor_module_fsdp.to('cuda')
+                        if optimizer and self.actor_optimizer is not None:
+                            load_fsdp_optimizer(self.actor_optimizer, device)
                 elif self.actor_strategy == 'megatron':
                     assert model
                     # we only load grad when we want to load optimizer for training
@@ -546,6 +582,9 @@ class AsyncActorRolloutRefWorker(Worker):
                 if self.ref_strategy == 'fsdp':
                     if model and not self.config.ref.fsdp_config.param_offload:
                         load_fsdp_model_to_gpu(self.ref_module_fsdp)
+                elif self.ref_strategy == 'vescale-fsdp2':
+                    if model and not self.config.ref.fsdp_config.param_offload:
+                        self.ref_module_fsdp.to('cuda')
                 elif self.ref_strategy == 'megatron':
                     if model:
                         # we never load grad for ref model
@@ -561,13 +600,23 @@ class AsyncActorRolloutRefWorker(Worker):
                             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
                         if optimizer and self.actor_optimizer is not None:
                             offload_fsdp_optimizer(self.actor_optimizer)
+                elif self.actor_strategy == 'vescale-fsdp2':
+                    if not self.config.actor.fsdp_config.param_offload:
+                        if model:
+                            self.actor_module_fsdp.to('cpu')
+                        if optimizer and self.actor_optimizer is not None:
+                            offload_fsdp_optimizer(self.actor_optimizer)
                 elif self.actor_strategy == 'megatron':
                     if model:
                         offload_megatron_model_to_cpu(models=self.actor_module_mariana)
+
             if self._is_ref:
                 if self.ref_strategy == 'fsdp':
                     if model and not self.config.ref.fsdp_config.param_offload:
                         offload_fsdp_model_to_cpu(self.ref_module_fsdp)
+                elif self.ref_strategy == 'vescale-fsdp2':
+                    if model and not self.config.ref.fsdp_config.param_offload:
+                        self.ref_module_fsdp.to('cpu')
                 elif self.ref_strategy == 'megatron':
                     if model:
                         offload_megatron_model_to_cpu(models=self.ref_module_mariana)
@@ -594,7 +643,7 @@ class AsyncActorRolloutRefWorker(Worker):
         ref_tp_size = config.ref.tp_size
         # normalize config
         if self._is_actor:
-            if self.actor_strategy == 'fsdp':
+            if self.actor_strategy in ('fsdp', 'vescale-fsdp2'):
                 sp_size = config.actor.ulysses_sequence_parallel_size
                 self.config.actor.ppo_mini_batch_size //= (world_size // sp_size // actor_tp_size)
                 self.config.actor.ppo_micro_batch_size //= (world_size // sp_size // actor_tp_size)
@@ -616,7 +665,7 @@ class AsyncActorRolloutRefWorker(Worker):
         #         self.config.rollout.log_prob_micro_batch_size //= dp_size
 
         if self._is_ref:
-            if self.ref_strategy == 'fsdp':
+            if self.ref_strategy in ('fsdp', 'vescale-fsdp2'):
                 sp_size = config.ref.ulysses_sequence_parallel_size
                 self.config.ref.log_prob_micro_batch_size //= (world_size // sp_size // ref_tp_size)
             elif self.ref_strategy == 'megatron':
@@ -642,7 +691,7 @@ class AsyncActorRolloutRefWorker(Worker):
                 optim_config = None
                 fsdp_config = OmegaConf.create()
 
-            if self.actor_strategy == 'fsdp':
+            if self.actor_strategy in ('fsdp', 'vescale-fsdp2'):
                 self.actor_module_fsdp, self.actor_optimizer, self.actor_lr_scheduler, self.actor_model_config, self.metrics_context = self._build_model_optimizer(
                     model_path=self.config.model.path,
                     fsdp_config=fsdp_config,
@@ -666,7 +715,7 @@ class AsyncActorRolloutRefWorker(Worker):
         # load from checkpoint
         if self._is_actor:
             OmegaConf.set_struct(self.config.actor, True)
-            if self.actor_strategy == 'fsdp':
+            if self.actor_strategy in ('fsdp', 'vescale-fsdp2'):
                 with open_dict(self.config.actor):
                     self.config.actor.use_rmpad = use_rmpad
                     self.config.actor.use_ce_loss_fusion = use_ce_loss_fusion
@@ -686,7 +735,7 @@ class AsyncActorRolloutRefWorker(Worker):
 
         if self._is_ref:
             from_scratch_ref = True if self.config.ref.ema == 1 else from_scratch
-            if self.ref_strategy == 'fsdp':
+            if self.ref_strategy in ('fsdp', 'vescale-fsdp2'):
                 self.ref_module_fsdp = self._build_model_optimizer(
                     model_path=self.config.model.path,
                     fsdp_config=self.config.ref.fsdp_config,
@@ -808,7 +857,7 @@ class AsyncActorRolloutRefWorker(Worker):
 
             data = self.actor_gather_manager.postprocess_data(data)
 
-        if self.actor_strategy == 'fsdp':
+        if self.actor_strategy in ('fsdp', 'vescale-fsdp2'):
             self.actor_lr_scheduler.step()
             lr = self.actor_lr_scheduler.get_last_lr()[0]
         elif self.actor_strategy == 'megatron':
@@ -1036,8 +1085,10 @@ class AsyncActorRolloutRefWorker(Worker):
             output = self.ref_gather_manager.postprocess_data(output)
 
         # reset FSDP buffer after forward
-        self.ref_policy.actor_module._handle.reshard(True)
-        log_gpu_memory_usage('After reference recompute log prob', logger=logger)
+        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+        if isinstance(self.ref_policy.actor_module, FSDP):
+            self.ref_policy.actor_module._handle.reshard(True)
+        log_gpu_memory_usage('After reference recompute log prob')
 
         max_memory_allocated, max_memory_reserved = get_memory()
         output.meta_info.update({
@@ -1069,7 +1120,7 @@ class AsyncActorRolloutRefWorker(Worker):
         if parallel_strategy == 'megatron':
             if version != 'omnistore':
                 raise NotImplementedError('Only the OmniStore ckpt manager supports megatron strategy currently')
-        elif parallel_strategy != 'fsdp':
+        elif parallel_strategy not in ('fsdp', 'vescale-fsdp2'):
             raise NotImplementedError(f'Saving / loading ckpt is not supported for strategy {parallel_strategy}')
         return ckpt_manager, parallel_strategy, device_mesh
 

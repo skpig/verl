@@ -787,10 +787,11 @@ def validate_config(config):
             config.reward_model.max_token_len = min_required_seq_len
             print(f"Warning: config.reward_model.max_token_len is set to {config.reward_model.max_token_len}")
 
-    assert config.actor_rollout_ref.actor.strategy in ['fsdp',
-                                                       'megatron'], f'Got {config.actor_rollout_ref.actor.strategy}'
-    assert config.actor_rollout_ref.ref.strategy in ['fsdp', 'megatron'], f'Got {config.actor_rollout_ref.ref.strategy}'
-    assert config.critic.strategy in ['fsdp', 'megatron'], f'Got {config.critic.strategy}'
+    assert config.actor_rollout_ref.actor.strategy in ['fsdp', 'megatron', 'vescale-fsdp2'
+                                                      ], f'Got {config.actor_rollout_ref.actor.strategy}'
+    assert config.actor_rollout_ref.ref.strategy in ['fsdp', 'megatron',
+                                                     'vescale-fsdp2'], f'Got {config.actor_rollout_ref.ref.strategy}'
+    assert config.critic.strategy in ['fsdp', 'megatron', 'vescale-fsdp2'], f'Got {config.critic.strategy}'
 
     # override each role mariana config with global mariana config
     config.actor_rollout_ref.mariana = config.mariana
@@ -824,7 +825,7 @@ def config_to_trainer_kwargs(config):
         processor.tokenizer.add_special_tokens({"additional_special_tokens": ["<ImageHere>"]})
 
     # define worker classes
-    if config.actor_rollout_ref.actor.strategy in ['fsdp', 'megatron']:
+    if config.actor_rollout_ref.actor.strategy in ['fsdp', 'vescale-fsdp2', 'megatron']:
         assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
         from single_controller.ray import RayWorkerGroup
         ray_worker_group_cls = RayWorkerGroup

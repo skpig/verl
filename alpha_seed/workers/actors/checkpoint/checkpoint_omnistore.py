@@ -114,6 +114,22 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
                 role=role,
                 **additional_kwargs_dict,
             )
+        elif strategy == 'vescale-fsdp2':
+            from vescale.parallel.fsdp2.extension.state_dict import eager_init_optimizer
+            sig = inspect.signature(omnistore.FSDP2Checkpointer.load)
+            if "kwargs" in sig.parameters:
+                additional_kwargs_dict = {"metrics_supplement": {"ray_actor_name": self.ray_actor_name, "role": role}}
+            else:
+                additional_kwargs_dict = {}
+            if self.optimizer:
+                eager_init_optimizer(ckpt_state['optimizer'])
+            omnistore.FSDP2Checkpointer.load(
+                hdfs_path,
+                ckpt_state,
+                enable_shm_download_ckpt_tmp=enable_shm,
+                role=role,
+                **additional_kwargs_dict,
+            )
         elif strategy == 'megatron':
             sig = inspect.signature(omnistore.MegatronCheckpointer.load)
             if "kwargs" in sig.parameters:
@@ -195,6 +211,27 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
                     enable_shm_upload_ckpt_tmp=enable_shm,
                     async_fast_checkpoint=False,
                     enable_tree_topo=True,
+                    global_steps=global_step,
+                    role=role,
+                    ignore_append_global_steps_to_folder=True,
+                    **additional_kwargs_dict,
+                )
+            elif strategy == 'vescale-fsdp2':
+                sig = inspect.signature(omnistore.FSDP2Checkpointer.save)
+                if "kwargs" in sig.parameters:
+                    additional_kwargs_dict = {
+                        "metrics_supplement": {
+                            "ray_actor_name": self.ray_actor_name,
+                            "role": role
+                        }
+                    }
+                else:
+                    additional_kwargs_dict = {}
+                omnistore.FSDP2Checkpointer.save(
+                    path,
+                    ckpt_state,
+                    enable_shm_upload_ckpt_tmp=enable_shm,
+                    async_fast_checkpoint=False,
                     global_steps=global_step,
                     role=role,
                     ignore_append_global_steps_to_folder=True,

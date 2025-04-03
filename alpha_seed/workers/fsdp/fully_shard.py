@@ -44,7 +44,7 @@ def fully_shard(
     """
     Create FSDP/HSDP with tensor parallelism extension.
 
-    By default, the model will use mixed-precision traiing (i.e., BF16 for forward/backward 
+    By default, the model will use mixed-precision training (i.e., BF16 for forward/backward 
     and FP32 for gradient reduction).
 
     If ``tp_plan`` is provided, each module will be registered by a `_tp_mesh` attribute

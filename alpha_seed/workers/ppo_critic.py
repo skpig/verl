@@ -146,16 +146,9 @@ class DataParallelPPOCritic(BasePPOCritic):
         # release kv mirror memory for m8
         if hasattr(self.critic_module, 'release_act_memory'):
             self.critic_module.release_act_memory()
-
-        if self.config.train_memory_offload:
-            load_fsdp_optimizer(self.critic_optimizer, torch.cuda.current_device())
-
         assert self.config.grad_clip is not None
         grad_norm = self.critic_module.clip_grad_norm_(max_norm=self.config.grad_clip)
         self.critic_optimizer.step()
-
-        if self.config.train_memory_offload:
-            offload_fsdp_optimizer(self.critic_optimizer)
         return grad_norm
 
     def _optimizer_zero_grad(self):
@@ -163,7 +156,7 @@ class DataParallelPPOCritic(BasePPOCritic):
         # FlatParam. The param.grad is a view of FlatParam.grad. Therefore, optimizer.zero_grad()
         # only removes tensor views of gradients, but cannot remove the FlatParam.grad.
         self.critic_optimizer.zero_grad()
-        if self.critic_module._use_orig_params:
+        if isinstance(self.critic_module, FSDP):
             for module in FSDP.fsdp_modules(self.critic_module):
                 module._flat_param.grad = None
 
@@ -198,7 +191,8 @@ class DataParallelPPOCritic(BasePPOCritic):
                     values, _ = self._forward_micro_batch(micro_batch)
                     mini_batch_values.append(values)
             # release root module unshard memory
-            self.critic_module._handle.reshard(True)
+            if isinstance(self.critic_module, FSDP):
+                self.critic_module._handle.reshard(True)
 
             mini_values = torch.cat(mini_batch_values, dim=0)
             if use_dynamic_bsz:

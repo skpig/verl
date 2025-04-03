@@ -39,7 +39,6 @@ from alpha_seed.workers.fsdp.initialize import (create_mesh, meta_device_init,
                                                 cleanup_local_tmp_folder_safetensors_files)
 from alpha_seed.trainer.optim import get_optimizer_from_config
 from alpha_seed.workers.fsdp.offload import offload_fsdp_optimizer, load_fsdp_optimizer, offload_fsdp_model_to_cpu, load_fsdp_model_to_gpu
-from alpha_seed.workers.fsdp import fully_shard
 from alpha_seed.workers.megatron.offload import offload_megatron_model_to_cpu, load_megatron_model_to_gpu
 from alpha_seed.workers.hybrid_engine.fsdp_gather import DataGatherManager
 from alpha_seed.workers.ppo_critic import DataParallelPPOCritic
@@ -77,11 +76,11 @@ class CriticWorker(Worker):
 
         self.critic_strategy = config.strategy
 
-        assert self.critic_strategy in ['fsdp', 'megatron']
+        assert self.critic_strategy in ['fsdp', 'megatron', 'vescale-fsdp2']
 
         world_size = torch.distributed.get_world_size()
 
-        if self.critic_strategy == 'fsdp':
+        if self.critic_strategy in ('fsdp', 'vescale-fsdp2'):
             fsdp_size = config.fsdp_size
             sp_size = config.ulysses_sequence_parallel_size
             tp_size = config.tp_size
@@ -159,7 +158,15 @@ class CriticWorker(Worker):
             print(f'Critic overriding config {override_config_kwargs}')
             print_model_size(critic_module)
 
-        if config.model.fsdp_config.param_offload:
+        strategy = self.critic_strategy
+        if strategy == "fsdp":
+            from alpha_seed.workers.fsdp import fully_shard
+        elif strategy == "vescale-vescale2":
+            from alpha_seed.workers.vescale.fully_shard import fully_shard
+        else:
+            raise RuntimeError(f"[critic]: Unknown strategy for fsdp: {strategy}")
+
+        if strategy == 'fsdp' and config.model.fsdp_config.param_offload:
             # NOTE: CPUOffload needs to cooperate with FSDP.no_sync() in gradient accumulation,
             # which will lead to more memory consumption as gradients keep unshard in between micro-batches.
             # temporarily disbale this for more investigation
@@ -189,6 +196,20 @@ class CriticWorker(Worker):
         # create critic optimizer
         critic_optimizer = get_optimizer_from_config(
             [param for param in critic_module.parameters() if param.requires_grad], config.optim)
+
+        # enbale optimizer offload
+        if strategy == 'fsdp' and not config.model.fsdp_config.param_offload:
+            critic_optimizer.register_step_pre_hook(
+                lambda optim, args, kwargs: load_fsdp_optimizer(optim, torch.cuda.current_device()))
+            critic_optimizer.register_step_post_hook(lambda optim, args, kwargs: offload_fsdp_optimizer(optim))
+        elif strategy == 'vescale-fsdp2':
+            from alpha_seed.workers.vescale.fully_shard import register_dtensor_hook
+            from vescale.parallel.fsdp2.extension.optimizer_offload import apply_optimizer_offload
+            register_dtensor_hook(critic_module, critic_optimizer)
+            if not config.model.fsdp_config.param_offload:
+                apply_optimizer_offload(critic_module,
+                                        critic_optimizer,
+                                        get_seqlen_fn=lambda args, kwargs: kwargs["input_ids"].numel())
 
         total_steps = config.optim.get('total_training_steps', 0)
         num_warmup_steps = int(config.optim.get('lr_warmup_steps', -1))
@@ -340,6 +361,19 @@ class CriticWorker(Worker):
                     offload_fsdp_model_to_cpu(self.critic_module, model_empty_cache)
                 if optimizer:
                     offload_fsdp_optimizer(self.critic_optimizer)
+        elif self.critic_strategy == 'vescale-fsdp2':
+            if self.config.model.fsdp_config.param_offload:
+                return
+            if device == 'cuda':
+                if model:
+                    self.critic_module.to(torch.cuda.current_device(), non_blocking=True)
+                if optimizer:
+                    load_fsdp_optimizer(self.critic_optimizer)
+            elif device == "cpu":
+                if model:
+                    self.critic_module.to('cpu', non_blocking=True)
+                if optimizer:
+                    offload_fsdp_optimizer(self.critic_optimizer)
         elif self.critic_strategy == 'megatron':
             if device == 'cuda':
                 load_megatron_model_to_gpu(models=self.critic_module, load_grad=optimizer)
@@ -354,10 +388,9 @@ class CriticWorker(Worker):
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get('external_lib', None))
 
-        if self.critic_strategy == 'fsdp':
+        if self.critic_strategy in ('fsdp', 'vescale-fsdp2'):
             self.critic_module, self.critic_optimizer, self.critic_lr_scheduler, self.critic_model_config = self._build_critic_model_optimizer(
                 self.config, from_scratch=from_scratch)
-
             self.critic = DataParallelPPOCritic(config=self.config,
                                                 critic_module=self.critic_module,
                                                 critic_optimizer=self.critic_optimizer)
@@ -422,7 +455,7 @@ class CriticWorker(Worker):
         # optimizer will be loaded just before the step to save
         # forward & backward memory
         if self.config.train_memory_offload:
-            self.to("cuda", model=True, optimizer=False if self.critic_strategy == 'fsdp' else True)
+            self.to("cuda", model=True, optimizer=False if self.critic_strategy in ('fsdp', 'vescale-fsdp2') else True)
 
         with self.gather_manager:
             data = self.gather_manager.preprocess_data(data)
@@ -435,7 +468,7 @@ class CriticWorker(Worker):
             estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
             metrics['mfu/critic'] = estimated_flops * self.config.ppo_epochs / promised_flops / self.world_size
 
-            if self.critic_strategy == 'fsdp':
+            if self.critic_strategy in ('fsdp', 'vescale-fsdp2'):
                 self.critic_lr_scheduler.step()
                 lr = self.critic_lr_scheduler.get_last_lr()[0]
             elif self.critic_strategy == 'megatron':
@@ -464,9 +497,10 @@ class CriticWorker(Worker):
     def load_checkpoint(self, hdfs_path=None, version='v1', enable_shm=False):
         if self.config.train_memory_offload:
             self.to("cuda")
+        fsdp_mesh = self.fsdp_mesh if self.critic_strategy in ('fsdp', 'vescale-fsdp2') else None
         self.checkpoint_manager.load_checkpoint(version=version,
                                                 hdfs_path=hdfs_path,
-                                                device_mesh=self.fsdp_mesh if self.critic_strategy == 'fsdp' else None,
+                                                device_mesh=fsdp_mesh,
                                                 role='critic',
                                                 strategy=self.critic_strategy,
                                                 enable_shm=enable_shm)
@@ -483,15 +517,16 @@ class CriticWorker(Worker):
                         enable_shm=False):
         if self.config.train_memory_offload:
             self.to("cuda")
-        self.checkpoint_manager.save_checkpoint(version=version,
-                                                local_path=local_path,
-                                                hdfs_path=hdfs_path,
-                                                device_mesh=self.fsdp_mesh if self.critic_strategy == 'fsdp' else None,
-                                                role='critic',
-                                                strategy=self.critic_strategy,
-                                                global_step=global_step,
-                                                ckpt_global_uploader_ref=ckpt_global_uploader_ref,
-                                                enable_shm=enable_shm)
+        self.checkpoint_manager.save_checkpoint(
+            version=version,
+            local_path=local_path,
+            hdfs_path=hdfs_path,
+            device_mesh=self.fsdp_mesh if self.critic_strategy in ('fsdp', 'vescale-fsdp2') else None,
+            role='critic',
+            strategy=self.critic_strategy,
+            global_step=global_step,
+            ckpt_global_uploader_ref=ckpt_global_uploader_ref,
+            enable_shm=enable_shm)
         if self.config.train_memory_offload:
             self.to("cpu")
 

@@ -6,7 +6,7 @@ from .checkpoint_omnistore import CheckpointManagerOmniStore
 class CheckpointManagerWrapper:
 
     def __init__(self, strategy: str = 'fsdp', *args, **kwargs):
-        if strategy == 'fsdp':
+        if strategy in ('fsdp', 'vescale-fsdp2'):
             self.checkpoint_manager_map = {
                 'v1': CheckpointManagerV1(*args, **kwargs),
                 'v2': CheckpointManagerV2(*args, **kwargs),

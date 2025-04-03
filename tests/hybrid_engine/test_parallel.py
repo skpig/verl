@@ -3,15 +3,16 @@ torchrun --nproc_per_node=$ARNOLD_WORKER_GPU --nnodes=$ARNOLD_WORKER_NUM --node_
     --master_addr=$ARNOLD_WORKER_0_HOST --master_port=12321 \
     tests/hybrid_engine/test_parallel.py \
     --model hdfs://harunava/home/byte_data_seed_us/hdd_va/user/zhiqi.0/rlhf/m8_2B5_sft \
-    --tp-size 2 \
+    --strategy fsdp \
+    --tp-size 1 \
     --sp-size 2 \
     --grad-accum 4 \
     --max-token 16384 \
     --seqlen 16384 \
     --ce-loss-fusion \
     --act-offload \
-    --offload-optim \
-    2>&1 | tee log.txt
+    --optim-offload \
+    2>&1 | tee fsdp.txt
 
 """
 import warnings
@@ -50,9 +51,7 @@ from alpha_seed.workers.hybrid_engine.fsdp_gather import ulysses_pad_and_slice_i
 from dist_attn.ulysses.parallel_states import set_ulysses_sequence_parallel_group
 from dist_attn.ulysses.ops import gather_outputs
 from alpha_seed.models.transformers.monkey_patch import apply_monkey_patch, get_parallel_plan
-from alpha_seed.workers.fsdp.clip_grad_norm import clip_grad_norm_
 from alpha_seed.workers.fsdp.offload import offload_fsdp_optimizer, load_fsdp_optimizer
-from alpha_seed.workers.fsdp import fully_shard
 from alpha_seed.workers.fsdp.offload import activation_offload
 from alpha_seed.trainer.optim import get_optimizer_from_config
 
@@ -99,6 +98,13 @@ def init_model(model_path: str, fsdp_size: int, tp_size: int, sp_size: int, opti
 
     print_each_rank(f"After init from HF model: {torch.cuda.memory_allocated() / (1024**3):.2f} GB")
 
+    if args.strategy == 'fsdp':
+        from alpha_seed.workers.fsdp import fully_shard
+    elif args.strategy == 'vescale-fsdp2':
+        from alpha_seed.workers.vescale import fully_shard
+        from alpha_seed.workers.vescale.fully_shard import register_dtensor_hook
+        from vescale.parallel.fsdp2.extension.optimizer_offload import apply_optimizer_offload
+
     model, _ = fully_shard(model=model,
                            block_cls=model._no_split_modules[0],
                            fsdp_mesh=fsdp_mesh,
@@ -106,7 +112,7 @@ def init_model(model_path: str, fsdp_size: int, tp_size: int, sp_size: int, opti
                            tp_mesh=tp_mesh,
                            recompute=True,
                            act_offload=args.act_offload,
-                           param_offload=False,
+                           param_offload=args.param_offload,
                            weights=model_path)
 
     optim_config = {
@@ -117,6 +123,17 @@ def init_model(model_path: str, fsdp_size: int, tp_size: int, sp_size: int, opti
     from omegaconf import DictConfig
     optimizer = get_optimizer_from_config([param for param in model.parameters() if param.requires_grad],
                                           DictConfig(optim_config))
+
+    if args.strategy == 'fsdp':
+        if args.optim_offload:
+            optimizer.register_step_pre_hook(
+                lambda optim, args, kwargs: load_fsdp_optimizer(optim, torch.cuda.current_device()))
+            optimizer.register_step_post_hook(lambda optim, args, kwargs: offload_fsdp_optimizer(optim))
+    elif args.strategy == 'vescale-fsdp2':
+        register_dtensor_hook(model, optimizer)
+        if args.optim_offload:
+            apply_optimizer_offload(model, optimizer, get_seqlen_fn=lambda args, kwargs: kwargs["input_ids"].numel())
+
     print_each_rank(f"After FSDP init: memory: {torch.cuda.memory_allocated() / (1024**3):.2f} GB")
     torch.cuda.reset_peak_memory_stats()
     return model, optimizer, meshes
@@ -173,8 +190,6 @@ def train(model, optimizer, meshes, steps: int = 20, profile_to_mlx: bool = Fals
                                      wait=2 * args.grad_accum - 1,
                                      active=1)
 
-    act_offload_ctx = activation_offload.get_offload_context(args.act_offload, model)
-
     bar = trange(steps, total=steps, disable=dist.get_rank() != 0)
     for step in range(steps):
 
@@ -205,17 +220,15 @@ def train(model, optimizer, meshes, steps: int = 20, profile_to_mlx: bool = Fals
 
             # forward
             if args.ce_loss_fusion:
-                with act_offload_ctx:
-                    output = model(input_ids=input_ids,
-                                   position_ids=position_ids,
-                                   use_cache=False,
-                                   labels=input_ids_rolled,
-                                   temperature=1.0,
-                                   fuse_lm_head_ce_loss=True)
+                output = model(input_ids=input_ids,
+                               position_ids=position_ids,
+                               use_cache=False,
+                               labels=input_ids_rolled,
+                               temperature=1.0,
+                               fuse_lm_head_ce_loss=True)
                 log_probs = output.loss
             else:
-                with act_offload_ctx:
-                    output = model(input_ids=input_ids, position_ids=position_ids, use_cache=False)
+                output = model(input_ids=input_ids, position_ids=position_ids, use_cache=False)
                 logits = output.logits.squeeze(0)
                 log_probs = cross_entropy_loss(logits, input_ids_rolled, inplace_backward=True)[0]
             if sp_mesh.size() > 1:
@@ -227,15 +240,12 @@ def train(model, optimizer, meshes, steps: int = 20, profile_to_mlx: bool = Fals
 
             gnorm = 0.0
             if (step + 1) % args.grad_accum == 0:
-                gnorm = clip_grad_norm_(model, max_norm=1.0).item()
-                if args.offload_optim:
-                    load_fsdp_optimizer(optimizer, torch.cuda.current_device())
+                gnorm = model.clip_grad_norm_(max_norm=1.0).item()
                 optimizer.step()
                 optimizer.zero_grad()
-                if args.offload_optim:
-                    offload_fsdp_optimizer(optimizer)
-                for module in FSDP.fsdp_modules(model):
-                    module._flat_param.grad = None
+                if isinstance(model, FSDP):
+                    for module in FSDP.fsdp_modules(model):
+                        module._flat_param.grad = None
 
             torch.cuda.synchronize()
             span = time.time() - start
@@ -320,6 +330,7 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, required=True)
+    parser.add_argument("--strategy", type=str, choices=['fsdp', 'vescale-fsdp2'], default='fsdp')
     parser.add_argument("--fsdp-size", type=int, default=-1)
     parser.add_argument("--tp-size", type=int, default=2)
     parser.add_argument("--sp-size", type=int, default=2)
@@ -329,15 +340,13 @@ if __name__ == '__main__':
     parser.add_argument("--seqlen", type=int, default=16384, help="sequence length for a device (before tp / sp)")
     parser.add_argument("--grad-accum", type=int, default=1, help="gradient accumulation times")
     parser.add_argument("--optimizer-type", type=str, default="adam", help="optimizer type, default: adam")
-    parser.add_argument("--offload-optim", action='store_true', default=False)
+    parser.add_argument("--optim-offload", action='store_true', default=False)
+    parser.add_argument("--param-offload", action='store_true', default=False)
+    parser.add_argument("--act-offload", action='store_true', default=False)
     parser.add_argument("--ce-loss-fusion",
                         action='store_true',
                         default=False,
                         help="use ce loss fusion to reduce memory")
-    parser.add_argument("--act-offload",
-                        action='store_true',
-                        default=False,
-                        help='enable activation offload at recompute boundary')
     args = parser.parse_args()
     print(args)
 
