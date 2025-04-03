@@ -668,6 +668,7 @@ class AsyncActorRolloutRefWorker(Worker):
             if self.ref_strategy in ('fsdp', 'vescale-fsdp2'):
                 sp_size = config.ref.ulysses_sequence_parallel_size
                 self.config.ref.log_prob_micro_batch_size //= (world_size // sp_size // ref_tp_size)
+                self.config.ref.ppo_mini_batch_size //= (world_size // sp_size // ref_tp_size)
             elif self.ref_strategy == 'megatron':
                 dp_size = mpu.get_data_parallel_world_size()
                 self.config.ref.log_prob_micro_batch_size //= dp_size
