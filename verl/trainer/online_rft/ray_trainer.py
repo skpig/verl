@@ -423,62 +423,63 @@ class RayOnlineRFTTrainer(RayPPOTrainer):
             self.config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
             self.config.critic.optim.total_training_steps = total_training_steps
 
-    def _maybe_log_val_generations(self, inputs, outputs, scores):
-        """Log a table of validation samples to the configured logger (wandb or swanlab)"""
+    # def _maybe_log_val_generations(self, inputs, outputs, scores):
+    #     """Log a table of validation samples to the configured logger (wandb or swanlab)"""
 
-        generations_to_log = self.config.trainer.log_val_generations
+    #     generations_to_log = self.config.trainer.log_val_generations
 
-        if generations_to_log == 0:
-            return
+    #     if generations_to_log == 0:
+    #         return
 
-        import numpy as np
+    #     import numpy as np
 
-        # Create tuples of (input, output, score) and sort by input text
-        samples = list(zip(inputs, outputs, scores))
-        samples.sort(key=lambda x: x[0])  # Sort by input text
+    #     # Create tuples of (input, output, score) and sort by input text
+    #     samples = list(zip(inputs, outputs, scores))
+    #     samples.sort(key=lambda x: x[0])  # Sort by input text
 
-        # Use fixed random seed for deterministic shuffling
-        rng = np.random.RandomState(42)
-        rng.shuffle(samples)
+    #     # Use fixed random seed for deterministic shuffling
+    #     rng = np.random.RandomState(42)
+    #     rng.shuffle(samples)
 
-        # Take first N samples after shuffling
-        samples = samples[:generations_to_log]
+    #     # Take first N samples after shuffling
+    #     samples = samples[:generations_to_log]
 
-        # Log to each configured logger
-        self.generations_logger.log(self.config.trainer.logger, 'val', samples, self.global_steps)
+    #     # Log to each configured logger
+    #     self.generations_logger.log(self.config.trainer.logger, 'val', samples, self.global_steps)
     
 
-    def _maybe_log_train_generations(self, batch):
-        """Log a table of validation samples to the configured logger (wandb or swanlab)"""
-        input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in batch.batch['input_ids']] # (bsz,)
-        response_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in batch.batch['responses']] # (bsz,)
+    # def _maybe_log_train_generations(self, batch):
+    #     """Log a table of validation samples to the configured logger (wandb or swanlab)"""
+    #     input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in batch.batch['input_ids']] # (bsz,)
+    #     response_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in batch.batch['responses']] # (bsz,)
 
 
-        """Add more statistics here"""
+    #     """Add more statistics here"""
 
 
         
-        if self.global_steps % 5 != 0:
-            return
+    #     if self.global_steps % 5 != 0:
+    #         return
 
-        import numpy as np
+    #     import numpy as np
 
-        generations_to_log = self.config.trainer.log_val_generations
+    #     generations_to_log = self.config.trainer.log_val_generations
 
-        if generations_to_log == 0:
-            return
+    #     if generations_to_log == 0:
+    #         return
 
-        # randomly sample `generations_to_log` samples
-        indices = np.random.choice(len(input_texts), generations_to_log)
-        input_texts = [input_texts[i] for i in indices]
-        response_texts = [response_texts[i] for i in indices]
-        seq_level_scores = [batch.batch['seq_level_scores'][i] for i in indices]
+    #     # randomly sample `generations_to_log` samples
+    #     indices = np.random.choice(len(input_texts), generations_to_log)
+    #     input_texts = [input_texts[i] for i in indices]
+    #     response_texts = [response_texts[i] for i in indices]
+    #     seq_level_scores = [batch.batch['seq_level_scores'][i] for i in indices]
 
-        # Create tuples of (input, output, score) and sort by input text
-        samples = list(zip(input_texts, response_texts, seq_level_scores))
+    #     # Create tuples of (input, output, score) and sort by input text
+    #     samples = list(zip(input_texts, response_texts, seq_level_scores))
 
-        # Log to each configured logger
-        self.generations_logger.log(self.config.trainer.logger, 'train', samples, self.global_steps)
+    #     # Log to each configured logger
+    #     self.generations_logger.log(self.config.trainer.logger, 'train', samples, self.global_steps)
+
 
 
     def _validate(self):
@@ -824,8 +825,10 @@ class RayOnlineRFTTrainer(RayPPOTrainer):
                     batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))],
                                                              dtype=object)
                     # repeat to align with repeated responses in rollout
+                    rollout_index_batch = torch.arange(self.config.actor_rollout_ref.rollout.n, device=batch.batch.device).repeat(len(batch)) # [0, 1, 2, ..., n, 0, 1, 2, ..., n, ...]
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
+                    batch.batch['rollout_index'] = rollout_index_batch
 
                     # balance the number of valid tokens on each dp rank.
                     # Note that this breaks the order of data inside the batch.
@@ -880,7 +883,6 @@ class RayOnlineRFTTrainer(RayPPOTrainer):
                     """Statistics"""
                     # compute global_valid tokens
                     batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask'], dim=-1).tolist()
-                    self._maybe_log_train_generations(batch)
 
                     # update actor
                     with _timer('update_actor', timing_raw):
@@ -912,8 +914,17 @@ class RayOnlineRFTTrainer(RayPPOTrainer):
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
 
+                self._maybe_log_train_generations(batch)
+
                 if is_last_step:
                     pprint(f'Final validation metrics: {last_val_metrics}')
+                    # save train result to local file
+                    data_path = '/home/huangbz/verl/train_result.parquet'
+                    if os.path.exists(data_path):
+                        old_df = pd.read_parquet(data_path, engine='pyarrow')
+                    current_df = pd.read_parquet(self.cache_file_path, engine='pyarrow')
+                    df = pd.concat([old_df, current_df], ignore_index=True)
+                    df.to_parquet(data_path, engine='pyarrow')
                     return
 
                 self.global_steps += 1

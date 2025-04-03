@@ -16,6 +16,7 @@ FSDP PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
 
+from functools import cache
 import os
 import uuid
 from contextlib import contextmanager
@@ -26,6 +27,7 @@ from typing import Counter, Type, Dict
 from copy import deepcopy
 from collections import Counter, defaultdict
 from tqdm import tqdm
+import pandas as pd
 
 import ray
 import numpy as np
@@ -491,7 +493,116 @@ class RayPPOTrainer(object):
         samples = samples[:generations_to_log]
 
         # Log to each configured logger
-        self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
+        self.validation_generations_logger.log(self.config.trainer.logger, 'val', samples, self.global_steps)
+    
+
+    def map_token_scores_to_chars(self, batch_input_ids, batch_scores, batch_attention_mask):
+        tokenizer = self.tokenizer
+        results = []
+        bsz, seq_len = batch_input_ids.shape
+
+        for i in range(bsz):
+            input_ids = batch_input_ids[i]
+            scores = batch_scores[i]
+            attention_mask = batch_attention_mask[i]
+
+            # 去除 pad，只保留有效 tokens
+            valid_input_ids = input_ids[attention_mask.bool()]
+            valid_scores = scores[attention_mask.bool()]
+
+            # 还原 detokenized 文本（不加 special tokens）
+            text = tokenizer.decode(valid_input_ids.tolist(), skip_special_tokens=True)
+
+            # 对 detokenized 文本重新 encode 来获取 offsets
+            encoding = tokenizer.encode_plus(
+                text,
+                return_offsets_mapping=True,
+                add_special_tokens=False
+            )
+            offsets = encoding["offset_mapping"]
+
+            # 对应 token 数量如果不一致，跳过不处理
+            if len(offsets) != len(valid_scores):
+                results.append({
+                    "offsets": [(0, len(text) - 1)],
+                    "char_scores": [0.0]
+                })
+            else:
+                results.append({
+                    "offsets": offsets,
+                    "char_scores": valid_scores
+                })
+
+            # # 初始化字符分数
+            # char_scores = [0.0] * len(text)
+
+            # for (start, end), score in zip(offsets, valid_scores):
+            #     for pos in range(start, end):
+            #         if pos < len(char_scores):
+            #             char_scores[pos] = score.item() if hasattr(score, 'item') else score
+
+        return results
+
+    def _maybe_log_train_generations(self, batch):
+        """Log a table of validation samples to the configured logger (wandb or swanlab)"""
+        input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in batch.batch['prompts']] # (bsz,)
+        response_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in batch.batch['responses']] # (bsz,)
+
+
+        """TODO: Add more statistics here"""
+        LOG_FREQ = 10
+
+        if self.global_steps % LOG_FREQ != 0:
+            return
+
+        # save in local file
+        df = pd.DataFrame({
+            'query_index': batch.batch['index'].tolist(),
+            'query': input_texts,
+            'rollout_index': batch.batch['rollout_index'].tolist(),
+            'rollout': response_texts,
+            'seq_level_reward': batch.batch['token_level_rewards'].sum(-1).tolist(),
+            'seq_level_scores': batch.batch['token_level_scores'].sum(-1).tolist() if 'token_level_scores' in batch.batch else None,
+            'token_level_scores': self.map_token_scores_to_chars(batch.batch['responses'], batch.batch['token_level_scores'], batch.batch['response_mask']) if 'token_level_scores' in batch.batch else None,
+        })
+        df['step_num'] = self.global_steps
+        df['run_name'] = self.config.trainer.experiment_name
+
+        df = df.sort_values(by=['query_index', 'rollout_index'])
+
+
+        self.cache_file_path = os.path.join(self.config.trainer.default_local_dir, 'train_generations.parquet')
+        # load old df on the next few steps
+        if os.path.exists(self.cache_file_path) and self.global_steps // LOG_FREQ != 1:
+            old_df = pd.read_parquet(self.cache_file_path, engine='pyarrow')
+            df = pd.concat([old_df, df], ignore_index=True)
+        # save new df
+        df.to_parquet(self.cache_file_path, engine='pyarrow')
+        
+
+
+
+        """send to logger"""
+        import numpy as np
+
+        generations_to_log = self.config.trainer.log_val_generations
+
+        if generations_to_log == 0:
+            return
+
+        # randomly sample `generations_to_log` samples with a fixed seed
+        np.random.seed(42)
+        indices = np.random.choice(len(input_texts), generations_to_log)
+        input_texts = [input_texts[i] for i in indices]
+        response_texts = [response_texts[i] for i in indices]
+        seq_level_scores = [batch.batch['seq_level_scores'][i] for i in indices]
+
+        # Create tuples of (input, output, score) and sort by input text
+        samples = list(zip(input_texts, response_texts, seq_level_scores))
+
+        # Log to each configured logger
+        self.validation_generations_logger.log(self.config.trainer.logger, 'train', samples, self.global_steps)
+
 
     def _validate(self):
         reward_tensor_lst = []
@@ -813,6 +924,7 @@ class RayPPOTrainer(object):
                 timing_raw = {}
 
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
+                # breakpoint()
 
                 # pop those keys for generation
                 if 'multi_modal_inputs' in batch.non_tensor_batch.keys():
@@ -852,8 +964,10 @@ class RayPPOTrainer(object):
                     batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))],
                                                              dtype=object)
                     # repeat to align with repeated responses in rollout
+                    rollout_index_batch = torch.arange(self.config.actor_rollout_ref.rollout.n, device=batch.batch.device).repeat(len(batch)) # [0, 1, 2, ..., n, 0, 1, 2, ..., n, ...]
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
+                    batch.batch['rollout_index'] = rollout_index_batch
 
                     batch.batch['response_mask'] = compute_response_mask(batch)
                     # balance the number of valid tokens on each dp rank.
@@ -952,9 +1066,20 @@ class RayPPOTrainer(object):
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
 
+                # log rollout generations
+                self._maybe_log_train_generations(batch)
+
+
                 if is_last_step:
                     pprint(f'Final validation metrics: {last_val_metrics}')
                     progress_bar.close()
+                    # save train result to local file
+                    data_path = '/home/huangbz/verl/train_result.parquet'
+                    if os.path.exists(data_path):
+                        old_df = pd.read_parquet(data_path, engine='pyarrow')
+                    current_df = pd.read_parquet(self.cache_file_path, engine='pyarrow')
+                    df = pd.concat([old_df, current_df], ignore_index=True)
+                    df.to_parquet(data_path, engine='pyarrow')
                     return
 
                 progress_bar.update(1)

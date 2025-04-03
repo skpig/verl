@@ -233,7 +233,7 @@ class DataParallelPPOActor(BasePPOActor):
         return log_probs
 
     def update_policy(self, data: DataProto):
-        breakpoint()
+        # breakpoint()
         # make sure we are in training mode
         self.actor_module.train()
 
