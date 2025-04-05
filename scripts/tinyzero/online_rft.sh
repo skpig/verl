@@ -5,6 +5,7 @@ TEMPLATE_TYPE=chat # or chat
 DATA_DIR=${MY_DATA_DIR}countdown
 REWARD_FILE=/home/huangbz/verl/verl/utils/reward_score/countdown.py 
 REWARD_NAME=compute_score
+RUN_ID=$1
 
 # Model settings
 ROLLOUT_N=5
@@ -25,7 +26,7 @@ BACKWARD_MAX_TOKEN_LEN=$((4 * MAX_PROMPT_LEN + MAX_RESPONSE_LEN))
 PROJ_NAME="TinyZero"
 MODEL_NAME=$(basename $BASE_MODEL)
 DATA_NAME=$(basename $DATA_DIR)
-EXPERIMENT_NAME="${DATA_NAME}_onlinerft_${MODEL_NAME}_n${ROLLOUT_N}_resplen${MAX_RESPONSE_LEN}_bsz${BATCH_SIZE}"
+EXPERIMENT_NAME="ID${RUN_ID}_${DATA_NAME}_onlinerft_${MODEL_NAME}_n${ROLLOUT_N}_resplen${MAX_RESPONSE_LEN}_bsz${BATCH_SIZE}"
 
 python3 data_preprocess/countdown.py \
   --local_dir $DATA_DIR \

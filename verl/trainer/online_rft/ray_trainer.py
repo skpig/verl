@@ -26,6 +26,7 @@ from typing import Counter, Type, Dict
 from copy import deepcopy
 from collections import Counter, defaultdict
 import torch
+import pandas as pd
 
 import ray
 import numpy as np
@@ -37,8 +38,8 @@ from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.base import Worker
 from verl.single_controller.ray import RayResourcePool, RayWorkerGroup, RayClassWithInitArgs
 from verl.single_controller.ray.base import create_colocated_worker_cls
-from verl.trainer.ppo import core_algos
-from verl.trainer.online_rft.metric_utils import compute_data_metrics, compute_throughout_metrics, compute_timing_metrics, reduce_metrics
+from verl.trainer.online_rft import core_algos
+from verl.trainer.online_rft.metric_utils import compute_data_metrics, compute_throughout_metrics, compute_timing_metrics, reduce_metrics, compute_rollout_metrics
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer, WorkerType, Role, AdvantageEstimator, ResourcePoolManager, apply_kl_penalty, _timer
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
@@ -448,39 +449,68 @@ class RayOnlineRFTTrainer(RayPPOTrainer):
     #     self.generations_logger.log(self.config.trainer.logger, 'val', samples, self.global_steps)
     
 
-    # def _maybe_log_train_generations(self, batch):
-    #     """Log a table of validation samples to the configured logger (wandb or swanlab)"""
-    #     input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in batch.batch['input_ids']] # (bsz,)
-    #     response_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in batch.batch['responses']] # (bsz,)
+    def _maybe_log_train_generations(self, batch):
+        """Log a table of validation samples to the configured logger (wandb or swanlab)"""
 
 
-    #     """Add more statistics here"""
+        """TODO: Add more statistics here"""
+        LOG_FREQ = 10
+
+        if self.global_steps % LOG_FREQ != 0:
+            return
+
+        input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in batch.batch['prompts']] # (bsz,)
+        response_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in batch.batch['responses']] # (bsz,)
+
+        """ Save in local file """
+        df = pd.DataFrame({
+            'query_index': batch.batch['index'].tolist(),
+            'query': input_texts,
+            'rollout_index': batch.batch['rollout_index'].tolist(),
+            'rollout': response_texts,
+            'seq_level_scores': batch.batch['seq_level_scores'].tolist(),
+            'seq_level_rewards': batch.batch['seq_level_scores'].tolist(),
+        })
+        df['step_num'] = self.global_steps
+        df['run_name'] = self.config.trainer.experiment_name
+
+        df = df.sort_values(by=['query_index', 'rollout_index'])
 
 
+        self.cache_file_path = os.path.join(self.config.trainer.default_local_dir, 'train_generations.parquet')
+        # load old df on the next few steps
+        if os.path.exists(self.cache_file_path) and self.global_steps // LOG_FREQ != 1:
+            old_df = pd.read_parquet(self.cache_file_path, engine='pyarrow')
+            df = pd.concat([old_df, df], ignore_index=True)
+        # save new df
+        dir_name = os.path.dirname(self.cache_file_path)
+        if not os.path.exists(dir_name):
+            os.makedirs(dir_name, exist_ok=False)
+        df.to_parquet(self.cache_file_path, engine='pyarrow')
         
-    #     if self.global_steps % 5 != 0:
-    #         return
-
-    #     import numpy as np
-
-    #     generations_to_log = self.config.trainer.log_val_generations
-
-    #     if generations_to_log == 0:
-    #         return
-
-    #     # randomly sample `generations_to_log` samples
-    #     indices = np.random.choice(len(input_texts), generations_to_log)
-    #     input_texts = [input_texts[i] for i in indices]
-    #     response_texts = [response_texts[i] for i in indices]
-    #     seq_level_scores = [batch.batch['seq_level_scores'][i] for i in indices]
-
-    #     # Create tuples of (input, output, score) and sort by input text
-    #     samples = list(zip(input_texts, response_texts, seq_level_scores))
-
-    #     # Log to each configured logger
-    #     self.generations_logger.log(self.config.trainer.logger, 'train', samples, self.global_steps)
 
 
+
+        """Send to logger"""
+        import numpy as np
+
+        generations_to_log = self.config.trainer.log_val_generations
+
+        if generations_to_log == 0:
+            return
+
+        # randomly sample `generations_to_log` samples with a fixed seed
+        np.random.seed(42)
+        indices = np.random.choice(len(input_texts), generations_to_log)
+        input_texts = [input_texts[i] for i in indices]
+        response_texts = [response_texts[i] for i in indices]
+        seq_level_scores = [batch.batch['seq_level_scores'][i].item() for i in indices]
+
+        # Create tuples of (input, output, score) and sort by input text
+        samples = list(zip(input_texts, response_texts, seq_level_scores))
+
+        # Log to each configured logger
+        self.validation_generations_logger.log(self.config.trainer.logger, 'train', samples, self.global_steps)
 
     def _validate(self):
         reward_tensor_lst = []
@@ -550,7 +580,7 @@ class RayOnlineRFTTrainer(RayPPOTrainer):
             reward_meta.update(reward_type_counter)
 
             # Store scores
-            scores = reward_tensor.sum(-1).cpu().tolist()
+            scores = reward_tensor.cpu().tolist()
             sample_scores.extend(scores)
 
             reward_tensor_lst.append(reward_tensor)
@@ -907,6 +937,7 @@ class RayOnlineRFTTrainer(RayPPOTrainer):
                 # collect metrics
                 metrics.update(compute_data_metrics(batch=batch))
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
+                metrics.update(compute_rollout_metrics(batch=batch, tokenizer=self.tokenizer))
                 # TODO: implement actual tflpo and theoretical tflpo
                 n_gpus = self.resource_pool_manager.get_n_gpus()
                 metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))

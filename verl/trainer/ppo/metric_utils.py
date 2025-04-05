@@ -15,10 +15,19 @@
 Metrics related to the PPO trainer.
 """
 
+import ray
+from collections import defaultdict
 import torch
 from typing import Any, Dict, List
 import numpy as np
+from traitlets import default
 from verl import DataProto
+import re
+from langdetect import detect_langs
+import nltk
+from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+from nltk.metrics.distance import edit_distance
+import multiprocessing
 
 
 def reduce_metrics(metrics: Dict[str, List[Any]]) -> Dict[str, Any]:
@@ -41,6 +50,84 @@ def _compute_response_info(batch: DataProto) -> Dict[str, Any]:
         prompt_length=prompt_length,
         response_length=response_length,
     )
+
+def compute_rollout_metrics(batch: DataProto, tokenizer) -> Dict[str, Any]:
+    # rollouts = [(index, tokenizer.decode(token_ids, skip_special_tokens=True)) for index, token_ids in zip(batch.batch['index'], batch.batch['responses'])]
+    # # sort by index
+    # rollouts = sorted(rollouts, key=lambda x: x[0])
+    index2rollout = defaultdict(list)
+    for index, token_ids in zip(batch.batch['index'], batch.batch['responses']):
+        # decode
+        rollout = tokenizer.decode(token_ids, skip_special_tokens=True)
+        index2rollout[index.item()].append(rollout)
+    rollouts = [r for rollouts in index2rollout.values() for r in rollouts]
+    print(f"avg rollout num: {len(rollouts) / len(index2rollout)}")
+
+
+    """Frequency of language mixing"""
+    def contains_language_mixing(text: str) -> bool:
+        try:
+            detected_langs = detect_langs(text)
+        except Exception:
+            return False
+        # 只统计概率超过threshold的语言
+        languages = {lang.lang for lang in detected_langs if lang.prob > 0.05}
+        return len(languages) > 1
+
+    mix_count = sum(contains_language_mixing(rollout) for rollout in rollouts)
+    metrics = {
+        'rollout/language_mixing_count': mix_count,
+        'rollout/language_mixing_ratio': mix_count / len(rollouts) if rollouts else 0.0,
+    }
+
+    """Diversity in all responses to one prompt"""
+    @ray.remote
+    def compute_self_bleu_and_edit_distance(responses):
+        """
+        计算一组文本的 Self-BLEU 和编辑距离均值。
+        
+        :param responses: list[str], 包含多条生成文本
+        :return: (avg_self_bleu, avg_edit_distance)
+        """
+        bleu_scores = []
+        edit_distances = []
+        # 计算每对文本之间的 Self-BLEU 和编辑距离
+        for i in range(len(responses)):
+            for j in range(i + 1, len(responses)):
+                # 计算编辑距离
+                edit_dist = edit_distance(responses[i], responses[j])
+                # 计算 Self-BLEU
+                # 这里使用 nltk 的 sentence_bleu 函数计算 Self-BLEU
+                # 需要将文本分词
+                reference = responses[j].split()
+                candidate = responses[i].split()
+                bleu_score = sentence_bleu([reference], candidate, smoothing_function=SmoothingFunction().method1)
+
+                bleu_scores.append(bleu_score)
+                edit_distances.append(edit_dist)
+        # 计算平均值
+        avg_self_bleu = np.mean(bleu_scores) if bleu_scores else 0.0
+        avg_edit_distance = np.mean(edit_distances) if edit_distances else 0.0
+        return avg_self_bleu, avg_edit_distance
+
+        
+
+    # bleu_edit_lst = [compute_self_bleu_and_edit_distance(responses) for responses in index2rollout.values()]
+    # 使用多进程计算 Self-BLEU 和编辑距离
+    bleu_edit_tasks = [compute_self_bleu_and_edit_distance.remote(responses) for responses in index2rollout.values()]
+    # 等待所有任务完成
+    bleu_edit_results = ray.get(bleu_edit_tasks)
+    # 计算平均值
+    bleu_edit_lst = [result for result in bleu_edit_results if result is not None]
+
+    metrics.update({
+        'rollout/self_bleu': np.mean([bleu for bleu, _ in bleu_edit_lst]),
+        'rollout/edit_distance': np.mean([edit for _, edit in bleu_edit_lst]),
+    })
+
+    """ TODO: Add more pattern matching metrics here """
+
+    return metrics
 
 
 def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str, Any]:

@@ -19,7 +19,7 @@ import torch
 from typing import Any, Dict, List
 import numpy as np
 from verl import DataProto
-from verl.trainer.ppo.metric_utils import reduce_metrics, _compute_response_info
+from verl.trainer.ppo.metric_utils import reduce_metrics, _compute_response_info, compute_rollout_metrics
 
 
 # # no need

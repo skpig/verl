@@ -40,7 +40,7 @@ from verl.single_controller.base import Worker
 from verl.single_controller.ray import RayResourcePool, RayWorkerGroup, RayClassWithInitArgs
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo import core_algos
-from verl.trainer.ppo.metric_utils import compute_data_metrics, compute_throughout_metrics, compute_timing_metrics, reduce_metrics
+from verl.trainer.ppo.metric_utils import compute_data_metrics, compute_throughout_metrics, compute_timing_metrics, reduce_metrics, compute_rollout_metrics
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
@@ -530,7 +530,7 @@ class RayPPOTrainer(object):
             else:
                 results.append({
                     "offsets": offsets,
-                    "char_scores": valid_scores
+                    "char_scores": valid_scores.tolist()
                 })
 
             # # 初始化字符分数
@@ -545,8 +545,6 @@ class RayPPOTrainer(object):
 
     def _maybe_log_train_generations(self, batch):
         """Log a table of validation samples to the configured logger (wandb or swanlab)"""
-        input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in batch.batch['prompts']] # (bsz,)
-        response_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in batch.batch['responses']] # (bsz,)
 
 
         """TODO: Add more statistics here"""
@@ -555,13 +553,16 @@ class RayPPOTrainer(object):
         if self.global_steps % LOG_FREQ != 0:
             return
 
-        # save in local file
+        input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in batch.batch['prompts']] # (bsz,)
+        response_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in batch.batch['responses']] # (bsz,)
+
+        """ Save in local file """
         df = pd.DataFrame({
             'query_index': batch.batch['index'].tolist(),
             'query': input_texts,
             'rollout_index': batch.batch['rollout_index'].tolist(),
             'rollout': response_texts,
-            'seq_level_reward': batch.batch['token_level_rewards'].sum(-1).tolist(),
+            'seq_level_rewards': batch.batch['token_level_rewards'].sum(-1).tolist(),
             'seq_level_scores': batch.batch['token_level_scores'].sum(-1).tolist() if 'token_level_scores' in batch.batch else None,
             'token_level_scores': self.map_token_scores_to_chars(batch.batch['responses'], batch.batch['token_level_scores'], batch.batch['response_mask']) if 'token_level_scores' in batch.batch else None,
         })
@@ -577,12 +578,15 @@ class RayPPOTrainer(object):
             old_df = pd.read_parquet(self.cache_file_path, engine='pyarrow')
             df = pd.concat([old_df, df], ignore_index=True)
         # save new df
+        dir_name = os.path.dirname(self.cache_file_path)
+        if not os.path.exists(dir_name):
+            os.makedirs(dir_name, exist_ok=False)
         df.to_parquet(self.cache_file_path, engine='pyarrow')
         
 
 
 
-        """send to logger"""
+        """Send to logger"""
         import numpy as np
 
         generations_to_log = self.config.trainer.log_val_generations
@@ -595,7 +599,7 @@ class RayPPOTrainer(object):
         indices = np.random.choice(len(input_texts), generations_to_log)
         input_texts = [input_texts[i] for i in indices]
         response_texts = [response_texts[i] for i in indices]
-        seq_level_scores = [batch.batch['seq_level_scores'][i] for i in indices]
+        seq_level_scores = [batch.batch['token_level_rewards'][i].sum(-1).item() for i in indices]
 
         # Create tuples of (input, output, score) and sort by input text
         samples = list(zip(input_texts, response_texts, seq_level_scores))
@@ -1059,6 +1063,7 @@ class RayPPOTrainer(object):
                 # collect metrics
                 metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
+                metrics.update(compute_rollout_metrics(batch=batch, tokenizer=self.tokenizer))
                 # TODO: implement actual tflpo and theoretical tflpo
                 n_gpus = self.resource_pool_manager.get_n_gpus()
                 metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
