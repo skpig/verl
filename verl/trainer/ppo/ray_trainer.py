@@ -286,6 +286,9 @@ class RayPPOTrainer(object):
         self._validate_config()
         self._create_dataloader()
 
+        self.cache_file_path = os.path.join('/home/huangbz/verl/.cache', self.config.trainer.experiment_name, 'train_generations.parquet')
+
+
     def _validate_config(self):
         config = self.config
         # number of GPUs total
@@ -572,7 +575,6 @@ class RayPPOTrainer(object):
         df = df.sort_values(by=['query_index', 'rollout_index'])
 
 
-        self.cache_file_path = os.path.join(self.config.trainer.default_local_dir, 'train_generations.parquet')
         # load old df on the next few steps
         if os.path.exists(self.cache_file_path) and self.global_steps // LOG_FREQ != 1:
             old_df = pd.read_parquet(self.cache_file_path, engine='pyarrow')
@@ -974,6 +976,9 @@ class RayPPOTrainer(object):
                     batch.batch['rollout_index'] = rollout_index_batch
 
                     batch.batch['response_mask'] = compute_response_mask(batch)
+                    # compute_rollout_metrics(batch=batch, tokenizer=self.tokenizer)
+                    rollout_metrics = compute_rollout_metrics.remote(batch=batch, tokenizer=self.tokenizer)
+
                     # balance the number of valid tokens on each dp rank.
                     # Note that this breaks the order of data inside the batch.
                     # Please take care when you implement group based adv computation such as GRPO and rloo
@@ -1061,18 +1066,19 @@ class RayPPOTrainer(object):
                             self._save_checkpoint()
 
                 # collect metrics
-                metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
+                with _timer('log', timing_raw):
+                    metrics.update(ray.get(rollout_metrics))
+                    self._maybe_log_train_generations(batch)
+                    metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
+                    # TODO: implement actual tflpo and theoretical tflpo
+                    n_gpus = self.resource_pool_manager.get_n_gpus()
+                    metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
-                metrics.update(compute_rollout_metrics(batch=batch, tokenizer=self.tokenizer))
-                # TODO: implement actual tflpo and theoretical tflpo
-                n_gpus = self.resource_pool_manager.get_n_gpus()
-                metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
 
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
 
                 # log rollout generations
-                self._maybe_log_train_generations(batch)
 
 
                 if is_last_step:
@@ -1080,12 +1086,11 @@ class RayPPOTrainer(object):
                     progress_bar.close()
                     # save train result to local file
                     data_path = '/home/huangbz/verl/train_result.parquet'
+                    df = pd.read_parquet(self.cache_file_path, engine='pyarrow')
                     if os.path.exists(data_path):
                         old_df = pd.read_parquet(data_path, engine='pyarrow')
-                    current_df = pd.read_parquet(self.cache_file_path, engine='pyarrow')
-                    df = pd.concat([old_df, current_df], ignore_index=True)
+                        df = pd.concat([old_df, df], ignore_index=True)
                     df.to_parquet(data_path, engine='pyarrow')
                     return
-
                 progress_bar.update(1)
                 self.global_steps += 1

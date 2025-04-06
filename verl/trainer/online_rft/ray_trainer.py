@@ -237,192 +237,194 @@ class RayOnlineRFTTrainer(RayPPOTrainer):
         self._validate_config()
         self._create_dataloader()
 
-    # NO NEED
-    def _validate_config(self):
-        config = self.config
-        # number of GPUs total
-        n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
+        self.cache_file_path = os.path.join('/home/huangbz/verl/.cache', self.config.trainer.experiment_name, 'train_generations.parquet')
 
-        # 1. Check total batch size for data correctness
-        real_train_batch_size = config.data.train_batch_size * config.actor_rollout_ref.rollout.n
-        assert real_train_batch_size % n_gpus == 0, \
-            f"real_train_batch_size ({real_train_batch_size}) must be divisible by total n_gpus ({n_gpus})."
+    # # NO NEED
+    # def _validate_config(self):
+    #     config = self.config
+    #     # number of GPUs total
+    #     n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
 
-        # A helper function to check "micro_batch_size" vs "micro_batch_size_per_gpu"
-        # We throw an error if the user sets both. The new convention is "..._micro_batch_size_per_gpu".
-        def check_mutually_exclusive(mbs, mbs_per_gpu, name: str):
-            settings = {
-                "actor_rollout_ref.actor": "micro_batch_size",
-                "critic": "micro_batch_size",
-                "reward_model": "micro_batch_size",
-                "actor_rollout_ref.ref": "log_prob_micro_batch_size",
-                "actor_rollout_ref.rollout": "log_prob_micro_batch_size",
-            }
+    #     # 1. Check total batch size for data correctness
+    #     real_train_batch_size = config.data.train_batch_size * config.actor_rollout_ref.rollout.n
+    #     assert real_train_batch_size % n_gpus == 0, \
+    #         f"real_train_batch_size ({real_train_batch_size}) must be divisible by total n_gpus ({n_gpus})."
 
-            if name in settings:
-                param = settings[name]
-                param_per_gpu = f"{param}_per_gpu"
+    #     # A helper function to check "micro_batch_size" vs "micro_batch_size_per_gpu"
+    #     # We throw an error if the user sets both. The new convention is "..._micro_batch_size_per_gpu".
+    #     def check_mutually_exclusive(mbs, mbs_per_gpu, name: str):
+    #         settings = {
+    #             "actor_rollout_ref.actor": "micro_batch_size",
+    #             "critic": "micro_batch_size",
+    #             "reward_model": "micro_batch_size",
+    #             "actor_rollout_ref.ref": "log_prob_micro_batch_size",
+    #             "actor_rollout_ref.rollout": "log_prob_micro_batch_size",
+    #         }
 
-                if mbs is None and mbs_per_gpu is None:
-                    raise ValueError(
-                        f"[{name}] Please set at least one of '{name}.{param}' or '{name}.{param_per_gpu}'.")
+    #         if name in settings:
+    #             param = settings[name]
+    #             param_per_gpu = f"{param}_per_gpu"
 
-                if mbs is not None and mbs_per_gpu is not None:
-                    raise ValueError(
-                        f"[{name}] You have set both '{name}.{param}' AND '{name}.{param_per_gpu}'. "
-                        f"Please remove '{name}.{param}' because only '*_{param_per_gpu}' is supported (the former is deprecated)."
-                    )
+    #             if mbs is None and mbs_per_gpu is None:
+    #                 raise ValueError(
+    #                     f"[{name}] Please set at least one of '{name}.{param}' or '{name}.{param_per_gpu}'.")
 
-        if not config.actor_rollout_ref.actor.use_dynamic_bsz:
-            # actor: ppo_micro_batch_size vs. ppo_micro_batch_size_per_gpu
-            check_mutually_exclusive(config.actor_rollout_ref.actor.ppo_micro_batch_size,
-                                     config.actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu,
-                                     "actor_rollout_ref.actor")
+    #             if mbs is not None and mbs_per_gpu is not None:
+    #                 raise ValueError(
+    #                     f"[{name}] You have set both '{name}.{param}' AND '{name}.{param_per_gpu}'. "
+    #                     f"Please remove '{name}.{param}' because only '*_{param_per_gpu}' is supported (the former is deprecated)."
+    #                 )
 
-            if self.use_reference_policy:
-                # reference: log_prob_micro_batch_size vs. log_prob_micro_batch_size_per_gpu
-                check_mutually_exclusive(config.actor_rollout_ref.ref.log_prob_micro_batch_size,
-                                         config.actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu,
-                                         "actor_rollout_ref.ref")
+    #     if not config.actor_rollout_ref.actor.use_dynamic_bsz:
+    #         # actor: ppo_micro_batch_size vs. ppo_micro_batch_size_per_gpu
+    #         check_mutually_exclusive(config.actor_rollout_ref.actor.ppo_micro_batch_size,
+    #                                  config.actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu,
+    #                                  "actor_rollout_ref.actor")
 
-            #  The rollout section also has log_prob_micro_batch_size vs. log_prob_micro_batch_size_per_gpu
-            check_mutually_exclusive(config.actor_rollout_ref.rollout.log_prob_micro_batch_size,
-                                     config.actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu,
-                                     "actor_rollout_ref.rollout")
+    #         if self.use_reference_policy:
+    #             # reference: log_prob_micro_batch_size vs. log_prob_micro_batch_size_per_gpu
+    #             check_mutually_exclusive(config.actor_rollout_ref.ref.log_prob_micro_batch_size,
+    #                                      config.actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu,
+    #                                      "actor_rollout_ref.ref")
 
-        if self.use_critic and not config.critic.use_dynamic_bsz:
-            # Check for critic micro-batch size conflicts
-            check_mutually_exclusive(config.critic.ppo_micro_batch_size, config.critic.ppo_micro_batch_size_per_gpu,
-                                     "critic")
+    #         #  The rollout section also has log_prob_micro_batch_size vs. log_prob_micro_batch_size_per_gpu
+    #         check_mutually_exclusive(config.actor_rollout_ref.rollout.log_prob_micro_batch_size,
+    #                                  config.actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu,
+    #                                  "actor_rollout_ref.rollout")
 
-        # Check for reward model micro-batch size conflicts
-        if config.reward_model.enable and not config.reward_model.use_dynamic_bsz:
-            check_mutually_exclusive(config.reward_model.micro_batch_size, config.reward_model.micro_batch_size_per_gpu,
-                                     "reward_model")
+    #     if self.use_critic and not config.critic.use_dynamic_bsz:
+    #         # Check for critic micro-batch size conflicts
+    #         check_mutually_exclusive(config.critic.ppo_micro_batch_size, config.critic.ppo_micro_batch_size_per_gpu,
+    #                                  "critic")
 
-        # Actor
-        # check if train_batch_size is larger than ppo_mini_batch_size
-        # if NOT dynamic_bsz, we must ensure:
-        #    ppo_mini_batch_size is divisible by ppo_micro_batch_size
-        #    ppo_micro_batch_size * sequence_parallel_size >= n_gpus
-        if not config.actor_rollout_ref.actor.use_dynamic_bsz:
-            assert config.data.train_batch_size >= config.actor_rollout_ref.actor.ppo_mini_batch_size
-            sp_size = config.actor_rollout_ref.actor.get('ulysses_sequence_parallel_size', 1)
-            if config.actor_rollout_ref.actor.ppo_micro_batch_size is not None:
-                assert config.actor_rollout_ref.actor.ppo_mini_batch_size % config.actor_rollout_ref.actor.ppo_micro_batch_size == 0
-                assert config.actor_rollout_ref.actor.ppo_micro_batch_size * sp_size >= n_gpus
+    #     # Check for reward model micro-batch size conflicts
+    #     if config.reward_model.enable and not config.reward_model.use_dynamic_bsz:
+    #         check_mutually_exclusive(config.reward_model.micro_batch_size, config.reward_model.micro_batch_size_per_gpu,
+    #                                  "reward_model")
 
-        if config.algorithm.use_kl_in_reward and config.actor_rollout_ref.actor.use_kl_loss:
-            print(f"NOTICE: You have both enabled in-reward kl and kl loss.")
+    #     # Actor
+    #     # check if train_batch_size is larger than ppo_mini_batch_size
+    #     # if NOT dynamic_bsz, we must ensure:
+    #     #    ppo_mini_batch_size is divisible by ppo_micro_batch_size
+    #     #    ppo_micro_batch_size * sequence_parallel_size >= n_gpus
+    #     if not config.actor_rollout_ref.actor.use_dynamic_bsz:
+    #         assert config.data.train_batch_size >= config.actor_rollout_ref.actor.ppo_mini_batch_size
+    #         sp_size = config.actor_rollout_ref.actor.get('ulysses_sequence_parallel_size', 1)
+    #         if config.actor_rollout_ref.actor.ppo_micro_batch_size is not None:
+    #             assert config.actor_rollout_ref.actor.ppo_mini_batch_size % config.actor_rollout_ref.actor.ppo_micro_batch_size == 0
+    #             assert config.actor_rollout_ref.actor.ppo_micro_batch_size * sp_size >= n_gpus
 
-        # critic
-        if self.use_critic and not config.critic.use_dynamic_bsz:
-            assert config.data.train_batch_size >= config.critic.ppo_mini_batch_size
-            sp_size = config.critic.get('ulysses_sequence_parallel_size', 1)
-            if config.critic.ppo_micro_batch_size is not None:
-                assert config.critic.ppo_mini_batch_size % config.critic.ppo_micro_batch_size == 0
-                assert config.critic.ppo_micro_batch_size * sp_size >= n_gpus
+    #     if config.algorithm.use_kl_in_reward and config.actor_rollout_ref.actor.use_kl_loss:
+    #         print(f"NOTICE: You have both enabled in-reward kl and kl loss.")
 
-        # Check if use_remove_padding is enabled when using sequence parallelism for fsdp
-        if config.actor_rollout_ref.actor.strategy == 'fsdp':
-            if config.actor_rollout_ref.actor.get('ulysses_sequence_parallel_size', 1) > 1 or \
-                    config.actor_rollout_ref.ref.get('ulysses_sequence_parallel_size', 1) > 1:
-                assert config.actor_rollout_ref.model.use_remove_padding, \
-                    "When using sequence parallelism for actor/ref policy, you must enable `use_remove_padding`."
+    #     # critic
+    #     if self.use_critic and not config.critic.use_dynamic_bsz:
+    #         assert config.data.train_batch_size >= config.critic.ppo_mini_batch_size
+    #         sp_size = config.critic.get('ulysses_sequence_parallel_size', 1)
+    #         if config.critic.ppo_micro_batch_size is not None:
+    #             assert config.critic.ppo_mini_batch_size % config.critic.ppo_micro_batch_size == 0
+    #             assert config.critic.ppo_micro_batch_size * sp_size >= n_gpus
 
-        if self.use_critic and config.critic.strategy == 'fsdp':
-            if config.critic.get('ulysses_sequence_parallel_size', 1) > 1:
-                assert config.critic.model.use_remove_padding, \
-                    "When using sequence parallelism for critic, you must enable `use_remove_padding`."
+    #     # Check if use_remove_padding is enabled when using sequence parallelism for fsdp
+    #     if config.actor_rollout_ref.actor.strategy == 'fsdp':
+    #         if config.actor_rollout_ref.actor.get('ulysses_sequence_parallel_size', 1) > 1 or \
+    #                 config.actor_rollout_ref.ref.get('ulysses_sequence_parallel_size', 1) > 1:
+    #             assert config.actor_rollout_ref.model.use_remove_padding, \
+    #                 "When using sequence parallelism for actor/ref policy, you must enable `use_remove_padding`."
 
-        if config.data.get('val_batch_size', None) is not None:
-            print(
-                f"WARNING: val_batch_size is deprecated. Validation datasets are sent to inference engines as a whole batch, which will schedule the memory themselves."
-            )
+    #     if self.use_critic and config.critic.strategy == 'fsdp':
+    #         if config.critic.get('ulysses_sequence_parallel_size', 1) > 1:
+    #             assert config.critic.model.use_remove_padding, \
+    #                 "When using sequence parallelism for critic, you must enable `use_remove_padding`."
 
-        # check eval config
-        if config.actor_rollout_ref.rollout.val_kwargs.do_sample:
-            assert config.actor_rollout_ref.rollout.temperature > 0, \
-                "validation gen temperature should be greater than 0 when enabling do_sample"
+    #     if config.data.get('val_batch_size', None) is not None:
+    #         print(
+    #             f"WARNING: val_batch_size is deprecated. Validation datasets are sent to inference engines as a whole batch, which will schedule the memory themselves."
+    #         )
 
-        print("[validate_config] All configuration checks passed successfully!")
+    #     # check eval config
+    #     if config.actor_rollout_ref.rollout.val_kwargs.do_sample:
+    #         assert config.actor_rollout_ref.rollout.temperature > 0, \
+    #             "validation gen temperature should be greater than 0 when enabling do_sample"
 
-    # NO NEED
-    def _create_dataloader(self):
-        # TODO: we have to make sure the batch size is divisible by the dp size
-        self.train_dataset = RLHFDataset(parquet_files=self.config.data.train_files,
-                                         tokenizer=self.tokenizer,
-                                         processor=self.processor,
-                                         prompt_key=self.config.data.prompt_key,
-                                         image_key=self.config.data.get('image_key', 'images'),
-                                         max_prompt_length=self.config.data.max_prompt_length,
-                                         filter_prompts=True,
-                                         template_type=self.config.data.template_type,
-                                         return_raw_chat=self.config.data.get('return_raw_chat', False),
-                                         truncation=self.config.data.get('truncation', 'error'),
-                                         filter_overlong_prompts=self.config.data.filter_overlong_prompts)
-        assert self.train_dataset.truncation == self.config.data.get(
-            'truncation', 'error'
-        ), f'dataset truncation {self.train_dataset.truncation} must be the same as config {self.config.data.get("truncation", "error")}'
-        # use sampler for better ckpt resume
-        if self.config.data.shuffle:
-            train_dataloader_generator = torch.Generator()
-            train_dataloader_generator.manual_seed(self.config.data.get('seed', 1))
-            sampler = RandomSampler(data_source=self.train_dataset, generator=train_dataloader_generator)
-        else:
-            sampler = SequentialSampler(data_source=self.train_dataset)
+    #     print("[validate_config] All configuration checks passed successfully!")
 
-        self.train_dataloader = StatefulDataLoader(dataset=self.train_dataset,
-                                                   batch_size=self.config.data.train_batch_size,
-                                                   num_workers=8,
-                                                   drop_last=True,
-                                                   collate_fn=collate_fn,
-                                                   sampler=sampler)
+    # # NO NEED
+    # def _create_dataloader(self):
+    #     # TODO: we have to make sure the batch size is divisible by the dp size
+    #     self.train_dataset = RLHFDataset(parquet_files=self.config.data.train_files,
+    #                                      tokenizer=self.tokenizer,
+    #                                      processor=self.processor,
+    #                                      prompt_key=self.config.data.prompt_key,
+    #                                      image_key=self.config.data.get('image_key', 'images'),
+    #                                      max_prompt_length=self.config.data.max_prompt_length,
+    #                                      filter_prompts=True,
+    #                                      template_type=self.config.data.template_type,
+    #                                      return_raw_chat=self.config.data.get('return_raw_chat', False),
+    #                                      truncation=self.config.data.get('truncation', 'error'),
+    #                                      filter_overlong_prompts=self.config.data.filter_overlong_prompts)
+    #     assert self.train_dataset.truncation == self.config.data.get(
+    #         'truncation', 'error'
+    #     ), f'dataset truncation {self.train_dataset.truncation} must be the same as config {self.config.data.get("truncation", "error")}'
+    #     # use sampler for better ckpt resume
+    #     if self.config.data.shuffle:
+    #         train_dataloader_generator = torch.Generator()
+    #         train_dataloader_generator.manual_seed(self.config.data.get('seed', 1))
+    #         sampler = RandomSampler(data_source=self.train_dataset, generator=train_dataloader_generator)
+    #     else:
+    #         sampler = SequentialSampler(data_source=self.train_dataset)
 
-        self.val_dataset = RLHFDataset(parquet_files=self.config.data.val_files,
-                                       tokenizer=self.tokenizer,
-                                       processor=self.processor,
-                                       prompt_key=self.config.data.prompt_key,
-                                       image_key=self.config.data.get('image_key', 'images'),
-                                       max_prompt_length=self.config.data.max_prompt_length,
-                                       filter_prompts=True,
-                                       template_type=self.config.data.template_type,
-                                       return_raw_chat=self.config.data.get('return_raw_chat', False),
-                                       truncation=self.config.data.get('truncation', 'error'),
-                                       filter_overlong_prompts=self.config.data.filter_overlong_prompts)
-        assert self.val_dataset.truncation == self.config.data.get(
-            'truncation', 'error'
-        ), f'dataset truncation {self.val_dataset.truncation} must be the same as config {self.config.data.get("truncation", "error")}'
-        self.val_dataloader = StatefulDataLoader(
-            dataset=self.val_dataset,
-            # Validation datasets are sent to inference engines as a whole batch,
-            # which will schedule the memory themselves.
-            batch_size=len(self.val_dataset),
-            num_workers=8,
-            shuffle=False,
-            drop_last=False,
-            collate_fn=collate_fn)
+    #     self.train_dataloader = StatefulDataLoader(dataset=self.train_dataset,
+    #                                                batch_size=self.config.data.train_batch_size,
+    #                                                num_workers=8,
+    #                                                drop_last=True,
+    #                                                collate_fn=collate_fn,
+    #                                                sampler=sampler)
 
-        assert len(self.train_dataloader) >= 1
-        assert len(
-            self.val_dataloader
-        ) == 1, "Validation dataloader must have a single batch, which inference engines will schedule the memory themselves."
+    #     self.val_dataset = RLHFDataset(parquet_files=self.config.data.val_files,
+    #                                    tokenizer=self.tokenizer,
+    #                                    processor=self.processor,
+    #                                    prompt_key=self.config.data.prompt_key,
+    #                                    image_key=self.config.data.get('image_key', 'images'),
+    #                                    max_prompt_length=self.config.data.max_prompt_length,
+    #                                    filter_prompts=True,
+    #                                    template_type=self.config.data.template_type,
+    #                                    return_raw_chat=self.config.data.get('return_raw_chat', False),
+    #                                    truncation=self.config.data.get('truncation', 'error'),
+    #                                    filter_overlong_prompts=self.config.data.filter_overlong_prompts)
+    #     assert self.val_dataset.truncation == self.config.data.get(
+    #         'truncation', 'error'
+    #     ), f'dataset truncation {self.val_dataset.truncation} must be the same as config {self.config.data.get("truncation", "error")}'
+    #     self.val_dataloader = StatefulDataLoader(
+    #         dataset=self.val_dataset,
+    #         # Validation datasets are sent to inference engines as a whole batch,
+    #         # which will schedule the memory themselves.
+    #         batch_size=len(self.val_dataset),
+    #         num_workers=8,
+    #         shuffle=False,
+    #         drop_last=False,
+    #         collate_fn=collate_fn)
 
-        print(f'Size of train dataloader: {len(self.train_dataloader)}')
+    #     assert len(self.train_dataloader) >= 1
+    #     assert len(
+    #         self.val_dataloader
+    #     ) == 1, "Validation dataloader must have a single batch, which inference engines will schedule the memory themselves."
 
-        # inject total_training_steps to actor/critic optim_config. This is hacky.
-        total_training_steps = len(self.train_dataloader) * self.config.trainer.total_epochs
+    #     print(f'Size of train dataloader: {len(self.train_dataloader)}')
 
-        if self.config.trainer.total_training_steps is not None:
-            total_training_steps = self.config.trainer.total_training_steps
+    #     # inject total_training_steps to actor/critic optim_config. This is hacky.
+    #     total_training_steps = len(self.train_dataloader) * self.config.trainer.total_epochs
 
-        self.total_training_steps = total_training_steps
-        print(f'Total training steps: {self.total_training_steps}')
+    #     if self.config.trainer.total_training_steps is not None:
+    #         total_training_steps = self.config.trainer.total_training_steps
 
-        OmegaConf.set_struct(self.config, True)
-        with open_dict(self.config):
-            self.config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
-            self.config.critic.optim.total_training_steps = total_training_steps
+    #     self.total_training_steps = total_training_steps
+    #     print(f'Total training steps: {self.total_training_steps}')
+
+    #     OmegaConf.set_struct(self.config, True)
+    #     with open_dict(self.config):
+    #         self.config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
+    #         self.config.critic.optim.total_training_steps = total_training_steps
 
     # def _maybe_log_val_generations(self, inputs, outputs, scores):
     #     """Log a table of validation samples to the configured logger (wandb or swanlab)"""
@@ -477,7 +479,6 @@ class RayOnlineRFTTrainer(RayPPOTrainer):
         df = df.sort_values(by=['query_index', 'rollout_index'])
 
 
-        self.cache_file_path = os.path.join(self.config.trainer.default_local_dir, 'train_generations.parquet')
         # load old df on the next few steps
         if os.path.exists(self.cache_file_path) and self.global_steps // LOG_FREQ != 1:
             old_df = pd.read_parquet(self.cache_file_path, engine='pyarrow')
@@ -576,7 +577,7 @@ class RayOnlineRFTTrainer(RayPPOTrainer):
             test_batch = test_batch.union(test_output_gen_batch)
 
             # evaluate using reward_function
-            reward_tensor, reward_type_counter = self.val_reward_fn(test_batch)
+            reward_tensor, reward_type_counter = self.val_reward_fn(test_batch) # (bsz)
             reward_meta.update(reward_type_counter)
 
             # Store scores
@@ -588,7 +589,7 @@ class RayOnlineRFTTrainer(RayPPOTrainer):
 
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
 
-        reward_tensor = torch.cat(reward_tensor_lst, dim=0).sum(-1).cpu()  # (batch_size,)
+        reward_tensor = torch.cat(reward_tensor_lst, dim=0).cpu()  # (batch_size,)
         data_sources = np.concatenate(data_source_lst, axis=0)
 
         # evaluate test_score based on data source
@@ -607,174 +608,174 @@ class RayOnlineRFTTrainer(RayPPOTrainer):
 
         return metric_dict
 
-    # NO NEED
-    def init_workers(self):
-        """Init resource pool and worker group"""
-        self.resource_pool_manager.create_resource_pool()
+    # # NO NEED
+    # def init_workers(self):
+    #     """Init resource pool and worker group"""
+    #     self.resource_pool_manager.create_resource_pool()
 
-        self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
+    #     self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
 
-        # create actor and rollout
-        if self.hybrid_engine:
-            resource_pool = self.resource_pool_manager.get_resource_pool(Role.ActorRollout)
-            actor_rollout_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.ActorRollout],
-                                                     config=self.config.actor_rollout_ref,
-                                                     role='actor_rollout')
-            self.resource_pool_to_cls[resource_pool]['actor_rollout'] = actor_rollout_cls
-        else:
-            raise NotImplementedError
+    #     # create actor and rollout
+    #     if self.hybrid_engine:
+    #         resource_pool = self.resource_pool_manager.get_resource_pool(Role.ActorRollout)
+    #         actor_rollout_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.ActorRollout],
+    #                                                  config=self.config.actor_rollout_ref,
+    #                                                  role='actor_rollout')
+    #         self.resource_pool_to_cls[resource_pool]['actor_rollout'] = actor_rollout_cls
+    #     else:
+    #         raise NotImplementedError
 
-        # create critic
-        if self.use_critic:
-            resource_pool = self.resource_pool_manager.get_resource_pool(Role.Critic)
-            critic_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Critic], config=self.config.critic)
-            self.resource_pool_to_cls[resource_pool]['critic'] = critic_cls
+    #     # create critic
+    #     if self.use_critic:
+    #         resource_pool = self.resource_pool_manager.get_resource_pool(Role.Critic)
+    #         critic_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Critic], config=self.config.critic)
+    #         self.resource_pool_to_cls[resource_pool]['critic'] = critic_cls
 
-        # create reference policy if needed
-        if self.use_reference_policy:
-            resource_pool = self.resource_pool_manager.get_resource_pool(Role.RefPolicy)
-            ref_policy_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RefPolicy],
-                                                  config=self.config.actor_rollout_ref,
-                                                  role='ref')
-            self.resource_pool_to_cls[resource_pool]['ref'] = ref_policy_cls
+    #     # create reference policy if needed
+    #     if self.use_reference_policy:
+    #         resource_pool = self.resource_pool_manager.get_resource_pool(Role.RefPolicy)
+    #         ref_policy_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RefPolicy],
+    #                                               config=self.config.actor_rollout_ref,
+    #                                               role='ref')
+    #         self.resource_pool_to_cls[resource_pool]['ref'] = ref_policy_cls
 
-        # create a reward model if reward_fn is None
-        if self.use_rm:
-            # we create a RM here
-            resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel)
-            rm_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RewardModel], config=self.config.reward_model)
-            self.resource_pool_to_cls[resource_pool]['rm'] = rm_cls
+    #     # create a reward model if reward_fn is None
+    #     if self.use_rm:
+    #         # we create a RM here
+    #         resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel)
+    #         rm_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RewardModel], config=self.config.reward_model)
+    #         self.resource_pool_to_cls[resource_pool]['rm'] = rm_cls
 
-        # initialize WorkerGroup
-        # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
-        # you should not use `create_colocated_worker_cls`. Instead, directly pass different resource pool to different worker groups.
-        # See https://github.com/volcengine/verl/blob/master/examples/ray/tutorial.ipynb for more information.
-        all_wg = {}
-        self.wg_dicts = []
-        for resource_pool, class_dict in self.resource_pool_to_cls.items():
-            worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
-            wg_dict = self.ray_worker_group_cls(resource_pool=resource_pool, ray_cls_with_init=worker_dict_cls)
-            spawn_wg = wg_dict.spawn(prefix_set=class_dict.keys())
-            all_wg.update(spawn_wg)
-            # keep the referece of WorkerDict to support ray >= 2.31. Ref: https://github.com/ray-project/ray/pull/45699
-            self.wg_dicts.append(wg_dict)
+    #     # initialize WorkerGroup
+    #     # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
+    #     # you should not use `create_colocated_worker_cls`. Instead, directly pass different resource pool to different worker groups.
+    #     # See https://github.com/volcengine/verl/blob/master/examples/ray/tutorial.ipynb for more information.
+    #     all_wg = {}
+    #     self.wg_dicts = []
+    #     for resource_pool, class_dict in self.resource_pool_to_cls.items():
+    #         worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
+    #         wg_dict = self.ray_worker_group_cls(resource_pool=resource_pool, ray_cls_with_init=worker_dict_cls)
+    #         spawn_wg = wg_dict.spawn(prefix_set=class_dict.keys())
+    #         all_wg.update(spawn_wg)
+    #         # keep the referece of WorkerDict to support ray >= 2.31. Ref: https://github.com/ray-project/ray/pull/45699
+    #         self.wg_dicts.append(wg_dict)
 
-        if self.use_critic:
-            self.critic_wg = all_wg['critic']
-            self.critic_wg.init_model()
+    #     if self.use_critic:
+    #         self.critic_wg = all_wg['critic']
+    #         self.critic_wg.init_model()
 
-        if self.use_reference_policy:
-            self.ref_policy_wg = all_wg['ref']
-            self.ref_policy_wg.init_model()
+    #     if self.use_reference_policy:
+    #         self.ref_policy_wg = all_wg['ref']
+    #         self.ref_policy_wg.init_model()
 
-        if self.use_rm:
-            self.rm_wg = all_wg['rm']
-            self.rm_wg.init_model()
+    #     if self.use_rm:
+    #         self.rm_wg = all_wg['rm']
+    #         self.rm_wg.init_model()
 
-        # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
-        self.actor_rollout_wg = all_wg['actor_rollout']
-        self.actor_rollout_wg.init_model()
+    #     # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
+    #     self.actor_rollout_wg = all_wg['actor_rollout']
+    #     self.actor_rollout_wg.init_model()
 
-    # NO NEED
-    def _save_checkpoint(self):
-        # path: given_path + `/global_step_{global_steps}` + `/actor`
-        local_global_step_folder = os.path.join(self.config.trainer.default_local_dir,
-                                                f'global_step_{self.global_steps}')
+    # # NO NEED
+    # def _save_checkpoint(self):
+    #     # path: given_path + `/global_step_{global_steps}` + `/actor`
+    #     local_global_step_folder = os.path.join(self.config.trainer.default_local_dir,
+    #                                             f'global_step_{self.global_steps}')
 
-        print(f'local_global_step_folder: {local_global_step_folder}')
-        actor_local_path = os.path.join(local_global_step_folder, 'actor')
+    #     print(f'local_global_step_folder: {local_global_step_folder}')
+    #     actor_local_path = os.path.join(local_global_step_folder, 'actor')
 
-        actor_remote_path = None if self.config.trainer.default_hdfs_dir is None else os.path.join(
-            self.config.trainer.default_hdfs_dir, f'global_step_{self.global_steps}', 'actor')
+    #     actor_remote_path = None if self.config.trainer.default_hdfs_dir is None else os.path.join(
+    #         self.config.trainer.default_hdfs_dir, f'global_step_{self.global_steps}', 'actor')
 
-        remove_previous_ckpt_in_save = self.config.trainer.get('remove_previous_ckpt_in_save', False)
-        if remove_previous_ckpt_in_save:
-            print(
-                'Warning: remove_previous_ckpt_in_save is deprecated, set max_actor_ckpt_to_keep=1 and max_critic_ckpt_to_keep=1 instead'
-            )
-        max_actor_ckpt_to_keep = self.config.trainer.get('max_actor_ckpt_to_keep',
-                                                         None) if not remove_previous_ckpt_in_save else 1
-        max_critic_ckpt_to_keep = self.config.trainer.get('max_critic_ckpt_to_keep',
-                                                          None) if not remove_previous_ckpt_in_save else 1
+    #     remove_previous_ckpt_in_save = self.config.trainer.get('remove_previous_ckpt_in_save', False)
+    #     if remove_previous_ckpt_in_save:
+    #         print(
+    #             'Warning: remove_previous_ckpt_in_save is deprecated, set max_actor_ckpt_to_keep=1 and max_critic_ckpt_to_keep=1 instead'
+    #         )
+    #     max_actor_ckpt_to_keep = self.config.trainer.get('max_actor_ckpt_to_keep',
+    #                                                      None) if not remove_previous_ckpt_in_save else 1
+    #     max_critic_ckpt_to_keep = self.config.trainer.get('max_critic_ckpt_to_keep',
+    #                                                       None) if not remove_previous_ckpt_in_save else 1
 
-        self.actor_rollout_wg.save_checkpoint(actor_local_path,
-                                              actor_remote_path,
-                                              self.global_steps,
-                                              max_ckpt_to_keep=max_actor_ckpt_to_keep)
+    #     self.actor_rollout_wg.save_checkpoint(actor_local_path,
+    #                                           actor_remote_path,
+    #                                           self.global_steps,
+    #                                           max_ckpt_to_keep=max_actor_ckpt_to_keep)
 
-        if self.use_critic:
-            critic_local_path = os.path.join(local_global_step_folder, 'critic')
-            critic_remote_path = None if self.config.trainer.default_hdfs_dir is None else os.path.join(
-                self.config.trainer.default_hdfs_dir, f'global_step_{self.global_steps}', 'critic')
-            self.critic_wg.save_checkpoint(critic_local_path,
-                                           critic_remote_path,
-                                           self.global_steps,
-                                           max_ckpt_to_keep=max_critic_ckpt_to_keep)
+    #     if self.use_critic:
+    #         critic_local_path = os.path.join(local_global_step_folder, 'critic')
+    #         critic_remote_path = None if self.config.trainer.default_hdfs_dir is None else os.path.join(
+    #             self.config.trainer.default_hdfs_dir, f'global_step_{self.global_steps}', 'critic')
+    #         self.critic_wg.save_checkpoint(critic_local_path,
+    #                                        critic_remote_path,
+    #                                        self.global_steps,
+    #                                        max_ckpt_to_keep=max_critic_ckpt_to_keep)
 
-        # save dataloader
-        dataloader_local_path = os.path.join(local_global_step_folder, 'data.pt')
-        dataloader_state_dict = self.train_dataloader.state_dict()
-        torch.save(dataloader_state_dict, dataloader_local_path)
+    #     # save dataloader
+    #     dataloader_local_path = os.path.join(local_global_step_folder, 'data.pt')
+    #     dataloader_state_dict = self.train_dataloader.state_dict()
+    #     torch.save(dataloader_state_dict, dataloader_local_path)
 
-        # latest checkpointed iteration tracker (for atomic usage)
-        local_latest_checkpointed_iteration = os.path.join(self.config.trainer.default_local_dir,
-                                                           'latest_checkpointed_iteration.txt')
-        with open(local_latest_checkpointed_iteration, 'w') as f:
-            f.write(str(self.global_steps))
+    #     # latest checkpointed iteration tracker (for atomic usage)
+    #     local_latest_checkpointed_iteration = os.path.join(self.config.trainer.default_local_dir,
+    #                                                        'latest_checkpointed_iteration.txt')
+    #     with open(local_latest_checkpointed_iteration, 'w') as f:
+    #         f.write(str(self.global_steps))
 
-    # NO NEED
-    def _load_checkpoint(self):
-        if self.config.trainer.resume_mode == 'disable':
-            return 0
+    # # NO NEED
+    # def _load_checkpoint(self):
+    #     if self.config.trainer.resume_mode == 'disable':
+    #         return 0
 
-        # load from hdfs
-        if self.config.trainer.default_hdfs_dir is not None:
-            raise NotImplementedError('load from hdfs is not implemented yet')
-        else:
-            checkpoint_folder = self.config.trainer.default_local_dir  # TODO: check path
-            if not os.path.isabs(checkpoint_folder):
-                working_dir = os.getcwd()
-                checkpoint_folder = os.path.join(working_dir, checkpoint_folder)
-            global_step_folder = find_latest_ckpt_path(checkpoint_folder)  # None if no latest
+    #     # load from hdfs
+    #     if self.config.trainer.default_hdfs_dir is not None:
+    #         raise NotImplementedError('load from hdfs is not implemented yet')
+    #     else:
+    #         checkpoint_folder = self.config.trainer.default_local_dir  # TODO: check path
+    #         if not os.path.isabs(checkpoint_folder):
+    #             working_dir = os.getcwd()
+    #             checkpoint_folder = os.path.join(working_dir, checkpoint_folder)
+    #         global_step_folder = find_latest_ckpt_path(checkpoint_folder)  # None if no latest
 
-        # find global_step_folder
-        if self.config.trainer.resume_mode == 'auto':
-            if global_step_folder is None:
-                print('Training from scratch')
-                return 0
-        else:
-            if self.config.trainer.resume_mode == "resume_path":
-                assert isinstance(self.config.trainer.resume_from_path, str), "resume ckpt must be str type"
-                assert 'global_step_' in self.config.trainer.resume_from_path, "resume ckpt must specify the global_steps"
-                global_step_folder = self.config.trainer.resume_from_path
-                if not os.path.isabs(global_step_folder):
-                    working_dir = os.getcwd()
-                    global_step_folder = os.path.join(working_dir, global_step_folder)
-        print(f'Load from checkpoint folder: {global_step_folder}')
-        # set global step
-        self.global_steps = int(global_step_folder.split('global_step_')[-1])
+    #     # find global_step_folder
+    #     if self.config.trainer.resume_mode == 'auto':
+    #         if global_step_folder is None:
+    #             print('Training from scratch')
+    #             return 0
+    #     else:
+    #         if self.config.trainer.resume_mode == "resume_path":
+    #             assert isinstance(self.config.trainer.resume_from_path, str), "resume ckpt must be str type"
+    #             assert 'global_step_' in self.config.trainer.resume_from_path, "resume ckpt must specify the global_steps"
+    #             global_step_folder = self.config.trainer.resume_from_path
+    #             if not os.path.isabs(global_step_folder):
+    #                 working_dir = os.getcwd()
+    #                 global_step_folder = os.path.join(working_dir, global_step_folder)
+    #     print(f'Load from checkpoint folder: {global_step_folder}')
+    #     # set global step
+    #     self.global_steps = int(global_step_folder.split('global_step_')[-1])
 
-        print(f'Setting global step to {self.global_steps}')
-        print(f'Resuming from {global_step_folder}')
+    #     print(f'Setting global step to {self.global_steps}')
+    #     print(f'Resuming from {global_step_folder}')
 
-        actor_path = os.path.join(global_step_folder, 'actor')
-        critic_path = os.path.join(global_step_folder, 'critic')
-        # load actor
-        self.actor_rollout_wg.load_checkpoint(actor_path,
-                                              del_local_after_load=self.config.trainer.del_local_ckpt_after_load)
-        # load critic
-        if self.use_critic:
-            self.critic_wg.load_checkpoint(critic_path,
-                                           del_local_after_load=self.config.trainer.del_local_ckpt_after_load)
+    #     actor_path = os.path.join(global_step_folder, 'actor')
+    #     critic_path = os.path.join(global_step_folder, 'critic')
+    #     # load actor
+    #     self.actor_rollout_wg.load_checkpoint(actor_path,
+    #                                           del_local_after_load=self.config.trainer.del_local_ckpt_after_load)
+    #     # load critic
+    #     if self.use_critic:
+    #         self.critic_wg.load_checkpoint(critic_path,
+    #                                        del_local_after_load=self.config.trainer.del_local_ckpt_after_load)
 
-        # load dataloader,
-        # TODO: from remote not implemented yet
-        dataloader_local_path = os.path.join(global_step_folder, 'data.pt')
-        if os.path.exists(dataloader_local_path):
-            dataloader_state_dict = torch.load(dataloader_local_path, weights_only=False)
-            self.train_dataloader.load_state_dict(dataloader_state_dict)
-        else:
-            print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
+    #     # load dataloader,
+    #     # TODO: from remote not implemented yet
+    #     dataloader_local_path = os.path.join(global_step_folder, 'data.pt')
+    #     if os.path.exists(dataloader_local_path):
+    #         dataloader_state_dict = torch.load(dataloader_local_path, weights_only=False)
+    #         self.train_dataloader.load_state_dict(dataloader_state_dict)
+    #     else:
+    #         print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
 
     def _balance_batch(self, batch: DataProto, metrics, logging_prefix='global_seqlen'):
         """Reorder the data on single controller such that each dp rank gets similar total tokens"""
@@ -821,6 +822,9 @@ class RayOnlineRFTTrainer(RayPPOTrainer):
             logger.log(data=val_metrics, step=self.global_steps)
             if self.config.trainer.get('val_only', False):
                 return
+
+        # add tqdm
+        progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
 
         # we start from step 1
         self.global_steps += 1
@@ -910,6 +914,8 @@ class RayOnlineRFTTrainer(RayPPOTrainer):
                         valid_indices = valid_indices[:len(valid_indices) // self.actor_rollout_wg.world_size * self.actor_rollout_wg.world_size]
                         batch = batch.index_select(valid_indices)
 
+                    rollout_metrics = compute_rollout_metrics.remote(batch=batch, tokenizer=self.tokenizer)
+
                     """Statistics"""
                     # compute global_valid tokens
                     batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask'], dim=-1).tolist()
@@ -935,27 +941,29 @@ class RayOnlineRFTTrainer(RayPPOTrainer):
                             self._save_checkpoint()
 
                 # collect metrics
-                metrics.update(compute_data_metrics(batch=batch))
+                with _timer('log', timing_raw):
+                    metrics.update(ray.get(rollout_metrics))
+                    self._maybe_log_train_generations(batch)
+                    metrics.update(compute_data_metrics(batch=batch))
+                    # TODO: implement actual tflpo and theoretical tflpo
+                    n_gpus = self.resource_pool_manager.get_n_gpus()
+                    metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
-                metrics.update(compute_rollout_metrics(batch=batch, tokenizer=self.tokenizer))
-                # TODO: implement actual tflpo and theoretical tflpo
-                n_gpus = self.resource_pool_manager.get_n_gpus()
-                metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
 
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
 
-                self._maybe_log_train_generations(batch)
 
                 if is_last_step:
                     pprint(f'Final validation metrics: {last_val_metrics}')
                     # save train result to local file
                     data_path = '/home/huangbz/verl/train_result.parquet'
+                    df = pd.read_parquet(self.cache_file_path, engine='pyarrow')
                     if os.path.exists(data_path):
                         old_df = pd.read_parquet(data_path, engine='pyarrow')
-                    current_df = pd.read_parquet(self.cache_file_path, engine='pyarrow')
-                    df = pd.concat([old_df, current_df], ignore_index=True)
+                        df = pd.concat([old_df, df], ignore_index=True)
                     df.to_parquet(data_path, engine='pyarrow')
                     return
 
+                progress_bar.update(1)
                 self.global_steps += 1
