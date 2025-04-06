@@ -16,6 +16,7 @@ FSDP PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
 
+from tqdm import tqdm
 import os
 import uuid
 from contextlib import contextmanager
@@ -471,7 +472,7 @@ class RayOnlineRFTTrainer(RayPPOTrainer):
             'rollout_index': batch.batch['rollout_index'].tolist(),
             'rollout': response_texts,
             'seq_level_scores': batch.batch['seq_level_scores'].tolist(),
-            'seq_level_rewards': batch.batch['seq_level_scores'].tolist(),
+            'seq_level_rewards': batch.batch['seq_level_rewards'].tolist(),
         })
         df['step_num'] = self.global_steps
         df['run_name'] = self.config.trainer.experiment_name
@@ -505,10 +506,10 @@ class RayOnlineRFTTrainer(RayPPOTrainer):
         indices = np.random.choice(len(input_texts), generations_to_log)
         input_texts = [input_texts[i] for i in indices]
         response_texts = [response_texts[i] for i in indices]
-        seq_level_scores = [batch.batch['seq_level_scores'][i].item() for i in indices]
+        seq_level_rewards = [batch.batch['seq_level_rewards'][i].item() for i in indices]
 
         # Create tuples of (input, output, score) and sort by input text
-        samples = list(zip(input_texts, response_texts, seq_level_scores))
+        samples = list(zip(input_texts, response_texts, seq_level_rewards))
 
         # Log to each configured logger
         self.validation_generations_logger.log(self.config.trainer.logger, 'train', samples, self.global_steps)
@@ -793,6 +794,36 @@ class RayOnlineRFTTrainer(RayPPOTrainer):
                                                     partitions=global_partition_lst,
                                                     prefix=logging_prefix)
         metrics.update(global_balance_stats)
+    
+    def rescale_rewards_to_scores(self, seq_rewards: torch.Tensor) -> torch.Tensor:
+        """
+        Rescale sequence-level rewards to scores.
+        Args:
+            seq_rewards: (batch_size,)
+        """
+        MIN_REWARD = 0
+        MAX_REWARD = 1
+
+        if self.config.trainer.get('reward_scale_fn', None) is None:
+            pprint('WARNING: reward_scale_fn is not set, using default identity function')
+            reward_scale_fn = 'identity'
+        else:
+            reward_scale_fn = self.config.trainer.reward_scale_fn
+
+        if reward_scale_fn == 'max_only':
+            max_reward_mask = seq_rewards == MAX_REWARD
+            return torch.masked_fill(seq_rewards, max_reward_mask, 0.0)
+        elif reward_scale_fn == 'identity':
+            return seq_rewards
+        elif reward_scale_fn == 'linear0center':
+            # rescale to [-1, 1]
+            # seq_rewards = (seq_rewards - MIN_REWARD) / (MAX_REWARD - MIN_REWARD)
+            # seq_rewards = seq_rewards * 2 - 1
+            return ((seq_rewards - MIN_REWARD) / (MAX_REWARD - MIN_REWARD)) * (1 + 1) - 1
+        elif reward_scale_fn == 'z_normalize':
+            return (seq_rewards - seq_rewards.mean()) / (seq_rewards.std() + 1e-6)
+            
+            
 
     def fit(self):
         """
@@ -904,12 +935,14 @@ class RayOnlineRFTTrainer(RayPPOTrainer):
                         # we combine with rule-based rm
                         # breakpoint()
                         reward_tensor, reward_type_counter = self.reward_fn(batch)
-                        batch.batch['seq_level_scores'] = reward_tensor
+                        batch.batch['seq_level_rewards'] = reward_tensor
+                        print("reward_tensor shape", reward_tensor.shape)
+                        batch.batch['seq_level_scores'] = self.rescale_rewards_to_scores(batch.batch['seq_level_rewards'])
                         metrics.update({f'reward_type/{key}': val / len(batch) for key, val in reward_type_counter.items()})
 
-                        # only keep valid indices with rewards 1
+                        # only keep valid indices with non-zero scores
                         # breakpoint()
-                        valid_indices = torch.nonzero(reward_tensor == 1).squeeze(-1) # (n,)
+                        valid_indices = torch.nonzero(batch.batch['seq_level_scores']).squeeze(-1) # (n,)
                         # make sure #valid_indices is divisible by dp_size
                         valid_indices = valid_indices[:len(valid_indices) // self.actor_rollout_wg.world_size * self.actor_rollout_wg.world_size]
                         batch = batch.index_select(valid_indices)

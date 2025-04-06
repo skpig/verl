@@ -62,6 +62,13 @@ def compute_rollout_metrics(batch: DataProto, tokenizer) -> Dict[str, Any]:
         rollout = tokenizer.decode(token_ids, skip_special_tokens=True)
         index2rollout[index.item()].append(rollout)
     rollouts = [r for rollouts in index2rollout.values() for r in rollouts]
+    if len(rollouts) == 0:
+        return {
+            'rollout/language_mixing_count': 0,
+            'rollout/language_mixing_ratio': 0,
+            'rollout/self_bleu': 0,
+            'rollout/edit_distance': 0,
+        }
     print(f"avg rollout num: {len(rollouts) / len(index2rollout)}")
 
 

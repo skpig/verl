@@ -446,6 +446,7 @@ class ActorRolloutRefWorker(Worker):
         # breakpoint()
         # Support all hardwares
         data = data.to(torch.cuda.current_device())
+        data.meta_info['temperature'] = self.config.rollout.temperature
 
         assert self._is_actor
         if self._is_offload_param:

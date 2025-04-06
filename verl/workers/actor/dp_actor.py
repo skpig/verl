@@ -364,7 +364,7 @@ class DataParallelOnlineRFTActor(BasePPOActor):
             if self.config.get('use_torch_compile', True)  #  use torch compile by default
             else verl_F.entropy_from_logits)
 
-    def _forward_micro_batch(self, micro_batch) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _forward_micro_batch(self, micro_batch, temperature) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Returns: 
             entropy: # (bs, response_len)
@@ -420,6 +420,8 @@ class DataParallelOnlineRFTActor(BasePPOActor):
                                            use_cache=False)  # prevent model thinks we are generating
                 logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
 
+                logits_rmpad.div_(temperature)
+
                 # compute entropy
                 entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)  # ((total_nnz / sp) + pad)
 
@@ -449,17 +451,18 @@ class DataParallelOnlineRFTActor(BasePPOActor):
                 log_probs = full_log_probs.squeeze(-1)[:, -response_length - 1:-1]  # (bsz, response_length)
 
             else:  # not using rmpad and no ulysses sp
-                if not self.use_ulysses_sp:
-                    output = self.actor_module(input_ids=input_ids,
-                                            attention_mask=attention_mask,
-                                            position_ids=position_ids,
-                                            **multi_modal_inputs,
-                                            use_cache=False)  # prevent model thinks we are generating
-                    logits = output.logits
-                    logits = logits[:, -response_length - 1:-1, :]  # (bsz, response_length, vocab_size)
-                    entropy = verl_F.entropy_from_logits(logits)  # (bsz, response_length)
+                output = self.actor_module(input_ids=input_ids,
+                                           attention_mask=attention_mask,
+                                           position_ids=position_ids,
+                                           **multi_modal_inputs,
+                                           use_cache=False)  # prevent model thinks we are generating
+                logits = output.logits
+                logits.div_(temperature)
+                logits = logits[:, -response_length - 1:-1, :]  # (bsz, response_length, vocab_size), NOTE: already conduct shifting!!!
+                log_probs = logprobs_from_logits(logits, micro_batch['responses'])
+                entropy = verl_F.entropy_from_logits(logits)  # (bsz, response_length)
 
-            return logits, entropy
+            return entropy, log_probs
 
     def _optimizer_step(self):
         assert self.config.grad_clip is not None
@@ -535,6 +538,7 @@ class DataParallelOnlineRFTActor(BasePPOActor):
         # breakpoint()
         # make sure we are in training mode
         self.actor_module.train()
+        temperature = data.meta_info['temperature']  # temperature must be in the data.meta_info to avoid slient error
 
         select_keys = ['responses', 'input_ids', 'attention_mask', 'position_ids', 'seq_level_scores']
         if self.config.use_kl_loss:
@@ -586,15 +590,11 @@ class DataParallelOnlineRFTActor(BasePPOActor):
                     # entropy_coeff = self.config.entropy_coeff
 
                     # all return: (bsz, response_length)
-                    logits, entropy = self._forward_micro_batch(micro_batch=data)
+                    entropy, log_probs = self._forward_micro_batch(micro_batch=data, temperature=temperature) # [(bsz, response_length), (bsz, response_length)]
+                    loss = -log_probs # (bsz, response_length)
 
-                    shift_logits = logits[:, :-1, :].contiguous()
-                    shift_labels = responses[:, 1:].contiguous()
-                    loss = nn.functional.cross_entropy(shift_logits.view(-1, shift_logits.size(-1)),
-                                                       shift_labels.view(-1),
-                                                       reduction='none').view(shift_labels.size(0), -1) # (bsz, response_len-1)
-                    nll_loss = (loss * seq_level_reward.unsqueeze(-1)) # (bsz, response_len-1)
-                    nll_loss = verl_F.masked_mean(nll_loss, response_mask[:, 1:])
+                    nll_loss = (loss * seq_level_reward.unsqueeze(-1)) # (bsz, response_len)
+                    nll_loss = verl_F.masked_mean(nll_loss, response_mask)
                     # compute entropy loss from entropy
                     entropy_loss = verl_F.masked_mean(entropy, response_mask)
 
