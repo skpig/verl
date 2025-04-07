@@ -161,7 +161,7 @@ class CriticWorker(Worker):
         strategy = self.critic_strategy
         if strategy == "fsdp":
             from alpha_seed.workers.fsdp import fully_shard
-        elif strategy == "vescale-vescale2":
+        elif strategy == "vescale-fsdp2":
             from alpha_seed.workers.vescale.fully_shard import fully_shard
         else:
             raise RuntimeError(f"[critic]: Unknown strategy for fsdp: {strategy}")
