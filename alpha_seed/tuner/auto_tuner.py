@@ -10,13 +10,13 @@ Example:
 `h800_128_m8_20b_18k.yaml`
 
 python3 -m alpha_seed.tuner.auto_tuner \
-    --model hdfs://haruna/home/byte_data_seed/ssd_hldy/user/gracexu/exp/qwen2.5_32b_instruct_mariana/qwen2.5_32b_ins_v7.1_refge3_sp_fix-chatml_250217/rl_init/1230a1 \
+    --model hdfs://haruna/home/byte_data_seed/lf_lq/user/zhiqi.0/models/p6dense-72B-Instruct \
     --max-seqlen 22528 \
     --gpu-type H800 \
     --nnodes 32 \
     --ngpus-per-node 8 \
-    --export hdfs://haruna/home/byte_data_seed/lf_lq/user/zhiqi.0/rlhf/recipes/h20_256_qwen_32b_18k.yaml \
-    2>&1 | tee log.txt
+    --export test.yaml \
+    --tp-size 1
 
 ```
 
@@ -71,18 +71,21 @@ GpuMemorySpec = {
     "H800": 80.0,
     "H20": 95.0,
     "L20": 45.0,
+    "A100-SXM4-80GB": 80.0,
 }
 HaveNVLink = {
     "H100": True,
     "H800": True,
     "H20": True,
     "L20": False,
+    "A100-SXM4-80GB": True,
 }
 GpusPerNode = {
     "H100": 8,
     "H800": 8,
     "H20": 8,
     "L20": 16,
+    "A100-SXM4-80GB": 8,
 }
 
 
@@ -142,8 +145,6 @@ class AutoTuner:
         self.default_filename = None  # will be set in init_model_info
         self.init_model_info()
         self.seed = 42
-        # runtime config
-        self.act_offload_ctx = None  # set in profiling
 
     def init_model_info(self):
         # init original model
@@ -210,7 +211,6 @@ class AutoTuner:
     def train_one_step(self, model: FSDP, optimizer, meshes, max_token, accum_steps: int = -1):
 
         fsdp_mesh, tp_mesh, sp_mesh, gather_mesh = meshes
-        self.act_offload_ctx = activation_offload.get_offload_context(True, model)
 
         torch.manual_seed(self.seed)
         # self.seed += 1
@@ -533,7 +533,7 @@ class RayAutoTuner(Worker):
                 min(GpusPerNode.get(gpu_type, 8), ngpus),
                 ngpus,
                 torch.cuda.get_device_properties(0).total_memory / (1024**3) * (1 - mem_margin),
-                HaveNVLink[gpu_type],
+                HaveNVLink.get(gpu_type, True),
             )
 
         self.tuner = AutoTuner(model_path=model_path, max_seqlen=max_seqlen, env=env)
