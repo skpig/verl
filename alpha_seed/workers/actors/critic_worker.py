@@ -506,6 +506,8 @@ class CriticWorker(Worker):
                                                 enable_shm=enable_shm)
         if self.config.train_memory_offload:
             self.to("cpu")
+        torch.cuda.empty_cache()
+        log_gpu_memory_usage('After loading checkpoint of critic')
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def save_checkpoint(self,
