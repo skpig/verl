@@ -80,7 +80,21 @@ if __name__ == '__main__':
         hf_path = copy_local_path_from_hdfs(os.path.join(args.load_dir, 'huggingface'))
 
     with tempfile.TemporaryDirectory() as local_tmp_dir:
-        print('Step2: merge omnistore ckpt to get state_dict')
+        print('Step2: prepare hf config and model')
+        time_begin = time.time()
+        config = AutoConfig.from_pretrained(hf_path)
+        untie_embeddings = True  # to avoid adding lm head key by omnistore
+        if 'ForTokenClassification' in config.architectures[0]:
+            auto_model = AutoModelForTokenClassification
+        elif 'ForCausalLM' in config.architectures[0]:
+            auto_model = AutoModelForCausalLM
+            if hasattr(config, 'tie_word_embeddings'):
+                untie_embeddings = not config.tie_word_embeddings
+        else:
+            raise NotImplementedError(f'Unknown architecture {config["architectures"]}')
+        print(f'Prepare hf config and model cost time: {time.time() - time_begin}s')
+
+        print('Step3: merge omnistore ckpt to get state_dict')
         time_begin = time.time()
         state_dict = omnistore_ckpt_to_pytorch_ckpt(
             args.load_dir,
@@ -88,27 +102,20 @@ if __name__ == '__main__':
             'fsdp',
             model_only=True,
             safetensors_format=True,
+            untie_embeddings=untie_embeddings,
             return_dict=True,
         )
         print(f'Merge omnistore checkpoint successfully! cost time: {time.time() - time_begin}s')
 
-        print('Step3: load state_dict to huggingface model')
+        print('Step4: load state_dict to huggingface model')
         time_begin = time.time()
-        config = AutoConfig.from_pretrained(hf_path)
-        if 'ForTokenClassification' in config.architectures[0]:
-            auto_model = AutoModelForTokenClassification
-        elif 'ForCausalLM' in config.architectures[0]:
-            auto_model = AutoModelForCausalLM
-        else:
-            raise NotImplementedError(f'Unknown architecture {config["architectures"]}')
-
         with torch.device('meta'):
             model = auto_model.from_config(config, torch_dtype=torch.bfloat16)
         model.to_empty(device='cpu')
         model.load_state_dict(state_dict['model'], strict=True, assign=True)
         print(f'Load state_dict to huggingface model cost time: {time.time() - time_begin}s')
 
-        print(f'Step4: save merged huggingface model to local {hf_path}')
+        print(f'Step5: save merged huggingface model to local {hf_path}')
         time_begin = time.time()
         model.save_pretrained(hf_path)
         print(f'Save merged huggingface model to local cost time: {time.time() - time_begin}s')
@@ -117,7 +124,7 @@ if __name__ == '__main__':
 
         thread_map = {}
         # upload hf folder with configs and safetensors to hdfs by default
-        print(f'Step5: async save merged huggingface model and configs from {hf_path} to remote {args.save_path}')
+        print(f'Step6: async save merged huggingface model and configs from {hf_path} to remote {args.save_path}')
         thread_map['hf'] = threading.Thread(
             target=hdfs_upload,
             args=(hf_path, args.save_path, 'Async save merged huggingface model and configs to remote'),
@@ -125,7 +132,7 @@ if __name__ == '__main__':
         thread_map['hf'].start()
 
         # upload merged megatron ckpt to hdfs
-        print(f'Step6: convert model to xperf format and async upload to {args.save_path}')
+        print(f'Step7: convert model to xperf format and async upload to {args.save_path}')
         # convert to megatron for autoeval
         megatron_save_path = os.path.join(args.save_path, 'megatron')
         thread_map['xperf'] = simple_convert_seed_models_to_megatron(model, local_tmp_dir, megatron_save_path)
