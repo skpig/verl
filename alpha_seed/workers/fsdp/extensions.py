@@ -131,6 +131,8 @@ def _append_state_with_tp_spec(tensor: DTensor, shard: Placement, tp_mesh: Devic
     placements = [shard] + placements if tp_outside else placements + [shard]
     # shape must be tuple. Give a list will cause unhashable error
     # in torch. This is a bug in torch.
+    if global_device_mesh.ndim != len(placements):
+        raise RuntimeError(f"{global_device_mesh.ndim=} != {len(placements)}")
     tensor = DTensor.from_local(tensor._local_tensor,
                                 device_mesh=global_device_mesh,
                                 placements=placements,
@@ -245,17 +247,17 @@ class FlexDTensor(FSDPExtensions):
         This will extend the DTensors in optimizer state dict with TP placements
         """
 
-        def optim_state_post_hook_patch(model: FSDP, optim, optim_state_dict=None):
+        def optim_state_patch(model: FSDP, optim, optim_state_dict=None):
             fsdp_mesh = model._device_mesh
             extension: FlexDTensor = model._fsdp_extension
             assert fsdp_mesh is not None, f"Please init FSDP module with device_mesh"
             # NOTE we don't support diverse process group for different FSDP sub-modules
             fsdp_pg = model.process_group
             optim_state = orig_optim_state_dict(model, optim, optim_state_dict, fsdp_pg)
-            if self.tp_mesh is None:
+            if extension.tp_mesh is None:
                 return optim_state
 
-            global_device_mesh = self.tp_mesh._parent_mesh
+            global_device_mesh = extension.tp_mesh._parent_mesh
             assert global_device_mesh.ndim in (2, 3)
             # extend placements by adding TP placement
             for fqn in sorted(optim_state["state"].keys()):
@@ -265,29 +267,32 @@ class FlexDTensor(FSDPExtensions):
                         if fqn not in extension.fqn2spec:
                             raise KeyError(f"cannot find {fqn} in tp sepc: {extension.fqn2spec}")
                         shard = extension.fqn2spec[fqn].shard
-                        val = _append_state_with_tp_spec(val, shard, self.tp_mesh, self.tp_outside)
+                        val = _append_state_with_tp_spec(val, shard, extension.tp_mesh, extension.tp_outside)
+                        assert len(
+                            val.placements) == val.device_mesh.ndim, f"{key}: {val.placements} | {val.device_mesh}"
                     fqn_state[key] = val
                 optim_state["state"][fqn] = fqn_state
             return optim_state
 
         # monkey patch
-        FSDP.optim_state_dict = staticmethod(optim_state_post_hook_patch)
+        FSDP.optim_state_dict = staticmethod(optim_state_patch)
 
-        def optim_state_load_pre_hook(model,
-                                      optim,
-                                      optim_state_dict,
-                                      is_named_optimizer=False,
-                                      load_directly=False,
-                                      group=None):
+        def optim_state_load_patch(model: FSDP,
+                                   optim,
+                                   optim_state_dict,
+                                   is_named_optimizer=False,
+                                   load_directly=False,
+                                   group=None):
             """
             At this point, the `optim_state_dict` is correctly resharded to the current device mesh by `dcp.load`
             """
             fsdp_mesh = model._device_mesh
             assert fsdp_mesh is not None, f"Please init FSDP module with device_mesh"
+            extension: FlexDTensor = model._fsdp_extension
 
             # NOTE we don't support diverse process group for different FSDP sub-modules
-            if self.tp_mesh is not None:
-                global_device_mesh = self.tp_mesh._parent_mesh
+            if extension.tp_mesh is not None:
+                global_device_mesh = extension.tp_mesh._parent_mesh
                 assert global_device_mesh.ndim in (2, 3)
                 for fqn in sorted(optim_state_dict["state"].keys()):
                     fqn_state = {}
@@ -301,7 +306,7 @@ class FlexDTensor(FSDPExtensions):
                                     "Cannot detect tp mesh when loading optimizer, this can only happen when the checkpoint is saved before tp support."
                                 )
                                 fsdp_mesh = device_mesh
-                            elif self.tp_outside:
+                            elif extension.tp_outside:
                                 assert mesh_dim_names[0] == "tp"
                                 fsdp_mesh = device_mesh[mesh_dim_names[1:]]
                             else:
@@ -325,7 +330,7 @@ class FlexDTensor(FSDPExtensions):
             return optim_state
 
         # monkey patch
-        FSDP.optim_state_dict_to_load = staticmethod(optim_state_load_pre_hook)
+        FSDP.optim_state_dict_to_load = staticmethod(optim_state_load_patch)
 
 
 def register_dtensor_save_hook(fsdp_model: FSDP, shard_plan: Dict = None, tp_outside: bool = False):
