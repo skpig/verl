@@ -18,19 +18,7 @@ class RolloutPool:
         self.strategy = self.config.actor_rollout_ref.rollout.get("strategy", "default")
         assert (self.strategy in self.fn_map), "strategy {} not in fn_map, expected in [{}]".format(
             self.strategy, self.fn_map.keys())
-        self.replay_buffer_type = self.config.actor_rollout_ref.rollout.get("replay_buffer_type", "default")
-        assert self.replay_buffer_type in ["default", "persistable"]
-        if self.replay_buffer_type == "default":
-            from verl.utils.replay_buffer.vanilla_replay_buffer_client import VanillaReplayBufferClient
-            self.pool = VanillaReplayBufferClient()
-        elif self.replay_buffer_type == "persistable":
-            from verl.utils.replay_buffer.persistable_replay_buffer_client import PersistableReplayBufferClient
-            replay_buffer_name = self.config.actor_rollout_ref.rollout.get("replay_buffer_name", "replay_buffer")
-            assert len(replay_buffer_name) != 0
-            cache_size_limit_in_mb = self.config.actor_rollout_ref.rollout.get("replay_buffer_in_memory_cache_limit_mb",
-                                                                               1024)
-            self.pool = PersistableReplayBufferClient(replay_buffer_name, cache_size_limit_in_mb=cache_size_limit_in_mb)
-
+        self.pool = dict()
         self.pool_size = 0
         self.history_pool = dict()
         self.bon_ready_batch = queue.Queue()
@@ -44,11 +32,12 @@ class RolloutPool:
     def fill_rollout_pool(self, batch_lst):
         for batch in batch_lst:
             index = batch.non_tensor_batch['rollout_id'][0]
-            self.pool.push(index, batch)
+            if index not in self.pool:
+                self.pool[index] = queue.Queue()
+            self.pool[index].put(batch)
             self.pool_size += 1
 
-            batch_list = self.pool.get(index)
-            if len(batch_list) >= self.num_bon:
+            if self.pool[index].qsize() >= self.num_bon:
                 self.bon_ready_batch.put(index)
         print("[fill_rollout_pool] fill_batch:", len(batch_lst), "bon_ready_batch:",
               self.bon_ready_batch.qsize() * self.num_bon, "pool_size:", self.pool_size)
@@ -97,26 +86,21 @@ class RolloutPool:
         return_batch = []
         while not self.bon_ready_batch.empty() and len(return_batch) < return_batch_size:
             index = self.bon_ready_batch.get()
-            ready_batch = self.pool.get(index)
-            if len(return_batch) + len(ready_batch) > return_batch_size:
+            ready_batch = self.pool[index]
+            if len(return_batch) + ready_batch.qsize() > return_batch_size:
                 self.bon_ready_batch.put(index)
                 break
-            return_batch.extend(ready_batch)
-            self.history_pool[index] = ready_batch
-            self.pool.delete(index)
+            return_batch.extend(list(ready_batch.queue))
+            self.history_pool[index] = self.pool.pop(index)
             self.pool_size -= self.num_bon
         complete_bon_bsz = len(return_batch)
 
-        sampler = self.pool.sample()
-        while len(return_batch) < return_batch_size:
-            try:
-                _, ready_batch = next(sampler)
-            except StopIteration:  # The pool is empty
+        while len(return_batch) < return_batch_size and len(self.pool) > 0:
+            index = random.choice(list(self.pool.keys()))
+            ready_batch = self.pool[index]
+            if len(return_batch) + ready_batch.qsize() > return_batch_size:
                 break
-
-            if len(return_batch) + len(ready_batch) > return_batch_size:
-                break
-            return_batch.extend(ready_batch)
+            return_batch.extend(list(ready_batch.queue))
 
         if len(return_batch) < return_batch_size:
             return_batch.extend([random.choice(return_batch) for _ in range(return_batch_size - len(return_batch))])
