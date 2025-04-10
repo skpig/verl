@@ -32,7 +32,7 @@ class VanillaReplayBufferClient():
         keys = list(self.__pool.keys())
         while keys:  # raises StopIteration on every next() if keys is empty
             random_key = random.choice(keys)
-            yield self.__pool[random_key]
+            yield random_key, self.__pool[random_key]
 
     def delete(self, key: str):
         self.__pool.pop(key)
