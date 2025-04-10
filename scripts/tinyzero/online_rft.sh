@@ -26,7 +26,7 @@ BACKWARD_MAX_TOKEN_LEN=$((4 * MAX_PROMPT_LEN + MAX_RESPONSE_LEN))
 PROJ_NAME="TinyZero"
 MODEL_NAME=$(basename $BASE_MODEL)
 DATA_NAME=$(basename $DATA_DIR)
-EXPERIMENT_NAME="ID${RUN_ID}_${DATA_NAME}_onlinerft_${MODEL_NAME}_n${ROLLOUT_N}_resplen${MAX_RESPONSE_LEN}_bsz${BATCH_SIZE}"
+EXPERIMENT_NAME="ID${RUN_ID}_${DATA_NAME}_onlinerft_${MODEL_NAME}_n${ROLLOUT_N}_resplen${MAX_RESPONSE_LEN}_bsz${BATCH_SIZE}-${MINI_BSZ}"
 
 python3 data_preprocess/countdown.py \
   --local_dir $DATA_DIR \
@@ -70,4 +70,4 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_online_rft \
  trainer.project_name=$PROJ_NAME \
  trainer.experiment_name=$EXPERIMENT_NAME \
  trainer.total_epochs=$TOTAL_EPOCHS \
- trainer.reward_scale_fn=max_only
+ trainer.reward_scale_fn=linear0center

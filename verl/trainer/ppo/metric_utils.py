@@ -63,6 +63,7 @@ def compute_rollout_metrics(batch: DataProto, tokenizer) -> Dict[str, Any]:
         index2rollout[index.item()].append(rollout)
     rollouts = [r for rollouts in index2rollout.values() for r in rollouts]
     if len(rollouts) == 0:
+        raise ValueError("No rollouts found in the batch.")
         return {
             'rollout/language_mixing_count': 0,
             'rollout/language_mixing_ratio': 0,
@@ -79,7 +80,7 @@ def compute_rollout_metrics(batch: DataProto, tokenizer) -> Dict[str, Any]:
         except Exception:
             return False
         # 只统计概率超过threshold的语言
-        languages = {lang.lang for lang in detected_langs if lang.prob > 0.05}
+        languages = {lang.lang for lang in detected_langs if lang.prob > 1e-4}
         return len(languages) > 1
 
     mix_count = sum(contains_language_mixing(rollout) for rollout in rollouts)

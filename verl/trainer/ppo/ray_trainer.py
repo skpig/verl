@@ -16,6 +16,7 @@ FSDP PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
 
+import wandb
 from functools import cache
 import os
 import uuid
@@ -287,6 +288,7 @@ class RayPPOTrainer(object):
         self._create_dataloader()
 
         self.cache_file_path = os.path.join('/home/huangbz/verl/.cache', self.config.trainer.experiment_name, 'train_generations.parquet')
+        # self.artifact = 
 
 
     def _validate_config(self):
@@ -608,6 +610,25 @@ class RayPPOTrainer(object):
 
         # Log to each configured logger
         self.validation_generations_logger.log(self.config.trainer.logger, 'train', samples, self.global_steps)
+    
+    def _log(self):
+        from verl.utils.tracking import Tracking
+        logger = Tracking(project_name=self.config.trainer.project_name,
+                          experiment_name=self.config.trainer.experiment_name,
+                          default_backend=self.config.trainer.logger,
+                          config=OmegaConf.to_container(self.config, resolve=True))
+
+        for i in range(10):
+            # create a trivial table
+            artifact = wandb.Artifact(name=self.config.trainer.project_name, type="rollouts")
+            table = wandb.Table(columns=["x", "y"])
+            for j in range(10):
+                table.add_data(i, j)
+            # log the table
+            wandb.log({"table": table})
+            # self.artifact.add(table, f"table")
+            artifact.add(table, f"table")
+            wandb.log_artifact(artifact)
 
 
     def _validate(self):
