@@ -399,6 +399,14 @@ class DataProto:
             sub_meta_info = copy.deepcopy(sub_meta_info)
 
         return DataProto(batch=sub_batch, non_tensor_batch=non_tensor_batch, meta_info=sub_meta_info)
+    
+    def index_select(self, indices) -> 'DataProto':
+        """
+        Note that this operation is in-place
+        """
+        sub_batch = self.batch[indices]
+        non_tensor_batch = {key: val[indices] for key, val in self.non_tensor_batch.items()}
+        return DataProto(batch=sub_batch, non_tensor_batch=non_tensor_batch, meta_info=self.meta_info)
 
     def select_idxs(self, idxs):
         """

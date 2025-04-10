@@ -1,0 +1,902 @@
+[
+  {
+    "run_name": "run_2",
+    "step_num": 50,
+    "query_index": 1,
+    "rollout_index": 2,
+    "query": "Query 1 for run_2",
+    "rollout_text": "Rollout text for run_2, step 50, query 1, rollout 2.",
+    "reward": 0.95
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 20,
+    "query_index": 1,
+    "rollout_index": 4,
+    "query": "Query 1 for run_3",
+    "rollout_text": "Rollout text for run_3, step 20, query 1, rollout 4.",
+    "reward": 0.33
+  },
+  {
+    "run_name": "run_1",
+    "step_num": 50,
+    "query_index": 1,
+    "rollout_index": 3,
+    "query": "Query 1 for run_1",
+    "rollout_text": "Rollout text for run_1, step 50, query 1, rollout 3.",
+    "reward": 0.16
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 10,
+    "query_index": 2,
+    "rollout_index": 2,
+    "query": "Query 2 for run_3",
+    "rollout_text": "Rollout text for run_3, step 10, query 2, rollout 2.",
+    "reward": 0.46
+  },
+  {
+    "run_name": "run_2",
+    "step_num": 10,
+    "query_index": 1,
+    "rollout_index": 5,
+    "query": "Query 1 for run_2",
+    "rollout_text": "Rollout text for run_2, step 10, query 1, rollout 5.",
+    "reward": 0.48
+  },
+  {
+    "run_name": "run_2",
+    "step_num": 50,
+    "query_index": 2,
+    "rollout_index": 0,
+    "query": "Query 2 for run_2",
+    "rollout_text": "Rollout text for run_2, step 50, query 2, rollout 0.",
+    "reward": 0.4
+  },
+  {
+    "run_name": "run_2",
+    "step_num": 50,
+    "query_index": 2,
+    "rollout_index": 4,
+    "query": "Query 2 for run_2",
+    "rollout_text": "Rollout text for run_2, step 50, query 2, rollout 4.",
+    "reward": 0.17
+  },
+  {
+    "run_name": "run_1",
+    "step_num": 50,
+    "query_index": 1,
+    "rollout_index": 5,
+    "query": "Query 1 for run_1",
+    "rollout_text": "Rollout text for run_1, step 50, query 1, rollout 5.",
+    "reward": 0.97
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 30,
+    "query_index": 1,
+    "rollout_index": 4,
+    "query": "Query 1 for run_3",
+    "rollout_text": "Rollout text for run_3, step 30, query 1, rollout 4.",
+    "reward": 0.99
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 10,
+    "query_index": 2,
+    "rollout_index": 1,
+    "query": "Query 2 for run_3",
+    "rollout_text": "Rollout text for run_3, step 10, query 2, rollout 1.",
+    "reward": 0.45
+  },
+  {
+    "run_name": "run_2",
+    "step_num": 10,
+    "query_index": 1,
+    "rollout_index": 0,
+    "query": "Query 1 for run_2",
+    "rollout_text": "Rollout text for run_2, step 10, query 1, rollout 0.",
+    "reward": 0.0
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 30,
+    "query_index": 2,
+    "rollout_index": 0,
+    "query": "Query 2 for run_3",
+    "rollout_text": "Rollout text for run_3, step 30, query 2, rollout 0.",
+    "reward": 0.16
+  },
+  {
+    "run_name": "run_1",
+    "step_num": 10,
+    "query_index": 0,
+    "rollout_index": 0,
+    "query": "Query 0 for run_1",
+    "rollout_text": "Rollout text for run_1, step 10, query 0, rollout 0.",
+    "reward": 0.9
+  },
+  {
+    "run_name": "run_1",
+    "step_num": 40,
+    "query_index": 0,
+    "rollout_index": 4,
+    "query": "Query 0 for run_1",
+    "rollout_text": "Rollout text for run_1, step 40, query 0, rollout 4.",
+    "reward": 0.2
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 30,
+    "query_index": 2,
+    "rollout_index": 0,
+    "query": "Query 2 for run_3",
+    "rollout_text": "Rollout text for run_3, step 30, query 2, rollout 0.",
+    "reward": 0.0
+  },
+  {
+    "run_name": "run_1",
+    "step_num": 50,
+    "query_index": 1,
+    "rollout_index": 1,
+    "query": "Query 1 for run_1",
+    "rollout_text": "Rollout text for run_1, step 50, query 1, rollout 1.",
+    "reward": 0.8
+  },
+  {
+    "run_name": "run_2",
+    "step_num": 40,
+    "query_index": 2,
+    "rollout_index": 3,
+    "query": "Query 2 for run_2",
+    "rollout_text": "Rollout text for run_2, step 40, query 2, rollout 3.",
+    "reward": 0.71
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 20,
+    "query_index": 2,
+    "rollout_index": 1,
+    "query": "Query 2 for run_3",
+    "rollout_text": "Rollout text for run_3, step 20, query 2, rollout 1.",
+    "reward": 0.25
+  },
+  {
+    "run_name": "run_2",
+    "step_num": 40,
+    "query_index": 2,
+    "rollout_index": 0,
+    "query": "Query 2 for run_2",
+    "rollout_text": "Rollout text for run_2, step 40, query 2, rollout 0.",
+    "reward": 0.05
+  },
+  {
+    "run_name": "run_1",
+    "step_num": 20,
+    "query_index": 2,
+    "rollout_index": 1,
+    "query": "Query 2 for run_1",
+    "rollout_text": "Rollout text for run_1, step 20, query 2, rollout 1.",
+    "reward": 0.32
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 40,
+    "query_index": 1,
+    "rollout_index": 4,
+    "query": "Query 1 for run_3",
+    "rollout_text": "Rollout text for run_3, step 40, query 1, rollout 4.",
+    "reward": 0.97
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 30,
+    "query_index": 2,
+    "rollout_index": 4,
+    "query": "Query 2 for run_3",
+    "rollout_text": "Rollout text for run_3, step 30, query 2, rollout 4.",
+    "reward": 0.73
+  },
+  {
+    "run_name": "run_1",
+    "step_num": 30,
+    "query_index": 0,
+    "rollout_index": 1,
+    "query": "Query 0 for run_1",
+    "rollout_text": "Rollout text for run_1, step 30, query 0, rollout 1.",
+    "reward": 0.92
+  },
+  {
+    "run_name": "run_1",
+    "step_num": 50,
+    "query_index": 0,
+    "rollout_index": 4,
+    "query": "Query 0 for run_1",
+    "rollout_text": "Rollout text for run_1, step 50, query 0, rollout 4.",
+    "reward": 0.63
+  },
+  {
+    "run_name": "run_2",
+    "step_num": 10,
+    "query_index": 0,
+    "rollout_index": 3,
+    "query": "Query 0 for run_2",
+    "rollout_text": "Rollout text for run_2, step 10, query 0, rollout 3.",
+    "reward": 0.19
+  },
+  {
+    "run_name": "run_1",
+    "step_num": 50,
+    "query_index": 0,
+    "rollout_index": 5,
+    "query": "Query 0 for run_1",
+    "rollout_text": "Rollout text for run_1, step 50, query 0, rollout 5.",
+    "reward": 0.17
+  },
+  {
+    "run_name": "run_2",
+    "step_num": 40,
+    "query_index": 2,
+    "rollout_index": 1,
+    "query": "Query 2 for run_2",
+    "rollout_text": "Rollout text for run_2, step 40, query 2, rollout 1.",
+    "reward": 0.9
+  },
+  {
+    "run_name": "run_1",
+    "step_num": 20,
+    "query_index": 0,
+    "rollout_index": 3,
+    "query": "Query 0 for run_1",
+    "rollout_text": "Rollout text for run_1, step 20, query 0, rollout 3.",
+    "reward": 0.55
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 50,
+    "query_index": 2,
+    "rollout_index": 3,
+    "query": "Query 2 for run_3",
+    "rollout_text": "Rollout text for run_3, step 50, query 2, rollout 3.",
+    "reward": 0.13
+  },
+  {
+    "run_name": "run_1",
+    "step_num": 30,
+    "query_index": 1,
+    "rollout_index": 4,
+    "query": "Query 1 for run_1",
+    "rollout_text": "Rollout text for run_1, step 30, query 1, rollout 4.",
+    "reward": 0.1
+  },
+  {
+    "run_name": "run_1",
+    "step_num": 20,
+    "query_index": 1,
+    "rollout_index": 2,
+    "query": "Query 1 for run_1",
+    "rollout_text": "Rollout text for run_1, step 20, query 1, rollout 2.",
+    "reward": 0.8
+  },
+  {
+    "run_name": "run_1",
+    "step_num": 30,
+    "query_index": 1,
+    "rollout_index": 3,
+    "query": "Query 1 for run_1",
+    "rollout_text": "Rollout text for run_1, step 30, query 1, rollout 3.",
+    "reward": 0.54
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 30,
+    "query_index": 1,
+    "rollout_index": 2,
+    "query": "Query 1 for run_3",
+    "rollout_text": "Rollout text for run_3, step 30, query 1, rollout 2.",
+    "reward": 0.92
+  },
+  {
+    "run_name": "run_2",
+    "step_num": 10,
+    "query_index": 2,
+    "rollout_index": 2,
+    "query": "Query 2 for run_2",
+    "rollout_text": "Rollout text for run_2, step 10, query 2, rollout 2.",
+    "reward": 0.35
+  },
+  {
+    "run_name": "run_2",
+    "step_num": 50,
+    "query_index": 2,
+    "rollout_index": 4,
+    "query": "Query 2 for run_2",
+    "rollout_text": "Rollout text for run_2, step 50, query 2, rollout 4.",
+    "reward": 0.4
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 10,
+    "query_index": 0,
+    "rollout_index": 5,
+    "query": "Query 0 for run_3",
+    "rollout_text": "Rollout text for run_3, step 10, query 0, rollout 5.",
+    "reward": 0.42
+  },
+  {
+    "run_name": "run_1",
+    "step_num": 30,
+    "query_index": 0,
+    "rollout_index": 3,
+    "query": "Query 0 for run_1",
+    "rollout_text": "Rollout text for run_1, step 30, query 0, rollout 3.",
+    "reward": 0.1
+  },
+  {
+    "run_name": "run_2",
+    "step_num": 30,
+    "query_index": 2,
+    "rollout_index": 2,
+    "query": "Query 2 for run_2",
+    "rollout_text": "Rollout text for run_2, step 30, query 2, rollout 2.",
+    "reward": 0.27
+  },
+  {
+    "run_name": "run_1",
+    "step_num": 50,
+    "query_index": 1,
+    "rollout_index": 3,
+    "query": "Query 1 for run_1",
+    "rollout_text": "Rollout text for run_1, step 50, query 1, rollout 3.",
+    "reward": 0.53
+  },
+  {
+    "run_name": "run_1",
+    "step_num": 10,
+    "query_index": 2,
+    "rollout_index": 0,
+    "query": "Query 2 for run_1",
+    "rollout_text": "Rollout text for run_1, step 10, query 2, rollout 0.",
+    "reward": 0.73
+  },
+  {
+    "run_name": "run_1",
+    "step_num": 10,
+    "query_index": 1,
+    "rollout_index": 1,
+    "query": "Query 1 for run_1",
+    "rollout_text": "Rollout text for run_1, step 10, query 1, rollout 1.",
+    "reward": 0.56
+  },
+  {
+    "run_name": "run_1",
+    "step_num": 10,
+    "query_index": 1,
+    "rollout_index": 1,
+    "query": "Query 1 for run_1",
+    "rollout_text": "Rollout text for run_1, step 10, query 1, rollout 1.",
+    "reward": 0.39
+  },
+  {
+    "run_name": "run_2",
+    "step_num": 10,
+    "query_index": 2,
+    "rollout_index": 5,
+    "query": "Query 2 for run_2",
+    "rollout_text": "Rollout text for run_2, step 10, query 2, rollout 5.",
+    "reward": 0.23
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 20,
+    "query_index": 1,
+    "rollout_index": 5,
+    "query": "Query 1 for run_3",
+    "rollout_text": "Rollout text for run_3, step 20, query 1, rollout 5.",
+    "reward": 0.32
+  },
+  {
+    "run_name": "run_2",
+    "step_num": 20,
+    "query_index": 1,
+    "rollout_index": 4,
+    "query": "Query 1 for run_2",
+    "rollout_text": "Rollout text for run_2, step 20, query 1, rollout 4.",
+    "reward": 0.08
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 20,
+    "query_index": 2,
+    "rollout_index": 3,
+    "query": "Query 2 for run_3",
+    "rollout_text": "Rollout text for run_3, step 20, query 2, rollout 3.",
+    "reward": 0.76
+  },
+  {
+    "run_name": "run_1",
+    "step_num": 40,
+    "query_index": 2,
+    "rollout_index": 5,
+    "query": "Query 2 for run_1",
+    "rollout_text": "Rollout text for run_1, step 40, query 2, rollout 5.",
+    "reward": 0.37
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 30,
+    "query_index": 2,
+    "rollout_index": 0,
+    "query": "Query 2 for run_3",
+    "rollout_text": "Rollout text for run_3, step 30, query 2, rollout 0.",
+    "reward": 0.27
+  },
+  {
+    "run_name": "run_1",
+    "step_num": 20,
+    "query_index": 0,
+    "rollout_index": 4,
+    "query": "Query 0 for run_1",
+    "rollout_text": "Rollout text for run_1, step 20, query 0, rollout 4.",
+    "reward": 0.29
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 50,
+    "query_index": 2,
+    "rollout_index": 3,
+    "query": "Query 2 for run_3",
+    "rollout_text": "Rollout text for run_3, step 50, query 2, rollout 3.",
+    "reward": 0.34
+  },
+  {
+    "run_name": "run_1",
+    "step_num": 40,
+    "query_index": 0,
+    "rollout_index": 5,
+    "query": "Query 0 for run_1",
+    "rollout_text": "Rollout text for run_1, step 40, query 0, rollout 5.",
+    "reward": 0.88
+  },
+  {
+    "run_name": "run_2",
+    "step_num": 40,
+    "query_index": 2,
+    "rollout_index": 4,
+    "query": "Query 2 for run_2",
+    "rollout_text": "Rollout text for run_2, step 40, query 2, rollout 4.",
+    "reward": 0.03
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 30,
+    "query_index": 1,
+    "rollout_index": 2,
+    "query": "Query 1 for run_3",
+    "rollout_text": "Rollout text for run_3, step 30, query 1, rollout 2.",
+    "reward": 0.23
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 10,
+    "query_index": 0,
+    "rollout_index": 3,
+    "query": "Query 0 for run_3",
+    "rollout_text": "Rollout text for run_3, step 10, query 0, rollout 3.",
+    "reward": 0.62
+  },
+  {
+    "run_name": "run_1",
+    "step_num": 30,
+    "query_index": 2,
+    "rollout_index": 0,
+    "query": "Query 2 for run_1",
+    "rollout_text": "Rollout text for run_1, step 30, query 2, rollout 0.",
+    "reward": 0.84
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 50,
+    "query_index": 1,
+    "rollout_index": 3,
+    "query": "Query 1 for run_3",
+    "rollout_text": "Rollout text for run_3, step 50, query 1, rollout 3.",
+    "reward": 0.75
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 10,
+    "query_index": 0,
+    "rollout_index": 4,
+    "query": "Query 0 for run_3",
+    "rollout_text": "Rollout text for run_3, step 10, query 0, rollout 4.",
+    "reward": 0.93
+  },
+  {
+    "run_name": "run_1",
+    "step_num": 10,
+    "query_index": 2,
+    "rollout_index": 5,
+    "query": "Query 2 for run_1",
+    "rollout_text": "Rollout text for run_1, step 10, query 2, rollout 5.",
+    "reward": 0.15
+  },
+  {
+    "run_name": "run_2",
+    "step_num": 50,
+    "query_index": 0,
+    "rollout_index": 2,
+    "query": "Query 0 for run_2",
+    "rollout_text": "Rollout text for run_2, step 50, query 0, rollout 2.",
+    "reward": 0.28
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 40,
+    "query_index": 0,
+    "rollout_index": 2,
+    "query": "Query 0 for run_3",
+    "rollout_text": "Rollout text for run_3, step 40, query 0, rollout 2.",
+    "reward": 0.42
+  },
+  {
+    "run_name": "run_1",
+    "step_num": 20,
+    "query_index": 0,
+    "rollout_index": 1,
+    "query": "Query 0 for run_1",
+    "rollout_text": "Rollout text for run_1, step 20, query 0, rollout 1.",
+    "reward": 0.81
+  },
+  {
+    "run_name": "run_1",
+    "step_num": 10,
+    "query_index": 1,
+    "rollout_index": 3,
+    "query": "Query 1 for run_1",
+    "rollout_text": "Rollout text for run_1, step 10, query 1, rollout 3.",
+    "reward": 0.03
+  },
+  {
+    "run_name": "run_2",
+    "step_num": 40,
+    "query_index": 2,
+    "rollout_index": 5,
+    "query": "Query 2 for run_2",
+    "rollout_text": "Rollout text for run_2, step 40, query 2, rollout 5.",
+    "reward": 0.34
+  },
+  {
+    "run_name": "run_1",
+    "step_num": 40,
+    "query_index": 2,
+    "rollout_index": 5,
+    "query": "Query 2 for run_1",
+    "rollout_text": "Rollout text for run_1, step 40, query 2, rollout 5.",
+    "reward": 0.25
+  },
+  {
+    "run_name": "run_2",
+    "step_num": 10,
+    "query_index": 1,
+    "rollout_index": 3,
+    "query": "Query 1 for run_2",
+    "rollout_text": "Rollout text for run_2, step 10, query 1, rollout 3.",
+    "reward": 0.08
+  },
+  {
+    "run_name": "run_1",
+    "step_num": 30,
+    "query_index": 1,
+    "rollout_index": 1,
+    "query": "Query 1 for run_1",
+    "rollout_text": "Rollout text for run_1, step 30, query 1, rollout 1.",
+    "reward": 0.1
+  },
+  {
+    "run_name": "run_2",
+    "step_num": 20,
+    "query_index": 2,
+    "rollout_index": 1,
+    "query": "Query 2 for run_2",
+    "rollout_text": "Rollout text for run_2, step 20, query 2, rollout 1.",
+    "reward": 0.42
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 40,
+    "query_index": 0,
+    "rollout_index": 3,
+    "query": "Query 0 for run_3",
+    "rollout_text": "Rollout text for run_3, step 40, query 0, rollout 3.",
+    "reward": 0.07
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 30,
+    "query_index": 0,
+    "rollout_index": 4,
+    "query": "Query 0 for run_3",
+    "rollout_text": "Rollout text for run_3, step 30, query 0, rollout 4.",
+    "reward": 0.07
+  },
+  {
+    "run_name": "run_1",
+    "step_num": 20,
+    "query_index": 0,
+    "rollout_index": 3,
+    "query": "Query 0 for run_1",
+    "rollout_text": "Rollout text for run_1, step 20, query 0, rollout 3.",
+    "reward": 0.76
+  },
+  {
+    "run_name": "run_1",
+    "step_num": 10,
+    "query_index": 1,
+    "rollout_index": 4,
+    "query": "Query 1 for run_1",
+    "rollout_text": "Rollout text for run_1, step 10, query 1, rollout 4.",
+    "reward": 0.61
+  },
+  {
+    "run_name": "run_1",
+    "step_num": 10,
+    "query_index": 1,
+    "rollout_index": 1,
+    "query": "Query 1 for run_1",
+    "rollout_text": "Rollout text for run_1, step 10, query 1, rollout 1.",
+    "reward": 0.49
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 30,
+    "query_index": 2,
+    "rollout_index": 3,
+    "query": "Query 2 for run_3",
+    "rollout_text": "Rollout text for run_3, step 30, query 2, rollout 3.",
+    "reward": 0.36
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 30,
+    "query_index": 2,
+    "rollout_index": 0,
+    "query": "Query 2 for run_3",
+    "rollout_text": "Rollout text for run_3, step 30, query 2, rollout 0.",
+    "reward": 0.94
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 40,
+    "query_index": 2,
+    "rollout_index": 2,
+    "query": "Query 2 for run_3",
+    "rollout_text": "Rollout text for run_3, step 40, query 2, rollout 2.",
+    "reward": 0.15
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 40,
+    "query_index": 2,
+    "rollout_index": 3,
+    "query": "Query 2 for run_3",
+    "rollout_text": "Rollout text for run_3, step 40, query 2, rollout 3.",
+    "reward": 0.41
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 30,
+    "query_index": 1,
+    "rollout_index": 2,
+    "query": "Query 1 for run_3",
+    "rollout_text": "Rollout text for run_3, step 30, query 1, rollout 2.",
+    "reward": 0.04
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 40,
+    "query_index": 1,
+    "rollout_index": 3,
+    "query": "Query 1 for run_3",
+    "rollout_text": "Rollout text for run_3, step 40, query 1, rollout 3.",
+    "reward": 0.7
+  },
+  {
+    "run_name": "run_1",
+    "step_num": 30,
+    "query_index": 1,
+    "rollout_index": 0,
+    "query": "Query 1 for run_1",
+    "rollout_text": "Rollout text for run_1, step 30, query 1, rollout 0.",
+    "reward": 0.79
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 30,
+    "query_index": 0,
+    "rollout_index": 2,
+    "query": "Query 0 for run_3",
+    "rollout_text": "Rollout text for run_3, step 30, query 0, rollout 2.",
+    "reward": 0.3
+  },
+  {
+    "run_name": "run_1",
+    "step_num": 10,
+    "query_index": 2,
+    "rollout_index": 0,
+    "query": "Query 2 for run_1",
+    "rollout_text": "Rollout text for run_1, step 10, query 2, rollout 0.",
+    "reward": 0.7
+  },
+  {
+    "run_name": "run_2",
+    "step_num": 50,
+    "query_index": 1,
+    "rollout_index": 3,
+    "query": "Query 1 for run_2",
+    "rollout_text": "Rollout text for run_2, step 50, query 1, rollout 3.",
+    "reward": 0.01
+  },
+  {
+    "run_name": "run_1",
+    "step_num": 20,
+    "query_index": 2,
+    "rollout_index": 3,
+    "query": "Query 2 for run_1",
+    "rollout_text": "Rollout text for run_1, step 20, query 2, rollout 3.",
+    "reward": 0.03
+  },
+  {
+    "run_name": "run_1",
+    "step_num": 20,
+    "query_index": 1,
+    "rollout_index": 4,
+    "query": "Query 1 for run_1",
+    "rollout_text": "Rollout text for run_1, step 20, query 1, rollout 4.",
+    "reward": 0.31
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 30,
+    "query_index": 0,
+    "rollout_index": 0,
+    "query": "Query 0 for run_3",
+    "rollout_text": "Rollout text for run_3, step 30, query 0, rollout 0.",
+    "reward": 0.43
+  },
+  {
+    "run_name": "run_2",
+    "step_num": 10,
+    "query_index": 0,
+    "rollout_index": 5,
+    "query": "Query 0 for run_2",
+    "rollout_text": "Rollout text for run_2, step 10, query 0, rollout 5.",
+    "reward": 0.95
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 30,
+    "query_index": 2,
+    "rollout_index": 4,
+    "query": "Query 2 for run_3",
+    "rollout_text": "Rollout text for run_3, step 30, query 2, rollout 4.",
+    "reward": 0.14
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 40,
+    "query_index": 0,
+    "rollout_index": 4,
+    "query": "Query 0 for run_3",
+    "rollout_text": "Rollout text for run_3, step 40, query 0, rollout 4.",
+    "reward": 0.51
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 20,
+    "query_index": 0,
+    "rollout_index": 3,
+    "query": "Query 0 for run_3",
+    "rollout_text": "Rollout text for run_3, step 20, query 0, rollout 3.",
+    "reward": 0.08
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 10,
+    "query_index": 0,
+    "rollout_index": 3,
+    "query": "Query 0 for run_3",
+    "rollout_text": "Rollout text for run_3, step 10, query 0, rollout 3.",
+    "reward": 0.46
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 30,
+    "query_index": 0,
+    "rollout_index": 3,
+    "query": "Query 0 for run_3",
+    "rollout_text": "Rollout text for run_3, step 30, query 0, rollout 3.",
+    "reward": 0.77
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 50,
+    "query_index": 1,
+    "rollout_index": 0,
+    "query": "Query 1 for run_3",
+    "rollout_text": "Rollout text for run_3, step 50, query 1, rollout 0.",
+    "reward": 0.08
+  },
+  {
+    "run_name": "run_2",
+    "step_num": 20,
+    "query_index": 1,
+    "rollout_index": 5,
+    "query": "Query 1 for run_2",
+    "rollout_text": "Rollout text for run_2, step 20, query 1, rollout 5.",
+    "reward": 0.44
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 20,
+    "query_index": 1,
+    "rollout_index": 2,
+    "query": "Query 1 for run_3",
+    "rollout_text": "Rollout text for run_3, step 20, query 1, rollout 2.",
+    "reward": 0.33
+  },
+  {
+    "run_name": "run_3",
+    "step_num": 10,
+    "query_index": 0,
+    "rollout_index": 4,
+    "query": "Query 0 for run_3",
+    "rollout_text": "Rollout text for run_3, step 10, query 0, rollout 4.",
+    "reward": 0.6
+  },
+  {
+    "run_name": "run_1",
+    "step_num": 20,
+    "query_index": 1,
+    "rollout_index": 3,
+    "query": "Query 1 for run_1",
+    "rollout_text": "Rollout text for run_1, step 20, query 1, rollout 3.",
+    "reward": 0.54
+  },
+  {
+    "run_name": "run_2",
+    "step_num": 30,
+    "query_index": 0,
+    "rollout_index": 2,
+    "query": "Query 0 for run_2",
+    "rollout_text": "Rollout text for run_2, step 30, query 0, rollout 2.",
+    "reward": 0.05
+  },
+  {
+    "run_name": "run_2",
+    "step_num": 40,
+    "query_index": 0,
+    "rollout_index": 3,
+    "query": "Query 0 for run_2",
+    "rollout_text": "Rollout text for run_2, step 40, query 0, rollout 3.",
+    "reward": 0.54
+  },
+  {
+    "run_name": "run_2",
+    "step_num": 20,
+    "query_index": 0,
+    "rollout_index": 0,
+    "query": "Query 0 for run_2",
+    "rollout_text": "Rollout text for run_2, step 20, query 0, rollout 0.",
+    "reward": 0.85
+  },
+  {
+    "run_name": "run_1",
+    "step_num": 10,
+    "query_index": 0,
+    "rollout_index": 3,
+    "query": "Query 0 for run_1",
+    "rollout_text": "Rollout text for run_1, step 10, query 0, rollout 3.",
+    "reward": 0.63
+  }
+]

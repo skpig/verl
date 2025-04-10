@@ -3,7 +3,6 @@ data:
   train_files: ~/data/rlhf/gsm8k/train.parquet
   val_files: ~/data/rlhf/gsm8k/test.parquet
   prompt_key: prompt
-  reward_fn_key: data_source
   max_prompt_length: 512
   max_response_length: 512
   train_batch_size: 1024
@@ -12,12 +11,12 @@ data:
   return_raw_chat: False
   template_type: chat
   shuffle: True
-  filter_overlong_prompts: False # for large-scale dataset, filtering overlong prompts could be timeconsuming. You cat set the filter_overlong_prompts_workers to use multiprocessing to speed up.
-  filter_overlong_prompts_workers: 1
+  filter_overlong_prompts: False # for large-scale dataset, filtering overlong prompts could be timeconsuming. You should disable this and set `truncation='left'
   truncation: error
   image_key: images
 
 actor_rollout_ref:
+  algorithm: online_rft
   hybrid_engine: True
   model:
     path: ~/models/deepseek-llm-7b-chat
@@ -33,12 +32,8 @@ actor_rollout_ref:
     use_dynamic_bsz: False
     ppo_max_token_len_per_gpu: 16384 # n * ${data.max_prompt_length} + ${data.max_response_length}
     grad_clip: 1.0
-    # pg_losses2 = -advantages * torch.clamp(ratio, 1 - cliprange_low, 1 + cliprange_high)
-    clip_ratio: 0.2 # default value if clip_ratio_low and clip_ratio_high are not specified
-    clip_ratio_low: 0.2
-    clip_ratio_high: 0.2
+    clip_ratio: 0.2
     clip_ratio_c: 3.0 # lower bound of the value for Dual-clip PPO from https://arxiv.org/pdf/1912.09729
-    loss_agg_mode: "token-mean" # / "seq-mean-token-sum" / "seq-mean-token-mean"
     entropy_coeff: 0.001
     use_kl_loss: False # True for GRPO
     use_torch_compile: True # False to disable torch compile
@@ -56,7 +51,6 @@ actor_rollout_ref:
       min_lr_ratio: null   # only useful for warmup with cosine
       warmup_style: constant  # select from constant/cosine
       total_training_steps: -1  # must be override by program
-      weight_decay: 0.01
     fsdp_config:
       wrap_policy:
         # transformer_layer_cls_to_wrap: None
@@ -71,7 +65,7 @@ actor_rollout_ref:
         # transformer_layer_cls_to_wrap: None
         min_num_params: 0
     log_prob_micro_batch_size: null # will be deprecated, use log_prob_micro_batch_size_per_gpu
-    log_prob_micro_batch_size_per_gpu: null
+    log_prob_micro_batch_size_per_gpu: ${actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu}
     log_prob_use_dynamic_bsz: ${actor_rollout_ref.actor.use_dynamic_bsz}
     log_prob_max_token_len_per_gpu: ${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}
     ulysses_sequence_parallel_size: ${actor_rollout_ref.actor.ulysses_sequence_parallel_size} # sp size
@@ -121,7 +115,6 @@ critic:
     min_lr_ratio: null   # only useful for warmup with cosine
     warmup_style: constant  # select from constant/cosine
     total_training_steps: -1  # must be override by program
-    weight_decay: 0.01
   model:
     path: ~/models/deepseek-llm-7b-chat
     tokenizer_path: ${actor_rollout_ref.model.path}
@@ -169,8 +162,8 @@ reward_model:
   micro_batch_size_per_gpu: null # set a number
   max_length: null
   ulysses_sequence_parallel_size: 1 # sp size
-  use_dynamic_bsz: ${critic.use_dynamic_bsz}
-  forward_max_token_len_per_gpu: ${critic.forward_max_token_len_per_gpu}
+  use_dynamic_bsz: True
+  forward_max_token_len_per_gpu: ${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}
   reward_manager: naive
 
 custom_reward_function:
@@ -211,5 +204,4 @@ trainer:
   default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
   max_actor_ckpt_to_keep: null
   max_critic_ckpt_to_keep: null
-  # The timeout for ray worker group to wait for the register center to be ready
-  ray_wait_register_center_timeout: 300
+  reward_scale_fn: 'max_only' # 'identity'不改变, 'max_only'只保留最大的reward=1, 'z_normalize'根据当前batch高斯归一化到[-1,1]区间, 'linear0center'从0,1放缩到-1,1区间

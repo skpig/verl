@@ -1,4 +1,5 @@
-# Copyright 2024 PRIME team and/or its affiliates
+# Copyright 2024 Bytedance Ltd. and/or its affiliates
+# Copyright 2022 The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,8 +12,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""
+Core functions to implement PPO algorithms.
+The function implemented in this file should be used by trainer with different distributed strategies to
+implement PPO
+"""
 
-from .prime import PrimeRewardManager
-from .batch import BatchRewardManager
-from .dapo import DAPORewardManager
-from .naive import NaiveRewardManager, SequenceLevelRewardManager
+import numpy as np
+import torch
+from collections import defaultdict
+
+import verl.utils.torch_functional as verl_F
+from verl.trainer.ppo.core_algos import get_kl_controller
+

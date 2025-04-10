@@ -105,6 +105,7 @@ class RLHFDataset(Dataset):
 
         self.return_raw_chat = return_raw_chat
         self.chat_template_func = chat_template_func
+        self.template_type = template_type
         self.truncation = truncation
         self.filter_overlong_prompts = filter_overlong_prompts
         if num_workers is None:
@@ -166,7 +167,8 @@ class RLHFDataset(Dataset):
 
         chat = row_dict.pop(self.prompt_key)
 
-        prompt_with_chat_template = self.tokenizer.apply_chat_template(chat, add_generation_prompt=True, tokenize=False)
+        prompt_with_chat_template = self.tokenizer.apply_chat_template(chat, add_generation_prompt=True, tokenize=False) if self.template_type == 'chat' else chat
+        assert isinstance(prompt_with_chat_template, str), "prompt after applying chat template should be a string"
 
         is_multi_modal = self.image_key in row_dict
         if is_multi_modal:  # expand image token
@@ -215,7 +217,7 @@ class RLHFDataset(Dataset):
         row_dict['input_ids'] = input_ids[0]
         row_dict['attention_mask'] = attention_mask[0]
         row_dict['position_ids'] = position_ids[0]
-        row_dict['raw_prompt_ids'] = self.tokenizer.encode(raw_prompt, add_special_tokens=False)
+        row_dict['raw_prompt_ids'] = self.tokenizer.encode(raw_prompt, add_special_tokens=False) # without padding or truncation
 
         # encode prompts without chat template
         if self.return_raw_chat:
@@ -223,7 +225,7 @@ class RLHFDataset(Dataset):
 
         # add index for each prompt
         index = row_dict.get("extra_info", {}).get("index", 0)
-        row_dict["index"] = index
+        row_dict["index"] = torch.tensor(index, dtype=torch.int)
 
         return row_dict
 

@@ -19,6 +19,7 @@ from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 import os
 import ray
 import hydra
+import os
 
 
 def get_custom_reward_fn(config):
@@ -69,7 +70,8 @@ def run_ppo(config) -> None:
             'env_vars': {
                 'TOKENIZERS_PARALLELISM': 'true',
                 'NCCL_DEBUG': 'WARN',
-                'VLLM_LOGGING_LEVEL': 'WARN'
+                'VLLM_LOGGING_LEVEL': 'WARN',
+                'CUDA_VISIBLE_DEVICES': os.environ.get("CUDA_VISIBLE_DEVICES", "0")
             }
         })
 

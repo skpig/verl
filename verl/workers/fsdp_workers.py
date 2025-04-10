@@ -372,7 +372,8 @@ class ActorRolloutRefWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
-        from verl.workers.actor import DataParallelPPOActor
+        # breakpoint()
+        from verl.workers.actor import DataParallelPPOActor, DataParallelOnlineRFTActor
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get('external_lib', None))
 
@@ -411,9 +412,14 @@ class ActorRolloutRefWorker(Worker):
             OmegaConf.set_struct(self.config.actor, True)
             with open_dict(self.config.actor):
                 self.config.actor.use_remove_padding = use_remove_padding
-            self.actor = DataParallelPPOActor(config=self.config.actor,
-                                              actor_module=self.actor_module_fsdp,
-                                              actor_optimizer=self.actor_optimizer)
+            if self.config.get('algorithm', None) is None:
+                self.actor = DataParallelPPOActor(config=self.config.actor,
+                                                    actor_module=self.actor_module_fsdp,
+                                                    actor_optimizer=self.actor_optimizer)
+            elif self.config.get('algorithm', None) == 'online_rft':
+                self.actor = DataParallelOnlineRFTActor(config=self.config.actor,
+                                                        actor_module=self.actor_module_fsdp,
+                                                        actor_optimizer=self.actor_optimizer)
 
         if self._is_rollout:
             self.rollout, self.rollout_sharding_manager = self._build_rollout(
@@ -445,8 +451,10 @@ class ActorRolloutRefWorker(Worker):
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def update_actor(self, data: DataProto):
+        # breakpoint()
         # Support all hardwares
         data = data.to(torch.cuda.current_device())
+        data.meta_info['temperature'] = self.config.rollout.temperature
 
         assert self._is_actor
         if self._is_offload_param:
@@ -491,6 +499,7 @@ class ActorRolloutRefWorker(Worker):
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def generate_sequences(self, prompts: DataProto):
+        # breakpoint()
         # Support all hardwares
         prompts = prompts.to(torch.cuda.current_device())
 
@@ -846,6 +855,7 @@ class CriticWorker(Worker):
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def update_critic(self, data: DataProto):
+        # breakpoint()
         # Support all hardwares
         data = data.to(torch.cuda.current_device())
         if self._is_offload_param:

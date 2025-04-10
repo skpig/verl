@@ -179,40 +179,37 @@ def _flatten_dict(raw: Dict[str, Any], *, sep: str) -> Dict[str, Any]:
 @dataclasses.dataclass
 class ValidationGenerationsLogger:
 
-    def log(self, loggers, samples, step):
+    def log(self, loggers, tag, samples, step):
         if 'wandb' in loggers:
-            self.log_generations_to_wandb(samples, step)
+            self.log_generations_to_wandb(tag, samples, step)
         if 'swanlab' in loggers:
             self.log_generations_to_swanlab(samples, step)
         if 'mlflow' in loggers:
             self.log_generations_to_mlflow(samples, step)
 
-    def log_generations_to_wandb(self, samples, step):
-        """Log samples to wandb as a table"""
+    def log_generations_to_wandb(self, tag, samples, step):
+        """Log samples to wandb as a table
+        Args:
+            tag (str): tag to identify the table
+            samples (List[Tuple[str, str, float]]): list of samples, each sample is a tuple of (input, output and score)
+            step (int): step to log the data
+        """
         import wandb
 
         # Create column names for all samples
-        columns = ["step"] + sum([[f"input_{i+1}", f"output_{i+1}", f"score_{i+1}"] for i in range(len(samples))], [])
-
-        if not hasattr(self, 'validation_table'):
-            # Initialize the table on first call
-            self.validation_table = wandb.Table(columns=columns)
+        columns = ['id', 'input', 'output', 'score']
 
         # Create a new table with same columns and existing data
         # Workaround for https://github.com/wandb/wandb/issues/2981#issuecomment-1997445737
-        new_table = wandb.Table(columns=columns, data=self.validation_table.data)
+        new_table = wandb.Table(columns=columns, data=[])
 
-        # Add new row with all data
-        row_data = []
-        row_data.append(step)
-        for sample in samples:
-            row_data.extend(sample)
-
-        new_table.add_data(*row_data)
+        # Add new samples to the table
+        for i, sample in enumerate(samples):
+            new_table.add_data(i, sample[0], sample[1], sample[2])
 
         # Update reference and log
-        wandb.log({"val/generations": new_table}, step=step)
-        self.validation_table = new_table
+        wandb.log({f"{tag}/generations": new_table}, step=step)
+        setattr(self, tag, new_table)
 
     def log_generations_to_swanlab(self, samples, step):
         """Log samples to swanlab as text"""

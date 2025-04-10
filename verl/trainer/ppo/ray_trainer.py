@@ -16,29 +16,34 @@ FSDP PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
 
+import wandb
+from functools import cache
 import os
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from pprint import pprint
-from typing import Type, Dict
+from typing import Counter, Type, Dict
 from copy import deepcopy
 from collections import defaultdict
 from functools import partial
+from collections import Counter, defaultdict
 from tqdm import tqdm
+import pandas as pd
 
 import ray
 import numpy as np
 from codetiming import Timer
 from omegaconf import OmegaConf, open_dict
+from traitlets import default
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.base import Worker
 from verl.single_controller.ray import RayResourcePool, RayWorkerGroup, RayClassWithInitArgs
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo import core_algos
-from verl.trainer.ppo.metric_utils import compute_data_metrics, compute_throughout_metrics, compute_timing_metrics, reduce_metrics, bootstrap_metric, calc_maj_val, process_validation_metrics
+from verl.trainer.ppo.metric_utils import compute_data_metrics, compute_throughout_metrics, compute_timing_metrics, reduce_metrics, bootstrap_metric, calc_maj_val, process_validation_metrics, compute_rollout_metrics
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
@@ -233,6 +238,7 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
 @contextmanager
 def _timer(name: str, timing_raw: Dict[str, float]):
     with Timer(name=name, logger=None) as timer:
+        print("Start timing of : ", name)
         yield
     timing_raw[name] = timer.last
 
@@ -292,6 +298,10 @@ class RayPPOTrainer(object):
 
         self._validate_config()
         self._create_dataloader()
+
+        self.cache_file_path = os.path.join('/home/huangbz/verl/.cache', self.config.trainer.experiment_name, 'train_generations.parquet')
+        # self.artifact = 
+
 
     def _validate_config(self):
         config = self.config
@@ -503,7 +513,138 @@ class RayPPOTrainer(object):
         samples = samples[:generations_to_log]
 
         # Log to each configured logger
-        self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
+        self.validation_generations_logger.log(self.config.trainer.logger, 'val', samples, self.global_steps)
+    
+
+    def map_token_scores_to_chars(self, batch_input_ids, batch_scores, batch_attention_mask):
+        tokenizer = self.tokenizer
+        results = []
+        bsz, seq_len = batch_input_ids.shape
+
+        for i in range(bsz):
+            input_ids = batch_input_ids[i]
+            scores = batch_scores[i]
+            attention_mask = batch_attention_mask[i]
+
+            # 去除 pad，只保留有效 tokens
+            valid_input_ids = input_ids[attention_mask.bool()]
+            valid_scores = scores[attention_mask.bool()]
+
+            # 还原 detokenized 文本（不加 special tokens）
+            text = tokenizer.decode(valid_input_ids.tolist(), skip_special_tokens=True)
+
+            # 对 detokenized 文本重新 encode 来获取 offsets
+            encoding = tokenizer.encode_plus(
+                text,
+                return_offsets_mapping=True,
+                add_special_tokens=False
+            )
+            offsets = encoding["offset_mapping"]
+
+            # 对应 token 数量如果不一致，跳过不处理
+            if len(offsets) != len(valid_scores):
+                results.append({
+                    "offsets": [(0, len(text) - 1)],
+                    "char_scores": [0.0]
+                })
+            else:
+                results.append({
+                    "offsets": offsets,
+                    "char_scores": valid_scores.tolist()
+                })
+
+            # # 初始化字符分数
+            # char_scores = [0.0] * len(text)
+
+            # for (start, end), score in zip(offsets, valid_scores):
+            #     for pos in range(start, end):
+            #         if pos < len(char_scores):
+            #             char_scores[pos] = score.item() if hasattr(score, 'item') else score
+
+        return results
+
+    def _maybe_log_train_generations(self, batch):
+        """Log a table of validation samples to the configured logger (wandb or swanlab)"""
+
+
+        """TODO: Add more statistics here"""
+        LOG_FREQ = 10
+
+        if self.global_steps % LOG_FREQ != 0:
+            return
+
+        input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in batch.batch['prompts']] # (bsz,)
+        response_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in batch.batch['responses']] # (bsz,)
+
+        """ Save in local file """
+        df = pd.DataFrame({
+            'query_index': batch.batch['index'].tolist(),
+            'query': input_texts,
+            'rollout_index': batch.batch['rollout_index'].tolist(),
+            'rollout': response_texts,
+            'seq_level_rewards': batch.batch['token_level_rewards'].sum(-1).tolist(),
+            'seq_level_scores': batch.batch['token_level_scores'].sum(-1).tolist() if 'token_level_scores' in batch.batch else None,
+            'token_level_scores': self.map_token_scores_to_chars(batch.batch['responses'], batch.batch['token_level_scores'], batch.batch['response_mask']) if 'token_level_scores' in batch.batch else None,
+        })
+        df['step_num'] = self.global_steps
+        df['run_name'] = self.config.trainer.experiment_name
+
+        df = df.sort_values(by=['query_index', 'rollout_index'])
+
+
+        # load old df on the next few steps
+        if os.path.exists(self.cache_file_path) and self.global_steps // LOG_FREQ != 1:
+            old_df = pd.read_parquet(self.cache_file_path, engine='pyarrow')
+            df = pd.concat([old_df, df], ignore_index=True)
+        # save new df
+        dir_name = os.path.dirname(self.cache_file_path)
+        if not os.path.exists(dir_name):
+            os.makedirs(dir_name, exist_ok=False)
+        df.to_parquet(self.cache_file_path, engine='pyarrow')
+        
+
+
+
+        """Send to logger"""
+        import numpy as np
+
+        generations_to_log = self.config.trainer.log_val_generations
+
+        if generations_to_log == 0:
+            return
+
+        # randomly sample `generations_to_log` samples with a fixed seed
+        np.random.seed(42)
+        indices = np.random.choice(len(input_texts), generations_to_log)
+        input_texts = [input_texts[i] for i in indices]
+        response_texts = [response_texts[i] for i in indices]
+        seq_level_scores = [batch.batch['token_level_rewards'][i].sum(-1).item() for i in indices]
+
+        # Create tuples of (input, output, score) and sort by input text
+        samples = list(zip(input_texts, response_texts, seq_level_scores))
+
+        # Log to each configured logger
+        self.validation_generations_logger.log(self.config.trainer.logger, 'train', samples, self.global_steps)
+    
+    def _log(self):
+        from verl.utils.tracking import Tracking
+        logger = Tracking(project_name=self.config.trainer.project_name,
+                          experiment_name=self.config.trainer.experiment_name,
+                          default_backend=self.config.trainer.logger,
+                          config=OmegaConf.to_container(self.config, resolve=True))
+
+        for i in range(10):
+            # create a trivial table
+            artifact = wandb.Artifact(name=self.config.trainer.project_name, type="rollouts")
+            table = wandb.Table(columns=["x", "y"])
+            for j in range(10):
+                table.add_data(i, j)
+            # log the table
+            wandb.log({"table": table})
+            # self.artifact.add(table, f"table")
+            artifact.add(table, f"table")
+            wandb.log_artifact(artifact)
+
 
     def _validate(self):
         data_source_lst = []
@@ -513,6 +654,9 @@ class RayPPOTrainer(object):
         sample_inputs = []
         sample_outputs = []
         sample_scores = []
+
+
+        reward_meta = Counter()
 
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
@@ -601,6 +745,9 @@ class RayPPOTrainer(object):
                         metric_sec = "val-aux"
                     pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"
                     metric_dict[pfx] = metric_val
+        # TODO:
+        # metric_dict.update({f'val/test_score/reward_type/{key}': value / len(reward_tensor) for key, value in reward_meta.items()})
+
 
         return metric_dict
 
@@ -799,6 +946,7 @@ class RayPPOTrainer(object):
         The driver process only need to call the compute functions of the worker group through RPC to construct the PPO dataflow.
         The light-weight advantage computation is done on the driver process.
         """
+        # breakpoint()
         from verl.utils.tracking import Tracking
         from omegaconf import OmegaConf
 
@@ -834,6 +982,7 @@ class RayPPOTrainer(object):
                 timing_raw = {}
 
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
+                # breakpoint()
 
                 # pop those keys for generation
                 if 'multi_modal_inputs' in batch.non_tensor_batch.keys():
@@ -873,10 +1022,15 @@ class RayPPOTrainer(object):
                     batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))],
                                                              dtype=object)
                     # repeat to align with repeated responses in rollout
+                    rollout_index_batch = torch.arange(self.config.actor_rollout_ref.rollout.n, device=batch.batch.device).repeat(len(batch)) # [0, 1, 2, ..., n, 0, 1, 2, ..., n, ...]
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
+                    batch.batch['rollout_index'] = rollout_index_batch
 
                     batch.batch['response_mask'] = compute_response_mask(batch)
+                    # compute_rollout_metrics(batch=batch, tokenizer=self.tokenizer)
+                    rollout_metrics = compute_rollout_metrics.remote(batch=batch, tokenizer=self.tokenizer)
+
                     # balance the number of valid tokens on each dp rank.
                     # Note that this breaks the order of data inside the batch.
                     # Please take care when you implement group based adv computation such as GRPO and rloo
@@ -924,6 +1078,9 @@ class RayPPOTrainer(object):
                             reward_extra_infos_dict = {}
 
                         batch.batch['token_level_scores'] = reward_tensor
+                        # TODO:
+                        # metrics.update({f'reward_type/{key}': val / len(batch) for key, val in reward_type_counter.items()})
+
 
                         print(f'{list(reward_extra_infos_dict.keys())=}')
                         if reward_extra_infos_dict:
@@ -975,19 +1132,31 @@ class RayPPOTrainer(object):
                             self._save_checkpoint()
 
                 # collect metrics
-                metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
+                with _timer('log', timing_raw):
+                    metrics.update(ray.get(rollout_metrics))
+                    self._maybe_log_train_generations(batch)
+                    metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
+                    # TODO: implement actual tflpo and theoretical tflpo
+                    n_gpus = self.resource_pool_manager.get_n_gpus()
+                    metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
-                # TODO: implement actual tflpo and theoretical tflpo
-                n_gpus = self.resource_pool_manager.get_n_gpus()
-                metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
 
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
 
+                # log rollout generations
+
+
                 if is_last_step:
                     pprint(f'Final validation metrics: {last_val_metrics}')
                     progress_bar.close()
+                    # save train result to local file
+                    data_path = '/home/huangbz/verl/train_result.parquet'
+                    df = pd.read_parquet(self.cache_file_path, engine='pyarrow')
+                    if os.path.exists(data_path):
+                        old_df = pd.read_parquet(data_path, engine='pyarrow')
+                        df = pd.concat([old_df, df], ignore_index=True)
+                    df.to_parquet(data_path, engine='pyarrow')
                     return
-
                 progress_bar.update(1)
                 self.global_steps += 1

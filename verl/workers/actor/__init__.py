@@ -13,6 +13,6 @@
 # limitations under the License.
 
 from .base import BasePPOActor
-from .dp_actor import DataParallelPPOActor
+from .dp_actor import DataParallelPPOActor, DataParallelOnlineRFTActor
 
-__all__ = ["BasePPOActor", "DataParallelPPOActor"]
+__all__ = ["BasePPOActor", "DataParallelPPOActor", "DataParallelOnlineRFTActor"]
