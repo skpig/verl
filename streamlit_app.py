@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import textwrap
 import json
 import os
 import plotly.express as px
@@ -9,12 +10,10 @@ import plotly.express as px
 #############################
 
 def load_data():
-    if not os.path.exists("data.json"):
-        st.error("数据文件 data.json 不存在。")
+    if not os.path.exists("data.parquet"):
+        st.error("数据文件 data.parquet 不存在。")
         st.stop()
-    with open("data.json", "r", encoding="utf-8") as f:
-        data = json.load(f)
-    return pd.DataFrame(data)
+    return pd.read_parquet("data.parquet")
 
 def load_saved_views():
     if os.path.exists("saved_views.json"):
@@ -155,21 +154,23 @@ def draw_aggregation_analysis(df):
 #################################
 
 def save_data(df):
-    with open("data.json", "w", encoding="utf-8") as f:
-        json.dump(df.to_dict(orient="records"), f, indent=2, ensure_ascii=False)
-    st.success("✅ data.json 修改已保存")
+    df.to_parquet("data.parquet", index=False)
+    st.success("✅ data.parquet 修改已保存")
+
 
 def draw_rollout_visualization(df):
-    st.title("📝 Rollout 文本可视化与编辑")
-    st.write("你可以编辑 rollout 数据、切换筛选条件，或新增计算列。")
+    st.title("📝 Rollout 文本可视化")
+    st.write("你可以筛选数据、或新增计算列。")
 
     key_fields = ["run_name", "step_num", "query_index", "rollout_index"]
     primary_key = st.sidebar.selectbox("选择主键字段:", key_fields, key="rollout_primary_key")
     other_keys = [k for k in key_fields if k != primary_key]
 
     selected_primary_values = st.sidebar.multiselect(
-        f"选择 {primary_key}:", sorted(df[primary_key].unique()), key="rollout_primary_filter"
+        f"选择 {primary_key}:", ['All'] + sorted(df[primary_key].unique()), key="rollout_primary_filter"
     )
+    if 'All' in selected_primary_values:
+        selected_primary_values = sorted(df[primary_key].unique())
 
     selected_other = {}
     st.sidebar.markdown("#### 🔄 快速切换其他字段")
@@ -236,20 +237,38 @@ def draw_rollout_visualization(df):
             st.session_state["original_df_backup"] = df.copy()
             st.success("✅ 选中列已删除")
 
+    # 筛选
     filtered_df = df[df[primary_key].isin(selected_primary_values)]
     for key, val in selected_other.items():
         filtered_df = filtered_df[filtered_df[key] == val]
 
-    edited_df = st.data_editor(filtered_df, num_rows="dynamic", use_container_width=True, key="editable_df")
+    # 对长文本字段进行手动换行处理
+    if "rollout_text" in filtered_df.columns:
+        filtered_df["rollout"] = filtered_df["rollout"].apply(lambda x: "\n".join(textwrap.wrap(x, width=100)))
 
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        if st.button("📥 保存修改"):
-            df.update(edited_df)
-            save_data(df)
-    with col2:
-        if st.button("↩️ 撤销所有未保存修改"):
-            st.session_state["working_df"] = st.session_state["original_df_backup"].copy()
+    # 隐藏 selected_other 中所有字段
+    columns_to_hide = list(selected_other.keys())
+    columns_to_show = [col for col in filtered_df.columns if col not in columns_to_hide]
+    filtered_df_to_display = filtered_df[columns_to_show]
+
+    # 显示静态表格
+    st.markdown("### 📊 当前筛选结果")
+    st.dataframe(
+        filtered_df,
+        column_order=columns_to_show,
+        hide_index=True,
+        use_container_width=True,
+        row_height=100,
+        column_config={
+            "rollout": st.column_config.TextColumn(
+                max_chars=1000,
+                help="长文本字段，使用换行显示",
+                # format_func=lambda x: x.replace("\n", "<br>"),
+                width=700
+            )
+        },
+        height=1000,
+    )
 
 #################################
 # 主函数入口
