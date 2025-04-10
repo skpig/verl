@@ -65,7 +65,7 @@ from flash_attn.ops.triton.cross_entropy import cross_entropy_loss
 
 from dist_attn.ulysses.parallel_states import set_ulysses_sequence_parallel_group, get_ulysses_sequence_parallel_group, get_ulysses_sequence_parallel_world_size
 
-from omnistore import RLFSDPCheckpointer
+from omnistore import FSDPCheckpointer
 
 
 class ReduceLoss(torch.autograd.Function):
@@ -409,11 +409,10 @@ class RMTrainer(object):
         return loss, pairwise_acc, reward_mean
 
     def save_checkpoint(self, step):
-        RLFSDPCheckpointer.save(
+        FSDPCheckpointer.save(
             os.path.join(self.config.trainer.default_hdfs_dir, "checkpoints"),
             {"model": self.fsdp_model},
             global_steps=step,
-            rl_role="sft",
         )
 
     def fit(self):
