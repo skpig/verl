@@ -42,7 +42,7 @@ if __name__ == '__main__':
     dataset = datasets.load_dataset(data_source, trust_remote_code=True)
 
     train_dataset = dataset['train']
-    test_dataset = dataset['test']
+    test_dataset = dataset['test'].select(range(1000))  # for test, we only use 1000 samples
 
     instruction_following = "Let's think step by step and output the final answer within \\boxed{}."
 

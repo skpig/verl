@@ -105,7 +105,6 @@ class RLHFDataset(Dataset):
 
         self.return_raw_chat = return_raw_chat
         self.chat_template_func = chat_template_func
-        self.template_type = template_type
         self.truncation = truncation
         self.filter_overlong_prompts = filter_overlong_prompts
         if num_workers is None:
@@ -167,8 +166,8 @@ class RLHFDataset(Dataset):
 
         chat = row_dict.pop(self.prompt_key)
 
-        prompt_with_chat_template = self.tokenizer.apply_chat_template(chat, add_generation_prompt=True, tokenize=False) if self.template_type == 'chat' else chat
-        assert isinstance(prompt_with_chat_template, str), "prompt after applying chat template should be a string"
+        prompt_with_chat_template = self.tokenizer.apply_chat_template(chat, add_generation_prompt=True, tokenize=False)
+        # assert isinstance(prompt_with_chat_template, str), "prompt after applying chat template should be a string"
 
         is_multi_modal = self.image_key in row_dict
         if is_multi_modal:  # expand image token
