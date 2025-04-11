@@ -13,7 +13,7 @@ from xperf_gpt.inference import init_inference
 from alpha_seed.workers.xperf_rollout.component.cache_manager import CacheManager
 from alpha_seed.workers.xperf_rollout.component.infer_scheduler import InferScheduler
 from alpha_seed.workers.xperf_rollout.component.sampling_manager import Sampler
-from alpha_seed.workers.xperf_rollout.component.query import Query
+from alpha_seed.workers.xperf_rollout.component.query import Query, InflightQueue
 from alpha_seed.utils.observility import get_profiler_context_wrapped
 from xperf_gpt.utils import (logging_rank, logging_rank_only)
 from typing import List, Dict
@@ -22,6 +22,7 @@ import os
 import torch
 import copy
 import logging
+from threading import Lock
 from transformers import AutoTokenizer
 
 # Constants
@@ -155,8 +156,30 @@ class InferenceSession:
             self.num_pred_tokens = 0
 
         # components
+        '''
+        1. Pending Queue(For Rollout Server Only)
+        Acts as the entry point for incoming requests
+        Temporarily stores newly arrived queries before they're scheduled for execution
+        Maintains requests in FIFO (First-In-First-Out) order by default
+        2. Waiting Queue
+        Serves as a "pause buffer" for interrupted queries
+        Holds requests that were:
+        Preempted during execution (e.g., due to priority weight updates)
+        Evicted from memory (via paged eviction mechanisms)
+        Preserves partial execution states for later resumption
+        3. Running Queue
+        Contains currently executing queries
+        Represents active workloads consuming system resources
+        Maintains real-time status of in-process operations
+        
+        Workflow:
+            Requests flow from Pending → Running → (Waiting if interrupted) → Finished. 
+            The waiting queue enables stateful handling of mid-execution interruptions through check-pointing mechanisms.
+        '''
+        self.pending = InflightQueue()
         self.waiting = []
         self.running = []
+
         self.finished = {}
         self.stop_sequence_tokens: List[List[int]] = []
         self.common_prefix = ""
@@ -166,6 +189,7 @@ class InferenceSession:
         self.last_token_only = True
         self.eos_callback_fn = None
         self.stop_signal_tensor = torch.tensor([0.0]).float().cuda()
+        self.update_weights_lock = Lock()
 
     def _validate_paged_attention_config(self):
         """Validate paged attention configuration constraints"""
@@ -257,6 +281,7 @@ class InferenceSession:
         self.engine = init_inference(None, **init_inference_kwargs)
         self.sampler = Sampler(generation_config=generation_config)
         self.num_return_sequences = self.engine.module.num_return_sequences
+
         self.reset_logging_level()
 
         self.cache_manager = CacheManager(slot_num=self.num_slots,
@@ -456,6 +481,7 @@ class InferenceSession:
         self.cache_manager.empty_cache()
         self.infer_scheduler.empty_cache()
         self.stop_signal_tensor = torch.tensor([0.0]).float().cuda()
+        self.pending = InflightQueue()
         self.waiting = []
         self.running = []
         self.finished = {}
@@ -607,7 +633,7 @@ class InferenceSession:
 
     def _should_terminate(self, prompts, complete_ratio, stop_event):
         # complete ratio break, only works when stop event not set
-        if self.finished_num >= int(complete_ratio * len(prompts)) and stop_event is None:
+        if stop_event is None and self.finished_num >= int(complete_ratio * len(prompts)):
             return True
         if stop_event is not None:
             # stop event break
@@ -615,7 +641,7 @@ class InferenceSession:
                 self.stop_signal_tensor.fill_(1.0)
             # reuse first nccl layer to comm signal
             if self.engine.module.tp_size > 1:
-                self.engine.module.layers_impl[0].all_reduce(self.stop_signal_tensor)
+                self.engine.module.layers_impl[0].all_reduce(self.stop_signal_tensor, "sum")
 
             # wait for the max_off_policy rollout
             skip_break = False
@@ -623,8 +649,23 @@ class InferenceSession:
                 if (not query.is_finished and query.off_policy_steps >= self.max_off_policy_steps):
                     skip_break = True
             if not skip_break and self.stop_signal_tensor.item() == self.engine.module.tp_size:
+                self.stop_signal_tensor.fill_(0.0)
                 return True
         return False
+
+    def _fetch_from_pending_queries(self):
+        num_ready_query_local_tensor = torch.tensor([len(self.pending)], dtype=torch.float32, device="cuda")
+        num_ready = len(self.pending)
+        if self.engine.module.tp_size > 1:
+            self.engine.module.layers_impl[0].all_reduce(num_ready_query_local_tensor, "min")
+            num_ready = num_ready_query_local_tensor.int().item()
+        if num_ready == 0:
+            return self.waiting
+        new_joins = self.pending.get_earliest(num_ready)
+        for query in new_joins:
+            self.finished[query.id] = query
+        self.pending.truncate(num_ready)
+        return self.waiting + new_joins
 
     def execute(self,
                 prompts,
@@ -696,6 +737,67 @@ class InferenceSession:
         torch.cuda.synchronize()
         self.infer_scheduler.record("cur_steps", [self.current_steps])
 
+    def async_execute(self, update_weight_event):
+        torch.manual_seed(int(os.getenv('XPERF_RANDOM_SEED', '0')))
+        self.current_steps = 0
+        self.finished_num = 0
+        tokens_len = None
+        accepted_len = None
+
+        def _check_stop_event():
+            while (self._should_terminate(None, 1.0, stop_event=update_weight_event)):
+                # recompute prefill
+                for query in self.running:
+                    self.cache_manager.release_query(query)
+                    query.reset_compute()
+                    self.waiting.append(query)
+                self.running = []
+                import time
+                time.sleep(0.01)
+
+        while (True):
+            try:
+                _check_stop_event()
+                self.current_steps += 1
+                # each rank should have the same running and waiting
+                self.waiting = self._fetch_from_pending_queries()
+                if (len(self.waiting) == 0 and len(self.running) == 0):
+                    continue
+                self.running, self.waiting = self._select_running_queries()
+                forward_inputs = self._prepare_forward_inputs(self.running)
+                context_input = forward_inputs['context_input']
+                decode_input = forward_inputs['decode_input']
+                next_tokens, _, _, log_probs, probs_gt_threshold_num, probs_lt_threshold_sum = self.infer_scheduler.forward_and_sample(
+                    context_input=context_input,
+                    decode_input=decode_input,
+                    total_length=forward_inputs['total_length'],
+                    kv_index=forward_inputs['kv_index'],
+                    orca_updated=True,
+                    context_shifts=forward_inputs['context_shifts'],
+                    history_ids=forward_inputs['history_ids'],
+                    sample_kwargs=forward_inputs['sample_kwargs'])
+
+                if self.engine.module.tp_size > 1 and next_tokens is not None:
+                    self.engine.module.layers_impl[0].broadcast(next_tokens)
+
+                self._update_running_batch(next_tokens=next_tokens,
+                                           tokens_len=tokens_len,
+                                           accepted_len=accepted_len,
+                                           index_in_running_batch=forward_inputs['forward_index'],
+                                           log_probs=log_probs,
+                                           probs_gt_threshold_num=probs_gt_threshold_num,
+                                           probs_lt_threshold_sum=probs_lt_threshold_sum)
+                self.infer_scheduler.next_step()
+                if self.step_profiler is not None:
+                    ctx_tokens = context_input.shape[0] if context_input is not None else 0
+                    dec_tokens = decode_input.shape[0] if decode_input is not None else 0
+                    self.step_profiler.record_step(ctx_tokens=ctx_tokens, dec_tokens=dec_tokens)
+            except Exception as e:
+                for query in self.running:
+                    query.set_finished(exception=e)
+                logging.error(f"Error handling request: {str(e)}")
+                raise (e)
+
     def _exceed_length_condition(self, query, tokens_threshold):
         return query.new_token_len + tokens_threshold >= query.max_new_tokens or len(query.new_token_ids) + len(
             query.input_ids) + tokens_threshold >= query.max_length
@@ -737,7 +839,8 @@ class InferenceSession:
         if accepted_len is not None:
             assert (accepted_len.shape[0] == len(self.running))
         if log_probs is not None:
-            assert (log_probs.shape[0] == len(self.running))
+            assert (log_probs.shape[0] == len(self.running)), "log_probs shape mismatch, {} vs {}".format(
+                log_probs.shape[0], len(self.running))
             log_probs = log_probs.cpu().tolist()
         if probs_gt_threshold_num is not None:
             assert (probs_gt_threshold_num.shape[0] == len(self.running))
@@ -776,7 +879,7 @@ class InferenceSession:
                 else:
                     if self.eos_callback_fn:
                         self.eos_callback_fn(query)
-                    query.is_finished = True
+                    query.set_finished()
                     self.finished_num += 1
                     self.cache_manager.release_query(query)
                     self.infer_scheduler.record("finished_tokens_by_step", [self.current_steps])

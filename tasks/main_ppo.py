@@ -53,6 +53,7 @@ from alpha_seed.utils.reward_score.extra_reward import add_length_reward, punish
 from alpha_seed.utils.reward_score import math_v1, verifier_service, gsm8k, math_v2, model_score_fn, logic_puzzle, oj_utils, math_verifier, response_post_proc, gpqa_verifier, math_deepscale, code_local_verifier
 from alpha_seed.utils.duplicate import para_dup
 from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRefWorker
+from alpha_seed.workers.streaming_service.streaming_rollout import RemoteAsyncXPerfGPTRollout
 from alpha_seed.workers.actors.critic_worker import CriticWorker
 from alpha_seed.utils.alarm.lark_util import send_message_to_employee
 from alpha_seed.utils.server_client import validate_client_config, KVStore, ServerHealthCheck, TaskRunner, ClientTaskRunner, check_all_workers_alive, recreate_actor
@@ -729,10 +730,10 @@ def validate_config(config):
     # rollout
     # assert real_train_batch_size % config.actor_rollout_ref.rollout.micro_batch_size == 0
     complete_ratio = config.actor_rollout_ref.rollout.get("complete_ratio", 1.0)
-    if config.streaming_rollout.nnodes == 0:
-        assert complete_ratio == 1.0, f'When streaming rollout is not enabled, complete_ratio must be 1. Got {complete_ratio}'
+    if config.streaming_rollout.nnodes == 0 and config.rollout_server.nnodes == 0:
+        assert complete_ratio == 1.0, f'When streaming rollout (server) is not enabled, complete_ratio must be 1. Got {complete_ratio}'
     else:
-        assert complete_ratio < 1.0, f'When streaming rollout is enabled, complete_ratio must be smaller than 1. Got {complete_ratio}.'
+        assert complete_ratio < 1.0, f'When streaming rollout (server) is enabled, complete_ratio must be smaller than 1. Got {complete_ratio}.'
 
     # actor
     assert real_train_batch_size % config.actor_rollout_ref.actor.ppo_mini_batch_size == 0, f"{real_train_batch_size=} vs. {config.actor_rollout_ref.actor.ppo_mini_batch_size=}"
@@ -839,22 +840,26 @@ def config_to_trainer_kwargs(config):
         Role.Critic: CriticWorker,
         Role.Rollout: AsyncActorRolloutRefWorker,
         Role.Validator: AsyncActorRolloutRefWorker,
+        Role.RolloutServer: RemoteAsyncXPerfGPTRollout
     }
 
     # in server client, the pool id should follow the format of f"{RoleNameInMerlin}_pool"
     global_pool_id = 'hybrid_pool'
     standalone_pool_id = 'rollout_pool'
     validation_pool_id = 'validator_pool'
+    rollout_server_pool_id = 'server_pool'
     resource_pool_spec = {
         global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
         standalone_pool_id: [config.streaming_rollout.n_gpus_per_node] * config.streaming_rollout.nnodes,
         validation_pool_id: [config.streaming_validator.n_gpus_per_node] * config.streaming_validator.nnodes,
+        rollout_server_pool_id: [config.rollout_server.n_gpus_per_node] * config.rollout_server.nnodes,
     }
     mapping = {
         Role.ActorRolloutRef: global_pool_id,
         Role.Critic: global_pool_id,
         Role.Rollout: standalone_pool_id,
         Role.Validator: validation_pool_id,
+        Role.RolloutServer: rollout_server_pool_id
     }
 
     # we should adopt a multi-source reward function here

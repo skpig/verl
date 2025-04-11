@@ -102,8 +102,8 @@ class DataParallelPPOActor(BasePPOActor):
                                                   upload_to_mlx=self.config.profile.upload_to_mlx,
                                                   wait=10)
 
-        self.compute_entropy_loss = torch.compile(core_algos.compute_entropy_loss, dynamic=True)
-        self.entropy_from_logits = torch.compile(verl_F.entropy_from_logits, dynamic=True)
+        self.compute_entropy_loss = core_algos.compute_entropy_loss
+        self.entropy_from_logits = verl_F.entropy_from_logits
         self.loss_fn = default_loss_fn
 
     def _forward_micro_batch(self, micro_batch: TensorDict, temperature, compute_entropy):
@@ -484,6 +484,7 @@ def default_loss_fn(config, micro_data, full_entropy, log_prob):
     entropy_coeff = config.entropy_coeff
     upgo_loss_weight = config.upgo_loss_weight
     kl_loss_weight = config.kl_loss_weight
+    offpolicy_kl_loss_weight = config.offpolicy_kl_loss_weight
     lm_loss_weight = config.lm_loss_weight
     kl_penalty_type = config.kl_penalty
     loss_average_method = config.loss_average_method
@@ -511,6 +512,11 @@ def default_loss_fn(config, micro_data, full_entropy, log_prob):
     else:
         kl_loss = torch.zeros((), device=pg_loss.device)
 
+    if offpolicy_kl_loss_weight > 0.0:
+        offpolicy_kl_loss = core_algos.compute_kl_loss(log_prob, old_log_prob, response_mask, kl_penalty_type)
+    else:
+        offpolicy_kl_loss = torch.zeros((), device=pg_loss.device)
+
     if lm_loss_weight > 0.0:
         eos_ids = micro_data['eos_ids']
         raw_scores = micro_data['token_level_scores']
@@ -528,13 +534,14 @@ def default_loss_fn(config, micro_data, full_entropy, log_prob):
     else:
         entropy_loss = torch.zeros((), device=pg_loss.device)
 
-    policy_loss = total_loss - entropy_loss * entropy_coeff + kl_loss_weight * kl_loss + lm_loss_weight * lm_loss
+    policy_loss = total_loss - entropy_loss * entropy_coeff + kl_loss_weight * kl_loss + lm_loss_weight * lm_loss + offpolicy_kl_loss_weight * offpolicy_kl_loss
 
     metrics = {
         # 'actor/entropy': entropy_loss.detach().item(),
         'actor/pg_loss': pg_loss.detach().item(),
         'actor/upgo_loss': upgo_loss.detach().item(),
         'actor/kl_loss': kl_loss.detach().item(),
+        'actor/offpolicy_kl_loss': offpolicy_kl_loss.detach().item(),
         'actor/pg_clipfrac': pg_clipfrac.detach().item(),
         'actor/pg_clipfrac_hi': pg_clipfrac_hi.detach().item(),
         'actor/pg_clipfrac_lo': pg_clipfrac_lo.detach().item(),

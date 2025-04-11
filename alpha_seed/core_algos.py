@@ -267,7 +267,7 @@ def compute_policy_loss(old_log_prob, ref_log_prob, log_prob, advantages, upgo_a
     else:
         # ref: https://github.com/openai/ppo-ewma/blob/master/ppo_ewma/ppo.py#L93
         # log space importance sampling
-        log_ratio = log_prob - ref_log_prob
+        log_ratio = log_prob - ref_log_prob  # old
         # clip by 10.0
         logp_adj = torch.max(old_log_prob, log_prob.detach() - np.log(10.))
         # log space importance sampling again

@@ -113,3 +113,113 @@ def is_multihost_model(model_parallel_size: int) -> bool:
     print(f'find gpu_per_node: {gpu_per_node}, model_parallel_size: {model_parallel_size}')
     # assuming that all nodes have the same number of GPUs
     return gpu_per_node < model_parallel_size
+
+
+def _postprocess(off_p_list, on_p_list, target_length, pad_token=-1, mode="off_policy_step"):
+    assert (
+        len(off_p_list) == len(on_p_list)
+    ), f"off-policy and on-policy list should have the same length, but got {len(off_p_list)} and {len(on_p_list)}, mode = {mode}"
+    list_padded = []
+    for i, on_p_list_i in enumerate(on_p_list):
+        off_p_list_i = off_p_list[i]
+        prev_index = torch.nonzero(off_p_list_i == -1)
+        if prev_index.numel() == 0:
+            prev_index = -1
+        else:
+            prev_index = prev_index[0]
+        cur_list_i = off_p_list_i[:prev_index].tolist() + on_p_list_i
+        if mode == "off_policy_step":
+            cur_list_i = [x + 1 for x in cur_list_i]
+        # off-policy + on-policy might exceeds the target length
+        if len(cur_list_i) > target_length:
+            padded_list = cur_list_i[:target_length]
+        else:
+            padded_list = cur_list_i + [pad_token] * (target_length - len(cur_list_i))
+        list_padded.append(padded_list)
+    t_padded = torch.tensor(list_padded)
+    return t_padded
+
+
+from dataclasses import dataclass
+
+
+@dataclass
+class DataPack:
+    response_log_probs: list
+    response_probs_gt_threshold_num: list
+    response_probs_lt_threshold_sum: list
+    this_turn_off_policy_steps: list
+    response_outputs: list
+    is_finished: list
+    metrics: dict
+
+    @classmethod
+    def create_from_completion(cls, message):
+        data_pack = DataPack(response_outputs=[message.raw_output_ids],
+                             response_log_probs=[message.response_log_probs],
+                             response_probs_gt_threshold_num=[message.response_probs_gt_threshold_num],
+                             response_probs_lt_threshold_sum=[message.response_probs_lt_threshold_sum],
+                             this_turn_off_policy_steps=[[-1 for _ in range(len(message.raw_output_ids))]],
+                             is_finished=[message.is_finished],
+                             metrics=message.metrics)
+        return data_pack
+
+
+def pack_to_dataproto(prompts, tokenizer, data_pack, config):
+    max_new_tokens = prompts.meta_info.get('generation_kwargs').get('max_new_tokens', config.response_length)
+    prompts.batch = prompts.batch.cpu()
+    prompt_ids = prompts.batch['input_ids']  # (bs, prompt_length)
+    # left-padded attention_mask
+    attention_mask = prompts.batch['attention_mask']
+    off_turn_off_policy_steps = prompts.batch["off_policy_steps"]
+    off_policy_response_log_probs = prompts.batch["rollout_log_probs"]
+    off_policy_probs_gt_threshold_num = prompts.batch["probs_gt_threshold_num"]
+    off_policy_probs_lt_threshold_sum = prompts.batch["probs_lt_threshold_sum"]
+
+    from unittest.mock import patch
+    # remove warning
+    tokenizer.deprecation_warnings['Asking-to-pad-a-fast-tokenizer'] = True
+    with patch.object(tokenizer, "padding_side", "right"):
+        response_outputs = tokenizer.pad(dict(input_ids=data_pack.response_outputs),
+                                         padding="max_length",
+                                         max_length=max_new_tokens,
+                                         return_tensors="pt")
+
+    response_log_probs = _postprocess(off_policy_response_log_probs,
+                                      data_pack.response_log_probs,
+                                      max_new_tokens,
+                                      mode="log_prob")
+    response_probs_gt_threshold_num = _postprocess(off_policy_probs_gt_threshold_num,
+                                                   data_pack.response_probs_gt_threshold_num,
+                                                   max_new_tokens,
+                                                   mode="probs_gt_threshold_num")
+    response_probs_lt_threshold_sum = _postprocess(off_policy_probs_lt_threshold_sum,
+                                                   data_pack.response_probs_lt_threshold_sum,
+                                                   max_new_tokens,
+                                                   mode="probs_lt_threshold_sum")
+    response_off_policy = _postprocess(off_turn_off_policy_steps,
+                                       data_pack.this_turn_off_policy_steps,
+                                       max_new_tokens,
+                                       mode="off_policy_step")
+    response_ids = response_outputs["input_ids"].to(torch.int32)
+    response_attention_mask = response_outputs["attention_mask"].to(torch.int8)
+    attention_mask = torch.hstack((attention_mask, response_attention_mask))
+    input_ids = torch.hstack((prompt_ids, response_ids))
+
+    # all the tp ranks should contain the same data here. data in all ranks are valid
+    batch = {
+        'rollout_log_probs': response_log_probs.to(torch.bfloat16),
+        'probs_gt_threshold_num': response_probs_gt_threshold_num.to(torch.bfloat16),
+        'probs_lt_threshold_sum': response_probs_lt_threshold_sum.to(torch.bfloat16),
+        'input_ids': input_ids.to(torch.int32),  # here input_ids become the whole sentences
+        'attention_mask': attention_mask.to(torch.int8),
+        'is_finished': torch.Tensor(data_pack.is_finished).to(torch.int8),
+        'off_policy_steps': response_off_policy.to(torch.int8),
+    }
+    from verl import DataProto
+    out = DataProto.from_dict(batch)
+    data_pack.metrics["off_policy_steps"] = response_off_policy.tolist()
+    out.meta_info["xperf_metrics"] = data_pack.metrics
+    out.meta_info["generation_kwargs"] = prompts.meta_info['generation_kwargs']
+    out.non_tensor_batch = prompts.non_tensor_batch
+    return out

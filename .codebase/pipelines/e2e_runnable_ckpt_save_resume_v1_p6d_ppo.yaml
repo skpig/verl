@@ -3,8 +3,8 @@ trigger:
   change
 jobs:
   e2e_runnable_ckpt_save_resume_v1_p6d_ppo_tests:
-    # Merlin - data.aml.verl:v85
-    image: hub.byted.org/reckon/data.reckon.mlx.image_5940:36aebfdb72c17e002e016c4594c602c4
+    # Merlin - data.aml.verl:v175
+    image: hub.byted.org/reckon/data.reckon.mlx.image_5940:e2ec141539bafdc9109d4f1c9cfc42a8
     if: ${{ !contains(Event.Change.Title, "WIP") }}
     runs-on:
       cluster: gpu-l20-16
@@ -47,6 +47,7 @@ jobs:
           - pip3 install bytedance.ndtimeline --upgrade
           - pip3 install byted-omnistore==0.7.12
           - pip3 install pylatexenc
+          - pip3 install pydantic==1.10.15
 
       - name: p6d ppo ckpt save resume v1
         commands:

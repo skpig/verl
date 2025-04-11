@@ -148,7 +148,7 @@ class RolloutPool:
                 break
             return_batch.extend(ready_batch)
 
-        if len(return_batch) < return_batch_size:
+        if len(return_batch) < return_batch_size and len(return_batch) > 0:
             return_batch.extend([random.choice(return_batch) for _ in range(return_batch_size - len(return_batch))])
         incomplete_bon_bsz = len(return_batch) - complete_bon_bsz
 

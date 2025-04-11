@@ -2,6 +2,8 @@ from typing import *
 from dataclasses import dataclass
 import uuid
 import torch
+from threading import Lock
+import asyncio
 
 
 @dataclass
@@ -38,7 +40,7 @@ class Query:
     nll_loss: Optional[torch.Tensor]
     is_finished: bool
     off_policy_steps: int
-    meta_info: Optional[Dict] = None
+    meta_info: Optional[Dict]
 
     def __init__(self,
                  input_ids,
@@ -59,6 +61,7 @@ class Query:
         self.input_len = len(input_ids)
         self.is_context_computing = True
         self.new_token_ids = []
+        self.global_new_token_ids = []
         self.new_token_log_probs = []
         self.probs_gt_threshold_num = []
         self.probs_lt_threshold_sum = []
@@ -107,3 +110,82 @@ class Query:
 
     def is_kv_cache_slot_allocated(self):
         return len(self.kv_slot_ids) > 0
+
+    def set_finished(self, is_partial=False):
+        self.is_finished = not is_partial
+        self.global_new_token_ids.extend(self.new_token_ids)
+
+    def reset_compute(self):
+        self.kv_slot_ids = []
+        self.is_context_computing = True
+        self.input_ids.extend(self.new_token_ids)
+        self.new_token_ids = []
+        self.context_shift = 0
+        self.prefix_already_computed_len = 0
+        return
+
+
+@dataclass
+class AsyncQuery(Query):
+
+    def __init__(self,
+                 input_ids,
+                 input_prompt,
+                 idx,
+                 prefix_already_computed_len=0,
+                 system_ids_len=0,
+                 code_book=None,
+                 constraint_decoding_predictor=None):
+        super().__init__(input_ids, input_prompt, idx, prefix_already_computed_len, system_ids_len, code_book,
+                         constraint_decoding_predictor)
+        self._event = None
+        self._loop = None
+        self._exception = None
+
+    def set_finished(self, is_partial=False, exception=None):
+        super().set_finished(is_partial)
+        self._loop.call_soon_threadsafe(self._event.set)
+        self._exception = exception
+
+    async def wait_until_done(self):
+        await self._event.wait()
+
+    @classmethod
+    def from_request(cls, input_ids, request_id, sampling_kwargs):
+        query = AsyncQuery(input_ids, code_book=None, input_prompt='', idx=request_id, prefix_already_computed_len=0)
+        query.id = request_id
+        query.top_k = sampling_kwargs.get("top_k", 0)
+        query.top_p = sampling_kwargs.get("top_p", 1.0)
+        query.temperature = sampling_kwargs.get("temperature", 1.0)
+        query.max_new_tokens = sampling_kwargs.get("max_new_tokens", 32)
+        query.max_length = sampling_kwargs.get("max_length", 1024)
+        return query
+
+
+class InflightQueue:
+
+    def __init__(self):
+        self.query_pool = {}
+        self.queue = []
+        self.lock = Lock()
+
+    def append(self, item):
+        with self.lock:
+            self.query_pool[item.id] = item
+            self.queue.append(item)
+
+    def truncate(self, length):
+        with self.lock:
+            self.queue = self.queue[length:]
+
+    def get_earliest(self, length):
+        with self.lock:
+            return self.queue[:length]
+
+    def __len__(self):
+        with self.lock:
+            return len(self.queue)
+
+    def __iter__(self):
+        with self.lock:
+            return iter(self.queue.copy())

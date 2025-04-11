@@ -59,6 +59,7 @@ actor_rollout_ref:
     upgo_loss_weight: 0.0
     upgo_loss_version: 1
     kl_loss_weight: 0.0
+    offpolicy_kl_loss_weight: 0.0
     lm_loss_weight: 0.0
     kl_penalty: ${algorithm.kl_penalty}
     entropy_coeff: 0.001
@@ -168,6 +169,7 @@ actor_rollout_ref:
     rollout_pool:
       nnodes: 1
       warmup_step: 0
+  rollout_server_args: ${rollout_server}
   streaming_rollout_args: ${streaming_rollout}
   streaming_validator_args: ${streaming_validator}
   use_cuda_timer: False # doesn't take effect; only for backward-compatibility
@@ -375,6 +377,10 @@ streaming_rollout:
   force_eos: False
 
 streaming_validator:
+  n_gpus_per_node: 0
+  nnodes: 0
+
+rollout_server:
   n_gpus_per_node: 0
   nnodes: 0
 

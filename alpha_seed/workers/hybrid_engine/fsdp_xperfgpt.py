@@ -31,6 +31,7 @@ from verl.utils.torch_functional import broadcast_dict_tensor, allgather_dict_te
 from verl.utils.debug import log_gpu_memory_usage
 
 from alpha_seed.workers.xperf_rollout.session import InferenceSession
+from alpha_seed.workers.xperf_rollout.utils.weights_communicater import WeightsCommunicater
 
 import torch
 import torch.distributed
@@ -64,12 +65,9 @@ class ActorXPerfGPTShardingManager(BaseShardingManager):
 
         # here standalone means standalone validator or standalone validator
         self.standalone = standalone
-
         self.bind_fn = get_xperf_gpt_weight_bind_fn(model_config,
                                                     self.inference_engine.engine.module.quant_mode,
                                                     backend=backend)
-        # will be set when calling to `setup_standalone_rollout_comm`
-        self.has_standalone_workers = False
 
         # Note that torch_random_states may be different on each dp rank
         self.torch_random_states = torch.cuda.get_rng_state()
@@ -86,44 +84,9 @@ class ActorXPerfGPTShardingManager(BaseShardingManager):
         # True for generation only scenarios, we don't need to update weights, only call bind_fn for once
         self.only_bind_once = only_bind_once
         self._bind_fn_called = False
-
-    def setup_standalone_worker_comm(self, hybrid_master_address, standalone_master_address, port, role):
-        assert role in ["standalone_rollout", "standalone_validator"]
-        assert (hybrid_master_address is not None)
-        assert (standalone_master_address is not None)
-        self.has_standalone_workers = True
-
-        master_address = hybrid_master_address[0].meta_info["hybrid_master_addr"]
-        hybrid_world_size = len(hybrid_master_address)
-        standalone_world_size = len(standalone_master_address)
-        rank = torch.distributed.get_rank() + (0 if not self.standalone else hybrid_world_size)
-        world_size = hybrid_world_size + standalone_world_size
-        comm_info = {
-            "hybrid_world_size": hybrid_world_size,
-            "standalone_world_size": standalone_world_size,
-            "rank": rank,
-            "world_size": world_size,
-            "master_address": master_address,
-            "master_port": port
-        }
-        print(comm_info)
-
-        with patch.dict(
-                os.environ,
-            {
-                'RANK': str(comm_info["rank"]),
-                'WORLD_SIZE': str(comm_info["world_size"]),
-                'LOCAL_RANK': str(comm_info["rank"] % 8),
-                'LOCAL_WORLD_SIZE': str(min(8, comm_info["world_size"])),
-                'MASTER_ADDR': str(comm_info["master_address"]),
-                'MASTER_PORT': str(comm_info["master_port"]),  # find a free port
-                # need to disable custom ar for global connection
-                'XPERF_CUSTOM_ALL_REDUCE': "0",
-            }):
-            comm_info["nccl_layer"] = torch.classes.XGPT.NCCLPrimitive()
-            comm_info["nccl_layer"].init(f"standalone_{int(port)}", comm_info["world_size"], comm_info["rank"], "tcp",
-                                         0)
-        setattr(self, f"{role}_comm_info", comm_info)
+        self.weights_communicater = WeightsCommunicater(inference_engine=self.inference_engine,
+                                                        standalone=self.standalone,
+                                                        device_mesh=self.device_mesh)
 
     def release_param_and_cache(self):
         """Release the GPU memory occupied by xperf parameter and cache"""
@@ -158,9 +121,6 @@ class ActorXPerfGPTShardingManager(BaseShardingManager):
         else:
             load_to_cuda(tp_model=self.inference_engine.engine.module)
 
-        if hasattr(self.inference_engine, "infer_scheduler") and hasattr(self.inference_engine.infer_scheduler,
-                                                                         "init_cuda_graph"):
-            self.inference_engine.infer_scheduler.init_cuda_graph()
         # important: need to manually set the random states of each tp to be identical. Otherwise, xperf_gpt will hang
         if self.device_mesh is not None:
             self.torch_random_states = torch.cuda.get_rng_state()
@@ -220,57 +180,6 @@ class ActorXPerfGPTShardingManager(BaseShardingManager):
 
         data.check_consistency()
         return data
-
-    def update_standalone_worker(self, role):
-
-        def _update_xperf_model(comm_fn, comm_rank):
-            layernorm_weight = self.inference_engine.engine.module.layernorm_weight.cuda()
-            lm_head_weight = self.inference_engine.engine.module.lm_head_weight.cuda()
-            wte_weight = self.inference_engine.engine.module.wte_weight.cuda()
-            comm_fn(layernorm_weight, comm_rank)
-            comm_fn(lm_head_weight, comm_rank)
-            comm_fn(wte_weight, comm_rank)
-            self.inference_engine.engine.module.layernorm_weight = layernorm_weight
-            self.inference_engine.engine.module.lm_head_weight = lm_head_weight
-            self.inference_engine.engine.module.wte_weight = wte_weight
-            layers_weight = self.inference_engine.engine.module.layers_weight
-            for layer, layer_weight in enumerate(layers_weight):
-                for i, weight in enumerate(layer_weight):
-                    if isinstance(weight, torch.Tensor):
-                        origin_dtype = weight.dtype
-                        if origin_dtype == torch.float8_e4m3fn or origin_dtype == torch.uint8:
-                            # use int8 to communicate
-                            weight = weight.view(torch.int8)
-                            if (self.inference_engine.engine.module.quant_mode == "WFP8"):
-                                origin_dtype = torch.float8_e4m3fn
-                        weight = weight.cuda()
-                        comm_fn(weight, comm_rank)
-                        self.inference_engine.engine.module.layers_weight[layer][i].data = weight.view(
-                            origin_dtype).data
-            self.inference_engine.current_steps = 0
-
-        comm_info = getattr(self, f"{role}_comm_info")
-        hybrid_world_size = comm_info["hybrid_world_size"]
-        standalone_world_size = comm_info["standalone_world_size"]
-        rank = comm_info["rank"]
-        world_size = comm_info["world_size"]
-        nccl_layer = comm_info["nccl_layer"]
-
-        if self.standalone:
-            from_rank = rank % hybrid_world_size
-            _update_xperf_model(nccl_layer.recv, from_rank)
-        else:
-            for i in range((world_size - 1) // hybrid_world_size):
-                to_rank = rank + hybrid_world_size + i * hybrid_world_size
-                if to_rank < world_size:
-                    _update_xperf_model(nccl_layer.send, to_rank)
-
-        if self.standalone:
-            # restore random states
-            if self.device_mesh is not None:
-                torch.cuda.set_rng_state(self.gen_random_states)
-
-        log_gpu_memory_usage(f'After {role} update')
 
 
 class FSDPXPerfGPTShardingManager(ActorXPerfGPTShardingManager):

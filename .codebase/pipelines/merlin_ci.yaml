@@ -47,7 +47,7 @@ jobs:
     name: Merlin ci
     manual: false
     # v144
-    image: hub.byted.org/reckon/data.reckon.mlx.image_5940:36aebfdb72c17e002e016c4594c602c4
+    image: hub.byted.org/reckon/data.reckon.mlx.image_5940:e2ec141539bafdc9109d4f1c9cfc42a8
     envs:
       MERLIN_CN_TOKEN_LIUJUNCAI: ${{MERLIN_CN_TOKEN_LIUJUNCAI}}
       MERLIN_EXPERIMENT_ARNOLD_API_TOKEN_LIUJUNCAI: ${{MERLIN_EXPERIMENT_ARNOLD_API_TOKEN_LIUJUNCAI}}

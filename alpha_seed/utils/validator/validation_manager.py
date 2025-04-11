@@ -178,7 +178,7 @@ class ValidateManager(object):
 
                 # mark the paddig data uid to None
                 for i in range(pad_size):
-                    test_gen_batch_padded.non_tensor_batch['uid'][i] = None
+                    test_gen_batch_padded.non_tensor_batch['uid'][-1 - i] = None
 
                 test_output_gen_batch = validator_wg.generate_sequences(test_gen_batch_padded)
                 test_output_gen_batch.batch['prompts'] = test_output_gen_batch.batch['input_ids'][:, :self.config.data.

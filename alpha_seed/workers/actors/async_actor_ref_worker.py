@@ -96,8 +96,8 @@ class AsyncActorRolloutRefWorker(Worker):
         self.role = role
         assert self.role in [
             'actor', 'rollout', 'ref', 'actor_rollout', 'actor_rollout_ref', 'standalone_rollout',
-            'standalone_validator'
-        ]
+            'standalone_validator', 'rollout_server'
+        ], f'Invalid role: {self.role}'
 
         self._is_actor = self.role in ['actor', 'actor_rollout', 'actor_rollout_ref']
         self._is_rollout = self.role in ['rollout', 'actor_rollout', 'actor_rollout_ref']
@@ -107,7 +107,7 @@ class AsyncActorRolloutRefWorker(Worker):
 
         self.actor_strategy = config.actor.strategy
         self.ref_strategy = config.ref.strategy
-
+        self.local_path = None
         # actor model
         if self.actor_strategy in ('fsdp', 'vescale-fsdp2'):
             actor_fsdp_size = config.actor.fsdp_size
@@ -198,15 +198,17 @@ class AsyncActorRolloutRefWorker(Worker):
 
         log_gpu_memory_usage('Before init from HF AutoModel', logger=logger)
         # TODO: ignore pulling model file if resuming ckpt
-        local_path = download_minimal_required_files(model_path, from_scratch, torch.distributed.get_rank(),
-                                                     torch.distributed.get_world_size())
+        self.local_path = download_minimal_required_files(model_path, from_scratch, torch.distributed.get_rank(),
+                                                          torch.distributed.get_world_size())
 
         # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect
-        self.tokenizer = AutoTokenizer.from_pretrained(local_path, trust_remote_code=trust_remote_code)
+        # TODO(zhangchi.usc1992): 1. support create from random initialized model. 2. Support init with FSDP directly
+        self.tokenizer = AutoTokenizer.from_pretrained(self.local_path, trust_remote_code=trust_remote_code)
         torch_dtype = torch.float32 if self._is_actor else torch.bfloat16
 
         # override model kwargs
-        actor_model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code)
+        actor_model_config = AutoConfig.from_pretrained(self.local_path, trust_remote_code=trust_remote_code)
+
         override_config_kwargs = {
             'bos_token_id': self.tokenizer.bos_token_id,
             'eos_token_id': self.tokenizer.eos_token_id,
@@ -310,7 +312,7 @@ class AsyncActorRolloutRefWorker(Worker):
             recompute=enable_gradient_checkpointing,
             act_offload=self.config.actor.act_offload if role == 'actor' else False,
             param_offload=param_offload,
-            weights=local_path if from_scratch else None,
+            weights=self.local_path if from_scratch else None,
             ignored_modules=ignored_modules,
             enable_training_stats=enable_training_stats,
             act_offload_kwargs=act_offload_kwargs)
@@ -523,10 +525,10 @@ class AsyncActorRolloutRefWorker(Worker):
         log_gpu_memory_usage('Before AsyncXPerfGPTRollout init')
 
         # actually, we just need hf_config in order to build rollout
-        rollout = AsyncXPerfGPTRollout(config=self.config.rollout,
-                                       tokenizer=self.tokenizer,
-                                       model_hf_config=self.actor_model_config,
-                                       is_standalone=self._is_standalone_rollout)
+        rollout = AsyncXPerfGPTRollout(config=self.config.rollout)
+        rollout.initialize(local_path=self.local_path,
+                           is_standalone=self._is_standalone_rollout or self._is_standalone_validator)
+        rollout.setup_rollout()
         log_gpu_memory_usage('After AsyncXPerfGPTRollout init')
 
         # Note that in standalone case, model is None.
@@ -634,7 +636,8 @@ class AsyncActorRolloutRefWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def setup_standalone_worker_comm(self, hybrid_master_address, standalone_master_address, port, role):
-        self.sharding_manager.setup_standalone_worker_comm(hybrid_master_address, standalone_master_address, port, role)
+        self.sharding_manager.weights_communicater.setup_standalone_worker_comm(hybrid_master_address,
+                                                                                standalone_master_address, port, role)
 
     def _normalize_config(self):
         config = self.config
@@ -826,7 +829,7 @@ class AsyncActorRolloutRefWorker(Worker):
         # TODO(zhangchi.usc1992): we have a redundant weight binding here for standalone validator
         # Try to remove it by introduing an argument
         with self.sharding_manager:
-            self.sharding_manager.update_standalone_worker(role)
+            self.sharding_manager.weights_communicater.update_standalone_worker(role)
         if not self.sharding_manager.standalone and self.config.actor.train_memory_offload:
             self.to("cpu", model=True, optimizer=False)
 

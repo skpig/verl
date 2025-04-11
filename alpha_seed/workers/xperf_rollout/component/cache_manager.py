@@ -105,12 +105,7 @@ class CacheManager:
                     self.page_swap_out_bs += 1
                     self.page_swap_out_token += len(query.input_ids) + len(query.new_token_ids)
                 self.release_query(query)
-                query.kv_slot_ids = []
-                query.is_context_computing = True
-                query.input_ids.extend(query.new_token_ids)
-                query.new_token_ids = []
-                query.context_shift = 0
-                query.prefix_already_computed_len = 0
+                query.reset_compute()
                 waiting.append(query)
 
         # See if any query from the waiting-list can be activated
@@ -145,6 +140,7 @@ class CacheManager:
             query.kv_slot_ids = []
             query.is_context_computing = True
             query.input_ids.extend(query.new_token_ids)
+            query.global_new_token_ids.extend(query.new_token_ids)
             query.new_token_ids = []
             query.context_shift = 0
             query.prefix_already_computed_len = 0

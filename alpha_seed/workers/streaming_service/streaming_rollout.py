@@ -25,9 +25,16 @@ import tempfile
 import json
 import queue
 import threading
-import time
-
+from fastapi import FastAPI, Request
+from fastapi.responses import StreamingResponse
+import uvicorn
+from typing import AsyncGenerator
+import asyncio
+import xperf_gpt
 from alpha_seed.workers.xperf_rollout.session import InferenceSession, StepProfiler
+from alpha_seed.workers.xperf_rollout.component.query import Query
+from single_controller.base.worker import WorkerHelper
+from single_controller.base import Worker
 
 from pathlib import Path
 import os
@@ -38,12 +45,13 @@ import torch.distributed as dist
 
 import torch.distributed
 from torch.distributed.device_mesh import init_device_mesh
+from single_controller.base.decorator import register, Dispatch
 
 from contextlib import contextmanager
 import logging
 
 from alpha_seed.workers.xperf_rollout.utils import get_xperf_gpt_config
-from alpha_seed.workers.streaming_service.streaming_utils import is_multihost_model, get_gpus_per_node
+from alpha_seed.workers.streaming_service.streaming_utils import is_multihost_model, DataPack, pack_to_dataproto, get_gpus_per_node
 from alpha_seed.workers.xperf_rollout.utils.layout_convert_helper import offload_to_device
 from alpha_seed.workers.streaming_service.xperf_model_prophet import XperfModelProphet
 from alpha_seed.workers.xperf_rollout.utils.logits_manipulate import logits_manipulate_fn_core, logits_manipulate_fn_eta, logits_manipulate_fn_minp, logits_manipulate_fn_clip
@@ -96,29 +104,61 @@ class AsyncXPerfGPTRollout(object):
     If tp_device_mesh is None, we assume it is executed on a single GPU
     """
 
-    def __init__(self, config, tokenizer, model_hf_config, is_standalone=False):
+    def __init__(self, config, role: str = 'rollout'):
         self.config = config
-        self.tokenizer = tokenizer
-        if hasattr(config, 'profile'):
-            self.profiler_context = get_profiler_context_wrapped(filename=config.profile.filename,
-                                                                 profile_on_ranks=config.profile.profile_on_ranks,
-                                                                 upload_to_mlx=config.profile.upload_to_mlx,
-                                                                 enable=config.profile.enable,
+        self.role = role
+
+    def initialize(self,
+                   local_path=None,
+                   is_standalone=False,
+                   rank=None,
+                   world_size=None,
+                   master_addr=None,
+                   master_port=None):
+        from alpha_seed.utils.ckpt.hdfs import download_minimal_required_files
+
+        local_path = download_minimal_required_files(local_path, False, torch.distributed.get_rank(),
+                                                     torch.distributed.get_world_size())
+
+        from transformers import AutoTokenizer, AutoConfig
+        from omegaconf import OmegaConf
+        print(f'local_path: {local_path}')
+
+        from seed_models import P4Config, P5Config, P6Config
+        self.tokenizer = AutoTokenizer.from_pretrained(local_path, trust_remote_code=False)
+        self.model_hf_config = AutoConfig.from_pretrained(local_path, trust_remote_code=False)
+        self.is_standalone = is_standalone
+
+        self.rank = rank
+        self.world_size = world_size
+        if master_addr is None:
+            master_addr_port = list(WorkerHelper().get_availale_master_addr_port())
+            master_addr = master_addr_port[0]
+            master_port = master_addr_port[1]
+        self.master_addr = master_addr
+        self.master_port = master_port
+        xperf_gpt.load_xperf_gpt()
+
+    def setup_rollout(self):
+        if hasattr(self.config, 'profile'):
+            self.profiler_context = get_profiler_context_wrapped(filename=self.config.profile.filename,
+                                                                 profile_on_ranks=self.config.profile.profile_on_ranks,
+                                                                 upload_to_mlx=self.config.profile.upload_to_mlx,
+                                                                 enable=self.config.profile.enable,
                                                                  wait=1)
         else:
             self.profiler_context = nullcontext(NullProfileEnter())
-        self.is_standalone = is_standalone
         self.async_remain_warmup_step = self.config.rollout_pool.get("warmup_step", 0)
         # auto infer rollout running config
         enable_paged_attn = self.config.get('enable_paged_attention', True)
         enable_cuda_graph = self.config.get('enable_cuda_graph', False)
         slot_block_size = self.config.get('slot_block_size', 1024)
 
-        model_cfg = get_xperf_gpt_config(model_config=model_hf_config, tokenizer=tokenizer)
+        model_cfg = get_xperf_gpt_config(model_config=self.model_hf_config, tokenizer=self.tokenizer)
         model_cfg["quant_mode"] = self.config.get("quant_mode", "NO_QUANT")
         sched_cfg = {
-            "max_sequence_length": config.prompt_length + config.response_length,
-            "max_context_len": config.prompt_length,
+            "max_sequence_length": self.config.prompt_length + self.config.response_length,
+            "max_context_len": self.config.prompt_length,
             "vllm_block_size": slot_block_size,
         }
         tp_size = self.config.get('tensor_model_parallel_size', 1)
@@ -156,90 +196,25 @@ class AsyncXPerfGPTRollout(object):
         )
         torch.manual_seed(9898)
 
-        if config.get('enable_eot', False):
-            bothink = tokenizer.convert_tokens_to_ids("<Begin_of_Thinking>")
-            eothink = tokenizer.convert_tokens_to_ids("<End_of_Thinking>")
-            boresponse = tokenizer.convert_tokens_to_ids("<Begin_of_Response>")
-            eoresponse = tokenizer.convert_tokens_to_ids("<End_of_Response>")
-
-            logits_manipulate_fn = partial(logits_manipulate_fn_core,
-                                           manipulate_args={
-                                               'eothink': eothink,
-                                               'response_length': config.response_length,
-                                               'soft_interval': config.get('soft_interval', 512),
-                                               'summary_min_space': config.get('summary_min_space', 1024)
-                                           })
-        elif config.get("ban_eos", 'v0') != 'v0':
-            if config['ban_eos'] == 'v1':
-                eos_id = tokenizer.eos_token_id
-            elif config['ban_eos'] == 'v2':
-                eos_id = tokenizer.convert_tokens_to_ids('</')
-            else:
-                raise NotImplementedError(f'ban_eos {config["ban_eos"]} not supported')
-            gen_start_ids = tokenizer.encode(f"{tokenizer.bos_token}assistant\n")
-
-            def find_gen_start_ids(history_id, gen_start_ids):
-                for i in range(len(history_id)):
-                    if gen_start_ids == history_id[i:i + len(gen_start_ids)]:
-                        return i + len(gen_start_ids)
-                return None
-
-            def logits_manipulate_fn_core(logits, history_ids, manipulate_args):
-                eos_id = manipulate_args['eos_id']
-                max_len = manipulate_args['max_len']
-                gen_start_ids = manipulate_args['gen_start_ids']
-                LARGE = max(1000.0, torch.max(logits) - torch.min(logits))
-                ban_eos_list = []
-                for history_id in history_ids:
-                    gen_start_idx = find_gen_start_ids(history_id, gen_start_ids)
-                    assert gen_start_idx is not None, history_id
-                    ban_eos = (len(history_id) - gen_start_idx) < (0.5 * max_len)
-                    ban_eos_list.append(ban_eos)
-                ban_eos = torch.tensor(ban_eos_list, device=logits.device).float()
-                logits[:, eos_id] -= LARGE * ban_eos
-                return logits
-
-            logits_manipulate_fn = partial(logits_manipulate_fn_core,
-                                           manipulate_args={
-                                               'eos_id': eos_id,
-                                               'max_len': config.response_length,
-                                               'gen_start_ids': gen_start_ids
-                                           })
-        elif config.train_generate_kwargs['min_p'] != -1:
-            logits_manipulate_fn = partial(logits_manipulate_fn_minp,
-                                           manipulate_args={
-                                               'min_p': config.train_generate_kwargs.min_p,
-                                           })
-        elif config.train_generate_kwargs['eta_epsilon'] != -1:
-            logits_manipulate_fn = partial(logits_manipulate_fn_eta,
-                                           manipulate_args={
-                                               'eta_epsilon': config.train_generate_kwargs.eta_epsilon,
-                                           })
-        elif config.train_generate_kwargs['logits_clamp'] != 0:
-            logits_manipulate_fn = partial(logits_manipulate_fn_clip,
-                                           manipulate_args={
-                                               'logits_clamp': config.train_generate_kwargs.logits_clamp,
-                                           })
-        else:
-            logits_manipulate_fn = None
-        generate_kwargs = dict(max_new_tokens=config.response_length,
-                               do_sample=config.train_generate_kwargs.do_sample,
-                               top_k=config.train_generate_kwargs.top_k,
-                               top_p=config.train_generate_kwargs.top_p,
-                               temperature=config.train_generate_kwargs.temperature,
+        logits_manipulate_fn = None
+        generate_kwargs = dict(max_new_tokens=self.config.response_length,
+                               do_sample=self.config.train_generate_kwargs.do_sample,
+                               top_k=self.config.train_generate_kwargs.top_k,
+                               top_p=self.config.train_generate_kwargs.top_p,
+                               temperature=self.config.train_generate_kwargs.temperature,
                                logits_manipulate_fn=logits_manipulate_fn)
-        step_profiler = StepProfiler(config.profile)
+        step_profiler = StepProfiler(self.config.profile)
         inference_sess = InferenceSession(num_slots=num_slots,
                                           max_batch_size=max_batch_size,
-                                          max_length=config.prompt_length + config.response_length,
+                                          max_length=self.config.prompt_length + self.config.response_length,
                                           slot_block_size=slot_block_size,
                                           enable_paged_attn=enable_paged_attn,
-                                          vocab_tp=config.get('vocab_tp', False),
+                                          vocab_tp=self.config.get('vocab_tp', False),
                                           enable_truncation=False,
                                           context_limit_bs=max_ctx_batch_size,
                                           enable_cuda_graph=enable_cuda_graph,
-                                          standalone=is_standalone,
-                                          schedule_strategy=config.schedule_strategy,
+                                          standalone=self.is_standalone,
+                                          schedule_strategy=self.config.schedule_strategy,
                                           step_profiler=step_profiler)
         inference_sess.max_off_policy_steps = self.config.get('max_off_policy_steps', 5)
         with tempfile.NamedTemporaryFile(mode='w', suffix=".json") as f:
@@ -297,7 +272,7 @@ class AsyncXPerfGPTRollout(object):
                                                                  mp_size=tp_size,
                                                                  enable_metrics=True,
                                                                  use_ep=use_ep,
-                                                                 tokenizer_path=tokenizer.name_or_path,
+                                                                 tokenizer_path=self.tokenizer.name_or_path,
                                                                  multi_host_tp=multi_host_tp)
                     if dist.is_initialized() and tp_size > 1:
                         dist.barrier()
@@ -313,8 +288,31 @@ class AsyncXPerfGPTRollout(object):
         self.__init_sub_process()
 
         # offload to meta device
-        offload_to_device(self.inference_engine.engine.module, "meta")
+        if not self.is_standalone:
+            offload_to_device(self.inference_engine.engine.module, "meta")
         torch.cuda.empty_cache()
+
+    def add_inflight_query(self, query):
+        query._event = asyncio.Event()
+        query._loop = asyncio.get_running_loop()
+        # inference_engine is running on a different threads
+        # FIXME: use different lock when the weights are updating?
+        with self.inference_engine.update_weights_lock:
+            self.inference_engine.pending.append(query)
+        return query.id
+
+    async def get_inflight_query(self, query_id):
+        with self.inference_engine.update_weights_lock:
+            query = self.inference_engine.pending.query_pool[query_id]
+        await query.wait_until_done()
+        query._event = None
+        query._loop = None
+        if query._exception is not None:
+            raise query._exception
+        return query
+
+    def get_master_addr_port(self):
+        return self.master_addr, self.master_port
 
     def _set_tuner_config(self):
         os.environ["USE_SESSION_CACHE"] = "0"
@@ -364,7 +362,8 @@ class AsyncXPerfGPTRollout(object):
         self.input_queue = queue.Queue()
         self.output_queue = queue.Queue()
         self.stop_event = threading.Event()
-        self.process_thread = threading.Thread(target=self.generate, args=())
+        self.process_thread = threading.Thread(
+            target=self.generate if self.role != "rollout_server" else self.async_generate, args=())
         self.process_thread.start()
 
     def set_rollout_callback_function(self, eos_callback_fn):
@@ -381,34 +380,39 @@ class AsyncXPerfGPTRollout(object):
         if hasattr(self.inference_engine.engine.module, "_prepare_yarn_embedding"):
             self.inference_engine.engine.module._prepare_yarn_embedding()
 
-    def _postprocess(self, off_p_list, on_p_list, target_length, pad_token=-1, mode="off_policy_step"):
-        assert (len(off_p_list) == len(on_p_list))
-        list_padded = []
-        for i, on_p_list_i in enumerate(on_p_list):
-            off_p_list_i = off_p_list[i]
-            prev_index = torch.nonzero(off_p_list_i == -1)
-            if prev_index.numel() == 0:
-                prev_index = -1
-            else:
-                prev_index = prev_index[0]
-            cur_list_i = off_p_list_i[:prev_index].tolist() + on_p_list_i
-            if mode == "off_policy_step":
-                cur_list_i = [x + 1 for x in cur_list_i]
-            # off-policy + on-policy might exceeds the target length
-            if len(cur_list_i) > target_length:
-                padded_list = cur_list_i[:target_length]
-            else:
-                padded_list = cur_list_i + [pad_token] * (target_length - len(cur_list_i))
-            list_padded.append(padded_list)
-        t_padded = torch.tensor(list_padded)
-        return t_padded
+    def _dump_context(self):
+        if os.getenv('XPERF_DUMP_NAN', '0') == '1':
+            from hdfs_io.hdfs_io import hcopy, hmkdir
+            dump_nan_dir = self.config.get("dump_nan", None)
+            if dump_nan_dir is None:
+                print("dump_nan config is not set, skip")
+                return
+            global_rank = 0 if not dist.is_initialized() else dist.get_rank()
+            tp_rank = 0 if self.device_mesh is None else self.device_mesh['tp'].get_local_rank()
+            tp_size = 1 if self.device_mesh is None else self.device_mesh['tp'].size()
+            save_model_name = f"{global_rank}_{tp_rank}_{tp_size}"
+            print("saving... inference engine ... ", f"{save_model_name}_model_engine")
+            torch.save(self.inference_engine.engine.module.layers_weight,
+                       f"{save_model_name}_model_engine_layers_weight.pt")
+            torch.save(self.inference_engine.engine.module.wte_weight, f"{save_model_name}_model_engine_wte_weight.pt")
+            torch.save(self.inference_engine.engine.module.lm_head_weight,
+                       f"{save_model_name}_model_engine_lm_head_weight.pt")
+            torch.save(self.inference_engine.engine.module.layernorm_weight,
+                       f"{save_model_name}_model_engine_layernorm_weight.pt")
+            torch.save(self.inference_engine.get_inorder_responses(), f"{save_model_name}_output.pt")
+            print(f"dump weights/tensors to {dump_nan_dir}")
+            hmkdir(self.config.get("dump_nan", None))
+            hcopy(f"{save_model_name}_model_engine_layers_weight.pt", self.config.get("dump_nan", None))
+            hcopy(f"{save_model_name}_model_engine_wte_weight.pt", self.config.get("dump_nan", None))
+            hcopy(f"{save_model_name}_model_engine_layernorm_weight.pt", self.config.get("dump_nan", None))
+            hcopy(f"{save_model_name}_model_engine_lm_head_weight.pt", self.config.get("dump_nan", None))
+            hcopy(f"{save_model_name}_output.pt", self.config.get("dump_nan", None))
 
     def generate(self):
         torch.cuda.set_device(int(os.getenv('LOCAL_RANK', '0')))
         while True:
             (query_pool, complete_ratio, generation_kwargs, prompt_meta_info) = self.input_queue.get(block=True)
             original_query_pool = copy.deepcopy(query_pool)
-
             # convert omegaconf config to py obj to prevent performance issue
             generation_kwargs = omegaconf_config_to_py_obj(generation_kwargs)
             self.inference_engine.set_generator_strategy(**generation_kwargs)
@@ -421,36 +425,7 @@ class AsyncXPerfGPTRollout(object):
                                                   prompt_meta_info=prompt_meta_info)
                     profile_step(p, None)
                 except Exception as e:
-                    if os.getenv('XPERF_DUMP_NAN', '0') == '1':
-                        from hdfs_io.hdfs_io import hcopy, hmkdir
-                        dump_nan_dir = self.config.get("dump_nan", None)
-                        if dump_nan_dir is None:
-                            print("dump_nan config is not set, skip")
-                            raise (e)
-                        global_rank = 0 if not dist.is_initialized() else dist.get_rank()
-                        tp_rank = 0 if self.device_mesh is None else self.device_mesh['tp'].get_local_rank()
-                        tp_size = 1 if self.device_mesh is None else self.device_mesh['tp'].size()
-                        save_model_name = f"{global_rank}_{tp_rank}_{tp_size}"
-                        print("saving... inference engine ... ", f"{save_model_name}_model_engine")
-                        torch.save(self.inference_engine.engine.module.layers_weight,
-                                   f"{save_model_name}_model_engine_layers_weight.pt")
-                        torch.save(self.inference_engine.engine.module.wte_weight,
-                                   f"{save_model_name}_model_engine_wte_weight.pt")
-                        torch.save(self.inference_engine.engine.module.lm_head_weight,
-                                   f"{save_model_name}_model_engine_lm_head_weight.pt")
-                        torch.save(self.inference_engine.engine.module.layernorm_weight,
-                                   f"{save_model_name}_model_engine_layernorm_weight.pt")
-                        torch.save(query_pool, f"{save_model_name}_query_pool.pt")
-                        torch.save(self.inference_engine.get_inorder_responses(), f"{save_model_name}_output.pt")
-                        print(f"dump weights/tensors to {dump_nan_dir}")
-                        hmkdir(self.config.get("dump_nan", None))
-                        hcopy(f"{save_model_name}_model_engine_layers_weight.pt", self.config.get("dump_nan", None))
-                        hcopy(f"{save_model_name}_model_engine_wte_weight.pt", self.config.get("dump_nan", None))
-                        hcopy(f"{save_model_name}_model_engine_layernorm_weight.pt", self.config.get("dump_nan", None))
-                        hcopy(f"{save_model_name}_model_engine_lm_head_weight.pt", self.config.get("dump_nan", None))
-                        hcopy(f"{save_model_name}_query_pool.pt", self.config.get("dump_nan", None))
-                        hcopy(f"{save_model_name}_output.pt", self.config.get("dump_nan", None))
-
+                    self._dump_context()
                     raise (e)
 
             response_outputs = []
@@ -466,14 +441,19 @@ class AsyncXPerfGPTRollout(object):
                 response_probs_lt_threshold_sum.append(v.probs_lt_threshold_sum)
                 is_finished.append(v.is_finished)
                 off_policy_steps.append([-1] * len(v.new_token_log_probs))
-            is_finished = torch.Tensor(is_finished)
             metrics = {}
             if hasattr(self.inference_engine.infer_scheduler,
                        "init_metrics") and self.inference_engine.infer_scheduler.enable_metrics:
                 metrics = self.inference_engine.infer_scheduler.metrics
             self.inference_engine.empty_cache()
-            self.output_queue.put((response_outputs, response_log_probs, response_probs_gt_threshold_num,
-                                   response_probs_lt_threshold_sum, is_finished, off_policy_steps, metrics))
+            data_pack = DataPack(response_outputs=response_outputs,
+                                 response_log_probs=response_log_probs,
+                                 response_probs_gt_threshold_num=response_probs_gt_threshold_num,
+                                 response_probs_lt_threshold_sum=response_probs_lt_threshold_sum,
+                                 this_turn_off_policy_steps=off_policy_steps,
+                                 is_finished=is_finished,
+                                 metrics=metrics)
+            self.output_queue.put(data_pack)
 
     def _get_output_from_queue(self):
         while True:
@@ -492,11 +472,7 @@ class AsyncXPerfGPTRollout(object):
         prompt_ids = prompts.batch['input_ids']  # (bs, prompt_length)
         batch_size = prompt_ids.shape[0]
         # left-padded attention_mask
-        attention_mask = prompts.batch['attention_mask']
         off_turn_off_policy_steps = prompts.batch["off_policy_steps"]
-        off_policy_response_log_probs = prompts.batch["rollout_log_probs"]
-        off_policy_probs_gt_threshold_num = prompts.batch["probs_gt_threshold_num"]
-        off_policy_probs_lt_threshold_sum = prompts.batch["probs_lt_threshold_sum"]
         first_non_one_indices = (prompt_ids != self.tokenizer.pad_token_id).int().argmax(dim=1)
         rmv_padding_prompt_ids = [row[index:].tolist() for row, index in zip(prompt_ids, first_non_one_indices)]
 
@@ -516,62 +492,98 @@ class AsyncXPerfGPTRollout(object):
             # stop event
             if self.async_remain_warmup_step <= 0:
                 self.stop_event.set()
-            (response_outputs, response_log_probs, response_probs_gt_threshold_num, response_probs_lt_threshold_sum,
-             is_finished, this_turn_off_policy_steps, metrics) = self._get_output_from_queue()
+            data_pack = self._get_output_from_queue()
             if self.async_remain_warmup_step <= 0:
                 self.stop_event.clear()
             self.async_remain_warmup_step -= 1
         else:
             # complete_ratio or all prompts are finished
-            (response_outputs, response_log_probs, response_probs_gt_threshold_num, response_probs_lt_threshold_sum,
-             is_finished, this_turn_off_policy_steps, metrics) = self._get_output_from_queue()
+            data_pack = self._get_output_from_queue()
 
-        # Note that the tokenizer may change at runtime
-        tokenizer: PreTrainedTokenizer = self.tokenizer
-        # remove warning
-        tokenizer.deprecation_warnings['Asking-to-pad-a-fast-tokenizer'] = True
-        with patch.object(tokenizer, "padding_side", "right"):
-            response_outputs = tokenizer.pad(dict(input_ids=response_outputs),
-                                             padding="max_length",
-                                             max_length=max_new_tokens,
-                                             return_tensors="pt")
-
-        response_log_probs = self._postprocess(off_policy_response_log_probs,
-                                               response_log_probs,
-                                               max_new_tokens,
-                                               mode="log_prob")
-        response_probs_gt_threshold_num = self._postprocess(off_policy_probs_gt_threshold_num,
-                                                            response_probs_gt_threshold_num,
-                                                            max_new_tokens,
-                                                            mode="probs_gt_threshold_num")
-        response_probs_lt_threshold_sum = self._postprocess(off_policy_probs_lt_threshold_sum,
-                                                            response_probs_lt_threshold_sum,
-                                                            max_new_tokens,
-                                                            mode="probs_lt_threshold_sum")
-        response_off_policy = self._postprocess(off_turn_off_policy_steps,
-                                                this_turn_off_policy_steps,
-                                                max_new_tokens,
-                                                mode="off_policy_step")
-        response_ids = response_outputs["input_ids"].cuda().to(torch.int32)
-        response_attention_mask = response_outputs["attention_mask"].cuda().to(torch.int8)
-        attention_mask = torch.hstack((attention_mask, response_attention_mask))
-        input_ids = torch.hstack((prompt_ids, response_ids))
-
-        # all the tp ranks should contain the same data here. data in all ranks are valid
-        batch = {
-            # 'prompts': prompt_ids,
-            # 'responses': response_ids,
-            'rollout_log_probs': response_log_probs.to(torch.bfloat16),
-            'probs_gt_threshold_num': response_probs_gt_threshold_num.to(torch.bfloat16),
-            'probs_lt_threshold_sum': response_probs_lt_threshold_sum.to(torch.bfloat16),
-            'input_ids': input_ids.to(torch.int32),  # here input_ids become the whole sentences
-            'attention_mask': attention_mask.to(torch.int8),
-            'is_finished': is_finished.to(torch.int8),
-            'off_policy_steps': response_off_policy.to(torch.int8),
-        }
-
-        out = DataProto.from_dict(batch)
-        metrics["off_policy_steps"] = response_off_policy.tolist()
-        out.meta_info["xperf_metrics"] = metrics
-        out.meta_info["generation_kwargs"] = prompts.meta_info['generation_kwargs']
+        out = pack_to_dataproto(prompts=prompts, data_pack=data_pack, config=self.config, tokenizer=self.tokenizer)
         yield out
+
+    def async_generate(self):
+        torch.cuda.set_device(int(os.getenv('LOCAL_RANK', '0')))
+        while True:
+            with logging_set_level(self.config.get('logging_level', 'WARN')), self.profiler_context as p:
+                try:
+                    self.reset_status()
+                    self.inference_engine.async_execute(self.stop_event)
+                    profile_step(p, None)
+                except Exception as e:
+                    self._dump_context()
+                    raise (e)
+
+
+from omegaconf import DictConfig
+
+
+@ray.remote
+class RemoteAsyncXPerfGPTRollout(Worker):
+    """
+    This worker can be instantiated as a standalone actor or a standalone rollout or a standalone reference policy
+    or a hybrid engine based on the config.rollout
+    """
+
+    def __init__(self, config: DictConfig, role: str):
+        super().__init__()
+        if not torch.distributed.is_initialized():
+            from datetime import timedelta
+            timeout = timedelta(minutes=int(os.getenv('NCCL_TIMEOUT', 60)))
+            torch.distributed.init_process_group(backend="nccl", timeout=timeout)
+        self.config = config
+        self.rollout_actor = AsyncXPerfGPTRollout(config=self.config.rollout, role=role)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def add_inflight_query(self, query: Query):
+        return self.rollout_actor.add_inflight_query(query)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    async def get_inflight_query(self, query_id):
+        return await self.rollout_actor.get_inflight_query(query_id)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
+    def setup_rollout(self):
+        self.rollout_actor.initialize(self.config.model.path, True)
+        self.rollout_actor.setup_rollout()
+        from alpha_seed.workers.xperf_rollout.utils.weights_communicater import WeightsCommunicater
+        self.weights_communicater = WeightsCommunicater(inference_engine=self.rollout_actor.inference_engine,
+                                                        standalone=self.rollout_actor.is_standalone,
+                                                        device_mesh=self.rollout_actor.device_mesh)
+        # build device mesh
+        self.master_address = os.getenv('MASTER_ADDR', 'localhost')
+        self.master_port = os.getenv('MASTER_PORT', '12345')
+
+        print(f'Master address: {self.master_address}, Master port: {self.master_port}')
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def get_master_addr(self):
+        key = "standalone_master_addr" if self.rollout_actor.is_standalone else "hybrid_master_addr"
+        out = DataProto.from_dict(tensors={'mock': torch.tensor([[0]])}, meta_info={key: self.master_address})
+        return out
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def setup_standalone_worker_comm(self, hybrid_master_address, standalone_master_address, port, role):
+        self.weights_communicater.setup_standalone_worker_comm(hybrid_master_address, standalone_master_address, port,
+                                                               role)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
+    def stop_server_before_weights_update(self):
+        with self.rollout_actor.inference_engine.update_weights_lock:
+            self.rollout_actor.stop_event.set()
+
+        while (self.rollout_actor.inference_engine.stop_signal_tensor.item()
+               != self.rollout_actor.inference_engine.engine.module.tp_size):
+            import time
+            time.sleep(0.01)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def update_standalone_worker(self, role):
+        with self.rollout_actor.inference_engine.update_weights_lock:
+            self.weights_communicater.update_standalone_worker(role)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
+    def restart_server_after_weights_update(self):
+        with self.rollout_actor.inference_engine.update_weights_lock:
+            self.rollout_actor.stop_event.clear()

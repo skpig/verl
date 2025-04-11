@@ -1,5 +1,5 @@
 set -x
-
+ray stop --force
 NUM_STEPS="${NUM_STEPS:-240}"
 echo $NUM_STEPS
 
@@ -20,14 +20,14 @@ default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/t
 
 # 训练长度
 max_prompt_length=512 # 16384
-max_response_length=512 # 16384
+max_response_length=2048 # 16384
 # batch size && 训练epoch
 train_batch_size=512
 val_batch_size=5000
 ppo_mini_batch_size=128
 ppo_micro_batch_size=64
 total_epochs=100
-test_freq=1
+test_freq=10000
 save_freq=-1
 # 算法相关的参数
 actor_lr=1e-6
@@ -80,19 +80,20 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.actor.entropy_coeff=${entropy_coeff} \
     actor_rollout_ref.rollout.micro_batch_size=1024 \
     actor_rollout_ref.rollout.log_prob_micro_batch_size=512 \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
+    actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=xperf_gpt \
     +actor_rollout_ref.rollout.use_vllm=False \
     +actor_rollout_ref.rollout.num_slots=256 \
-    +actor_rollout_ref.rollout.slot_block_size=1024 \
-    +actor_rollout_ref.rollout.complete_ratio=0.5 \
+    +actor_rollout_ref.rollout.slot_block_size=512 \
+    +actor_rollout_ref.rollout.complete_ratio=1.0 \
     actor_rollout_ref.ref.log_prob_micro_batch_size=512 \
     actor_rollout_ref.ref.ema=0.99 \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
+    +actor_rollout_ref.rollout.enable_cuda_graph=False \
     critic.optim.lr=${critic_lr} \
     critic.optim.lr_warmup_steps_ratio=${lr_warmup_steps_ratio} \
     critic.model.path=${RM_MODEL_PATH} \
-    critic.model.enable_gradient_checkpointing=True \
+    critic.model.enable_gradient_checkpointing=False \
     critic.ppo_micro_batch_size=${ppo_micro_batch_size} \
     critic.model.fsdp_config.param_offload=False \
     +critic.model.override_config.attention_dropout=0. \
@@ -100,7 +101,7 @@ python3 tasks/main_ppo.py \
     +critic.model.override_config.resid_pdrop=0. \
     +critic.use_rmpad=True \
     critic.model.external_lib=seed_models \
-    reward_model.enable=True \
+    reward_model.enable=False \
     reward_model.model.input_tokenizer=null \
     reward_model.model.path=${RM_MODEL_PATH} \
     reward_model.micro_batch_size=512 \
@@ -124,7 +125,7 @@ python3 tasks/main_ppo.py \
     trainer.save_freq=${save_freq} \
     trainer.test_freq=${test_freq} \
     trainer.total_epochs=${total_epochs} \
-    trainer.eval_before_training=True \
+    trainer.eval_before_training=False \
     trainer.val_only=False \
     trainer.val_epoch=1 \
     trainer.need_log=False \
@@ -132,10 +133,12 @@ python3 tasks/main_ppo.py \
     trainer.resume_steps=disable \
     trainer.set_fake_attention_mask=False \
     trainer.fake_seqlen_ratio=0.5 \
-    streaming_rollout.nnodes=1 \
+    streaming_rollout.nnodes=0 \
     streaming_rollout.n_gpus_per_node=${N_GPUS_PER_NODE_STREAMING} \
     streaming_rollout.warmup_step=0 \
     streaming_rollout.force_eos=True \
     streaming_validator.nnodes=1 \
     streaming_validator.n_gpus_per_node=${N_GPUS_PER_NODE_STREAMING} \
+    rollout_server.nnodes=1 \
+    rollout_server.n_gpus_per_node=${N_GPUS_PER_NODE_STREAMING} \
     trainer.total_steps=${NUM_STEPS}
