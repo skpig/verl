@@ -130,6 +130,10 @@ class CriticWorker(Worker):
         torch_dtype = PrecisionType.to_dtype(torch_dtype)
         trust_remote_code = False
         critic_model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code)
+        architectures = [
+            arch.replace('ForCausalLM', 'ForTokenClassification') for arch in critic_model_config.architectures
+        ]
+        setattr(critic_model_config, 'architectures', architectures)
 
         use_rmpad = self.config.get('use_rmpad', False)
         if use_rmpad:
@@ -264,6 +268,10 @@ class CriticWorker(Worker):
         # TODO(zhangchi.usc1992): 1. support create from random initialized model. 2. Support init with FSDP directly
         self.tokenizer = AutoTokenizer.from_pretrained(config_path)
         critic_model_config = AutoConfig.from_pretrained(config_path)
+        architectures = [
+            arch.replace('ForCausalLM', 'ForTokenClassification') for arch in critic_model_config.architectures
+        ]
+        setattr(critic_model_config, 'architectures', architectures)
 
         megatron_config = MegatronConfig(**self.config.mariana.megatron)
 
