@@ -58,4 +58,4 @@ def compute_score(solution_str, ground_truth, verifier_service_psm, **argv) -> f
         except Exception as ex:
             continue
     print(f'Got exception in compute_score via verifier_service:')
-    return -1
+    return -2

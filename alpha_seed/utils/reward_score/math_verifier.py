@@ -56,4 +56,4 @@ def compute_score(solution_str, ground_truth, **argv) -> float:
         else:
             return -1
     except Exception as ex:
-        return -1
+        return -2
