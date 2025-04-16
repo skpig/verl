@@ -373,6 +373,7 @@ class AsyncActorRolloutRefWorker(Worker):
         log_gpu_memory_usage('Before init from HF AutoModel', logger=logger)
         # TODO: ignore pulling model file if resuming ckpt
         local_path = copy_local_path_from_hdfs(model_path)
+        self.local_path = local_path
 
         # TODO(zhangchi.usc1992): this logic is VERY VERY hacky as the upstream mariana
         # lacks huggingface folder checkpoint format

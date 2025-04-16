@@ -359,9 +359,11 @@ class MegatronPPOCritic(BasePPOCritic):
         max_token_len = data.meta_info['max_token_len']
 
         # perform dynamic bsz
-        micro_batches, num_micro_batches, indices = rearrange_micro_batches(batch=batch,
-                                                                            max_token_len=max_token_len,
-                                                                            dp_group=mpu.get_data_parallel_group())
+        micro_batches, num_micro_batches, indices = rearrange_micro_batches(
+            batch=batch,
+            max_token_len=max_token_len,
+            dp_group=mpu.get_data_parallel_group(),
+            min_num_micro_batch=mpu.get_pipeline_model_parallel_world_size())
 
         with torch.no_grad():
             output = self._forward_backward_batch(micro_batches, response_length=response_length, forward_only=True)
@@ -413,9 +415,11 @@ class MegatronPPOCritic(BasePPOCritic):
         for batch_idx, mini_batch in enumerate(dataloader):
             self._optimizer_zero_grad()
 
-            micro_batches, _, _ = rearrange_micro_batches(batch=mini_batch,
-                                                          max_token_len=self.config.ppo_max_token_len,
-                                                          dp_group=mpu.get_data_parallel_group())
+            micro_batches, _, _ = rearrange_micro_batches(
+                batch=mini_batch,
+                max_token_len=self.config.ppo_max_token_len,
+                dp_group=mpu.get_data_parallel_group(),
+                min_num_micro_batch=mpu.get_pipeline_model_parallel_world_size())
 
             metric_micro_batch = self._forward_backward_batch(micro_batches,
                                                               response_length=response_length,
