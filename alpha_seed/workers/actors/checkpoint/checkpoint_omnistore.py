@@ -6,37 +6,20 @@ import inspect
 import hdfs_io
 
 import warnings
-from packaging.version import Version
 
 import torch
 import torch.distributed
 
 from transformers import PretrainedConfig, PreTrainedTokenizer
-import importlib.metadata
 
 from .checkpoint_manager import BaseCheckpointManager
 
 from ray.actor import ActorHandle
 
+from alpha_seed.utils.version import check_omnistore_version
+
 REQUIRED_OMNISTORE_VERSION = '0.7.11'
-ACTUAL_OMNISTORE_VERSION = None
-
-
-def check_omnistore_version():
-    try:
-        global ACTUAL_OMNISTORE_VERSION
-        ACTUAL_OMNISTORE_VERSION = importlib.metadata.version('byted-omnistore')
-
-        assert Version(ACTUAL_OMNISTORE_VERSION) >= Version(REQUIRED_OMNISTORE_VERSION), \
-            f'byted-omnistore version {ACTUAL_OMNISTORE_VERSION} is too old. Please upgrade to version ' \
-            f'{REQUIRED_OMNISTORE_VERSION} or higher. Example command: pip3 install --upgrade byted-omnistore.'
-    except importlib.metadata.PackageNotFoundError as e:
-        print(f'byted-omnistore not installed. Please install it and upgrade to version {REQUIRED_OMNISTORE_VERSION} '
-              f'or higher. Example command: pip3 install byted-omnistore=={REQUIRED_OMNISTORE_VERSION}.')
-        raise e
-
-
-check_omnistore_version()
+ACTUAL_OMNISTORE_VERSION = check_omnistore_version(REQUIRED_OMNISTORE_VERSION)
 
 import omnistore
 

@@ -19,7 +19,12 @@ from transformers import (
     AutoModelForTokenClassification,
 )
 from alpha_seed.utils.ckpt.hdfs import prepare_hdfs_copy_kwargs
+from alpha_seed.utils.version import check_seed_models_version
 from verl.utils.fs import copy_local_path_from_hdfs
+
+REQUIRED_SEED_MODELS_VERSION = '1.2.0'
+
+check_seed_models_version(REQUIRED_SEED_MODELS_VERSION)
 
 
 def hdfs_upload(local_path, remote_path, log_text):

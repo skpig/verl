@@ -11,24 +11,16 @@ import torch
 import threading
 
 from alpha_seed.utils.ckpt.hdfs import prepare_hdfs_copy_kwargs
+from alpha_seed.utils.version import check_seed_models_version
 
 import hdfs_io
 from omnistore.utilities.ckpt_format.merge_tool import omnistore_ckpt_to_pytorch_ckpt
-from packaging.version import Version
 from transformers import PretrainedConfig
 from verl.utils.fs import copy_local_path_from_hdfs
 
 REQUIRED_SEED_MODELS_VERSION = '1.2.3'
 
-
-def check_seed_models_version():
-    from seed_models import __version__
-    assert Version(__version__) >= Version(REQUIRED_SEED_MODELS_VERSION), \
-        (f'seed_models version {__version__} is too old. Please upgrade to version {REQUIRED_SEED_MODELS_VERSION} '
-         'or higher.')
-
-
-check_seed_models_version()
+check_seed_models_version(REQUIRED_SEED_MODELS_VERSION)
 from seed_models.utils.ckpt.checkpoint_utils import LLM_CONVERT_FUNC
 
 
