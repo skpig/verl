@@ -87,7 +87,7 @@ def _get_p5_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
         "is_exp_moe": False,
         "moe_ffn_has_bias": False,
         "model_name": "GPT2LMHeadModelMoe" if config.moe_num_expert else "GPT2LMHeadModel",
-        "is_meta": False,
+        "is_meta": True,
         "has_k_layernorm": config.use_key_layernorm,
         "tokenizer_path": tokenizer.name_or_path,
         "rope_mode": "default",
@@ -117,7 +117,7 @@ def _get_p6_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
         "is_exp_moe": False,
         "moe_ffn_has_bias": False,
         "model_name": "GPT2LMHeadModelMoe" if config.moe_num_expert else "GPT2LMHeadModel",
-        "is_meta": False,
+        "is_meta": True,
         "has_k_layernorm": config.use_key_layernorm,
         "has_context_layernorm": config.use_context_groupnorm,
         "tokenizer_path": tokenizer.name_or_path,
@@ -149,7 +149,7 @@ def _get_p6dense_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
         "num_layers": config.num_hidden_layers,
         "gqa_weights_layout": "AABB",
         "quant_mode": "NO_QUANT",
-        "is_meta": False,
+        "is_meta": True,
         "dtype": "bfloat16",
         "has_mlp_bias": config.mlp_bias,
         "has_attn_bias": config.attention_bias,
@@ -201,7 +201,7 @@ def _get_p7_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
         "model_name":
             "GPT2LMHeadModelMoe" if config.moe_num_expert else "GPT2LMHeadModel",
         "is_meta":
-            False,
+            True,
         "has_k_layernorm":
             config.use_key_layernorm,
         "has_context_layernorm":
@@ -275,7 +275,7 @@ def _get_m8_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
         "model_name":
             "GPT2LMHeadModelMoe" if config.moe_num_expert else "GPT2LMHeadModel",
         "is_meta":
-            False,
+            True,
         "has_k_layernorm":
             config.use_key_layernorm,
         "has_context_layernorm":
@@ -423,7 +423,7 @@ def _get_dsv3_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
         "topk_group": config.topk_group,
         "share_expert_num": config.n_shared_experts,
         "model_name": "DeepSeekV3Model",
-        "is_meta": False,
+        "is_meta": True,
         "use_flash2": True,
         "has_output_quant": False,
         "has_kv_qscale": False,

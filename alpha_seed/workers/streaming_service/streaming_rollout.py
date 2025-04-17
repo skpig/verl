@@ -317,35 +317,10 @@ class AsyncXPerfGPTRollout(object):
     def _set_tuner_config(self):
         os.environ["USE_SESSION_CACHE"] = "0"
         if self.config.get("quant_mode", "NO_QUANT") == "WFP8":
-            model_type = self.config.get('model_type', "")
-            if model_type not in ["dense_70b", "m8_2b5", "m8_14b", "m8_20b"]:
-                print(f"model_type {model_type} tuner not supported")
-            model_type = "m8_14b" if model_type == "m8_20b" else model_type
             # set environment variables for tuner
             os.environ["XGPT_TUNER_ENABLE"] = os.getenv("XGPT_TUNER_ENABLE", "1")
             os.environ["XPERF_TUNER_ONLINE_PRIORITY"] = os.getenv("XPERF_TUNER_ONLINE_PRIORITY", "1")
-
-            # fp8 must use offline tuning config
-            base_dir = os.path.normpath(os.path.dirname(os.path.dirname(__file__)))
-            device_name = torch.cuda.get_device_name().split(' ')[-1].lower()
-
-            if model_type == "dense_70b":
-                os.environ["XPERF_TUNER_ONLINE_VERSION"] = "1.9.7a1+xgpt"
-            elif model_type in ['m8_2b5', 'm8_14b', 'm8_20b']:
-                os.environ["XPERF_TUNER_ONLINE_VERSION"] = "1.9.7a3+xgpt"
-            else:
-                os.environ["XPERF_TUNER_ONLINE_VERSION"] = ""
-
-            use_ep = self.config.get('use_ep', False)
-            parallel = ("tp" if not use_ep else "ep") + str(self.config.get('tensor_model_parallel_size', 1))
-            fp8_fast_accum = "fastacc" if self.config.get('fp8_fast_accum', False) else "nofastacc"
-            config_path = os.path.join(base_dir, "xperf_rollout", "tuner_config",
-                                       f"{device_name}_{model_type}_{parallel}_{fp8_fast_accum}_gemm_config")
-            if os.path.exists(config_path):
-                os.environ["XPERF_TUNER_CONFIG_LOAD_PATH"] = config_path
-                print(f"use tuner config in {config_path}")
-            else:
-                print(f"tuner config not found in {config_path}")
+            os.environ["XPERF_TUNER_ONLINE_VERSION"] = "2.0.0+xgpt"
 
     def _set_multihost_env(self):
         os.environ["NCCL_SOCKET_IFNAME"] = os.getenv("NCCL_SOCKET_IFNAME", "eth0")
@@ -580,6 +555,7 @@ class RemoteAsyncXPerfGPTRollout(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def update_standalone_worker(self, role):
+        offload_to_device(self.rollout_actor.inference_engine.engine.module, "cuda")
         with self.rollout_actor.inference_engine.update_weights_lock:
             self.weights_communicater.update_standalone_worker(role)
 
