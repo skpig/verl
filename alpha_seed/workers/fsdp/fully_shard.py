@@ -15,7 +15,7 @@ from torch.distributed.fsdp.api import ShardingStrategy, MixedPrecision, CPUOffl
 from torch.distributed._tensor.placement_types import Placement
 from .extensions import register_dtensor_save_hook, parallelize_module
 from .initialize import parallel_load_safetensors, parallel_init_fsdp_fn
-from .offload.activation_offload import get_offload_context
+from .offload.activation_offload import get_offload_context, CheckpointFunction
 from .clip_grad_norm import clip_grad_norm_
 
 from transformers import PreTrainedModel
@@ -84,18 +84,26 @@ def fully_shard(
         if dist.get_rank() == 0:
             print(f"After parallelization: model size {nparams/1e9:.2f} B")
 
+    assert not (enable_training_stats and act_offload), f"act offload and training stats can not be enabled together"
+
+    if enable_training_stats or act_offload:
+        assert recompute, f"Detected training stats or act_offload is enabled, must open gradient checkpointing"
+
     # apply recompute for each layer
     metrics_context = MetricsTorchDispatchMode() if enable_training_stats else nullcontext()
     if recompute:
+        use_reentrant = act_offload
         if not isinstance(model, PreTrainedModel):
             raise RuntimeError(f"Recompute only works with HF PreTrainedModel")
+        if use_reentrant:
+            torch.utils.checkpoint.CheckpointFunction = CheckpointFunction
         model.gradient_checkpointing_enable(
             gradient_checkpointing_kwargs={
                 'use_reentrant':
-                    False,
+                    use_reentrant,
                 "context_fn":
-                    functools.partial(metrics_context_fn, metrics_context
-                                     ) if enable_training_stats else noop_context_fn,
+                    functools.partial(metrics_context_fn, metrics_context) if (
+                        enable_training_stats and not use_reentrant) else noop_context_fn,
             })
 
     fsdp_kwargs = {} if fsdp_kwargs is None else fsdp_kwargs
