@@ -586,6 +586,7 @@ class RayPPOTrainer(object):
         if not os.path.exists(dir_name):
             os.makedirs(dir_name, exist_ok=False)
         df.to_parquet(self.cache_file_path, engine='pyarrow')
+        print("Saved train generations to ", self.cache_file_path)
         
 
 
@@ -1088,12 +1089,12 @@ class RayPPOTrainer(object):
 
                 # collect metrics
                 with _timer('log', timing_raw):
-                    metrics.update(ray.get(rollout_metrics))
                     self._maybe_log_train_generations(batch)
                     metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
                     # TODO: implement actual tflpo and theoretical tflpo
                     n_gpus = self.resource_pool_manager.get_n_gpus()
                     metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
+                    metrics.update(ray.get(rollout_metrics))
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
 
                 # TODO: make a canonical logger that supports various backend

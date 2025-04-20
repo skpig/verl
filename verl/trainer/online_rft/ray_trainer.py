@@ -811,7 +811,7 @@ class RayOnlineRFTTrainer(RayPPOTrainer):
             reward_scale_fn = self.config.trainer.reward_scale_fn
 
         if reward_scale_fn == 'max_only':
-            max_reward_mask = seq_rewards == MAX_REWARD
+            max_reward_mask = seq_rewards != MAX_REWARD
             return torch.masked_fill(seq_rewards, max_reward_mask, 0.0)
         elif reward_scale_fn == 'identity':
             return seq_rewards

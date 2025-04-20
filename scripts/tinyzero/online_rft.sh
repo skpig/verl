@@ -12,16 +12,16 @@ ROLLOUT_N=5
 MAX_PROMPT_LEN=256
 MAX_RESPONSE_LEN=1024
 BATCH_SIZE=512
-MINI_BSZ=256
+MINI_BSZ=64
 
 # Performance tuning
 N_GPUS=4
-ROLLOUT_TP_SIZE=4
+ROLLOUT_TP_SIZE=1
 FORWARD_BSZ=16
 BACKWARD_BSZ=8
 TOTAL_EPOCHS=1
-FORWARD_MAX_TOKEN_LEN=$((8 * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN)))
-BACKWARD_MAX_TOKEN_LEN=$((4 * MAX_PROMPT_LEN + MAX_RESPONSE_LEN))
+FORWARD_MAX_TOKEN_LEN=$((16 * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN)))
+BACKWARD_MAX_TOKEN_LEN=$((8 * MAX_PROMPT_LEN + MAX_RESPONSE_LEN))
 
 PROJ_NAME="TinyZero"
 MODEL_NAME=$(basename $BASE_MODEL)
@@ -65,9 +65,9 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_online_rft \
  trainer.default_hdfs_dir=null \
  trainer.n_gpus_per_node=$N_GPUS \
  trainer.nnodes=1 \
- trainer.save_freq=-1 \
+ trainer.save_freq=10 \
  trainer.test_freq=10 \
  trainer.project_name=$PROJ_NAME \
  trainer.experiment_name=$EXPERIMENT_NAME \
  trainer.total_epochs=$TOTAL_EPOCHS \
- trainer.reward_scale_fn=linear0center
+ trainer.reward_scale_fn=max_only

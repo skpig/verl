@@ -12,22 +12,22 @@ RUN_ID=$1
 ROLLOUT_N=5
 MAX_PROMPT_LEN=256
 MAX_RESPONSE_LEN=1024
-BATCH_SIZE=1024
-MINI_BSZ=256
+BATCH_SIZE=512
+MINI_BSZ=512
 
 # Performance tuning
 N_GPUS=4
-ROLLOUT_TP_SIZE=4
+ROLLOUT_TP_SIZE=1
 FORWARD_BSZ=16
 BACKWARD_BSZ=8
 TOTAL_EPOCHS=1
-FORWARD_MAX_TOKEN_LEN=$((24 * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN)))
-BACKWARD_MAX_TOKEN_LEN=$((12 * MAX_PROMPT_LEN + MAX_RESPONSE_LEN))
+FORWARD_MAX_TOKEN_LEN=$((12 * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN)))
+BACKWARD_MAX_TOKEN_LEN=$((6 * MAX_PROMPT_LEN + MAX_RESPONSE_LEN))
 
 PROJ_NAME="TinyZero"
 MODEL_NAME=$(basename $BASE_MODEL)
 DATA_NAME=$(basename $DATA_DIR)
-EXPERIMENT_NAME="ID${RUN_ID}_${DATA_NAME}_grpo_${MODEL_NAME}_n${ROLLOUT_N}_resplen${MAX_RESPONSE_LEN}_bsz${BATCH_SIZE}"
+EXPERIMENT_NAME="ID${RUN_ID}_${DATA_NAME}_grpo_${MODEL_NAME}_n${ROLLOUT_N}_resplen${MAX_RESPONSE_LEN}_bsz${BATCH_SIZE}-${MINI_BSZ}"
 
 python3 data_preprocess/countdown.py \
   --local_dir $DATA_DIR \
@@ -70,7 +70,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
  trainer.default_hdfs_dir=null \
  trainer.n_gpus_per_node=$N_GPUS \
  trainer.nnodes=1 \
- trainer.save_freq=-1 \
+ trainer.save_freq=10 \
  trainer.test_freq=10 \
  trainer.project_name=$PROJ_NAME \
  trainer.experiment_name=$EXPERIMENT_NAME \
