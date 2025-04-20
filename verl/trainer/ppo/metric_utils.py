@@ -15,6 +15,7 @@
 Metrics related to the PPO trainer.
 """
 
+import random
 import ray
 from typing import Any, Callable, Dict, List
 import numpy as np
@@ -105,7 +106,7 @@ def compute_rollout_metrics(batch: DataProto, tokenizer) -> Dict[str, Any]:
         for i in range(len(responses)):
             for j in range(i + 1, len(responses)):
                 # 计算编辑距离
-                edit_dist = edit_distance(responses[i], responses[j])
+                edit_dist = 0 # edit_distance(responses[i], responses[j])
                 # 计算 Self-BLEU
                 # 这里使用 nltk 的 sentence_bleu 函数计算 Self-BLEU
                 # 需要将文本分词
@@ -124,7 +125,7 @@ def compute_rollout_metrics(batch: DataProto, tokenizer) -> Dict[str, Any]:
 
     # bleu_edit_lst = [compute_self_bleu_and_edit_distance(responses) for responses in index2rollout.values()]
     # 使用多进程计算 Self-BLEU 和编辑距离
-    bleu_edit_tasks = [compute_self_bleu_and_edit_distance.remote(responses) for responses in index2rollout.values()]
+    bleu_edit_tasks = [compute_self_bleu_and_edit_distance.remote(responses) for i, responses in enumerate(index2rollout.values()) if random.random() < 0.05]
     # 等待所有任务完成
     bleu_edit_results = ray.get(bleu_edit_tasks)
     # 计算平均值

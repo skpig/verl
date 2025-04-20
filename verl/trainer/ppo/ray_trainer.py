@@ -621,7 +621,7 @@ class RayPPOTrainer:
 
 
         """TODO: Add more statistics here"""
-        LOG_FREQ = 10
+        LOG_FREQ = 5
 
         if self.global_steps % LOG_FREQ != 0:
             return
@@ -700,6 +700,7 @@ class RayPPOTrainer:
 
 
     def _validate(self):
+        breakpoint()
         data_source_lst = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
 
@@ -761,7 +762,7 @@ class RayPPOTrainer:
             output_ids = test_output_gen_batch.batch["responses"]
             output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
             sample_outputs.extend(output_texts)
-
+            breakpoint()
             test_batch = test_batch.union(test_output_gen_batch)
 
             # evaluate using reward_function

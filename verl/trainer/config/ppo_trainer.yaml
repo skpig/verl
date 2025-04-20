@@ -13,7 +13,7 @@ data:
   template_type: chat
   shuffle: True
   filter_overlong_prompts: False # for large-scale dataset, filtering overlong prompts could be timeconsuming. You cat set the filter_overlong_prompts_workers to use multiprocessing to speed up.
-  filter_overlong_prompts_workers: 1
+  filter_overlong_prompts_workers: 50
   truncation: error
   image_key: images
   video_key: videos
@@ -78,8 +78,8 @@ actor_rollout_ref:
         min_num_params: 0
     log_prob_micro_batch_size: null # will be deprecated, use log_prob_micro_batch_size_per_gpu
     log_prob_micro_batch_size_per_gpu: null
-    log_prob_use_dynamic_bsz: ${actor_rollout_ref.actor.use_dynamic_bsz}
-    log_prob_max_token_len_per_gpu: ${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}
+    log_prob_use_dynamic_bsz: False
+    log_prob_max_token_len_per_gpu: null
     ulysses_sequence_parallel_size: ${actor_rollout_ref.actor.ulysses_sequence_parallel_size} # sp size
   rollout:
     name: vllm
@@ -102,8 +102,8 @@ actor_rollout_ref:
     max_num_seqs: 1024
     log_prob_micro_batch_size: null # will be deprecated, use log_prob_micro_batch_size_per_gpu
     log_prob_micro_batch_size_per_gpu: null
-    log_prob_use_dynamic_bsz: ${actor_rollout_ref.actor.use_dynamic_bsz}
-    log_prob_max_token_len_per_gpu: ${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}
+    log_prob_use_dynamic_bsz: ${actor_rollout_ref.ref.log_prob_use_dynamic_bsz}
+    log_prob_max_token_len_per_gpu: ${actor_rollout_ref.ref.log_prob_max_token_len_per_gpu}
     disable_log_stats: True
     enable_chunked_prefill: True # may get higher throughput when set to True. When activated, Please increase max_num_batched_tokens or decrease max_model_len.
     # for hf rollout
