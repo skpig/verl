@@ -1,6 +1,6 @@
 # BASE_MODEL=${MY_MODEL_DIR}Qwen/Qwen2.5-3B
 # TEMPLATE_TYPE=base # or chat
-BASE_MODEL=${MY_MODEL_DIR}Qwen/Qwen2.5-0.5B-Instruct
+BASE_MODEL=${MY_MODEL_DIR}Qwen/Qwen2.5-3B-Instruct
 TEMPLATE_TYPE=chat # or chat
 TRAIN_FILE="${MY_DATA_DIR}dapo-math-17k/dapo-math-17k.parquet"
 TEST_FILE="${MY_DATA_DIR}aime/aime-2024.parquet"
@@ -22,12 +22,12 @@ OFFLOAD=True
 FORWARD_BSZ=16
 BACKWARD_BSZ=8
 TOTAL_EPOCHS=1
-FORWARD_MAX_TOKEN_LEN=$((6 * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN)))
-BACKWARD_MAX_TOKEN_LEN=$((3 * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN)))
+FORWARD_MAX_TOKEN_LEN=$((8 * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN)))
+BACKWARD_MAX_TOKEN_LEN=$((4 * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN)))
 
 PROJ_NAME="TinyMATH"
 MODEL_NAME=$(basename $BASE_MODEL)
-# DATA_NAME=$(basename $DATA_DIR)
+DATA_NAME=DAPOmath
 EXPERIMENT_NAME="ID${RUN_ID}_${DATA_NAME}_grpo_${MODEL_NAME}_n${ROLLOUT_N}_resplen${MAX_RESPONSE_LEN}_bsz${BATCH_SIZE}-${MINI_BSZ}"
 
 # python3 examples/data_preprocess/math_dataset.py \
@@ -37,6 +37,7 @@ EXPERIMENT_NAME="ID${RUN_ID}_${DATA_NAME}_grpo_${MODEL_NAME}_n${ROLLOUT_N}_respl
 
 # set -x
 export VLLM_ATTENTION_BACKEND=XFORMERS
+# export CUDA_LAUNCH_BLOCKING=1
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
@@ -60,13 +61,14 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=$OFFLOAD \
+    actor_rollout_ref.actor.fsdp_config.param_offload=$OFFLOAD \
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=$FORWARD_MAX_TOKEN_LEN \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP_SIZE \
     actor_rollout_ref.rollout.name=vllm \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.9 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
     actor_rollout_ref.rollout.n=$ROLLOUT_N \
-    actor_rollout_ref.ref.fsdp_config.param_offload=True \
+    actor_rollout_ref.ref.fsdp_config.param_offload=False \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
