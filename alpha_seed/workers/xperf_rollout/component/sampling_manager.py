@@ -46,8 +46,9 @@ class Sampler:
             next_token_scores = self.temperature_logits_wrapper(scores=next_token_scores,
                                                                 per_query_arg=sample_kwargs.get("temperature", [None]))
         if not self.do_sample:
-            return torch.argmax(next_token_scores, dim=-1).cpu().tolist() if not need_torch_tensor else torch.argmax(
+            tokens = torch.argmax(next_token_scores, dim=-1).cpu().tolist() if not need_torch_tensor else torch.argmax(
                 next_token_scores, dim=-1)
+            return tokens, None, None, None
         if self.do_sample:
             next_token_scores = self.topk_logits_wrapper(scores=next_token_scores,
                                                          per_query_arg=sample_kwargs.get("top_k", [None]))

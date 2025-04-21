@@ -133,7 +133,8 @@ class InferScheduler():
             self.bs_graph_map[bs].replay()
             return self.output_placeholder[bs]
         else:
-            return self.engine.forward_orca(context_input_ids=context_input,
+            return self.engine.forward_orca(context_input_ids=None,
+                                            context_input_embeds=context_input,
                                             decode_input_ids=decode_input,
                                             total_length=total_length,
                                             kv_cache_index=kv_index,

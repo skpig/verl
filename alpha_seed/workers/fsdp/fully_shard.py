@@ -123,13 +123,16 @@ def fully_shard(
 
     # set module wrap class
     if isinstance(block_cls, str):
-        block_cls = get_module_class_from_name(model, block_cls)
-    if not issubclass(block_cls, torch.nn.Module):
-        raise NotImplementedError(f"block cls must be subclass of torch.nn.Module, but got {block_cls}")
+        block_cls = [block_cls]
+    assert isinstance(block_cls, list)
+    block_cls = {get_module_class_from_name(model, bl) for bl in block_cls}
+    for bl in block_cls:
+        if not issubclass(bl, torch.nn.Module):
+            raise NotImplementedError(f"block cls must be subclass of torch.nn.Module, but got {bl}")
 
     auto_wrap_policy = functools.partial(
         transformer_auto_wrap_policy,
-        transformer_layer_cls=(block_cls,),
+        transformer_layer_cls=block_cls,
     )
     # set fsdp/hsdp sharding strategy
     if fsdp_mesh.ndim > 1 and fsdp_mesh.size() > 1:

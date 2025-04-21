@@ -13,6 +13,7 @@ from xperf_gpt.inference import init_inference
 from alpha_seed.workers.xperf_rollout.component.cache_manager import CacheManager
 from alpha_seed.workers.xperf_rollout.component.infer_scheduler import InferScheduler
 from alpha_seed.workers.xperf_rollout.component.sampling_manager import Sampler
+from xperf_gpt.multi_models.visual.eva_vit import EVA_VIT_CONFIGS
 from alpha_seed.workers.xperf_rollout.component.query import Query, InflightQueue
 from alpha_seed.utils.observility import get_profiler_context_wrapped
 from xperf_gpt.utils import (logging_rank, logging_rank_only)
@@ -24,6 +25,8 @@ import copy
 import logging
 from threading import Lock
 from transformers import AutoTokenizer
+from xperf_gpt.multi_models.visual.inferencer import VITInferencer
+import numpy as np
 
 # Constants
 BLOCK_SIZE_ALIGNMENT = 256
@@ -233,12 +236,13 @@ class InferenceSession:
             else:
                 setattr(self, param, default)
 
-    def init_inference_engine(self, session_config_path, generation_config, **kwargs):
+    def init_inference_engine(self, session_config_path, generation_config, vit_config=None, **kwargs):
         """Initialize model engine and associated components
         
         Args:
             session_config_path: Path to model config JSON
             generation_config: Generation parameters
+            vit_config: vision config dict
             kwargs: Overrides for model loading
         """
 
@@ -307,6 +311,16 @@ class InferenceSession:
             max_ngram_size=self.max_ngram_size,
             num_pred_tokens=self.num_pred_tokens,
         )
+        if vit_config is not None:
+            if vit_config['vit_model'] not in EVA_VIT_CONFIGS.keys():
+                vit_config.update(vit_config.get('transformer_config'))
+            else:
+                detail_config = EVA_VIT_CONFIGS[vit_config['vit_model']]
+                vit_config.update(detail_config)
+            if vit_config.get('use_navit', False):
+                vit_config['navit_anyres'] = True
+            self.vit_engine = VITInferencer(vit_config_dict=vit_config,
+                                            tokenization_path=self.tokenizer_path).cuda().to(torch.bfloat16)
 
     def set_generator_strategy(self, **kwargs):
         self.sampler.set_generator_strategy(**kwargs)
@@ -503,6 +517,31 @@ class InferenceSession:
     def _select_running_queries(self):
         return self.cache_manager.update_queries(self.running, self.waiting)
 
+    def _prepare_image_embeds(self, input_ids, pixel_values, image_grid_hw):
+        assert pixel_values is not None
+        if isinstance(pixel_values, np.ndarray):
+            pixel_values = torch.from_numpy(pixel_values.astype(float))
+        pixel_values = pixel_values.to(torch.bfloat16).cuda(non_blocking=True)
+        if isinstance(image_grid_hw, np.ndarray):
+            image_grid_hw = torch.from_numpy(image_grid_hw.astype(int))
+
+        # compute image embedding
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            img_emb = self.vit_engine.visual_encoder(pixel_values, grid_hw=image_grid_hw)
+            if self.vit_engine.ln_vision is not None:
+                img_emb = self.vit_engine.ln_vision(img_emb)
+            if self.vit_engine.seed_proj is not None:
+                img_emb = self.vit_engine.seed_proj(img_emb)
+        image_token_id = -100
+        image_mask = input_ids == image_token_id
+        # fill image tokens to padding tokens, to avoid negative token_ids for text embedding
+        input_ids[image_mask] = 1
+        text_embeds = self.engine.get_input_embeddings(input_ids=input_ids)
+        image_mask = image_mask.unsqueeze(-1).expand_as(text_embeds).to(text_embeds.device)
+        img_emb = img_emb.to(text_embeds.device)
+        text_embeds = text_embeds.masked_scatter(image_mask, img_emb)
+        return text_embeds
+
     def _prepare_forward_inputs(self, running: List[Query]):
         max_context_len = -1
         max_kv_index_len = -1
@@ -526,22 +565,36 @@ class InferenceSession:
             context_len = len(query.input_ids) - query.prefix_already_computed_len
             max_kv_index_len = max(max_kv_index_len, len(query.kv_slot_ids))
             if query.is_context_computing:
+                input_ids = torch.tensor(query.input_ids).cuda()
+                if query.input_embedding is None:
+                    if query.meta_info.get('pixel_values') is not None:
+                        input_embs = self._prepare_image_embeds(input_ids, query.meta_info['pixel_values'],
+                                                                query.meta_info['image_grid_hw'])
+                    else:
+                        input_embs = self.engine.get_input_embeddings(input_ids=input_ids)
+                else:
+                    assert query.input_embedding.shape[1] == len(input_ids)
+
+                if input_embs.ndim == 2:
+                    input_embs = input_embs.unsqueeze(0)
+                query.input_embedding = input_embs
+
                 current_context_shift = query.context_shift + query.prefix_already_computed_len
                 # start from context_shift pos
-                query_input_ids = query.input_ids[current_context_shift:]
+                query_input_emb = query.input_embedding[:, current_context_shift:, :]
                 if context_len > self.context_split_len or query.context_shift > 0:
-                    query_input_ids = query.input_ids[current_context_shift:current_context_shift +
-                                                      self.context_split_len]
+                    query_input_emb = query.input_embedding[:, current_context_shift:current_context_shift +
+                                                            self.context_split_len, :]
                     logging_rank_only(
-                        logging.info, 0,
+                        logging.debug, 0,
                         "trigger context split {} -> {}:{}".format(context_len, current_context_shift,
-                                                                   current_context_shift + len(query_input_ids)))
-                    query.context_shift += len(query_input_ids)
-                    context_len = len(query_input_ids)
+                                                                   current_context_shift + context_len))
+                    query.context_shift += query_input_emb.shape[1]
+                    context_len = query_input_emb.shape[1]
 
                 max_context_len = max(max_context_len, context_len)
                 phase0_index.append(index)
-                phase0_list.append(query_input_ids)
+                phase0_list.append(query_input_emb)
                 phase0_total_length.append(context_len)
                 phase0_kv_index.append(query.kv_slot_ids) if self.enable_paged_attn else phase0_kv_index.extend(
                     query.kv_slot_ids)
@@ -568,10 +621,20 @@ class InferenceSession:
 
         # left pad context_input
         if len(phase0_list) > 0:
+            context_emb = None
             for i, query in enumerate(phase0_list):
-                phase0_list[i] = [self.pad_token_id] * (max_context_len - len(query)) + query
-                running[phase0_index[i]].cur_batch_pad_token = max_context_len - len(query)
-            context_input = torch.tensor(phase0_list, dtype=torch.int64).cuda()
+                pad_tokens = None if max_context_len - query.shape[1] == 0 else [self.pad_token_id] * (max_context_len -
+                                                                                                       query.shape[1])
+                if pad_tokens is not None:
+                    pad_tokens = torch.tensor(pad_tokens, dtype=torch.int64)
+                    pad_emb = self.engine.get_input_embeddings(pad_tokens.cuda()).unsqueeze(0)
+                    phase0_list[i] = torch.concat([pad_emb, query], dim=1)
+                    running[phase0_index[i]].cur_batch_pad_token = max_context_len - query.shape[1]
+                if context_emb is None:
+                    context_emb = phase0_list[i]
+                else:
+                    context_emb = torch.concat([context_emb, phase0_list[i]], dim=0)
+            context_input = context_emb
             results['context_input'] = context_input
         else:
             results['context_input'] = None
@@ -848,7 +911,7 @@ class InferenceSession:
         if probs_lt_threshold_sum is not None:
             assert (probs_lt_threshold_sum.shape[0] == len(self.running))
             probs_lt_threshold_sum = probs_lt_threshold_sum.cpu().tolist()
-            running_index_to_i = {idx: i for i, idx in enumerate(index_in_running_batch)}
+        running_index_to_i = {idx: i for i, idx in enumerate(index_in_running_batch)}
         for idx, query in enumerate(self.running):
             i = running_index_to_i[idx]
             # decoding

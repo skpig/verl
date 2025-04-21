@@ -543,7 +543,8 @@ def _reshard_fsdp_state_dict_to_xperf_m8_fp8(tp_model,
                                              state_dict,
                                              device_mesh: DeviceMesh,
                                              model_config,
-                                             backend='fsdp'):
+                                             backend='fsdp',
+                                             prefix=''):
     assert isinstance(model_config, M8Config)
     assert backend in ['fsdp', 'megatron']
 
@@ -564,10 +565,10 @@ def _reshard_fsdp_state_dict_to_xperf_m8_fp8(tp_model,
     num_kv_heads = model_config.num_key_value_heads
 
     if backend == 'fsdp':
-        ln_f_weight = state_dict.pop('transformer.norm.weight').full_tensor().to(torch.bfloat16)
+        ln_f_weight = state_dict.pop(prefix + 'transformer.norm.weight').full_tensor().to(torch.bfloat16)
         ln_f_weight = ln_f_weight.reshape(1, ln_f_weight.shape[-1])
     elif backend == 'megatron':
-        ln_f_weight = state_dict.pop('transformer.ln_f.weight', None)
+        ln_f_weight = state_dict.pop(prefix + 'transformer.ln_f.weight', None)
         ln_f_weight = broadcast_from_megatron_pp(ln_f_weight)
         ln_f_weight = ln_f_weight.to(torch.bfloat16)
         ln_f_weight = ln_f_weight.reshape(1, ln_f_weight.shape[-1]).clone()
@@ -576,12 +577,12 @@ def _reshard_fsdp_state_dict_to_xperf_m8_fp8(tp_model,
 
     # TODO: use xperf vocab_tp
     if backend == 'fsdp':
-        wte: DTensor = state_dict.pop('transformer.wte.weight').to(torch.bfloat16)
-        state_dict.pop('lm_head.weight')
+        wte: DTensor = state_dict.pop(prefix + 'transformer.wte.weight').to(torch.bfloat16)
+        state_dict.pop(prefix + 'lm_head.weight')
         wte_weight = wte.full_tensor()
     elif backend == 'megatron':
         # TODO: use xperf vocab_tp
-        wte = state_dict.pop('transformer.wte.weight', None)
+        wte = state_dict.pop(prefix + 'transformer.wte.weight', None)
         wte = broadcast_from_megatron_pp(wte)
         wte = allgather_from_megatron_tp(wte, dim=0).to(torch.bfloat16)
         wte_weight = wte
@@ -611,10 +612,10 @@ def _reshard_fsdp_state_dict_to_xperf_m8_fp8(tp_model,
                       *_) in enumerate(tp_model.layers_weight):
 
         if backend == 'fsdp':
-            ln_1_weight = state_dict.pop(f'transformer.h.{layer_index}.input_layernorm.weight').full_tensor()
+            ln_1_weight = state_dict.pop(prefix + f'transformer.h.{layer_index}.input_layernorm.weight').full_tensor()
             ln_1_weight = torch.stack((ln_1_weight,), dim=0).to(torch.bfloat16).reshape(1, ln_1_weight.shape[-1])
         elif backend == 'megatron':
-            ln_1_weight = state_dict.pop(f'transformer.h.layers.{layer_index}.input_layernorm.weight', None)
+            ln_1_weight = state_dict.pop(prefix + f'transformer.h.layers.{layer_index}.input_layernorm.weight', None)
             ln_1_weight = broadcast_from_megatron_pp(ln_1_weight).clone()  # clone to avoid offload by trainer
             ln_1_weight = torch.stack((ln_1_weight,), dim=0).to(torch.bfloat16).reshape(1, ln_1_weight.shape[-1])
 
@@ -622,12 +623,13 @@ def _reshard_fsdp_state_dict_to_xperf_m8_fp8(tp_model,
         ln_1.data = ln_1_weight.contiguous()
 
         if backend == 'fsdp':
-            key_norm_weight = state_dict[f'transformer.h.{layer_index}.attn.key_layernorm.weight'].full_tensor()
+            key_norm_weight = state_dict[prefix +
+                                         f'transformer.h.{layer_index}.attn.key_layernorm.weight'].full_tensor()
             key_norm_weight = torch.stack((key_norm_weight,),
                                           dim=0).to(torch.bfloat16).reshape(1, key_norm_weight.shape[-1])
         elif backend == 'megatron':
-            key_norm_weight = state_dict.pop(f'transformer.h.layers.{layer_index}.self_attention.key_layernorm.weight',
-                                             None)
+            key_norm_weight = state_dict.pop(
+                prefix + f'transformer.h.layers.{layer_index}.self_attention.key_layernorm.weight', None)
             key_norm_weight = broadcast_from_megatron_pp(key_norm_weight).clone()  # clone to avoid offload by trainer
             key_norm_weight = torch.stack((key_norm_weight,),
                                           dim=0).to(torch.bfloat16).reshape(1, key_norm_weight.shape[-1])
@@ -636,12 +638,13 @@ def _reshard_fsdp_state_dict_to_xperf_m8_fp8(tp_model,
         key_norm.data = key_norm_weight.contiguous()
 
         if backend == 'fsdp':
-            context_norm_weight = state_dict[f'transformer.h.{layer_index}.attn.context_norm.weight'].full_tensor()
+            context_norm_weight = state_dict[prefix +
+                                             f'transformer.h.{layer_index}.attn.context_norm.weight'].full_tensor()
             context_norm_weight = torch.stack((context_norm_weight,),
                                               dim=0).to(torch.bfloat16).reshape(1, context_norm_weight.shape[-1])
         elif backend == 'megatron':
             context_norm_weight = state_dict.pop(
-                f'transformer.h.layers.{layer_index}.self_attention.context_groupnorm.weight', None)
+                prefix + f'transformer.h.layers.{layer_index}.self_attention.context_groupnorm.weight', None)
             context_norm_weight = broadcast_from_megatron_pp(
                 context_norm_weight).clone()  # clone to avoid offload by trainer
             context_norm_weight = torch.stack((context_norm_weight,),
@@ -651,19 +654,19 @@ def _reshard_fsdp_state_dict_to_xperf_m8_fp8(tp_model,
         context_norm.data = context_norm_weight.contiguous()
 
         if backend == 'fsdp':
-            q_proj_weight = state_dict.pop(f'transformer.h.{layer_index}.attn.q_proj.weight').full_tensor().to(
+            q_proj_weight = state_dict.pop(prefix + f'transformer.h.{layer_index}.attn.q_proj.weight').full_tensor().to(
                 torch.bfloat16)
             q_proj_weight = q_proj_weight.view(num_kv_heads, -1, head_dim, hidden_size).transpose(0, 1).contiguous()
-            k_proj_weight = state_dict.pop(f'transformer.h.{layer_index}.attn.k_proj.weight').full_tensor().to(
+            k_proj_weight = state_dict.pop(prefix + f'transformer.h.{layer_index}.attn.k_proj.weight').full_tensor().to(
                 torch.bfloat16)
             k_proj_weight = k_proj_weight.view(1, num_kv_heads, head_dim, hidden_size)
-            v_proj_weight = state_dict.pop(f'transformer.h.{layer_index}.attn.v_proj.weight').full_tensor().to(
+            v_proj_weight = state_dict.pop(prefix + f'transformer.h.{layer_index}.attn.v_proj.weight').full_tensor().to(
                 torch.bfloat16)
             v_proj_weight = v_proj_weight.view(1, num_kv_heads, head_dim, hidden_size)
 
         elif backend == 'megatron':
             qkv: torch.Tensor = state_dict.pop(
-                f'transformer.h.layers.{layer_index}.self_attention.query_key_value.weight', None)
+                prefix + f'transformer.h.layers.{layer_index}.self_attention.query_key_value.weight', None)
             qkv = broadcast_from_megatron_pp(qkv)
 
             from megatron.core import parallel_state as mpu
@@ -723,11 +726,12 @@ def _reshard_fsdp_state_dict_to_xperf_m8_fp8(tp_model,
         qkv_w.data = qkv_weight.contiguous()
 
         if backend == 'fsdp':
-            o_proj_weight = state_dict.pop(f'transformer.h.{layer_index}.attn.o_proj.weight').full_tensor().to(
+            o_proj_weight = state_dict.pop(prefix + f'transformer.h.{layer_index}.attn.o_proj.weight').full_tensor().to(
                 torch.bfloat16)
             o_proj_weight = o_proj_weight.contiguous().view(hidden_size, -1).contiguous()
         elif backend == 'megatron':
-            o_proj_weight = state_dict.pop(f'transformer.h.layers.{layer_index}.self_attention.proj.weight', None)
+            o_proj_weight = state_dict.pop(prefix + f'transformer.h.layers.{layer_index}.self_attention.proj.weight',
+                                           None)
             o_proj_weight = broadcast_from_megatron_pp(o_proj_weight)
             o_proj_weight = o_proj_weight.to(torch.bfloat16)
             o_proj_weight = allgather_from_megatron_tp(o_proj_weight, dim=1)
@@ -753,10 +757,12 @@ def _reshard_fsdp_state_dict_to_xperf_m8_fp8(tp_model,
 
         if backend == 'fsdp':
             ln_2_weight = state_dict.pop(
-                f'transformer.h.{layer_index}.post_attention_layernorm.weight').full_tensor().to(torch.bfloat16)
+                prefix + f'transformer.h.{layer_index}.post_attention_layernorm.weight').full_tensor().to(
+                    torch.bfloat16)
             ln_2_weight = torch.stack((ln_2_weight,), dim=0).reshape(1, ln_2_weight.shape[-1])
         elif backend == 'megatron':
-            ln_2_weight = state_dict.pop(f'transformer.h.layers.{layer_index}.post_attention_layernorm.weight', None)
+            ln_2_weight = state_dict.pop(prefix + f'transformer.h.layers.{layer_index}.post_attention_layernorm.weight',
+                                         None)
             ln_2_weight = broadcast_from_megatron_pp(ln_2_weight).clone()  # clone to avoid offload by trainer
             ln_2_weight = ln_2_weight.to(torch.bfloat16)
             ln_2_weight = torch.stack((ln_2_weight,), dim=0).reshape(1, ln_2_weight.shape[-1])
@@ -766,16 +772,17 @@ def _reshard_fsdp_state_dict_to_xperf_m8_fp8(tp_model,
 
         if backend == 'fsdp':
             gate_wg = state_dict.pop(
-                f'transformer.h.{layer_index}.mlp.moe.gate.wg').full_tensor().T.contiguous().float()
-            gate_wg_ema = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.gate.wg_ema').T.contiguous().float()
+                prefix + f'transformer.h.{layer_index}.mlp.moe.gate.wg').full_tensor().T.contiguous().float()
+            gate_wg_ema = state_dict.pop(prefix +
+                                         f'transformer.h.{layer_index}.mlp.moe.gate.wg_ema').T.contiguous().float()
 
             gate_wg = (gate_wg + gate_wg_ema) * 0.5
         elif backend == 'megatron':
-            gate_wg = state_dict.pop(f'transformer.h.layers.{layer_index}.mlp.moe.gate.wg', None)
+            gate_wg = state_dict.pop(prefix + f'transformer.h.layers.{layer_index}.mlp.moe.gate.wg', None)
             gate_wg = broadcast_from_megatron_pp(gate_wg)
             gate_wg = gate_wg.T.contiguous().float().clone()  # clone to avoid offload by trainer
 
-            gate_wg_ema = state_dict.pop(f'transformer.h.layers.{layer_index}.mlp.moe.gate.wg_ema', None)
+            gate_wg_ema = state_dict.pop(prefix + f'transformer.h.layers.{layer_index}.mlp.moe.gate.wg_ema', None)
             gate_wg_ema = broadcast_from_megatron_pp(gate_wg_ema)
             gate_wg_ema = gate_wg_ema.T.contiguous().float().clone()  # clone to avoid offload by trainer
 
@@ -789,10 +796,10 @@ def _reshard_fsdp_state_dict_to_xperf_m8_fp8(tp_model,
         # assert use_grouped_gemm_weight
 
         if backend == 'fsdp':
-            fc1_1_weight = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts.fc1_1').to(
+            fc1_1_weight = state_dict.pop(prefix + f'transformer.h.{layer_index}.mlp.moe.experts.fc1_1').to(
                 torch.bfloat16).full_tensor()
         elif backend == 'megatron':
-            fc1_1_weight = state_dict.pop(f'transformer.h.layers.{layer_index}.mlp.moe.experts.fc1_1', None)
+            fc1_1_weight = state_dict.pop(prefix + f'transformer.h.layers.{layer_index}.mlp.moe.experts.fc1_1', None)
             fc1_1_weight = broadcast_from_megatron_pp(fc1_1_weight)
             fc1_1_weight = allgather_from_megatron_tp(fc1_1_weight.to(torch.bfloat16), dim=0)
 
@@ -805,10 +812,10 @@ def _reshard_fsdp_state_dict_to_xperf_m8_fp8(tp_model,
                                                                  Shard(0 if tp_model.use_ep else 1)])._local_tensor
 
         if backend == 'fsdp':
-            fc1_2_weight = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts.fc1_2').to(
+            fc1_2_weight = state_dict.pop(prefix + f'transformer.h.{layer_index}.mlp.moe.experts.fc1_2').to(
                 torch.bfloat16).full_tensor()
         elif backend == 'megatron':
-            fc1_2_weight = state_dict.pop(f'transformer.h.layers.{layer_index}.mlp.moe.experts.fc1_2', None)
+            fc1_2_weight = state_dict.pop(prefix + f'transformer.h.layers.{layer_index}.mlp.moe.experts.fc1_2', None)
             fc1_2_weight = broadcast_from_megatron_pp(fc1_2_weight)
             fc1_2_weight = allgather_from_megatron_tp(fc1_2_weight.to(torch.bfloat16), dim=0)
 
@@ -825,10 +832,11 @@ def _reshard_fsdp_state_dict_to_xperf_m8_fp8(tp_model,
         del fc1_2_weight
 
         if backend == 'fsdp':
-            share_fc1_1_weight = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts_share.fc1_1').to(
+            share_fc1_1_weight = state_dict.pop(prefix + f'transformer.h.{layer_index}.mlp.moe.experts_share.fc1_1').to(
                 torch.bfloat16).full_tensor()
         elif backend == 'megatron':
-            share_fc1_1_weight = state_dict.pop(f'transformer.h.layers.{layer_index}.mlp.moe.pr_expert.fc1_1', None)
+            share_fc1_1_weight = state_dict.pop(prefix + f'transformer.h.layers.{layer_index}.mlp.moe.pr_expert.fc1_1',
+                                                None)
             share_fc1_1_weight = broadcast_from_megatron_pp(share_fc1_1_weight)
             share_fc1_1_weight = allgather_from_megatron_tp(share_fc1_1_weight.to(torch.bfloat16), dim=0)
 
@@ -841,10 +849,11 @@ def _reshard_fsdp_state_dict_to_xperf_m8_fp8(tp_model,
                                                                  placements=[Replicate(), Shard(1)])._local_tensor
 
         if backend == 'fsdp':
-            share_fc1_2_weight = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts_share.fc1_2').to(
+            share_fc1_2_weight = state_dict.pop(prefix + f'transformer.h.{layer_index}.mlp.moe.experts_share.fc1_2').to(
                 torch.bfloat16).full_tensor()
         elif backend == 'megatron':
-            share_fc1_2_weight = state_dict.pop(f'transformer.h.layers.{layer_index}.mlp.moe.pr_expert.fc1_2', None)
+            share_fc1_2_weight = state_dict.pop(prefix + f'transformer.h.layers.{layer_index}.mlp.moe.pr_expert.fc1_2',
+                                                None)
             share_fc1_2_weight = broadcast_from_megatron_pp(share_fc1_2_weight)
             share_fc1_2_weight = allgather_from_megatron_tp(share_fc1_2_weight.to(torch.bfloat16), dim=0)
 
@@ -877,10 +886,10 @@ def _reshard_fsdp_state_dict_to_xperf_m8_fp8(tp_model,
             share_fc1_w.data = s_fc1_weight.contiguous()
 
         if backend == 'fsdp':
-            fc2_weight = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts.fc2').to(
+            fc2_weight = state_dict.pop(prefix + f'transformer.h.{layer_index}.mlp.moe.experts.fc2').to(
                 torch.bfloat16).full_tensor()
         elif backend == 'megatron':
-            fc2_weight = state_dict.pop(f'transformer.h.layers.{layer_index}.mlp.moe.experts.fc2', None)
+            fc2_weight = state_dict.pop(prefix + f'transformer.h.layers.{layer_index}.mlp.moe.experts.fc2', None)
             fc2_weight = broadcast_from_megatron_pp(fc2_weight)
             fc2_weight = allgather_from_megatron_tp(fc2_weight.to(torch.bfloat16), dim=0)
 
@@ -891,10 +900,11 @@ def _reshard_fsdp_state_dict_to_xperf_m8_fp8(tp_model,
                                                              Shard(0 if tp_model.use_ep else 2)])._local_tensor
 
         if backend == 'fsdp':
-            share_fc2_weight = state_dict.pop(f'transformer.h.{layer_index}.mlp.moe.experts_share.fc2').to(
+            share_fc2_weight = state_dict.pop(prefix + f'transformer.h.{layer_index}.mlp.moe.experts_share.fc2').to(
                 torch.bfloat16).full_tensor()
         elif backend == 'megatron':
-            share_fc2_weight = state_dict.pop(f'transformer.h.layers.{layer_index}.mlp.moe.pr_expert.fc2', None)
+            share_fc2_weight = state_dict.pop(prefix + f'transformer.h.layers.{layer_index}.mlp.moe.pr_expert.fc2',
+                                              None)
             share_fc2_weight = broadcast_from_megatron_pp(share_fc2_weight)
             share_fc2_weight = allgather_from_megatron_tp(share_fc2_weight.to(torch.bfloat16), dim=1)
 
@@ -966,6 +976,25 @@ def _reshard_fsdp_state_dict_to_xperf_m8_fp8(tp_model,
 
     load_to_cuda(tp_model=tp_model)
     torch.cuda.empty_cache()
+
+
+def _reshard_fsdp_state_dict_to_xperf_vl_m8_fp8(tp_model, vit_tp_model, state_dict, device_mesh, model_config):
+    if model_config.text_config.architectures[0] == "M8ForCausalLM":
+        _reshard_fsdp_state_dict_to_xperf_m8_fp8(tp_model,
+                                                 state_dict,
+                                                 device_mesh,
+                                                 model_config.text_config,
+                                                 prefix="language_model.")
+        if hasattr(vit_tp_model.visual_encoder.module, "layers_weight"):
+            from alpha_seed.workers.xperf_rollout.utils.bf16_convert_helper import _reshard_fsdp_state_dict_to_xperf_m8_vision_tp
+            _reshard_fsdp_state_dict_to_xperf_m8_vision_tp(vit_tp_model, state_dict, device_mesh,
+                                                           model_config.vision_config)
+        else:
+            from alpha_seed.workers.xperf_rollout.utils.bf16_convert_helper import _reshard_fsdp_state_dict_to_xperf_m8_vision
+            _reshard_fsdp_state_dict_to_xperf_m8_vision(vit_tp_model, state_dict, device_mesh,
+                                                        model_config.vision_config)
+    else:
+        raise ValueError(f"Unsupported model type: {model_config.text_config.architectures[0]}")
 
 
 def _reshard_fsdp_state_dict_to_xperf_deepseek_v3_fp8(tp_model, state_dict, device_mesh: DeviceMesh, model_config):

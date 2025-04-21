@@ -1704,7 +1704,7 @@ def _reshard_fsdp_state_dict_to_xperf_m8_vision(tp_model, state_dict, device_mes
             param_in_state_dict = state_dict.pop(key).to(torch.bfloat16).full_tensor()
         else:
             param_in_state_dict = key
-        assert param_in_tp_model.shape == param_in_state_dict.shape
+        assert param_in_tp_model.shape == param_in_state_dict.shape, f'{key=}, {param_in_tp_model.shape=}, {param_in_state_dict.shape=}'
         param_in_tp_model.data = param_in_state_dict.contiguous()
         assert_not_nan(param_in_tp_model.data)
 
@@ -1757,10 +1757,17 @@ def _reshard_fsdp_state_dict_to_xperf_m8_vision_tp(tp_model, state_dict, device_
         tp_size = 1
         tp_rank = 0
 
+    if model_config.embed_dim < 2048:  # disable small vit tp
+        tp_size = 1
+        tp_rank = 0
+        device_mesh = None
+
     def assign_data(param_in_tp_model, param_in_state_dict):
-        assert param_in_tp_model.shape == param_in_state_dict.shape
+        assert param_in_tp_model.shape == param_in_state_dict.shape, f"shape mismatch {param_in_tp_model.shape} vs {param_in_state_dict.shape}"
         param_in_tp_model.data = param_in_state_dict.contiguous()
 
+    ffn_intermediate_dim = (int(model_config.embed_dim * model_config.mlp_ratio) + 63) // 64 * 64
+    padding_size = ffn_intermediate_dim - int(model_config.embed_dim * model_config.mlp_ratio)
     for layer_index, (norm1_wb, qkv_w, qkv_b, out_w, out_b, norm2_wb, fc1_w, fc1_b, fc2_w, fc2_b,
                       *_) in enumerate(tp_model.visual_encoder.module.layers_weight):
         prefix = f'vision_encoder.blocks.{layer_index}.'
@@ -1786,6 +1793,8 @@ def _reshard_fsdp_state_dict_to_xperf_m8_vision_tp(tp_model, state_dict, device_
             fc1_weight = DTensor.from_local(fc1_weight, device_mesh=device_mesh, placements=[Replicate(), Replicate()])
             fc1_weight = fc1_weight.redistribute(device_mesh=device_mesh, placements=[Replicate(),
                                                                                       Shard(0)])._local_tensor
+        if padding_size > 0:
+            fc1_weight = torch.nn.functional.pad(fc1_weight, (0, 0, 0, padding_size))
         assign_data(fc1_w, fc1_weight)
 
         fc1_bias = state_dict.pop(prefix + 'mlp.fc1.bias').to(torch.bfloat16).full_tensor()
@@ -1793,6 +1802,8 @@ def _reshard_fsdp_state_dict_to_xperf_m8_vision_tp(tp_model, state_dict, device_
         if device_mesh is not None:
             fc1_bias = DTensor.from_local(fc1_bias, device_mesh=device_mesh, placements=[Replicate(), Replicate()])
             fc1_bias = fc1_bias.redistribute(device_mesh=device_mesh, placements=[Replicate(), Shard(0)])._local_tensor
+        if padding_size > 0:
+            fc1_bias = torch.nn.functional.pad(fc1_bias, (0, padding_size))
         assign_data(fc1_b, fc1_bias)
 
         fc2_weight = state_dict.pop(prefix + 'mlp.fc2.weight').to(torch.bfloat16).full_tensor()
@@ -1801,6 +1812,8 @@ def _reshard_fsdp_state_dict_to_xperf_m8_vision_tp(tp_model, state_dict, device_
             fc2_weight = DTensor.from_local(fc2_weight, device_mesh=device_mesh, placements=[Replicate(), Replicate()])
             fc2_weight = fc2_weight.redistribute(device_mesh=device_mesh, placements=[Replicate(),
                                                                                       Shard(1)])._local_tensor
+        if padding_size > 0:
+            fc2_weight = torch.nn.functional.pad(fc2_weight, (0, padding_size))
         assign_data(fc2_w, fc2_weight)
 
         fc2_bias = state_dict.pop(prefix + 'mlp.fc2.bias').to(torch.bfloat16).full_tensor()

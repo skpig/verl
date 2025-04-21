@@ -36,7 +36,7 @@ jobs:
         name: setup dependency
         commands:
           - cd /opt/tiger
-          - git clone -b 20250103 git@code.byted.org:seed/seed_models.git
+          - git clone -b v1.2.8 git@code.byted.org:seed/seed_models.git
           - cd seed_models
           - pip3 install -e . --user
           - cd /opt/tiger
@@ -48,6 +48,12 @@ jobs:
           - pip3 install byted-omnistore==0.7.12
           - pip3 install pylatexenc
           - pip3 install pydantic==1.10.15
+      
+      - name: hybrid engine tests
+        commands:
+          - export NCCL_SHM_DISABLE=1
+          - export MY_HOST_IPV6=$HOST_IP
+          - torchrun --nnodes=1 --nproc-per-node=8 --standalone tests/hybrid_engine/test_xperf_vlm_fsdp.py
 
       - name: math v1 ppo async and grpo
         commands:
@@ -63,3 +69,4 @@ jobs:
           - bash tasks_scripts/ci/run_m8_100m_math_v1_grpo.sh
           - bash tasks_scripts/ci/run_p6d_0b5_math_v1_grpo.sh
           - ray stop --force
+

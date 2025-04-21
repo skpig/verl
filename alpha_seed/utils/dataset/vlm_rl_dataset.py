@@ -48,7 +48,7 @@ def collate_fn(data_list: list[dict]) -> dict:
 
     for data in data_list:
         for key, val in data.items():
-            if isinstance(val, torch.Tensor):
+            if isinstance(val, torch.Tensor) and key not in ['pixel_values', 'image_grid_hw', 'num_image_tokens']:
                 if key not in tensors:
                     tensors[key] = []
                 tensors[key].append(val)
@@ -58,13 +58,10 @@ def collate_fn(data_list: list[dict]) -> dict:
                 non_tensors[key].append(val)
 
     for key, val in tensors.items():
-        if key in ['pixel_values', 'image_grid_hw', 'num_image_tokens']:
-            non_tensors[key] = np.array(val, dtype=object)
-        else:
-            tensors[key] = torch.stack(val, dim=0)
+        tensors[key] = torch.stack(val, dim=0)
 
     for key, val in non_tensors.items():
-        non_tensors[key] = np.array(val, dtype=object)
+        non_tensors[key] = np.fromiter(val, dtype=object)
 
     output = {}
     output.update(tensors)
@@ -126,14 +123,15 @@ class RLHFDatasetVL(RLHFDataset):
         else:
             row_dict = self.dataframe.iloc[item].to_dict()
 
-        chat = row_dict.pop(self.prompt_key)
-        image = row_dict.pop(self.image_key)
+        row_dict_ret = {}
+
+        chat = row_dict[self.prompt_key]
+        image = row_dict[self.image_key]
 
         prompt_names = []
         if self.multi_prompts == "none":
-            pil_images = [self.bytes_decoder(img) for img in image]
-            image_inputs = self.processor.image_processor(images=pil_images, return_tensors="pt")
-            user_contents = [{"type": "text", "text": f"{self.tokenizer.bos_token}user\n"}]
+            pil_images = [self.bytes_decoder(img) for img in image] if image else None
+            user_contents = [{"type": "text", "text": f"{self.tokenizer.bos_token}user\n "}]
             prompt_chunks = re.split(r"(<image>)", chat[0])
             for chunk in prompt_chunks:
                 if not chunk:
@@ -182,20 +180,24 @@ class RLHFDatasetVL(RLHFDataset):
                                                          left_pad=True,
                                                          truncation=self.truncation)
 
-            row_dict['input_ids'] = input_ids[0]
-            row_dict['prompt'] = prompt_with_chat_template
-            row_dict['attention_mask'] = attention_mask[0]
-            row_dict['vlm_data'] = (prompt_with_chat_template, [image[0]])
-            # TODO(caisonghua): for tracking only, need to optimize later
-            row_dict['raw_image'] = [image[0]]
-            row_dict['pixel_values'] = image_inputs['pixel_values']
-            row_dict['image_grid_hw'] = image_inputs['image_grid_hw']
-            row_dict['num_image_tokens'] = image_inputs['num_image_tokens']
+            row_dict_ret['input_ids'] = input_ids[0]
+            row_dict_ret['prompt'] = prompt_with_chat_template
+            row_dict_ret['attention_mask'] = attention_mask[0]
+            if image:
+                row_dict_ret['raw_image'] = []
+                row_dict_ret['pixel_values'] = inputs['pixel_values']
+                row_dict_ret['image_grid_hw'] = torch.tensor(inputs['image_grid_hw'])
+                row_dict_ret['num_image_tokens'] = inputs['num_image_tokens']
+            else:
+                row_dict_ret['raw_image'] = []
+                row_dict_ret['pixel_values'] = None
+                row_dict_ret['image_grid_hw'] = None
+                row_dict_ret['num_image_tokens'] = None
 
             # reward_model is required
-            row_dict['reward_model'] = {}
-            row_dict['reward_model']['style'] = row_dict['ability']
-            row_dict['reward_model']['ground_truth'] = row_dict['verifier_feature']
+            row_dict_ret['reward_model'] = {}
+            row_dict_ret['reward_model']['style'] = row_dict['ability']
+            row_dict_ret['reward_model']['ground_truth'] = row_dict['verifier_feature']
             prompt_names.append("")
         else:
             all_input_ids = []
@@ -220,8 +222,8 @@ class RLHFDatasetVL(RLHFDataset):
                 all_input_ids.append(input_ids[0])
                 all_attention_mask.append(attention_mask[0])
 
-            row_dict['input_ids'] = torch.cat(all_input_ids)
-            row_dict['attention_mask'] = torch.cat(all_attention_mask)
+            row_dict_ret['input_ids'] = torch.cat(all_input_ids)
+            row_dict_ret['attention_mask'] = torch.cat(all_attention_mask)
 
         # 添加answer
         if self.use_ref_answer:
@@ -233,21 +235,21 @@ class RLHFDatasetVL(RLHFDataset):
 
         # encode prompts without chat template
         if self.return_raw_chat:
-            row_dict['raw_prompt'] = [{"role": "user", "content": chat[0]}]
+            row_dict_ret['raw_prompt'] = [{"role": "user", "content": chat[0]}]
 
-        index = row_dict.get("extra_info", {}).get("index", 0)
-        row_dict["index"] = index
-        row_dict['prompt_names'] = prompt_names
+        index = row_dict.get("extra_info", {}).get("index", item)  ## important for grpo to group info
+        row_dict_ret["index"] = index
+        row_dict_ret['prompt_names'] = prompt_names
 
         def cast_type(key, dtype):
-            if key in row_dict:
-                row_dict[key] = row_dict[key].to(dtype)
+            if key in row_dict_ret:
+                row_dict_ret[key] = row_dict_ret[key].to(dtype)
 
         # type cast to save memory
         cast_type('input_ids', torch.int32)
         cast_type('attention_mask', torch.int8)
-        row_dict['off_policy_steps'] = torch.zeros([1]).to(torch.int8)
-        return row_dict
+        row_dict_ret['off_policy_steps'] = torch.zeros([1]).to(torch.int8)
+        return row_dict_ret
 
     def _read_files_and_tokenize(self):
         super()._read_files_and_tokenize()
@@ -265,18 +267,17 @@ class RLHFDatasetGUI(RLHFDatasetVL):
         Note that we also return the raw_input_ids so that it can be combined with other chat template
         """
         if 'session' in self.dataframe.iloc[item]:
-            row_dict = self.dataframe.iloc[item]['session']
+            row_dict = self.dataframe.iloc[item]['session'].copy()
         else:
             row_dict = self.dataframe.iloc[item].to_dict()
 
-        chat = row_dict.pop(self.prompt_key)
-        system_prompt = row_dict.pop("system_prompt")
-        image = row_dict.pop(self.image_key)
+        chat = row_dict[self.prompt_key]
+        system_prompt = row_dict["system_prompt"]
+        image = row_dict[self.image_key]
 
         prompt_names = []
         if self.multi_prompts == "none":
             pil_images = [self.bytes_decoder(img) for img in image]
-            image_inputs = self.processor.image_processor(images=pil_images, return_tensors="pt")
             content = [
                 {
                     "type":
@@ -324,9 +325,7 @@ class RLHFDatasetGUI(RLHFDatasetVL):
                 "content": content,
             }]
 
-            # print(conversation)
-
-            assert num_img == len(pil_images)
+            assert num_img == len(image)
 
             inputs = self.processor(images=pil_images,
                                     conversation=conversation,
@@ -345,12 +344,9 @@ class RLHFDatasetGUI(RLHFDatasetVL):
             row_dict['input_ids'] = input_ids[0]
             row_dict['prompt'] = prompt_with_chat_template
             row_dict['attention_mask'] = attention_mask[0]
-            row_dict['raw_image'] = image
-            row_dict['vlm_data'] = (prompt_with_chat_template, image)
-            row_dict['pixel_values'] = image_inputs['pixel_values']
-            row_dict['image_grid_hw'] = image_inputs['image_grid_hw']
-            row_dict['num_image_tokens'] = image_inputs['num_image_tokens']
-            num_image_sum = image_inputs['num_image_tokens'].sum().item()
+            row_dict['pixel_values'] = inputs['pixel_values']
+            row_dict['image_grid_hw'] = torch.tensor(inputs['image_grid_hw'])
+            num_image_sum = sum(inputs['num_image_tokens'])
             image_token_id = -100
             input_ids_sum = (row_dict['input_ids'] == image_token_id).sum().item()
             if num_image_sum != input_ids_sum:
@@ -400,7 +396,7 @@ class RLHFDatasetGUI(RLHFDatasetVL):
         if self.return_raw_chat:
             row_dict['raw_prompt'] = [{"role": "user", "content": chat[0]}]
 
-        index = row_dict.get("extra_info", {}).get("index", 0)
+        index = row_dict.get("extra_info", {}).get("index", item)  ## important for grpo to group info
         row_dict["index"] = index
         row_dict['prompt_names'] = prompt_names
 

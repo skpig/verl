@@ -15,7 +15,9 @@
 Note that we only support seed_models
 """
 
+from functools import partial
 from transformers import PreTrainedTokenizer
+import torch
 
 
 def get_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
@@ -375,9 +377,15 @@ def _get_vl_m8_xperf_vision_config(vision_config):
     ]
     xperf_vision_config = {"vit_precision": "bf16"}
     xperf_vision_config['vit_model'] = getattr(vision_config, 'vit_model') if hasattr(vision_config,
-                                                                                      'vit_model') else 'eva_clip_g'
+                                                                                      'vit_model') else None
     for key in vision_keys:
         xperf_vision_config[key] = getattr(vision_config, key)
+    if hasattr(vision_config, 'transformer_config'):
+        xperf_vision_config['transformer_config'] = getattr(vision_config, 'transformer_config')
+        if isinstance(xperf_vision_config['transformer_config']['norm_layer'], str):
+            # we may need to test performance of FusedLayerNorm
+            xperf_vision_config['transformer_config']['norm_layer'] = partial(torch.nn.LayerNorm, eps=1e-6)
+
     # avoid init fail in xperf_gpt
     xperf_vision_config["vit_model_path"] = None
     return xperf_vision_config
@@ -394,7 +402,7 @@ def _get_vl_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
         vision_config = _get_vl_p6_xperf_vision_config(model_config.vision_config)
     else:
         raise RuntimeError(f"Unsupported model type {model_config.text_config.architectures[0]}")
-    return llm_config, vision_config
+    return {"text_config": llm_config, "vision_config": vision_config}
 
 
 def _get_dsv3_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):

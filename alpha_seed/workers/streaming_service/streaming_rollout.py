@@ -155,7 +155,13 @@ class AsyncXPerfGPTRollout(object):
         slot_block_size = self.config.get('slot_block_size', 1024)
 
         model_cfg = get_xperf_gpt_config(model_config=self.model_hf_config, tokenizer=self.tokenizer)
-        model_cfg["quant_mode"] = self.config.get("quant_mode", "NO_QUANT")
+        vision_cfg = None
+        if 'vision_config' in model_cfg:
+            text_cfg = model_cfg['text_config']
+            vision_cfg = model_cfg['vision_config']
+        else:
+            text_cfg = model_cfg
+        text_cfg["quant_mode"] = self.config.get("quant_mode", "NO_QUANT")
         sched_cfg = {
             "max_sequence_length": self.config.prompt_length + self.config.response_length,
             "max_context_len": self.config.prompt_length,
@@ -165,17 +171,18 @@ class AsyncXPerfGPTRollout(object):
         use_ep = self.config.get('use_ep', False)
         multi_host_tp = is_multihost_model(tp_size)
 
-        xperf_prophet = XperfModelProphet(model_cfg, sched_cfg, tp_size)
+        # TODO(caisonghua): enable XperfModelProphet vit part later
+        xperf_prophet = XperfModelProphet(text_cfg, sched_cfg, tp_size)
         gpu_memory_utilization = self.config.get('gpu_memory_utilization', 0.7)
         if enable_paged_attn:
             prophet_cfg = xperf_prophet.profile_available_vllm_cfg(gpu_memory_utilization=gpu_memory_utilization)
             max_batch_size = prophet_cfg["orca_max_batch_size"]
-            max_ctx_batch_size = 8
+            max_ctx_batch_size = self.config.get("max_ctx_batch_size", 8)
             num_slots = prophet_cfg["vllm_num_slots"]
         else:
             prophet_cfg = xperf_prophet.profile_available_orca_cfg(gpu_memory_utilization=gpu_memory_utilization)
             max_batch_size = prophet_cfg["orca_max_batch_size"]
-            max_ctx_batch_size = 8
+            max_ctx_batch_size = self.config.get("max_ctx_batch_size", 8)
             num_slots = max_batch_size
 
         # create a 2D device mesh
@@ -218,7 +225,7 @@ class AsyncXPerfGPTRollout(object):
                                           step_profiler=step_profiler)
         inference_sess.max_off_policy_steps = self.config.get('max_off_policy_steps', 5)
         with tempfile.NamedTemporaryFile(mode='w', suffix=".json") as f:
-            json.dump(model_cfg, f)
+            json.dump(text_cfg, f)
             f.flush()
             global_rank = 0 if not dist.is_initialized() else dist.get_rank()
             tp_rank = 0 if self.device_mesh is None else self.device_mesh['tp'].get_local_rank()
@@ -273,7 +280,8 @@ class AsyncXPerfGPTRollout(object):
                                                                  enable_metrics=True,
                                                                  use_ep=use_ep,
                                                                  tokenizer_path=self.tokenizer.name_or_path,
-                                                                 multi_host_tp=multi_host_tp)
+                                                                 multi_host_tp=multi_host_tp,
+                                                                 vit_config=vision_cfg)
                     if dist.is_initialized() and tp_size > 1:
                         dist.barrier()
                         if tp_rank == 0:
@@ -410,6 +418,9 @@ class AsyncXPerfGPTRollout(object):
             is_finished = []
             off_policy_steps = []
             for prompt, v in zip(original_query_pool, self.inference_engine.get_inorder_responses()):
+                if torch.distributed.get_rank() == 0:
+                    print(f"=============== idx: {v.idx} input: {v.input_prompt}\noutput: {v.output_prompt}",
+                          flush=True)
                 response_outputs.append((v.input_ids + v.new_token_ids)[len(prompt):])
                 response_log_probs.append(v.new_token_log_probs)
                 response_probs_gt_threshold_num.append(v.probs_gt_threshold_num)

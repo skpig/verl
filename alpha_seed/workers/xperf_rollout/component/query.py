@@ -12,6 +12,7 @@ class Query:
     idx: int
     original_input_ids: Optional[List[int]]
     input_ids: Optional[List[int]]
+    input_embedding: Optional[torch.Tensor]
     code_book: Optional[List[int]]
     accepted_len: Optional[List[int]]
     input_prompt: Union[str, List[str]]
@@ -94,6 +95,7 @@ class Query:
         self.temperature = None
         self.max_new_tokens = None
         self.max_length = None
+        self.input_embedding = None
 
     # Check whether current query is going to enter the decoding stage
     def _is_to_decoding_compute(self):

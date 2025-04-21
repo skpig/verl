@@ -23,6 +23,11 @@ def process_output(input_batch, output_batch, tokenizer, ready_batch, pending_ba
     is_finished = output_batch.pop(batch_keys=['is_finished']).batch['is_finished']
     finished_num = is_finished.sum().int().item()
     if not standalone:
+        # TODO: issue in comparing non_tensor_batches
+        # RuntimeError: Boolean value of Tensor with more than one value is ambiguous
+        same_keys = input_batch.non_tensor_batch.keys() & output_batch.non_tensor_batch.keys()
+        input_batch.pop(non_tensor_batch_keys=list(same_keys))
+
         output_batch.union(input_batch)
         for i, item in enumerate(output_batch.chunk(len(output_batch))):
             if is_finished[i]:
@@ -97,6 +102,8 @@ def record_xperf_metrics(batch_info, metrics, logger, global_step, prefix=''):
 
 
 def get_gpus_per_node():
+    if not ray.is_initialized():
+        return 8
     gpu_per_node = 0
     for node in ray.nodes():
         if "Resources" not in node or "GPU" not in node['Resources']:
