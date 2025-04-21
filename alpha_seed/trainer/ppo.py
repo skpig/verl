@@ -1765,13 +1765,16 @@ class RayPPOTrainer(object):
                 self.load_checkpoint()
 
         # perform validation before training
-        if self.val_reward_fn is not None and self.config.trainer.eval_before_training:
+        if self.val_reward_fn is not None and (self.config.trainer.eval_before_training or \
+            self.config.trainer.val_only):
             self.validation_manager.validate(val_epoch=self.config.trainer.val_epoch,
                                              need_log=self.config.trainer.need_log,
                                              log_file=self.config.trainer.log_file,
                                              is_async=False,
                                              global_step=self.global_step)
         if self.config.trainer.val_only:
+            if self.config.trainer.save_train_batch_dir is not None and self.config.trainer.need_log:
+                hput(self.config.trainer.log_file, self.config.trainer.save_train_batch_dir)
             return
 
         # Note that we start from step 1. After resume, we increment step by 1 to start next step

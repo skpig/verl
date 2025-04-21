@@ -725,7 +725,7 @@ class AsyncActorRolloutRefWorker(Worker):
                     model_path=self.config.model.path, role='actor')
 
         # load from checkpoint
-        if self._is_actor:
+        if self._is_actor or self._is_rollout:
             OmegaConf.set_struct(self.config.actor, True)
             if self.actor_strategy in ('fsdp', 'vescale-fsdp2'):
                 with open_dict(self.config.actor):
@@ -781,7 +781,7 @@ class AsyncActorRolloutRefWorker(Worker):
             self.rollout, self.sharding_manager = self._build_rollout()
             self.rollout_async = None
 
-        if self._is_actor:
+        if self._is_actor or self._is_rollout:
             self.flops_counter = FlopsCounter(self.actor_model_config)
             self.checkpoint_manager = CheckpointManagerWrapper(strategy=self.actor_strategy,
                                                                model=self.actor.actor_module,
@@ -1115,7 +1115,7 @@ class AsyncActorRolloutRefWorker(Worker):
         """
         device_mesh = None
         if model == 'actor':
-            assert self._is_actor
+            assert self._is_actor or self._is_rollout
             ckpt_manager = self.checkpoint_manager
             parallel_strategy = self.actor_strategy
             if hasattr(self, 'actor_fsdp_mesh'):
