@@ -572,12 +572,11 @@ class InferenceSession:
                                                                 query.meta_info['image_grid_hw'])
                     else:
                         input_embs = self.engine.get_input_embeddings(input_ids=input_ids)
+                    if input_embs.ndim == 2:
+                        input_embs = input_embs.unsqueeze(0)
+                    query.input_embedding = input_embs
                 else:
                     assert query.input_embedding.shape[1] == len(input_ids)
-
-                if input_embs.ndim == 2:
-                    input_embs = input_embs.unsqueeze(0)
-                query.input_embedding = input_embs
 
                 current_context_shift = query.context_shift + query.prefix_already_computed_len
                 # start from context_shift pos

@@ -22,13 +22,12 @@ def pad(item, max_standalone_len, tokenizer):
 def process_output(input_batch, output_batch, tokenizer, ready_batch, pending_batch, config, standalone=False):
     is_finished = output_batch.pop(batch_keys=['is_finished']).batch['is_finished']
     finished_num = is_finished.sum().int().item()
+    # TODO: issue in comparing non_tensor_batches
+    # RuntimeError: Boolean value of Tensor with more than one value is ambiguous
+    same_keys = input_batch.non_tensor_batch.keys() & output_batch.non_tensor_batch.keys()
+    input_batch.pop(non_tensor_batch_keys=list(same_keys))
+    output_batch.union(input_batch)
     if not standalone:
-        # TODO: issue in comparing non_tensor_batches
-        # RuntimeError: Boolean value of Tensor with more than one value is ambiguous
-        same_keys = input_batch.non_tensor_batch.keys() & output_batch.non_tensor_batch.keys()
-        input_batch.pop(non_tensor_batch_keys=list(same_keys))
-
-        output_batch.union(input_batch)
         for i, item in enumerate(output_batch.chunk(len(output_batch))):
             if is_finished[i]:
                 ready_batch.append(item)
@@ -41,8 +40,6 @@ def process_output(input_batch, output_batch, tokenizer, ready_batch, pending_ba
         if config.streaming_rollout.force_eos:
             need_eos = is_finished == 0
             is_finished = torch.ones_like(is_finished)
-        # output_batch.pop(batch_keys=['prompts', 'responses'])
-        output_batch.union(input_batch)
 
         # rearrange...
         #   prompts layout: [00111111] left-padding only, shape [bs, max_prompt_length]
