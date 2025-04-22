@@ -1,6 +1,7 @@
 import torch
-from openai import OpenAI
+from openai import AsyncOpenAI
 from verl import DataProto
+import asyncio
 import os
 ''' example input: 
 DataProtoItem(batch=TensorDict(
@@ -14,36 +15,43 @@ DataProtoItem(batch=TensorDict(
     is_shared=False), non_tensor_batch= ... '''
 
 
-def _internal_call(item, config):
-    # openAI client call rollout
-    client = OpenAI(api_key="useless-api-key", base_url=f"http://0.0.0.0:8001")
-    item.batch = item.batch.reshape(-1)
-
-    input_ids = item.batch['input_ids']
-    attention_mask = item.batch['attention_mask']
-    valid_input_len = torch.sum(attention_mask)
-    prompt_ids = input_ids[0, -valid_input_len:].tolist()
-    data = {"prompt": prompt_ids}
-
-    completion = client.chat.completions.create(
-        model="rollout",
-        messages=data,
-        extra_body={
-            "top_p": config.train_generate_kwargs['top_p'],
-            "top_k": config.train_generate_kwargs['top_k'],
-            "max_tokens": config.train_generate_kwargs['max_new_tokens'],
-            "max_length": config.prompt_length + config.response_length
-        },
-    )
+async def _internal_call(item, config):
+    completion = None
+    async with AsyncOpenAI(api_key="useless-api-key", base_url="http://0.0.0.0:8001") as client:
+        try:
+            item.batch = item.batch.reshape(-1)
+            input_ids = item.batch['input_ids']
+            attention_mask = item.batch['attention_mask']
+            valid_input_len = torch.sum(attention_mask)
+            prompt_ids = input_ids[0, -valid_input_len:].tolist()
+            data = {"prompt": prompt_ids}
+            completion = await client.chat.completions.create(
+                model="rollout",
+                messages=data,
+                extra_body={
+                    "top_p": config.train_generate_kwargs['top_p'],
+                    "top_k": config.train_generate_kwargs['top_k'],
+                    "max_tokens": config.train_generate_kwargs['max_new_tokens'],
+                    "max_length": config.prompt_length + config.response_length
+                },
+                timeout=600  # Optional: per-request timeout
+            )
+        except asyncio.CancelledError:
+            # Handle task cancellation (e.g., cleanup)
+            print("Request was cancelled")
+            raise  # Re-raise to propagate the cancellation
+        except Exception as e:
+            print(f"Error occurred: {str(e)}")
+            raise  # Re-raise the exception to propagate it further
     return completion
 
 
-def process_single_batch(item, context):
+async def process_single_batch(item, context):
     os.environ["no_proxy"] = ""
     tokenizer = context.tokenizer
     config = context.config.actor_rollout_ref.rollout
 
-    completion = _internal_call(item, config)
+    completion = await _internal_call(item, config)
 
     from alpha_seed.workers.agents import DataPack, pack_to_dataproto
     data_pack = DataPack.create_from_completion(completion.choices[0].message)
@@ -78,17 +86,45 @@ def reward_fn(data_item, completion, context):
     return final_reward
 
 
-def process_single_batch_v2(item, context):
+async def process_single_batch_v2(item, context):
     os.environ["no_proxy"] = ""
     tokenizer = context.tokenizer
     config = context.config.actor_rollout_ref.rollout
     final_reward = 0
     round_idx = 0
     while (final_reward <= 0 and round_idx < 3):
-        completion = _internal_call(item, config)
+        completion = await _internal_call(item, config)
         from alpha_seed.workers.agents import DataPack, pack_to_dataproto
         data_pack = DataPack.create_from_completion(completion.choices[0].message)
         out = pack_to_dataproto(item, tokenizer, data_pack, config)  # dataproto
         final_reward = reward_fn(out, completion, context)
         round_idx += 1
     return out
+
+
+if __name__ == '__main__':
+    os.environ["no_proxy"] = ""
+    data = {"prompt": "1+1="}
+    import aiohttp
+
+    async def chat_completions(content):
+        try:
+            session = aiohttp.ClientSession()
+            async with session.post(
+                    url="http://0.0.0.0:8001/chat/completions",
+                    headers={"Authorization": "Bearer token-abc123"},
+                    json={
+                        "model": "rollout",
+                        "messages": content,
+                    },
+            ) as resp:
+                return await resp.json()
+        except Exception as e:
+            print(e)
+            return e
+        finally:
+            await session.close()
+
+    out = asyncio.run(chat_completions(data))
+    print(out)
+    print(out['choices'][0]['message'])

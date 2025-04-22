@@ -173,6 +173,8 @@ class InflightQueue:
 
     def append(self, item):
         with self.lock:
+            item._event = asyncio.Event()
+            item._loop = asyncio.get_running_loop()
             self.query_pool[item.id] = item
             self.queue.append(item)
 

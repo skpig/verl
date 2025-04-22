@@ -687,6 +687,7 @@ class InferenceSession:
                 f"context_input: {context_input}\ndecode_input: {decode_input}\ntotal_length: {total_length.tolist()}\npacked_kv_index: {packed_kv_index.tolist()}\ncontext_shift: {context_shift_tensor}"
             )
         results['kv_index'] = packed_kv_index
+
         results['total_length'] = total_length
         results['context_shifts'] = context_shift_tensor
         results['history_ids'] = history_ids
@@ -820,11 +821,11 @@ class InferenceSession:
         while (True):
             try:
                 _check_stop_event()
-                self.current_steps += 1
                 # each rank should have the same running and waiting
                 self.waiting = self._fetch_from_pending_queries()
                 if (len(self.waiting) == 0 and len(self.running) == 0):
                     continue
+                self.current_steps += 1
                 self.running, self.waiting = self._select_running_queries()
                 forward_inputs = self._prepare_forward_inputs(self.running)
                 context_input = forward_inputs['context_input']

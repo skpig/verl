@@ -1247,54 +1247,16 @@ class RayPPOTrainer(object):
         metrics.update(global_balance_stats)
         print_dataproto_size(batch, head='After Sequence Balancing')
 
-    def _generate_streaming(self, batch, start_step, metrics, standalone_batch, pending_batch):
-        from alpha_seed.workers.agents.math.handler import process_single_batch, process_single_batch_v2
+    async def _generate_streaming(self, batch, start_step, metrics, standalone_batch, pending_batch):
+        # from alpha_seed.workers.agents.math.handler import process_single_batch, process_single_batch_v2
+        from alpha_seed.workers.agents.math.aiohttp_handler import process_single_batch
+
         from alpha_seed.workers.agents import TaskContext
-        from concurrent.futures import as_completed
+        import asyncio
         import time
-        ready_batch = []
-        gen_batch, batch = self._preprocess_batch(batch, metrics, start_step)
-        gen_batch.union(batch)
-        context = TaskContext(self.config, self.tokenizer, self.reward_fn, self.global_step)  # add more context object
-
-        # submit the training batch to the rollout server
-        running_batch = []
-        for _, item in enumerate(gen_batch.chunk(len(gen_batch))):
-            future = self.executor.submit(process_single_batch, item, context)
-            running_batch.append(future)
-
-        # warmup to fill the training batch, do we really need this?
-        if self.global_step <= 1:
-            from concurrent.futures import wait
-            _, _ = wait(running_batch)
-
-        completed_num = 0
-        for future in as_completed(running_batch):
-            completed_num += 1
-            if completed_num > int(
-                    len(running_batch) * self.config.actor_rollout_ref.rollout.get("complete_ratio", 0.0)):
-                break
-
         # bind weights...
+        start = time.time()
         self.rollout_server_wg.stop_server_before_weights_update()
-
-        # get the training batch, some of which is still partial generated.
-        # pending, for the next run.
-        pending = []
-        results = []
-        for _, future in enumerate(running_batch + pending_batch):
-            if future.done():
-                results.append(future.result())
-            else:
-                pending.append(future)
-
-        ready_batch = results
-        finished_num = len(results)
-        pprint(
-            f'stop hybrid rollout, completed_batch {finished_num}, incompleted_batch {len(running_batch + pending_batch) - finished_num} '
-            + f'ready_queue {len(ready_batch)}, pending_queue {len(pending)}.')
-        metrics['rollout/hybrid_completed_batch'] = finished_num
-        metrics['rollout/hybrid_incompleted_batch'] = len(batch) - finished_num
 
         # update the rollout server, do weights binding
         with Timer(name='update_rollout_server', logger=None) as timer:
@@ -1308,9 +1270,56 @@ class RayPPOTrainer(object):
 
         # restart the rollout server
         self.rollout_server_wg.restart_server_after_weights_update()
+        print(f"[INFO] {self.global_step} generate streaming[update weights and restart] {time.time() - start}")
+
+        outside_start = time.time()
+        ready_batch = []
+        gen_batch, batch = self._preprocess_batch(batch, metrics, start_step)
+        gen_batch.union(batch)
+        context = TaskContext(self.config, self.tokenizer, self.reward_fn, self.global_step)  # add more context object
+
+        # submit the training batch to the rollout server
+        start = time.time()
+        running_batch = []
+        for item in gen_batch.chunk(len(gen_batch)):
+            task = asyncio.create_task(process_single_batch(item, context))
+            running_batch.append(task)
+        print(
+            f"[INFO] {self.global_step} generate streaming[submit], batch size: {len(gen_batch)}, {time.time() - start}"
+        )
+        start = time.time()
+
+        # warmup
+        if self.global_step - start_step < 1:
+            await asyncio.gather(*running_batch)
+
+        print(
+            f"[INFO] {self.global_step} generate streaming[as_completed], batch size: {len(gen_batch)}, {time.time() - start}"
+        )
+        start = time.time()
+
+        done, pending = await asyncio.wait(running_batch + pending_batch, timeout=0, return_when=asyncio.ALL_COMPLETED)
+        pending = list(pending)
+        results = []
+        for task in done:
+            if task.exception():
+                raise task.exception()
+            else:
+                results.append(task.result())
+
+        ready_batch = results
+        finished_num = len(results)
+        pprint(
+            f'stop hybrid rollout, completed_batch {finished_num}, incompleted_batch {len(running_batch + pending_batch) - finished_num} '
+            + f'ready_queue {len(ready_batch)}, pending_queue {len(pending)}.')
+        metrics['rollout/hybrid_completed_batch'] = finished_num
+        metrics['rollout/hybrid_incompleted_batch'] = len(batch) - finished_num
+        print(
+            f"[INFO] {self.global_step} generate streaming[stop and get batch], batch size: {len(gen_batch)}, {time.time() - start}"
+        )
         ray.get(self.rollout_pool.fill_rollout_pool.remote(ready_batch))
 
-        if self.global_step <= 1:
+        if self.global_step - start_step < 1:
             return [], standalone_batch, pending
 
         # get the training batch
@@ -1328,6 +1337,7 @@ class RayPPOTrainer(object):
             batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask'], dim=-1).tolist()
             metrics['rollout/training_batch'] = len(batch)
             pprint(f'training batches {len(batch)}.')
+        print("generate streaming... ", time.time() - outside_start)
         return batch, standalone_batch, pending
 
     def _preprocess_batch(self, batch, metrics, start_step):
@@ -1786,6 +1796,17 @@ class RayPPOTrainer(object):
         pending_batch = []
         rollout_counter = 0
         rollout_pool_metrics = {}
+        import asyncio
+        self.loop = None
+
+        def _run_loop():
+            self.loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self.loop)
+            self.loop.run_forever()
+
+        self.thread = threading.Thread(target=_run_loop, daemon=True)
+        self.thread.start()
+
         while True:
             for batch_dict in self.train_dataloader:
                 metrics = {}
@@ -1802,14 +1823,23 @@ class RayPPOTrainer(object):
                                     int(self.config.data.train_batch_size * self.config.algorithm.TD_priority_ratio))
                             batch = self.sample_pool.get_gen_batch(self.config.data.train_batch_size)
                         self.get_mean_max_len_per_query(batch, metrics)
-                        generate_fn = self._generate_streaming if self.use_rollout_server else self._generate
 
+                        # generate
                         with Timer(name='generate', logger=None) as timer:
-                            batch, standalone_batch, pending_batch = generate_fn(batch=batch,
-                                                                                 start_step=start_step,
-                                                                                 metrics=metrics,
-                                                                                 standalone_batch=standalone_batch,
-                                                                                 pending_batch=pending_batch)
+                            if self.use_rollout_server:
+                                batch, standalone_batch, pending_batch = asyncio.run_coroutine_threadsafe(
+                                    self._generate_streaming(batch=batch,
+                                                             start_step=start_step,
+                                                             metrics=metrics,
+                                                             standalone_batch=standalone_batch,
+                                                             pending_batch=pending_batch), self.loop).result()
+                            else:
+                                batch, standalone_batch, pending_batch = self._generate(
+                                    batch=batch,
+                                    start_step=start_step,
+                                    metrics=metrics,
+                                    standalone_batch=standalone_batch,
+                                    pending_batch=pending_batch)
                         metrics['time/generate'] = timer.last
                         if batch is None or len(
                                 batch) == 0 or self.global_step < self.rollout_pool_warmup_step + start_step:

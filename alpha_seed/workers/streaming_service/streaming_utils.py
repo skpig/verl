@@ -168,6 +168,17 @@ class DataPack:
                              metrics=message.metrics)
         return data_pack
 
+    @classmethod
+    def create_from_completion_dict(cls, message):
+        data_pack = DataPack(response_outputs=[message['raw_output_ids']],
+                             response_log_probs=[message['response_log_probs']],
+                             response_probs_gt_threshold_num=[message['response_probs_gt_threshold_num']],
+                             response_probs_lt_threshold_sum=[message['response_probs_lt_threshold_sum']],
+                             this_turn_off_policy_steps=[[-1 for _ in range(len(message['raw_output_ids']))]],
+                             is_finished=[message['is_finished']],
+                             metrics=message['metrics'])
+        return data_pack
+
 
 def pack_to_dataproto(prompts, tokenizer, data_pack, config):
     max_new_tokens = prompts.meta_info.get('generation_kwargs').get('max_new_tokens', config.response_length)

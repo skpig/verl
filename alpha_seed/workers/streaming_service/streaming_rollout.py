@@ -301,10 +301,7 @@ class AsyncXPerfGPTRollout(object):
         torch.cuda.empty_cache()
 
     def add_inflight_query(self, query):
-        query._event = asyncio.Event()
-        query._loop = asyncio.get_running_loop()
         # inference_engine is running on a different threads
-        # FIXME: use different lock when the weights are updating?
         with self.inference_engine.update_weights_lock:
             self.inference_engine.pending.append(query)
         return query.id
@@ -418,10 +415,8 @@ class AsyncXPerfGPTRollout(object):
             is_finished = []
             off_policy_steps = []
             for prompt, v in zip(original_query_pool, self.inference_engine.get_inorder_responses()):
-                if torch.distributed.get_rank() == 0:
-                    print(f"=============== idx: {v.idx} input: {v.input_prompt}\noutput: {v.output_prompt}",
-                          flush=True)
-                response_outputs.append((v.input_ids + v.new_token_ids)[len(prompt):])
+                response_output_ids = (v.input_ids + v.new_token_ids)[len(prompt):]
+                response_outputs.append(response_output_ids)
                 response_log_probs.append(v.new_token_log_probs)
                 response_probs_gt_threshold_num.append(v.probs_gt_threshold_num)
                 response_probs_lt_threshold_sum.append(v.probs_lt_threshold_sum)

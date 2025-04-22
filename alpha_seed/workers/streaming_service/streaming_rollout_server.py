@@ -201,9 +201,9 @@ class AsyncXPerfGPTRolloutServer(OpenAIProxy):
         # from single_controller.base.worker import WorkerHelper
         # worker_helper = WorkerHelper()
         # free_port_addr = list(worker_helper.get_availale_master_addr_port())
-        config = uvicorn.Config(self.app, host=host, port=8001, loop="asyncio", timeout_keep_alive=300)
-        logging.getLogger("uvicorn.access").disabled = True
-        logging.getLogger("uvicorn").propagate = False
+        config = uvicorn.Config(self.app, host=host, port=8001, loop="asyncio", timeout_keep_alive=300, backlog=16384)
+        # logging.getLogger("uvicorn.access").disabled = True
+        # logging.getLogger("uvicorn").propagate = False
         server = uvicorn.Server(config)
         self.server_task = asyncio.create_task(server.serve())
 
