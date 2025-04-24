@@ -28,10 +28,12 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--load-dir', required=True)
     parser.add_argument('--save-path', required=False)
+    parser.add_argument('--no-save-megatron', action='store_false', dest='save_megatron')
     # for compatibility with merlin auto eval
     parser.add_argument('--cruise-config', required=False)
     parser.add_argument('--dtype', required=False)
     parser.add_argument('--save_hf', action='store_true')
+    parser.add_argument('--save-hf-dir', required=False)
     args = parser.parse_args()
 
     print('Downloading model shards')
@@ -176,14 +178,20 @@ if __name__ == '__main__':
     # print(f'Upload merged huggingface model from {hf_path} to {args.hdfs_path}')
     # upload back to hdfs
     if args.save_hf:
-        print(f'Upload huggingface model from {hf_path} to {args.load_dir}')
-        hdfs_io.copy(hf_path, args.load_dir)
+        if args.save_hf_dir:
+            save_hf_dir = args.save_hf_dir
+        else:
+            save_hf_dir = args.load_dir
+        print(f'Upload huggingface model from {hf_path} to {save_hf_dir}')
+        hdfs_io.hmkdir(save_hf_dir)
+        hdfs_io.copy(hf_path, save_hf_dir)
 
-    # convert to megatron for autoeval
-    # if 'ForCausalLM' in config.architectures[0]:
-    # only save ForCausalLM
-    print(f'Upload merged megatron model from {hf_path} to {args.save_path}')
-    convert_seed_models_to_megatron(hf_path=hf_path,
-                                    local_path=local_dir,
-                                    output_path=os.path.dirname(args.save_path),
-                                    validate=False)
+    if args.save_megatron:
+        # convert to megatron for autoeval
+        # if 'ForCausalLM' in config.architectures[0]:
+        # only save ForCausalLM
+        print(f'Upload merged megatron model from {hf_path} to {args.save_path}')
+        convert_seed_models_to_megatron(hf_path=hf_path,
+                                        local_path=local_dir,
+                                        output_path=os.path.dirname(args.save_path),
+                                        validate=False)

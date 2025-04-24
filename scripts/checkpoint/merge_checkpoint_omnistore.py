@@ -13,11 +13,7 @@ from typing import Optional
 import hdfs_io
 import torch
 from omnistore.utilities.ckpt_format.merge_tool import omnistore_ckpt_to_pytorch_ckpt
-from transformers import (
-    AutoConfig,
-    AutoModelForCausalLM,
-    AutoModelForTokenClassification,
-)
+from transformers import (AutoConfig, AutoModelForCausalLM, AutoModelForTokenClassification, AutoModelForVision2Seq)
 from alpha_seed.utils.ckpt.hdfs import prepare_hdfs_copy_kwargs
 from alpha_seed.utils.version import check_seed_models_version
 from verl.utils.fs import copy_local_path_from_hdfs
@@ -29,7 +25,11 @@ check_seed_models_version(REQUIRED_SEED_MODELS_VERSION)
 
 def hdfs_upload(local_path, remote_path, log_text):
     time_begin = time.time()
-    hdfs_io.copy(local_path, remote_path, **prepare_hdfs_copy_kwargs())
+    hdfs_io.makedirs(remote_path, exist_ok=True)
+    if isinstance(local_path, str):
+        local_path = [local_path]
+    for lp in local_path:
+        hdfs_io.copy(lp, remote_path, **prepare_hdfs_copy_kwargs())
     print(f'{log_text} cost time: {time.time() - time_begin}s')
 
 
@@ -39,19 +39,28 @@ def simple_convert_seed_models_to_megatron(
     output_path: Optional[str] = None,
 ):
     converted_ckpt = model.get_xperf_compatible_state_dict()
-
-    local_output_path = f'{local_path}/megatron_merge_states.pt'
-    torch.save(converted_ckpt, local_output_path)
+    if isinstance(converted_ckpt, tuple):
+        converted_llm_ckpt, converted_vl_ckpt = converted_ckpt
+        vl_local_output_path = f"{local_path}/visual_megatron_states.pt"
+        gpt_local_output_path = f"{local_path}/gpt_megatron_states.pt"
+        torch.save(converted_vl_ckpt, vl_local_output_path)
+        torch.save(converted_llm_ckpt, gpt_local_output_path)
+        local_output_paths = (vl_local_output_path, gpt_local_output_path)
+    else:
+        local_output_path = f'{local_path}/megatron_merge_states.pt'
+        torch.save(converted_ckpt, local_output_path)
+        local_output_paths = [local_output_path]
     if output_path is not None:
-        print(f'Start upload model from {local_output_path} to hdfs path {output_path}')
-        if not hdfs_io.hexists(local_output_path):
-            raise ValueError(f'{local_output_path} is not found')
+        print(f'Start upload model from {local_output_paths} to hdfs path {output_path}')
+        for local_output_path in local_output_paths:
+            if not hdfs_io.hexists(local_output_path):
+                raise ValueError(f'{local_output_path} is not found')
 
         if not hdfs_io.exists(output_path):
             hdfs_io.makedirs(output_path)
         upload_thread = threading.Thread(
             target=hdfs_upload,
-            args=(local_output_path, output_path, 'Async upload converted xperf model'),
+            args=(local_output_paths, output_path, 'Async upload converted xperf model'),
         )
         upload_thread.start()
         return upload_thread
@@ -95,8 +104,10 @@ if __name__ == '__main__':
             auto_model = AutoModelForCausalLM
             if hasattr(config, 'tie_word_embeddings'):
                 untie_embeddings = not config.tie_word_embeddings
+        elif 'ForConditionalGeneration' in config.architectures[0]:
+            auto_model = AutoModelForVision2Seq
         else:
-            raise NotImplementedError(f'Unknown architecture {config["architectures"]}')
+            raise NotImplementedError(f'Unknown architecture {config.architectures}')
         print(f'Prepare hf config and model cost time: {time.time() - time_begin}s')
 
         print('Step3: merge omnistore ckpt to get state_dict')
