@@ -1,6 +1,7 @@
 import ray
 import os
 import re
+from functools import partial
 import inspect
 
 import hdfs_io
@@ -141,12 +142,12 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
             print(f'[rank-{self.rank}]: lr_scheduler not found in extra_state, skip loading')
         if 'rng_state' in ckpt_state['extra_state']:
             self.load_rng_state(ckpt_state['extra_state']['rng_state'])
-        print(f'[rank-{self.rank}]: finish loading checkpoint {hdfs_path}')
+        print(f'[rank-{self.rank}]: Finish loading checkpoint {hdfs_path}')
 
     def save_checkpoint(self, local_path: str, hdfs_path: str, role: str, strategy: str, global_step: int,
                         ckpt_global_uploader_ref: ActorHandle, enable_shm: bool, *args, **kwargs):
         path = os.path.abspath(local_path)
-        print(f'[rank-{self.rank}]: start saving checkpoint {path}')
+        print(f'[rank-{self.rank}]: Start saving checkpoint {hdfs_path}')
         # wait for previous upload to hdfs
         self.wait_previous_upload(role, ckpt_global_uploader_ref)
         self.previous_global_step = global_step
@@ -156,10 +157,6 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
         self.local_mkdir(path)
         torch.distributed.barrier()
 
-        file_path_list = [('model', os.path.join(path, 'model', f'__{self.rank}_0.distcp')),
-                          ('extra_state', os.path.join(path, 'extra_state', f'extra_state_rank_{self.rank}.pt'))]
-        if self.optimizer:
-            file_path_list.append(('optimizer', os.path.join(path, 'optimizer', f'__{self.rank}_0.distcp')))
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             ckpt_state = {'model': self.model, 'extra_state': {'rng_state': self.get_rng_state(),}}
@@ -176,7 +173,11 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
                 else:
                     ckpt_state['extra_state']['lr_scheduler'] = self.lr_scheduler.state_dict()
 
-            print(f'[rank-{self.rank}]: Saving checkpoint to {os.path.abspath(path)} with omnistore')
+            print(f'[rank-{self.rank}]: Saving checkpoint to {hdfs_path} with omnistore')
+
+            if self.rank == 0:
+                print(f'[rank-{self.rank}]: Register save omnistore ckpt callback')
+                ray.get(ckpt_global_uploader_ref.register_callback.remote(role, global_step))
             if strategy == 'fsdp':
                 sig = inspect.signature(omnistore.FSDPCheckpointer.save)
                 if "kwargs" in sig.parameters:
@@ -189,14 +190,18 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
                 else:
                     additional_kwargs_dict = {}
                 omnistore.FSDPCheckpointer.save(
-                    path,
+                    hdfs_path,
                     ckpt_state,
                     enable_shm_upload_ckpt_tmp=enable_shm,
-                    async_fast_checkpoint=False,
+                    async_fast_checkpoint=True,
                     enable_tree_topo=True,
                     global_steps=global_step,
                     role=role,
                     ignore_append_global_steps_to_folder=True,
+                    callback=partial(self.save_callback,
+                                     role=role,
+                                     global_step=global_step,
+                                     ckpt_global_uploader_ref=ckpt_global_uploader_ref),
                     **additional_kwargs_dict,
                 )
             elif strategy == 'vescale-fsdp2':
@@ -211,13 +216,17 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
                 else:
                     additional_kwargs_dict = {}
                 omnistore.FSDP2Checkpointer.save(
-                    path,
+                    hdfs_path,
                     ckpt_state,
                     enable_shm_upload_ckpt_tmp=enable_shm,
-                    async_fast_checkpoint=False,
+                    async_fast_checkpoint=True,
                     global_steps=global_step,
                     role=role,
                     ignore_append_global_steps_to_folder=True,
+                    callback=partial(self.save_callback,
+                                     role=role,
+                                     global_step=global_step,
+                                     ckpt_global_uploader_ref=ckpt_global_uploader_ref),
                     **additional_kwargs_dict,
                 )
             elif strategy == 'megatron':
@@ -232,38 +241,22 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
                 else:
                     additional_kwargs_dict = {}
                 omnistore.MegatronCheckpointer.save(
-                    path,
+                    hdfs_path,
                     ckpt_state,
                     enable_shm_upload_ckpt_tmp=enable_shm,
-                    async_fast_checkpoint=False,
+                    async_fast_checkpoint=True,
                     enable_tree_topo=True,
                     global_steps=global_step,
                     role=role,
                     ignore_append_global_steps_to_folder=True,
+                    callback=partial(self.save_callback,
+                                     role=role,
+                                     global_step=global_step,
+                                     ckpt_global_uploader_ref=ckpt_global_uploader_ref),
                     **additional_kwargs_dict,
                 )
             else:
                 raise NotImplementedError(f'Alpha-seed OmniStore checkpointer does not support strategy {strategy}')
-
-        if hdfs_path is not None:
-            if self.rank == 0:
-                print(f'[rank-{self.rank}]: prepare for uploading omnistore metadata')
-                file_path_list.append(('model', os.path.join(path, 'model/.metadata')))
-                if self.optimizer:
-                    file_path_list.append(('optimizer', os.path.join(path, 'optimizer/.metadata')))
-            for sub_folder_name, file_local_path in file_path_list:
-                file_local_path = os.path.abspath(file_local_path)
-                hdfs_path_sub_folder = os.path.join(hdfs_path, sub_folder_name)
-                assert os.path.isfile(file_local_path), f'local path {file_local_path} does not exist'
-                ray.get(
-                    ckpt_global_uploader_ref.register_upload_task.remote(role, global_step,
-                                                                         ray.get_runtime_context().get_node_id(),
-                                                                         file_local_path, hdfs_path_sub_folder))
-                print(
-                    f'[rank-{self.rank}]: register upload ckpt task of path {file_local_path} to hdfs {hdfs_path_sub_folder} done'
-                )
-        # wait for everyone to dump to local
-        torch.distributed.barrier()
 
         if self.rank == 0:
             self.save_hf_configs(path, hdfs_path, role, global_step, ckpt_global_uploader_ref)
@@ -271,8 +264,14 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
                 self.save_megatron_configs(path, hdfs_path, role, global_step, ckpt_global_uploader_ref)
             if hdfs_path:
                 ckpt_global_uploader_ref.start_uploading.remote(role, global_step)
-                print(f'[rank-{self.rank}]: start uploading ckpt')
+                print(f'[rank-{self.rank}]: Start uploading ckpt')
         torch.distributed.barrier()
 
         self.previous_save_local_path = path
-        print(f'[rank-{self.rank}]: finish saving checkpoint {path}')
+        print(f'[rank-{self.rank}]: Finish saving checkpoint {path}')
+
+    def save_callback(self, role, global_step, ckpt_global_uploader_ref, *args, **kwargs):
+        if self.rank != 0:
+            return
+        print(f'[rank-{self.rank}]: Invoke save omnistore ckpt callback')
+        ckpt_global_uploader_ref.callback.remote(role, global_step)
