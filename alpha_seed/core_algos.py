@@ -230,9 +230,23 @@ def compute_lm_loss(log_prob, raw_scores, eos_ids):
     return lm_loss
 
 
-def compute_policy_loss(old_log_prob, ref_log_prob, log_prob, advantages, upgo_advantages, eos_mask, cliprange_low,
-                        cliprange_high, cliprange2, scale_pg_by_kl, scale_pg_by_local_kl, upgo_loss_weight,
-                        use_ewma_loss, kl_penalty_type, overlong_mask, loss_average_method):
+def compute_policy_loss(old_log_prob,
+                        ref_log_prob,
+                        log_prob,
+                        advantages,
+                        upgo_advantages,
+                        eos_mask,
+                        cliprange_low,
+                        cliprange_high,
+                        cliprange2,
+                        scale_pg_by_kl,
+                        scale_pg_by_local_kl,
+                        upgo_loss_weight,
+                        use_ewma_loss,
+                        kl_penalty_type,
+                        overlong_mask,
+                        loss_average_method,
+                        loss_average_constant=0):
     """Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py#L1122
 
     Args:
@@ -283,8 +297,9 @@ def compute_policy_loss(old_log_prob, ref_log_prob, log_prob, advantages, upgo_a
         pg_losses_clip = torch.maximum(pg_losses1, pg_losses2)
         pg_losses = torch.minimum(pg_losses_clip, pg_losses3)  # 这个应该对advantage为正的情况不影响
 
-    assert loss_average_method in ['sample', 'token'
-                                  ], f"loss_average_method must be 'sample' or 'token', but got {loss_average_method}"
+    assert loss_average_method in [
+        'sample', 'token', 'constant'
+    ], f"loss_average_method must be 'sample' or 'token' or 'constant', but got {loss_average_method}"
 
     if loss_average_method == 'sample':
         pg_loss = torch.sum(pg_losses * eos_mask, dim=1) / seq_len_per_sample  # batch
@@ -323,6 +338,8 @@ def compute_policy_loss(old_log_prob, ref_log_prob, log_prob, advantages, upgo_a
 
     if loss_average_method == 'sample':
         pg_loss = torch.mean(pg_loss)
+    elif loss_average_method == 'constant':
+        pg_loss = (pg_loss * pg_loss_mask).sum() / (loss_average_constant * (pg_loss_mask[:, 0]).sum() + 1e-6)
     else:
         pg_loss = verl_F.masked_mean(pg_loss, pg_loss_mask)
 

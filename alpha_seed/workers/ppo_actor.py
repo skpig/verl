@@ -488,6 +488,7 @@ def default_loss_fn(config, micro_data, full_entropy, log_prob):
     lm_loss_weight = config.lm_loss_weight
     kl_penalty_type = config.kl_penalty
     loss_average_method = config.loss_average_method
+    loss_average_constant = config.loss_average_constant
 
     total_loss, pg_loss, upgo_loss, pg_clipfrac, pg_clipfrac_hi, pg_clipfrac_lo, pg_clipfrac2, ppo_kl, ppo_kl_sum = core_algos.compute_policy_loss(
         old_log_prob=old_log_prob,
@@ -505,7 +506,8 @@ def default_loss_fn(config, micro_data, full_entropy, log_prob):
         use_ewma_loss=use_ewma_loss,
         kl_penalty_type=kl_penalty_type,
         overlong_mask=overlong_mask,
-        loss_average_method=loss_average_method)
+        loss_average_method=loss_average_method,
+        loss_average_constant=loss_average_constant)
 
     if kl_loss_weight > 0.0:
         kl_loss = core_algos.compute_kl_loss(log_prob, ref_log_prob, response_mask, kl_penalty_type)

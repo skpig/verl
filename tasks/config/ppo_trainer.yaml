@@ -55,6 +55,7 @@ actor_rollout_ref:
     clip_ratio_high: null
     clip_ratio2: 10.0
     loss_average_method: "sample"
+    loss_average_constant: 0
     scale_pg_by_kl: False
     scale_pg_by_local_kl: False
     upgo_loss_weight: 0.0
