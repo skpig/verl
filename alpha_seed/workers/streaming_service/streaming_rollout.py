@@ -226,6 +226,7 @@ class AsyncXPerfGPTRollout(object):
                                           step_profiler=step_profiler)
         inference_sess.max_off_policy_steps = self.config.get('max_off_policy_steps', 5)
         with tempfile.NamedTemporaryFile(mode='w', suffix=".json") as f:
+            print(f"load xperf config ... {text_cfg}")
             json.dump(text_cfg, f)
             f.flush()
             global_rank = 0 if not dist.is_initialized() else dist.get_rank()
@@ -336,6 +337,9 @@ class AsyncXPerfGPTRollout(object):
             os.environ["XGPT_TUNER_ENABLE"] = os.getenv("XGPT_TUNER_ENABLE", "1")
             os.environ["XPERF_TUNER_ONLINE_PRIORITY"] = os.getenv("XPERF_TUNER_ONLINE_PRIORITY", "1")
             os.environ["XPERF_TUNER_ONLINE_VERSION"] = "2.0.0+xgpt"
+            base_dir = os.path.normpath(os.path.dirname(os.path.dirname(__file__)))
+            tuning_path = os.path.join(base_dir, "xperf_rollout", "tuning")
+            os.environ["XPERF_TUNER_CONFIG_LOAD_PATH"] = tuning_path
 
     def _set_multihost_env(self):
         os.environ["NCCL_SOCKET_IFNAME"] = os.getenv("NCCL_SOCKET_IFNAME", "eth0")
@@ -462,9 +466,6 @@ class AsyncXPerfGPTRollout(object):
     def generate_sequences(self, prompts: DataProto, is_async=False):
 
         complete_ratio = prompts.meta_info.get('complete_ratio', 1)
-
-        max_new_tokens = prompts.meta_info.get('generation_kwargs').get('max_new_tokens', self.config.response_length)
-
         prompt_ids = prompts.batch['input_ids']  # (bs, prompt_length)
         batch_size = prompt_ids.shape[0]
         # left-padded attention_mask
