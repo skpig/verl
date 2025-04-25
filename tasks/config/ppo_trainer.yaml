@@ -170,6 +170,10 @@ actor_rollout_ref:
     rollout_pool:
       nnodes: 1
       warmup_step: 0
+    xperf_custom:
+      enable: False
+      backbone: null
+      preset: null
   rollout_server_args: ${rollout_server}
   streaming_rollout_args: ${streaming_rollout}
   streaming_validator_args: ${streaming_validator}
@@ -472,4 +476,3 @@ mariana:
     janus_use_big_op: false
     janus_big_op_version: V1
     moe_pr_expert_type: swiglu-default
-

@@ -51,6 +51,7 @@ from contextlib import contextmanager
 import logging
 
 from alpha_seed.workers.xperf_rollout.utils import get_xperf_gpt_config
+from alpha_seed.workers.xperf_rollout.utils.custom_xperf_convert_helper import XCustomInferenceModuleAdapter
 from alpha_seed.workers.streaming_service.streaming_utils import is_multihost_model, DataPack, pack_to_dataproto, get_gpus_per_node
 from alpha_seed.workers.xperf_rollout.utils.layout_convert_helper import offload_to_device
 from alpha_seed.workers.streaming_service.xperf_model_prophet import XperfModelProphet
@@ -150,7 +151,7 @@ class AsyncXPerfGPTRollout(object):
             self.profiler_context = nullcontext(NullProfileEnter())
         self.async_remain_warmup_step = self.config.rollout_pool.get("warmup_step", 0)
         # auto infer rollout running config
-        enable_paged_attn = self.config.get('enable_paged_attention', True)
+        enable_paged_attn = self.config.get('enable_paged_attention', True) and not self.config.xperf_custom.enable
         enable_cuda_graph = self.config.get('enable_cuda_graph', False)
         slot_block_size = self.config.get('slot_block_size', 1024)
 
@@ -252,6 +253,9 @@ class AsyncXPerfGPTRollout(object):
                 tp_group = self.device_mesh['tp'].get_group()
                 tp_src_rank = dist.get_global_rank(tp_group, group_rank=0)
                 torch.distributed.broadcast_object_list(free_port_addr, src=tp_src_rank, group=tp_group)
+                inference_sess.set_tp_group(tp_group)
+            else:
+                inference_sess.set_tp_group(None)
 
             master_addr, master_port = free_port_addr[0], free_port_addr[1]
             gpus_per_node = get_gpus_per_node()
@@ -273,6 +277,10 @@ class AsyncXPerfGPTRollout(object):
                             f'XPerf init Global rank {global_rank}, tp_rank {tp_rank}, master_addr: {master_addr}, master_port: {master_port}'
                         )
                         with logging_set_level(self.config.get('logging_level', 'INFO')):
+                            xperf_custom_kwargs = {}
+                            if self.config.xperf_custom.enable:
+                                xperf_custom_kwargs['xperf_custom_backbone'] = self.config.xperf_custom.backbone
+                                xperf_custom_kwargs['xperf_custom_preset'] = self.config.xperf_custom.preset
                             inference_sess.init_inference_engine(f.name,
                                                                  generate_kwargs,
                                                                  rank0_split=False,
@@ -281,7 +289,9 @@ class AsyncXPerfGPTRollout(object):
                                                                  use_ep=use_ep,
                                                                  tokenizer_path=self.tokenizer.name_or_path,
                                                                  multi_host_tp=multi_host_tp,
-                                                                 vit_config=vision_cfg)
+                                                                 use_xperf_custom=self.config.xperf_custom.enable,
+                                                                 vit_config=vision_cfg,
+                                                                 **xperf_custom_kwargs)
                     if dist.is_initialized() and tp_size > 1:
                         dist.barrier()
                         if tp_rank == 0:
@@ -351,6 +361,8 @@ class AsyncXPerfGPTRollout(object):
 
     def reset_status(self):
         model = self.inference_engine.engine.module
+        if isinstance(model, XCustomInferenceModuleAdapter):
+            return
         for i in range(model.num_layers):
             if (hasattr(model, "kv_mirror_layers")):
                 if i + 1 in model.kv_mirror_layers:
@@ -362,6 +374,9 @@ class AsyncXPerfGPTRollout(object):
 
     def _dump_context(self):
         if os.getenv('XPERF_DUMP_NAN', '0') == '1':
+            if isinstance(self.inference_engine.engine.module, XCustomInferenceModuleAdapter):
+                print("XPerf custom engine dump weights not supported, skipping...")
+                return
             from hdfs_io.hdfs_io import hcopy, hmkdir
             dump_nan_dir = self.config.get("dump_nan", None)
             if dump_nan_dir is None:

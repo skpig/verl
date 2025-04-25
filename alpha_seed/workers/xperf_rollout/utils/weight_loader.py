@@ -43,7 +43,13 @@ from alpha_seed.workers.xperf_rollout.utils.fp8_convert_helper import (
     _reshard_fsdp_state_dict_to_xperf_vl_m8_fp8)
 
 
-def get_xperf_gpt_weight_bind_fn(model_config: PretrainedConfig, quant_mode: str = "NO_QUANT", backend='fsdp'):
+def get_xperf_gpt_weight_bind_fn(model_config: PretrainedConfig,
+                                 quant_mode: str = "NO_QUANT",
+                                 backend='fsdp',
+                                 is_custom_xperf: bool = False):
+    if is_custom_xperf:
+        from alpha_seed.workers.xperf_rollout.utils.custom_xperf_convert_helper import _reshard_state_dict_to_xperf_custom
+        return partial(_reshard_state_dict_to_xperf_custom, model_config=model_config, backend=backend)
     if backend == 'fsdp':
         if quant_mode == "WFP8":
             if model_config.model_type == 'seed_p6':

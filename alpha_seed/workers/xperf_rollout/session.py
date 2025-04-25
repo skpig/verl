@@ -13,6 +13,7 @@ from xperf_gpt.inference import init_inference
 from alpha_seed.workers.xperf_rollout.component.cache_manager import CacheManager
 from alpha_seed.workers.xperf_rollout.component.infer_scheduler import InferScheduler
 from alpha_seed.workers.xperf_rollout.component.sampling_manager import Sampler
+from alpha_seed.workers.xperf_rollout.utils.custom_xperf_convert_helper import XCustomInferenceModuleAdapter
 from xperf_gpt.multi_models.visual.eva_vit import EVA_VIT_CONFIGS
 from alpha_seed.workers.xperf_rollout.component.query import Query, InflightQueue
 from alpha_seed.utils.observility import get_profiler_context_wrapped
@@ -236,12 +237,18 @@ class InferenceSession:
             else:
                 setattr(self, param, default)
 
-    def init_inference_engine(self, session_config_path, generation_config, vit_config=None, **kwargs):
+    def init_inference_engine(self,
+                              session_config_path,
+                              generation_config,
+                              use_xperf_custom=False,
+                              vit_config=None,
+                              **kwargs):
         """Initialize model engine and associated components
         
         Args:
             session_config_path: Path to model config JSON
             generation_config: Generation parameters
+            use_xperf_custom: Whether use xperf_gpt_custom
             vit_config: vision config dict
             kwargs: Overrides for model loading
         """
@@ -282,7 +289,20 @@ class InferenceSession:
             multi_stream=1,
             **generation_config)
         init_inference_kwargs.update(kwargs)  # overridable by kwargs
-        self.engine = init_inference(None, **init_inference_kwargs)
+        if use_xperf_custom:
+            assert not self.enable_paged_attn, f"xperf custom for paged attention not supported yet."
+            import xperf_gpt_custom
+            backbone = kwargs.pop('xperf_custom_backbone', None)
+            preset = kwargs.pop('xperf_custom_preset', None)
+            engine = xperf_gpt_custom.create_network(backbone=backbone, preset=preset, **init_inference_kwargs)
+            module = XCustomInferenceModuleAdapter(engine)
+            setattr(engine, "module", module)
+            setattr(engine.config, "model_config", {"hidden_size": engine.config.hidden_size})
+            self.engine = engine
+            self.is_xperf_custom = True
+        else:
+            self.engine = init_inference(None, **init_inference_kwargs)
+            self.is_xperf_custom = False
         self.sampler = Sampler(generation_config=generation_config)
         self.num_return_sequences = self.engine.module.num_return_sequences
 
@@ -321,6 +341,9 @@ class InferenceSession:
                 vit_config['navit_anyres'] = True
             self.vit_engine = VITInferencer(vit_config_dict=vit_config,
                                             tokenization_path=self.tokenizer_path).cuda().to(torch.bfloat16)
+
+    def set_tp_group(self, tp_group):
+        self.tp_group = tp_group
 
     def set_generator_strategy(self, **kwargs):
         self.sampler.set_generator_strategy(**kwargs)
@@ -704,7 +727,8 @@ class InferenceSession:
                 self.stop_signal_tensor.fill_(1.0)
             # reuse first nccl layer to comm signal
             if self.engine.module.tp_size > 1:
-                self.engine.module.layers_impl[0].all_reduce(self.stop_signal_tensor, "sum")
+                assert self.tp_group is not None, "tp_group not set!"
+                torch.distributed.all_reduce(self.stop_signal_tensor, group=self.tp_group)
 
             # wait for the max_off_policy rollout
             skip_break = False
@@ -720,7 +744,9 @@ class InferenceSession:
         num_ready_query_local_tensor = torch.tensor([len(self.pending)], dtype=torch.float32, device="cuda")
         num_ready = len(self.pending)
         if self.engine.module.tp_size > 1:
-            self.engine.module.layers_impl[0].all_reduce(num_ready_query_local_tensor, "min")
+            assert self.tp_group is not None, "tp_group not set!"
+            reduce_op = torch.distributed.ReduceOp.MIN
+            torch.distributed.all_reduce(self.num_ready_query_local_tensor, group=self.tp_group, op=reduce_op)
             num_ready = num_ready_query_local_tensor.int().item()
         if num_ready == 0:
             return self.waiting
@@ -752,10 +778,11 @@ class InferenceSession:
         torch.manual_seed(int(os.getenv('XPERF_RANDOM_SEED', '0')))
         input_ids_list = self.truncate_prompts(prompts, logits_masks is not None)
         self.find_longest_common_prefix(input_ids_list, logits_masks)
-        self.build_prefix_kv_cache()
-        logging_rank(
-            logging.info,
-            "find common prefix which contains {} tokens, reuse this kv cache!".format(self.common_prefix_tensor_len))
+        if not self.is_xperf_custom:
+            self.build_prefix_kv_cache()
+            logging_rank(
+                logging.info, "find common prefix which contains {} tokens, reuse this kv cache!".format(
+                    self.common_prefix_tensor_len))
         self.prepare_context_inputs(input_ids_list, logits_masks, prompt_meta_info)
         self.current_steps = 0
         self.finished_num = 0
@@ -783,7 +810,9 @@ class InferenceSession:
                 sample_kwargs=forward_inputs['sample_kwargs'])
 
             if self.engine.module.tp_size > 1 and next_tokens is not None:
-                self.engine.module.layers_impl[0].broadcast(next_tokens)
+                assert self.tp_group is not None, "tp_group not set!"
+                tp_src_rank = torch.distributed.get_global_rank(self.tp_group, group_rank=0)
+                torch.distributed.broadcast(next_tokens, src=tp_src_rank, group=self.tp_group)
 
             self._update_running_batch(next_tokens=next_tokens,
                                        tokens_len=tokens_len,
@@ -841,7 +870,9 @@ class InferenceSession:
                     sample_kwargs=forward_inputs['sample_kwargs'])
 
                 if self.engine.module.tp_size > 1 and next_tokens is not None:
-                    self.engine.module.layers_impl[0].broadcast(next_tokens)
+                    assert self.tp_group is not None, "tp_group not set!"
+                    tp_src_rank = torch.distributed.get_global_rank(self.tp_group, group_rank=0)
+                    torch.distributed.broadcast(next_tokens, src=tp_src_rank, group=self.tp_group)
 
                 self._update_running_batch(next_tokens=next_tokens,
                                            tokens_len=tokens_len,

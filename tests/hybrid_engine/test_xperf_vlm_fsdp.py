@@ -70,6 +70,10 @@ rollout_config = OmegaConf.create({
         "default_hdfs_dir": None,
         "upload_to_mlx": False,
     },
+    "xperf_custom": {
+        "enable": False,
+        "backbone": "m8",
+    },
 })
 
 print(

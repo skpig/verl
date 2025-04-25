@@ -24,26 +24,32 @@ from transformers import PretrainedConfig
 
 from torch.distributed._tensor import DTensor, Replicate, Shard
 from torch.distributed.device_mesh import DeviceMesh
+from alpha_seed.workers.xperf_rollout.utils.custom_xperf_convert_helper import XCustomInferenceModuleAdapter
 
 
 def init_meta(tp_model):
-    param_list = [tp_model.layernorm_weight, tp_model.wte_weight, tp_model.lm_head_weight] + \
-                    [p for layer in tp_model.layers_weight for p in layer if isinstance(p, torch.Tensor)]
-    if hasattr(tp_model, 'wpe'):
-        param_list.append(tp_model.wpe.weight)
+    if isinstance(tp_model, XCustomInferenceModuleAdapter):
+        param_list = tp_model.get_param_list(skip_meta=False)
+    else:
+        param_list = [tp_model.layernorm_weight, tp_model.wte_weight, tp_model.lm_head_weight] + \
+                        [p for layer in tp_model.layers_weight for p in layer if isinstance(p, torch.Tensor)]
+        if hasattr(tp_model, 'wpe'):
+            param_list.append(tp_model.wpe.weight)
     for param in param_list:
         new_param = torch.empty_like(param, device='cpu')
         torch.utils.swap_tensors(param, new_param)
 
-    for i in range(tp_model.num_layers):
-        tp_model.layers_impl[i].free_kv_cache()
+    free_kv_cache(tp_model)
 
 
 def offload_param_to_device(tp_model, device):
-    param_list = [tp_model.layernorm_weight, tp_model.wte_weight, tp_model.lm_head_weight] + \
-                    [p for layer in tp_model.layers_weight for p in layer if isinstance(p, torch.Tensor)]
-    if hasattr(tp_model, 'wpe'):
-        param_list.append(tp_model.wpe.weight)
+    if isinstance(tp_model, XCustomInferenceModuleAdapter):
+        param_list = tp_model.get_param_list(skip_meta=True)
+    else:
+        param_list = [tp_model.layernorm_weight, tp_model.wte_weight, tp_model.lm_head_weight] + \
+                        [p for layer in tp_model.layers_weight for p in layer if isinstance(p, torch.Tensor)]
+        if hasattr(tp_model, 'wpe'):
+            param_list.append(tp_model.wpe.weight)
     for param in param_list:
         if param.is_meta:
             out = torch.empty_like(param, device=device)
@@ -53,6 +59,9 @@ def offload_param_to_device(tp_model, device):
 
 
 def free_kv_cache(tp_model):
+    if isinstance(tp_model, XCustomInferenceModuleAdapter):
+        # NOTE: free kv cache not supported yet
+        return
     for i in range(tp_model.num_layers):
         tp_model.layers_impl[i].free_kv_cache()
 
@@ -64,16 +73,21 @@ def offload_to_device(tp_model, device="cpu"):
 
 
 def load_to_cuda(tp_model):
-    if hasattr(tp_model, 'layers_weight'):
-        layers_weight = tp_model.layers_weight
-        param_list_other = [tp_model.layernorm_weight, tp_model.wte_weight, tp_model.lm_head_weight]
+    if isinstance(tp_model, XCustomInferenceModuleAdapter):
+        param_list = tp_model.get_param_list(skip_meta=True)
     else:
-        layers_weight = tp_model.visual_encoder.module.layers_weight
-        param_list_other = [tp_model.visual_encoder.module.rotary_pos_emb._buffers['inv_freq']]
-    param_list = [p for layer in layers_weight for p in layer if isinstance(p, torch.Tensor)]
-    param_list = param_list + param_list_other
-    if hasattr(tp_model, 'wpe'):
-        param_list.append(tp_model.wpe.weight)
+        if hasattr(tp_model, 'layers_weight'):
+            layers_weight = tp_model.layers_weight
+            param_list_other = [tp_model.layernorm_weight, tp_model.wte_weight, tp_model.lm_head_weight]
+        else:
+            layers_weight = tp_model.visual_encoder.module.layers_weight
+            param_list_other = [tp_model.visual_encoder.module.rotary_pos_emb._buffers['inv_freq']]
+        param_list = [p for layer in layers_weight for p in layer if isinstance(p, torch.Tensor)]
+        param_list = param_list + param_list_other
+
+        if hasattr(tp_model, 'wpe'):
+            param_list.append(tp_model.wpe.weight)
+
     for param in param_list:
         # make sure the param is not a DTensor
         assert not isinstance(param.data, DTensor)

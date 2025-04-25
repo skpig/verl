@@ -67,6 +67,7 @@ class ActorXPerfGPTShardingManager(BaseShardingManager):
         self.standalone = standalone
         self.bind_fn = get_xperf_gpt_weight_bind_fn(model_config,
                                                     self.inference_engine.engine.module.quant_mode,
+                                                    is_custom_xperf=self.inference_engine.is_xperf_custom,
                                                     backend=backend)
 
         # Note that torch_random_states may be different on each dp rank
