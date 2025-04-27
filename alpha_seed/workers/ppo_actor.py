@@ -362,6 +362,14 @@ class DataParallelPPOActor(BasePPOActor):
                 )
         temperature = data.meta_info['temperature']  # temperature must be in the data.meta_info to avoid slient error
         global_step = data.meta_info.get('global_step')
+
+        # compute batch full token count
+        response_length = data.batch['responses'].size(1)
+        batch_full_token_count_mask = data.batch['attention_mask'][:, -response_length:]
+        if 'overlong_mask' in data.batch.keys():
+            batch_full_token_count_mask *= data.batch['overlong_mask'].unsqueeze(-1)
+        batch_full_token_count = max(1, batch_full_token_count_mask.sum().item())
+
         dataloader = make_mini_step_dataloader(data, self.config.ppo_mini_batch_size)
         metrics = {}
 
@@ -380,6 +388,12 @@ class DataParallelPPOActor(BasePPOActor):
                 self._optimizer_zero_grad()
 
                 minibatch_early_stop = False
+
+                # compute minibatch full token count
+                mini_batch_full_token_count_mask = mini_batch['attention_mask'][:, -response_length:]
+                if 'overlong_mask' in mini_batch.keys():
+                    mini_batch_full_token_count_mask *= mini_batch['overlong_mask'].unsqueeze(-1)
+                mini_batch_full_token_count = max(1, mini_batch_full_token_count_mask.sum().item())
 
                 for i, micro_data in enumerate(micro_batches):
 
@@ -402,10 +416,17 @@ class DataParallelPPOActor(BasePPOActor):
                         minibatch_early_stop = True
                         break
 
-                    if self.config.use_dynamic_bsz:
-                        loss = policy_loss * (len(micro_data) / self.config.ppo_mini_batch_size)
+                    if self.config.loss_average_method in ['token', 'sample', 'constant']:
+                        if self.config.use_dynamic_bsz:
+                            loss = policy_loss * (len(micro_data) / self.config.ppo_mini_batch_size)
+                        else:
+                            loss = policy_loss / self.gradient_accumulation
+                    elif self.config.loss_average_method == 'minibatch':
+                        loss = policy_loss / mini_batch_full_token_count
+                    elif self.config.loss_average_method == 'batch':
+                        loss = policy_loss / batch_full_token_count * self.config.ppo_mini_batch_size
                     else:
-                        loss = policy_loss / self.gradient_accumulation
+                        raise NotImplementedError(f'loss_average_method {loss_average_method} not implemented.')
                     loss.backward()
 
                     micro_data_metric['actor/seqlen'] = seqlen
@@ -510,19 +531,27 @@ def default_loss_fn(config, micro_data, full_entropy, log_prob):
         loss_average_constant=loss_average_constant)
 
     if kl_loss_weight > 0.0:
-        kl_loss = core_algos.compute_kl_loss(log_prob, ref_log_prob, response_mask, kl_penalty_type)
+        kl_loss = core_algos.compute_kl_loss(log_prob,
+                                             ref_log_prob,
+                                             response_mask,
+                                             kl_penalty_type,
+                                             loss_average_method=loss_average_method)
     else:
         kl_loss = torch.zeros((), device=pg_loss.device)
 
     if offpolicy_kl_loss_weight > 0.0:
-        offpolicy_kl_loss = core_algos.compute_kl_loss(log_prob, old_log_prob, response_mask, kl_penalty_type)
+        offpolicy_kl_loss = core_algos.compute_kl_loss(log_prob,
+                                                       old_log_prob,
+                                                       response_mask,
+                                                       kl_penalty_type,
+                                                       loss_average_method=loss_average_method)
     else:
         offpolicy_kl_loss = torch.zeros((), device=pg_loss.device)
 
     if lm_loss_weight > 0.0:
         eos_ids = micro_data['eos_ids']
         raw_scores = micro_data['token_level_scores']
-        lm_loss = core_algos.compute_lm_loss(log_prob, raw_scores, eos_ids)
+        lm_loss = core_algos.compute_lm_loss(log_prob, raw_scores, eos_ids, loss_average_method=loss_average_method)
     else:
         lm_loss = torch.zeros((), device=pg_loss.device)
 

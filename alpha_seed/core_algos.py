@@ -218,7 +218,7 @@ def compute_rewards(token_level_scores, old_log_prob, ref_log_prob, kl_ratio):
     return token_level_scores - kl * kl_ratio
 
 
-def compute_lm_loss(log_prob, raw_scores, eos_ids):
+def compute_lm_loss(log_prob, raw_scores, eos_ids, loss_average_method='token'):
     eos_ids = eos_ids.unsqueeze(1)
     scores = torch.gather(raw_scores, 1, eos_ids)
     ids = torch.arange(log_prob.shape[1], device=eos_ids.device).unsqueeze(0).repeat(log_prob.shape[0], 1)
@@ -226,7 +226,12 @@ def compute_lm_loss(log_prob, raw_scores, eos_ids):
     mask1 = (scores > 0).repeat(1, log_prob.shape[1])
     mask = mask0 & mask1
     lm_loss = torch.masked_select(log_prob, mask)
-    lm_loss = -torch.sum(lm_loss) / max(lm_loss.numel(), 1)
+    if loss_average_method in ['sample', 'token', 'constant']:
+        lm_loss = -torch.sum(lm_loss) / max(lm_loss.numel(), 1)
+    elif loss_average_method in ['minibatch', 'batch']:
+        lm_loss = -torch.sum(lm_loss)
+    else:
+        raise NotImplementedError(f"loss_average_method {loss_average_method} not implemented")
     return lm_loss
 
 
@@ -298,8 +303,8 @@ def compute_policy_loss(old_log_prob,
         pg_losses = torch.minimum(pg_losses_clip, pg_losses3)  # 这个应该对advantage为正的情况不影响
 
     assert loss_average_method in [
-        'sample', 'token', 'constant'
-    ], f"loss_average_method must be 'sample' or 'token' or 'constant', but got {loss_average_method}"
+        'sample', 'token', 'constant', 'minibatch', 'batch'
+    ], f"loss_average_method must be in ['sample', 'token', 'constant', 'minibatch', 'batch'], but got {loss_average_method}"
 
     if loss_average_method == 'sample':
         pg_loss = torch.sum(pg_losses * eos_mask, dim=1) / seq_len_per_sample  # batch
@@ -340,8 +345,10 @@ def compute_policy_loss(old_log_prob,
         pg_loss = torch.mean(pg_loss)
     elif loss_average_method == 'constant':
         pg_loss = (pg_loss * pg_loss_mask).sum() / (loss_average_constant * (pg_loss_mask[:, 0]).sum() + 1e-6)
-    else:
+    elif loss_average_method == 'token':
         pg_loss = verl_F.masked_mean(pg_loss, pg_loss_mask)
+    else:
+        pg_loss = (pg_losse * pg_loss_mask).sum()
 
     if upgo_loss_weight > 0.0:
         rho = torch.minimum(ratio, torch.ones_like(ratio)).detach()
@@ -433,15 +440,22 @@ def compute_value_loss(vpreds, returns, values, eos_mask, cliprange_value_low, c
     return vf_loss, vf_clipfrac, seq_level_vf_loss
 
 
-def compute_kl_loss(log_prob, ref_log_prob, eos_mask, kl_penalty_):
+def compute_kl_loss(log_prob, ref_log_prob, eos_mask, kl_penalty_, loss_average_method='token'):
     if kl_penalty_ in ("abs", "mse", "low_var_kl"):
         kl = kl_penalty(log_prob, ref_log_prob, kl_penalty_)
     elif kl_penalty_ in ("kl"):
         kl = kl_penalty(log_prob, ref_log_prob, kl_penalty_).square()
     else:
         raise NotImplementedError
-    seq_len_per_sample = torch.clamp(torch.sum(eos_mask, dim=1), min=1.0)
-    kl_loss = torch.mean(torch.sum(kl * eos_mask, dim=1) / seq_len_per_sample)
+    if loss_average_method in ['sample', 'constant']:
+        seq_len_per_sample = torch.clamp(torch.sum(eos_mask, dim=1), min=1.0)
+        kl_loss = torch.mean(torch.sum(kl * eos_mask, dim=1) / seq_len_per_sample)
+    elif loss_average_method == 'token':
+        kl_loss = (kl * eos_mask).sum() / torch.clamp(eos_mask.sum(), min=1.0)
+    elif loss_average_method in ['minibatch', 'batch']:
+        kl_loss = (kl * eos_mask).sum()
+    else:
+        raise NotImplementedError
     return kl_loss
 
 
