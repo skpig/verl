@@ -16,27 +16,20 @@ FSDP PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
 
-import wandb
-from functools import cache
 import json
 import os
 import uuid
-from collections import defaultdict
+from collections import Counter, defaultdict
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
+from functools import cache, partial
 from pprint import pprint
-from typing import Counter, Type, Dict
-from copy import deepcopy
-from collections import defaultdict
-from functools import partial
-from collections import Counter, defaultdict
-from tqdm import tqdm
-import pandas as pd
+from typing import Counter, Dict, Type
 
-import ray
 import numpy as np
+import pandas as pd
 import ray
 import torch
 from codetiming import Timer
@@ -45,25 +38,27 @@ from torch.utils.data import Dataset, RandomSampler, SequentialSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 from traitlets import default
+
+import wandb
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.base import Worker
-from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
+from verl.single_controller.ray import (RayClassWithInitArgs, RayResourcePool,
+                                        RayWorkerGroup)
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import agg_loss
-from verl.trainer.ppo.metric_utils import (
-    compute_data_metrics,
-    compute_throughout_metrics,
-    compute_timing_metrics,
-    process_validation_metrics,
-    reduce_metrics,
-    compute_rollout_metrics
-)
+from verl.trainer.ppo.metric_utils import (compute_data_metrics,
+                                           compute_rollout_metrics,
+                                           compute_throughout_metrics,
+                                           compute_timing_metrics,
+                                           process_validation_metrics,
+                                           reduce_metrics)
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
-from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
+from verl.utils.seqlen_balancing import (get_seqlen_balanced_partitions,
+                                         log_seqlen_unbalance)
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.rollout.async_server import AsyncLLMServerManager
@@ -797,7 +792,7 @@ class RayPPOTrainer:
             output_ids = test_output_gen_batch.batch["responses"]
             output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
             sample_outputs.extend(output_texts)
-            # breakpoint()
+            breakpoint()
             test_batch = test_batch.union(test_output_gen_batch)
 
             # evaluate using reward_function
@@ -1076,7 +1071,6 @@ class RayPPOTrainer:
         The light-weight advantage computation is done on the driver process.
         """
         # breakpoint()
-        from verl.utils.tracking import Tracking
         from omegaconf import OmegaConf
 
         from verl.utils.tracking import Tracking

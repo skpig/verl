@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from .batch import BatchRewardManager
+from .custom import CustomRewardManager
 from .dapo import DAPORewardManager
 from .naive import NaiveRewardManager
 from .prime import PrimeRewardManager

@@ -406,13 +406,50 @@ def match_answer(response):
 
 import math
 
+# 定义不同检查对应的位
+ANSWER_MATCH_BIT = 1
+REASONING_ORDER_BIT = 2
+
+def verify_format(model_output: str):
+    """
+    Verify if the answer is in a valid format.
+    返回值为位掩码，不同位代表不同检查结果。
+    """
+    result = 0
+    
+    # 检查是否有且仅有一个 "## Answer:" 
+    answer_matches = re.findall(r'## Answer:', model_output)
+    if len(answer_matches) == 1:
+        result |= ANSWER_MATCH_BIT
+    
+    # 查找所有 "## Reasoning step [1-9]+:" 
+    reasoning_pattern = r'## Reasoning step ([1-9]+):'
+    reasoning_matches = [(match.start(), match.group(1)) for match in re.finditer(reasoning_pattern, model_output)]
+    
+    if reasoning_matches:
+        answer_match = re.search(r'## Answer:', model_output)
+        if answer_match is None:
+            return result
+        answer_index = answer_match.start()
+        reasoning_steps_valid = True
+        for step_index, match in reasoning_matches:
+            if step_index > answer_index:
+                reasoning_steps_valid = False
+                break
+        
+        reasoning_steps = [int(step) for _, step in reasoning_matches]
+        expected_steps = list(range(1, len(reasoning_steps) + 1))
+        if reasoning_steps == expected_steps and reasoning_steps_valid:
+            result |= REASONING_ORDER_BIT
+    
+    return result
+
 
 def compute_score(model_output: str, ground_truth: str) -> bool:
     model_output = str(model_output)
     ground_truth = str(ground_truth)
 
     is_matched, extracted_model_output = match_answer(model_output)
-    format_correctness = "Step 2:" in model_output and "\\box" in model_output
 
     # grade simple algebra questions. if succeeded, return; otherwise, proceed to more complex grading
     if grade_answer(extracted_model_output, ground_truth):
@@ -429,4 +466,12 @@ def compute_score(model_output: str, ground_truth: str) -> bool:
     except:
         is_correct = False
 
-    return is_correct, format_correctness, extracted_model_output
+    format_correctness = verify_format(extracted_model_output)
+
+
+    return {
+        "score": reward,
+        "acc": is_correct,
+        "format": format_correctness,
+        "pred": extracted_model_output,
+    }

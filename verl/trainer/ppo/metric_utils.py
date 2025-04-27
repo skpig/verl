@@ -15,21 +15,23 @@
 Metrics related to the PPO trainer.
 """
 
+import multiprocessing
 import random
-import ray
-from typing import Any, Callable, Dict, List
-import numpy as np
-import torch
-from traitlets import default
-from verl import DataProto
+import re
 from collections import Counter, defaultdict
 from functools import partial
-import re
-from langdetect import detect_langs
+from typing import Any, Callable, Dict, List
+
 import nltk
-from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+import numpy as np
+import ray
+import torch
+from langdetect import detect_langs
 from nltk.metrics.distance import edit_distance
-import multiprocessing
+from nltk.translate.bleu_score import SmoothingFunction, sentence_bleu
+from traitlets import default
+
+from verl import DataProto
 
 
 def reduce_metrics(metrics: Dict[str, List[Any]]) -> Dict[str, Any]:
@@ -304,6 +306,7 @@ def process_validation_metrics(
 
     # Calculate metrics for each group
     data_src2prompt2var2metric = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
+    # breakpoint()
     for data_source, prompt2var2vals in data_src2prompt2var2vals.items():
         for prompt, var2vals in prompt2var2vals.items():
             for var_name, var_vals in var2vals.items():
