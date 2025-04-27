@@ -424,7 +424,7 @@ class DataParallelPPOActor(BasePPOActor):
                     elif self.config.loss_average_method == 'minibatch':
                         loss = policy_loss / mini_batch_full_token_count
                     elif self.config.loss_average_method == 'batch':
-                        loss = policy_loss / batch_full_token_count * self.config.ppo_mini_batch_size
+                        loss = policy_loss / batch_full_token_count * len(dataloader)
                     else:
                         raise NotImplementedError(f'loss_average_method {loss_average_method} not implemented.')
                     loss.backward()
