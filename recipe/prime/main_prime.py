@@ -29,6 +29,8 @@
 Note that we don't combine the main with ray_trainer as ray_trainer is used by other main.
 """
 
+import asyncio
+
 import hydra
 import ray
 
@@ -45,6 +47,7 @@ def run_prime(config, compute_score=None):
         # this is for local ray cluster
         ray.init(
             runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN"}},
+            num_cpus=config.ray_init.num_cpus,
         )
 
     ray.get(main_task.remote(config, compute_score))
@@ -52,6 +55,10 @@ def run_prime(config, compute_score=None):
 
 @ray.remote(num_cpus=1)  # please make sure main_task is not scheduled on head
 def main_task(config, compute_score=None):
+    asyncio.run(_main_task(config, compute_score))
+
+
+async def _main_task(config, compute_score=None):
     # print initial config
     from pprint import pprint
 
@@ -141,7 +148,7 @@ def main_task(config, compute_score=None):
         val_reward_fn=val_reward_fn,
     )
     trainer.init_workers()
-    trainer.fit()
+    await trainer.fit()
 
 
 if __name__ == "__main__":
