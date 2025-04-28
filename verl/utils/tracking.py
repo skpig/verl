@@ -39,9 +39,29 @@ class Tracking:
         self.logger = {}
 
         if "tracking" in default_backend or "wandb" in default_backend:
+            from wandb.apis.public import Api
+
             import wandb
 
-            wandb.init(project=project_name, name=experiment_name, config=config)
+            # 获取上一个运行的ID
+            api = Api()
+            runs = api.runs(f"skpig/{project_name}")
+            if runs:
+                last_run_id = runs[-1].id # 最后一个运行的ID
+                resume_id = last_run_id
+                if input("是否继续上次的运行？(y/n)") == "n":
+                    resume_id = None
+            else:
+                resume_id = None
+
+            run = wandb.init(
+                project=project_name,
+                name=experiment_name,
+                config=config,
+                resume='allow',
+                id=resume_id
+            )
+            run.mark_preempting()
             self.logger["wandb"] = wandb
 
         if "mlflow" in default_backend:

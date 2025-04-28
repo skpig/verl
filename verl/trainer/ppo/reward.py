@@ -72,10 +72,14 @@ def load_reward_manager(config, tokenizer, num_examine, **reward_kwargs):
         from verl.workers.reward_manager import DAPORewardManager
 
         reward_manager_cls = DAPORewardManager
+        reward_kwargs['overlong_buffer'] = config.reward_model.overlong_buffer
+        reward_kwargs['max_resp_len'] = config.data.reward_model.overlong_buffer
     elif reward_manager_name == "custom":
         from verl.workers.reward_manager import CustomRewardManager
 
         reward_manager_cls = CustomRewardManager
+        reward_kwargs['overlong_buffer_cfg'] = config.reward_model.overlong_buffer
+        reward_kwargs['max_resp_len'] = config.data.max_response_length
     else:
         raise NotImplementedError
 

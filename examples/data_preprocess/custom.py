@@ -71,6 +71,12 @@ def process_numinamath_dataset():
     train_dataset = dataset["train"]
     test_dataset = dataset["validation"].shuffle(42).select(range(100)) # only select the first 100 samples for testing
 
+    def filter_fn(example):
+        # 过滤掉code data
+        return example['ability'] == "math"
+    train_dataset = train_dataset.filter(filter_fn)
+    test_dataset = test_dataset.filter(filter_fn)
+
     # 为每个数据项添加一个表示唯一ID的行
     def make_map_fn(split):
         def process_fn(example, idx):

@@ -792,7 +792,6 @@ class RayPPOTrainer:
             output_ids = test_output_gen_batch.batch["responses"]
             output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
             sample_outputs.extend(output_texts)
-            breakpoint()
             test_batch = test_batch.union(test_output_gen_batch)
 
             # evaluate using reward_function
@@ -801,6 +800,7 @@ class RayPPOTrainer:
             scores = reward_tensor.sum(-1).cpu().tolist()
             sample_scores.extend(scores)
 
+            # breakpoint()
             reward_extra_infos_dict["reward"].extend(scores)
             if "reward_extra_info" in result:
                 for key, lst in result["reward_extra_info"].items():
@@ -845,6 +845,7 @@ class RayPPOTrainer:
                     metric_dict[pfx] = metric_val
         # TODO:
         # metric_dict.update({f'val/test_score/reward_type/{key}': value / len(reward_tensor) for key, value in reward_meta.items()})
+        # for 
 
 
         return metric_dict

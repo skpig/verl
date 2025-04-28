@@ -120,7 +120,7 @@ actor_rollout_ref:
       top_k: -1 # 0 for hf rollout, -1 for vllm rollout
       top_p: 0.7
       temperature: 1.0
-      n: 8
+      n: 1
       do_sample: True # default eager for validation
 
 critic:
@@ -184,6 +184,11 @@ reward_model:
   forward_max_token_len_per_gpu: ${critic.forward_max_token_len_per_gpu}
   reward_manager: custom 
   launch_reward_fn_async: False # custom reward function executed async on CPU, during log_prob
+  overlong_buffer: 
+    enable: False # We try to avoid forgetting to set enable
+    len: 0
+    penalty_factor: 0.0
+    log: False
 
 custom_reward_function:
   path: null

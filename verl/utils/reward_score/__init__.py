@@ -41,7 +41,7 @@ def _default_compute_score(data_source, solution_str, ground_truth, extra_info=N
         "numina_synthetic_amc",
         "numina_cn_k12",
         "numina_olympiads",
-        "numina", #numinamath-cor
+        "numinamath", #numinamath-cor
         "math500",
         "amc12",
     ]:

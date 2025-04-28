@@ -11,13 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import asyncio
+import traceback
+from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 from typing import Callable, Optional
 
 import torch
+from sympy import ground_roots
 from transformers import PreTrainedTokenizer
 
 from verl import DataProto
@@ -42,7 +44,7 @@ async def single_compute_score(evaluation_func, completion, reference, task, tas
         print(f"Timeout occurred for completion: {completion}")
         return None  # Default value for timed-out rows
     except Exception as e:
-        print(f"Error processing completion: {completion[:10]}, Error: {e}")
+        print(f"==== Error processing completion ====\n {completion[:10]}\n==== Error: {e} ====")
         return None  # Default value for failed rows
 
 
@@ -81,6 +83,54 @@ async def parallel_compute_score_async(
     return scores
 
 
+# 定义同步版本的计算函数
+import concurrent.futures
+
+
+def parallel_compute_score_sync(
+    evaluation_func, completions, references, tasks, extra_info=None, num_processes=40
+):
+    scores = []
+    with concurrent.futures.ProcessPoolExecutor(max_workers=num_processes) as executor:
+        if extra_info is None:
+            extra_info = [None] * len(tasks)
+        futures = []
+        for completion, reference, task, task_extra_info in zip(completions, references, tasks, extra_info):
+            future = executor.submit(evaluation_func, task, completion, reference, task_extra_info)
+            futures.append(future)
+        #     try:
+        #         result = evaluation_func(task, completion, reference, task_extra_info)
+        #     except Exception as e:
+        #         print(f"==== Error processing completion ====\n {completion[:10]}\n==== Error: {e} ====")
+        #         traceback.print_exc()
+        #     futures.append(result)
+        # return futures
+
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                result = future.result(timeout=100.0) # 设置超时时间为 300 秒
+                scores.append(result)
+            except concurrent.futures.TimeoutError:
+                print(f"计算超时: {future}")
+                scores.append({
+                    "score": 0,
+                    "acc": 0,
+                    "format": 0,
+                    "pred": "Error",
+                })
+            except Exception as e:
+                traceback.print_exc()
+                print(f"计算出错: {e}")
+                scores.append({
+                    "score": 0,
+                    "acc": 0,
+                    "format": 0,
+                    "pred": "Error",
+                })
+
+    return scores
+
+
 class CustomRewardManager:
     """
     The Reward Manager used in https://github.com/PRIME-RL/PRIME
@@ -115,18 +165,18 @@ class CustomRewardManager:
         # valid_response_lst is a list of length N
         valid_response_lst = []
         for i in range(len(data)):
-            dataitem = data[i]
-            
-            prompt_ids = dataitem.batch["prompts"]
+            data_item = data[i]
+
+            prompt_ids = data_item.batch["prompts"]
             prompt_length = prompt_ids.shape[-1]
-            valid_response_length = dataitem.batch["attention_mask"][:, prompt_length:].sum(dim=-1)
-            response_ids = dataitem.batch["responses"]
-            valid_response_ids = response_ids[:, prompt_length:]
+            response_ids = data_item.batch["responses"]
+            valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
+            valid_response_ids = response_ids[:valid_response_length]
             valid_response_lst.append(valid_response_ids)
-        valid_response_lst = tokenizer.batch_decode(valid_response_lst, skip_special_tokens=True)
+        valid_response_lst = self.tokenizer.batch_decode(valid_response_lst, skip_special_tokens=True)
 
         # ground_truch_lst is a list of length N
-        ground_truth_lst = data.non_tensor_batch["reward_model"]["ground_truth"]
+        ground_truth_lst = [i["ground_truth"] for i in data.non_tensor_batch["reward_model"]]
 
         # data_source_lst is a list of length N
         data_source_lst = data.non_tensor_batch["data_source"]
@@ -138,21 +188,20 @@ class CustomRewardManager:
 
         assert len(valid_response_lst) == len(ground_truth_lst) == len(data_source_lst) == len(extra_info_lst), f"Length mismatch: valid_response_lst: {len(valid_response_lst)}, ground_truth_lst: {len(ground_truth_lst)}, data_source_lst: {len(data_source_lst)}, extra_info_lst: {len(extra_info_lst)}"
 
+        # breakpoint()
         try:
-            rtn_lst = asyncio.run(
-                parallel_compute_score_async(
-                    self.compute_score,
-                    valid_response_lst,
-                    ground_truth_lst,
-                    data_source_lst,
-                    extra_info=extra_info_lst,
-                    num_processes=64,
-                )
+            rtn_lst = parallel_compute_score_sync(
+                self.compute_score,
+                valid_response_lst,
+                ground_truth_lst,
+                data_source_lst,
+                extra_info=extra_info_lst,
+                num_processes=40,
             )
-        except asyncio.TimeoutError:
-            print("Global timeout in reward computing! Setting all as 0.")
         except Exception as e:
-            print(f"Unexpected error in batched reward computing. Setting all as 0.: {e}")
+            traceback.print_exc()
+            print(f"批量奖励计算时出现意外错误。全部设为 0.: {e}")
+            rtn_lst = [0.0] * len(valid_response_lst)
 
         return rtn_lst
 
@@ -218,19 +267,21 @@ class CustomRewardManager:
 
             reward_tensor[i, valid_response_length - 1] = reward
 
+            data_source = data.non_tensor_batch["data_source"][i]
+            ground_truth = data.non_tensor_batch["reward_model"][i]["ground_truth"]
             if data_source not in already_print_data_sources:
                 already_print_data_sources[data_source] = 0
 
             if already_print_data_sources[data_source] < self.num_examine:
                 already_print_data_sources[data_source] += 1
-                print("[prompt]", prompt_str)
-                print("[response]", response_str)
-                print("[ground_truth]", ground_truth)
+                print("=== [prompt] ===\n", prompt_str)
+                print("=== [response] ===\n", response_str)
+                print("=== [ground_truth] ===\n", ground_truth)
                 if isinstance(result, dict):
                     for key, value in result.items():
-                        print(f"[{key}]", value)
+                        print(f"=== [{key}] ===", value)
                 else:
-                    print("[score]", score)
+                    print("=== [score] ===", score)
 
         if return_dict:
             return {

@@ -302,7 +302,16 @@ def process_validation_metrics(
         prompt = sample_inputs[sample_idx]
         var2vals = data_src2prompt2var2vals[data_source][prompt]
         for var_name, var_vals in infos_dict.items():
-            var2vals[var_name].append(var_vals[sample_idx])
+            if var_name == "format":
+                var1 = "AnsMatch"
+                var2 = "StepOrd"
+                val = var_vals[sample_idx]
+                val1 = val & 1
+                val2 = (val >> 1) & 1
+                var2vals[var1].append(val1)
+                var2vals[var2].append(val2)
+            else:
+                var2vals[var_name].append(var_vals[sample_idx])
 
     # Calculate metrics for each group
     data_src2prompt2var2metric = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))

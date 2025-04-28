@@ -233,7 +233,7 @@ def should_allow_eval(expr: str):
     return all(re.search(bad_regex, expr) is None for bad_regex in BAD_REGEXES)
 
 
-@timeout(timeout_seconds=10)
+# @timeout(timeout_seconds=10)
 def are_equal_under_sympy(ground_truth_normalized: str, given_normalized: str):
     are_equal = False
     try:
@@ -423,23 +423,14 @@ def verify_format(model_output: str):
         result |= ANSWER_MATCH_BIT
     
     # 查找所有 "## Reasoning step [1-9]+:" 
-    reasoning_pattern = r'## Reasoning step ([1-9]+):'
+    # 修改正则表达式以支持多位数的编号
+    reasoning_pattern = r'## Reasoning step ([0-9]+):'
     reasoning_matches = [(match.start(), match.group(1)) for match in re.finditer(reasoning_pattern, model_output)]
     
     if reasoning_matches:
-        answer_match = re.search(r'## Answer:', model_output)
-        if answer_match is None:
-            return result
-        answer_index = answer_match.start()
-        reasoning_steps_valid = True
-        for step_index, match in reasoning_matches:
-            if step_index > answer_index:
-                reasoning_steps_valid = False
-                break
-        
         reasoning_steps = [int(step) for _, step in reasoning_matches]
         expected_steps = list(range(1, len(reasoning_steps) + 1))
-        if reasoning_steps == expected_steps and reasoning_steps_valid:
+        if reasoning_steps == expected_steps:
             result |= REASONING_ORDER_BIT
     
     return result
@@ -453,25 +444,30 @@ def compute_score(model_output: str, ground_truth: str) -> bool:
 
     # grade simple algebra questions. if succeeded, return; otherwise, proceed to more complex grading
     if grade_answer(extracted_model_output, ground_truth):
-        return True, True, extracted_model_output
+        return {
+            "score": 1.0,
+            "acc": 1,
+            "format": verify_format(model_output),
+            "pred": extracted_model_output,
+        }
 
     try:
         if "\pi" in extracted_model_output or "\pi" in ground_truth:
             equivs = []
             for pi in [math.pi, 3.14]:
-                equivs.append(math_equal(extracted_model_output, ground_truth, timeout=True, pi=pi))
+                equivs.append(math_equal(extracted_model_output, ground_truth, timeout=False, pi=pi))
             is_correct = any(equivs)
         else:
-            is_correct = math_equal(extracted_model_output, ground_truth, timeout=True)
+            is_correct = math_equal(extracted_model_output, ground_truth, timeout=False)
     except:
         is_correct = False
 
-    format_correctness = verify_format(extracted_model_output)
+    format_correctness = verify_format(model_output)
 
 
     return {
-        "score": reward,
-        "acc": is_correct,
+        "score": 1. if is_correct else 0.,
+        "acc": 1 if is_correct else 0,
         "format": format_correctness,
         "pred": extracted_model_output,
     }
