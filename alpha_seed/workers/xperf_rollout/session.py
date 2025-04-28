@@ -746,7 +746,7 @@ class InferenceSession:
         if self.engine.module.tp_size > 1:
             assert self.tp_group is not None, "tp_group not set!"
             reduce_op = torch.distributed.ReduceOp.MIN
-            torch.distributed.all_reduce(self.num_ready_query_local_tensor, group=self.tp_group, op=reduce_op)
+            torch.distributed.all_reduce(num_ready_query_local_tensor, group=self.tp_group, op=reduce_op)
             num_ready = num_ready_query_local_tensor.int().item()
         if num_ready == 0:
             return self.waiting
