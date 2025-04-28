@@ -45,7 +45,7 @@ jobs:
           - pip3 install -e . --user
           - pip3 install --upgrade byted-wandb
           - pip3 install bytedance.ndtimeline --upgrade
-          - pip3 install byted-omnistore==0.7.12
+          - pip3 install byted-omnistore==0.7.14
           - pip3 install pylatexenc
           - pip3 install pydantic==1.10.15
       

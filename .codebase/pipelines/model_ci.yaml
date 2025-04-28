@@ -36,7 +36,7 @@ jobs:
         name: setup env
         commands:
           - pip3 install --upgrade byted-wandb
-          - pip3 install byted-omnistore==0.7.12
+          - pip3 install byted-omnistore==0.7.14
           - pip3 install --upgrade bytedance.ndtimeline
           - cd /opt/tiger
           - git clone git@code.byted.org:data/verl

@@ -168,10 +168,6 @@ except ImportError:
 import math
 
 
-def is_divisible_by_0_point_1(score):
-    return math.isclose(score * 10, round(score * 10))
-
-
 class RewardManager():
 
     def __init__(self, tokenizer, config, logger: Tracking, rm_name="train") -> None:
@@ -448,12 +444,8 @@ class RewardManager():
             reward_tensor[idx, valid_response_length - 1] = score
             idx_tensor[idx] = valid_response_length - 1
 
-            if is_divisible_by_0_point_1(score):
-                all_final_scores.append(score)
-                all_final_scores_to_lens[score].append(valid_response_length)
-            else:
-                all_final_scores.append(-10)
-                all_final_scores_to_lens[-10].append(valid_response_length)
+            all_final_scores.append(round(score, 1))
+            all_final_scores_to_lens[round(score, 1)].append(valid_response_length)
 
             if reward_style not in already_print_data_sources:
                 already_print_data_sources[reward_style] = 0
