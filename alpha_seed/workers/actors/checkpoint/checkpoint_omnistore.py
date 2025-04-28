@@ -19,7 +19,7 @@ from ray.actor import ActorHandle
 
 from alpha_seed.utils.version import check_omnistore_version
 
-REQUIRED_OMNISTORE_VERSION = '0.7.11'
+REQUIRED_OMNISTORE_VERSION = '0.7.14'
 ACTUAL_OMNISTORE_VERSION = check_omnistore_version(REQUIRED_OMNISTORE_VERSION)
 
 import omnistore
