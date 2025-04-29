@@ -25,6 +25,7 @@ def clean_up_special_token(tokenizer, ids):
 
 
 def decode_response(prompt, response):
+    prompt = prompt[prompt > 0]
     decoded_prompt = child_tokenizer.decode(prompt, skip_special_tokens=True)
     decoded_response = child_tokenizer.decode(response, skip_special_tokens=True)
     decoded_response_clean = clean_up_special_token(child_tokenizer, response)

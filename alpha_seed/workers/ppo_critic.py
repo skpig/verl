@@ -21,6 +21,8 @@ import gc
 import torch
 import torch.distributed
 from torch import nn, optim
+import math
+from transformers import PretrainedConfig
 
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
@@ -32,7 +34,9 @@ from verl.utils.model import compute_position_id_with_mask
 
 from tensordict import TensorDict
 
-from alpha_seed.workers.hybrid_engine.fsdp_gather import ulysses_pad_and_slice_inputs
+from alpha_seed.utils.functional import rearrange_micro_data_proto
+from alpha_seed.workers.hybrid_engine.fsdp_gather import ulysses_pad_and_slice_inputs, ulysses_pad
+from alpha_seed.models.transformers.modeling_vlm import get_image_inputs, get_image_keys
 from alpha_seed import core_algos
 from alpha_seed.workers.fsdp.offload import offload_fsdp_optimizer, load_fsdp_optimizer
 
@@ -56,11 +60,15 @@ except:
 
 class DataParallelPPOCritic(BasePPOCritic):
 
-    def __init__(self, config, critic_module: nn.Module, critic_optimizer: optim.Optimizer):
+    def __init__(self,
+                 config,
+                 critic_module: nn.Module,
+                 critic_optimizer: optim.Optimizer,
+                 critic_model_config: PretrainedConfig = None):
         super().__init__(config=config)
         self.critic_module: FSDP = critic_module
         self.critic_optimizer = critic_optimizer
-
+        self.critic_model_config = critic_model_config
         self.use_rmpad = self.config.get('use_rmpad', False)
         if torch.distributed.get_rank() == 0:
             print(f'Critic use_rmpad={self.use_rmpad}')
@@ -85,10 +93,11 @@ class DataParallelPPOCritic(BasePPOCritic):
 
         self.value_loss = core_algos.compute_value_loss
 
-    def _forward_micro_batch(self, micro_batch: TensorDict):
+    def _forward_micro_batch(self, micro_batch: TensorDict, non_tensor_batch):
         from flash_attn.bert_padding import pad_input, unpad_input, index_first_axis, rearrange
 
         response_length = micro_batch['responses'].size(-1)
+        image_kwargs = get_image_inputs(non_tensor_batch)
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
             if self.use_rmpad:
                 input_ids = micro_batch['input_ids'].to(torch.int64)
@@ -105,13 +114,18 @@ class DataParallelPPOCritic(BasePPOCritic):
                 # handle ulysses sequence parallelism
                 sp_size = get_ulysses_sequence_parallel_world_size()
                 total_s = input_ids_rmpad.size(1)
-                input_ids_rmpad, position_ids_rmpad, pad_size = ulysses_pad_and_slice_inputs(
-                    input_ids_rmpad, position_ids_rmpad, sp_size)
+                if 'vision_config' in self.critic_model_config:
+                    input_ids_rmpad, position_ids_rmpad, pad_size = ulysses_pad(input_ids_rmpad, position_ids_rmpad,
+                                                                                sp_size)
+                else:
+                    input_ids_rmpad, position_ids_rmpad, pad_size = ulysses_pad_and_slice_inputs(
+                        input_ids_rmpad, position_ids_rmpad, sp_size)
                 seqlen_rmpad = input_ids_rmpad.size(1)
                 # forward
                 values_rmpad = self.critic_module(input_ids=input_ids_rmpad,
                                                   position_ids=position_ids_rmpad,
-                                                  use_cache=False).logits  # (1, total_nnz / sp_size, 1)
+                                                  use_cache=False,
+                                                  **image_kwargs).logits  # (1, total_nnz / sp_size, 1)
                 values_rmpad = values_rmpad.squeeze(0).squeeze(-1)  # (total_nnz / sp_size)
                 # handle ulysses sequence parallelism
                 if sp_size > 1:
@@ -127,7 +141,8 @@ class DataParallelPPOCritic(BasePPOCritic):
                 output = self.critic_module(input_ids=micro_batch['input_ids'],
                                             attention_mask=micro_batch['attention_mask'],
                                             position_ids=micro_batch['position_ids'],
-                                            use_cache=False)  # prevent model thinks we are generating
+                                            use_cache=False,
+                                            **image_kwargs)  # prevent model thinks we are generating
                 values = output.logits
             values = values[:, -response_length - 1:-1]
             return values, seqlen_rmpad
@@ -146,6 +161,11 @@ class DataParallelPPOCritic(BasePPOCritic):
         # release kv mirror memory for m8
         if hasattr(self.critic_module, 'release_act_memory'):
             self.critic_module.release_act_memory()
+        else:
+            if hasattr(self.critic_module, "language_model") and \
+                hasattr(self.critic_module.language_model, 'release_act_memory'):
+                self.critic_module.language_model.release_act_memory()
+
         assert self.config.grad_clip is not None
         grad_norm = self.critic_module.clip_grad_norm_(max_norm=self.config.grad_clip)
         self.critic_optimizer.step()
@@ -170,25 +190,33 @@ class DataParallelPPOCritic(BasePPOCritic):
             micro_batch_size = data.meta_info['micro_batch_size']
 
         select_keys = ['responses', 'input_ids', 'attention_mask']
-        batch = data.select(batch_keys=select_keys).batch
+        image_keys = get_image_keys(data.non_tensor_batch)
+        selected_data = data.select(batch_keys=select_keys, non_tensor_batch_keys=image_keys)
         values_lst = []
         # Note: mismatched data order (here vs. upldate critic) can lead to
         # mismatched values. In order to match them, we need to split
         # batch into mini batches (same with training).
-        for mini_batch in batch.split(self.config.ppo_mini_batch_size):
+        chunk_size = math.ceil(selected_data.batch.batch_size[0] / self.config.ppo_mini_batch_size)
+        for batch_idx, mini_batch in enumerate(selected_data.chunk(chunk_size)):
+            # for mini_batch in batch.split(self.config.ppo_mini_batch_size):
             if use_dynamic_bsz:
-                micro_batches, num_micro_batches, indices = rearrange_micro_batches(batch=mini_batch,
-                                                                                    max_token_len=max_token_len)
+                indices, micro_batches, non_tensor_batches = rearrange_micro_data_proto(max_token_len, mini_batch)
             else:
                 micro_batches = batch.split(micro_batch_size)
                 num_micro_batches = len(micro_batches)
 
             mini_batch_values = []
             with torch.no_grad():
-                for micro_batch in micro_batches:
-                    assert micro_batch.device == torch.device('cpu')
-                    micro_batch = micro_batch.cuda()  # actor device is cpu when using offload
-                    values, _ = self._forward_micro_batch(micro_batch)
+                for i, micro_batch_proto in enumerate(micro_batches):
+                    if use_dynamic_bsz:
+                        non_tensor_batch = non_tensor_batches[i]
+                        assert micro_batch_proto.device == torch.device('cpu')
+                        micro_batch = micro_batch_proto.cuda()
+                    else:
+                        non_tensor_batch = micro_batch_proto.non_tensor_batch
+                        assert micro_batch_proto.batch.device == torch.device('cpu')
+                        micro_batch = micro_batch_proto.batch.cuda()
+                    values, _ = self._forward_micro_batch(micro_batch, non_tensor_batch)
                     mini_batch_values.append(values)
             # release root module unshard memory
             if isinstance(self.critic_module, FSDP):
@@ -216,7 +244,11 @@ class DataParallelPPOCritic(BasePPOCritic):
             if 'overlong_mask' in data.batch.keys():
                 select_keys.append('overlong_mask')
             batch = data.select(batch_keys=select_keys).batch
-            dataloader = batch.split(self.config.ppo_mini_batch_size)
+            image_keys = get_image_keys(data.non_tensor_batch)
+            selected_data = data.select(batch_keys=select_keys, non_tensor_batch_keys=image_keys)
+            batch = selected_data.batch
+            chunk_size = math.ceil(batch.batch_size[0] / self.config.ppo_mini_batch_size)
+            dataloader = selected_data.chunk(chunk_size)
 
         if not self.config.use_dynamic_bsz:
             if self.gradient_accumulation > 2 and not isinstance(self.profiler_context, nullcontext):
@@ -227,18 +259,21 @@ class DataParallelPPOCritic(BasePPOCritic):
         global_step = data.meta_info.get('global_step')
         seq_level_vf_lst = []
         for batch_idx, mini_batch in enumerate(dataloader):
-            if self.config.shuffle:
-                mini_batch = mini_batch.batch
             with self.profiler_context as p:
                 if self.config.use_dynamic_bsz:
-                    micro_batches, _, _ = rearrange_micro_batches(batch=mini_batch,
-                                                                  max_token_len=self.config.ppo_max_token_len)
+                    indices, micro_batches, non_tensor_batches = rearrange_micro_data_proto(
+                        self.config.ppo_max_token_len, mini_batch)
                 else:
                     # split batch into micro_batches
                     micro_batches = mini_batch.split(self.config.ppo_micro_batch_size)
                 self._optimizer_zero_grad()
 
                 for i, micro_data in enumerate(micro_batches):
+                    if self.config.use_dynamic_bsz:
+                        non_tensor_batch = non_tensor_batches[i]
+                    else:
+                        micro_data = micro_batch.batch
+                        non_tensor_batch = micro_batch.non_tensor_batch
                     assert micro_data.device == torch.device('cpu')
                     micro_data = micro_data.cuda()  # critic device is cpu when using offload
                     input_ids = micro_data['input_ids']
@@ -252,7 +287,7 @@ class DataParallelPPOCritic(BasePPOCritic):
 
                     eos_mask = attention_mask[:, -response_length - 1:-1]
 
-                    vpreds, seqlen = self._forward_micro_batch(micro_data)
+                    vpreds, seqlen = self._forward_micro_batch(micro_data, non_tensor_batch)
 
                     # assert not torch.any(torch.isnan(vpreds)).item()
 

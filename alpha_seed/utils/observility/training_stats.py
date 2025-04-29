@@ -7,6 +7,7 @@ from transformers import PretrainedConfig
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
+from alpha_seed.utils.functional import get_text_model_type
 
 
 class MetricsTorchDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
@@ -119,8 +120,9 @@ def sync_training_stats(
     fsdp_size: int,
 ):
     training_stats = metrics_context.sync_and_clear_activation_stats()
+    model_type = get_text_model_type(model_config.model_type)
 
-    if model_config.model_type == "seed_p6dense":
+    if model_type == "seed_p6dense":
         for layer_idx in range(model_config.num_hidden_layers):
             attn = actor_module.module.model.layers[layer_idx].module.self_attn
 
@@ -146,8 +148,7 @@ def sync_training_stats(
         training_stats.update(
             sync_params_and_grads_stats(actor_module.module.lm_head.weight, "lm_head",
                                         model_config.hidden_size * model_config.vocab_size, fsdp_size))
-    elif model_config.model_type == "seed_m8" or \
-            (hasattr(model_config, "text_config") and model_config.text_config.model_type == "seed_m8"):
+    elif model_type == "seed_m8":
         for layer_idx in range(model_config.num_hidden_layers):
             attn = actor_module.module.transformer.h[layer_idx].module.attn
 

@@ -50,6 +50,40 @@ class WeightsCommunicater:
 
     def update_standalone_worker(self, role):
 
+        def _update_xperf_vit_model(comm_fn, comm_rank):
+
+            def comm_and_assign(module, param_names=None):
+                if param_names is None:
+                    param_names = ["weight", "bias"]
+                for param_name in param_names:
+                    param = getattr(module, param_name).cuda()
+                    comm_fn(param, comm_rank)
+                    setattr(module, param_name, param)
+
+            # TODO: if freezed, we don't need to update vit model
+            vit_engine = self.inference_engine.vit_engine
+            if hasattr(vit_engine.visual_encoder.module, "layers_weight"):
+                for layer, layer_weight in enumerate(vit_engine.visual_encoder.module.layers_weight):
+                    for i, weight in enumerate(layer_weight):
+                        if isinstance(weight, torch.Tensor):
+                            weight = weight.cuda()
+                            comm_fn(weight, comm_rank)
+                            vit_engine.visual_encoder.module.layers_weight[layer][i].data = weight.data
+                comm_and_assign(vit_engine.visual_encoder.module.patch_embed.proj)
+            else:
+                for layer in vit_engine.visual_encoder.module.custom_decoder.layers:
+                    comm_and_assign(layer.norm1)
+                    comm_and_assign(layer.norm2)
+                    comm_and_assign(layer.mlp.fc1)
+                    comm_and_assign(layer.mlp.fc2)
+                    comm_and_assign(layer.attn.proj)
+                    comm_and_assign(layer.attn.qkv, ['weight'])
+                    comm_and_assign(layer.attn, param_names=['q_bias', 'v_bias'])
+                comm_and_assign(vit_engine.visual_encoder.module.custom_decoder.patch_embed.proj)
+            comm_and_assign(vit_engine.ln_vision)
+            comm_and_assign(vit_engine.seed_proj[0])
+            comm_and_assign(vit_engine.seed_proj[2])
+
         def _update_xperf_model(comm_fn, comm_rank):
             layernorm_weight = self.inference_engine.engine.module.layernorm_weight.cuda()
             lm_head_weight = self.inference_engine.engine.module.lm_head_weight.cuda()
@@ -74,6 +108,8 @@ class WeightsCommunicater:
                         comm_fn(weight, comm_rank)
                         self.inference_engine.engine.module.layers_weight[layer][i].data = weight.view(
                             origin_dtype).data
+            if hasattr(self.inference_engine, 'vit_engine'):
+                _update_xperf_vit_model(comm_fn, comm_rank)
             self.inference_engine.current_steps = 0
 
         comm_info = getattr(self, f"{role}_comm_info")

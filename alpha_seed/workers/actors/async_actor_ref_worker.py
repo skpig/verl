@@ -29,7 +29,8 @@ import gc
 from single_controller.base import Worker
 from single_controller.base.decorator import register, Dispatch
 from verl import DataProto
-from verl.utils.model import print_model_size, update_model_config
+from alpha_seed.utils.functional import update_model_config, get_text_config
+from verl.utils.model import print_model_size
 from alpha_seed.workers.fsdp.offload import (offload_fsdp_optimizer, load_fsdp_optimizer, offload_fsdp_model_to_cpu,
                                              load_fsdp_model_to_gpu)
 from alpha_seed.workers.megatron.offload import (offload_megatron_model_to_cpu, load_megatron_model_to_gpu,
@@ -308,10 +309,14 @@ class AsyncActorRolloutRefWorker(Worker):
             offload_upbound=self.config.get('act_offload_upbound', None),
             buffer_size=self.config.get('act_offload_buff_size', 40),
         )
+        if hasattr(actor_module, "vision_encoder"):
+            block_cls = actor_module.language_model._no_split_modules + actor_module.vision_encoder._no_split_modules
+        else:
+            block_cls = actor_module._no_split_modules[0]
 
         actor_module_fsdp, metrics_context = fully_shard(
             model=actor_module,
-            block_cls=actor_module._no_split_modules[0],
+            block_cls=block_cls,
             fsdp_mesh=fsdp_mesh,
             tp_plan=get_parallel_plan(actor_model_config, tp_mesh),
             tp_mesh=tp_mesh,
@@ -358,8 +363,8 @@ class AsyncActorRolloutRefWorker(Worker):
             actor_lr_scheduler = get_constant_schedule_with_warmup(optimizer=actor_optimizer,
                                                                    num_warmup_steps=num_warmup_steps)
 
-        assert actor_model_config.num_attention_heads % self.config.actor.ulysses_sequence_parallel_size == 0, \
-            f'invalid ulysses sequence parallel size: {actor_model_config.num_attention_heads=} % {self.config.actor.ulysses_sequence_parallel_size=} != 0'
+        assert get_text_config(actor_model_config).num_attention_heads % self.config.actor.ulysses_sequence_parallel_size == 0, \
+            f'invalid ulysses sequence parallel size: {get_text_config(actor_model_config).num_attention_heads=} % {self.config.actor.ulysses_sequence_parallel_size=} != 0'
 
         log_gpu_memory_usage('After actor optimizer init')
         return actor_module_fsdp, actor_optimizer, actor_lr_scheduler, actor_model_config, metrics_context
@@ -715,9 +720,8 @@ class AsyncActorRolloutRefWorker(Worker):
                     role='actor' if self._is_actor else 'rollout',
                     from_scratch=from_scratch)
 
-                # get the original unwrapped module
-                assert self.actor_model_config.num_attention_heads % self.config.actor.ulysses_sequence_parallel_size == 0, \
-                    f'invalid ulysses sequence parallel size: {self.actor_model_config.num_attention_heads=} % {self.config.actor.ulysses_sequence_parallel_size=} != 0'
+                assert get_text_config(self.actor_model_config).num_attention_heads % self.config.actor.ulysses_sequence_parallel_size == 0, \
+                    f'invalid ulysses sequence parallel size: {get_text_config(self.actor_model_config).num_attention_heads=} % {self.config.actor.ulysses_sequence_parallel_size=} != 0'
 
             elif self.actor_strategy == 'megatron':
                 # TODO: build megatron model
@@ -764,7 +768,9 @@ class AsyncActorRolloutRefWorker(Worker):
                 with open_dict(self.config.ref):
                     self.config.ref.use_rmpad = use_rmpad
                     self.config.ref.use_ce_loss_fusion = use_ce_loss_fusion
-                self.ref_policy = DataParallelPPOActor(config=self.config.ref, actor_module=self.ref_module_fsdp)
+                self.ref_policy = DataParallelPPOActor(config=self.config.ref,
+                                                       actor_module=self.ref_module_fsdp,
+                                                       actor_model_config=self.actor_model_config)
             elif self.ref_strategy == 'megatron':
                 # TODO: build megatron actor
                 self.ref_module_mariana = self._build_model_optimizer_mariana(model_path=self.config.model.path,

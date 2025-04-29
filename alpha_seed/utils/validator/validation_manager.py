@@ -18,6 +18,7 @@ try:
 except ImportError:
     print('Cannot find pad_dataproto_to_divisor. Please use latest verl master')
     raise
+from alpha_seed.models.transformers.modeling_vlm import get_image_keys
 
 
 class ValidateManager(object):
@@ -159,6 +160,10 @@ class ValidateManager(object):
                     'input_ids', 'attention_mask', 'off_policy_steps', 'rollout_log_probs', 'probs_gt_threshold_num',
                     'probs_lt_threshold_sum'
                 ])
+                # for VLM with images
+                image_keys = get_image_keys(test_batch.non_tensor_batch)
+                for key in image_keys:
+                    test_gen_batch.non_tensor_batch[key] = test_batch.non_tensor_batch[key]
                 # copy relevant non-tensor info
                 non_tensor_infos = ['uid', 'reward_model']
                 for key in non_tensor_infos:
@@ -191,7 +196,8 @@ class ValidateManager(object):
                 print(
                     f'{val_epoch_idx + 1}-th/{val_epoch} {val_idx + 1}-th/{len(self.val_dataloader)} validation generation end'
                 )
-
+                same_keys = test_batch.non_tensor_batch.keys() & test_output_gen_batch.non_tensor_batch.keys()
+                test_batch.pop(non_tensor_batch_keys=list(same_keys))
                 test_batch = test_batch.union(test_output_gen_batch)
 
                 if self.use_rm:

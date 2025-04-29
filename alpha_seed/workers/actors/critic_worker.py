@@ -190,9 +190,13 @@ class CriticWorker(Worker):
             buffer_size=config.act_offload_buff_size,
         )
 
+        if hasattr(critic_module, "vision_encoder"):
+            block_cls = critic_module.language_model._no_split_modules + critic_module.vision_encoder._no_split_modules
+        else:
+            block_cls = critic_module._no_split_modules[0]
         critic_module, _ = fully_shard(
             model=critic_module,
-            block_cls=critic_module._no_split_modules[0],
+            block_cls=block_cls,
             fsdp_mesh=self.fsdp_mesh,
             tp_plan=get_parallel_plan(critic_model_config, self.tp_mesh),
             tp_mesh=self.tp_mesh,
@@ -409,7 +413,8 @@ class CriticWorker(Worker):
                 self.config, from_scratch=from_scratch)
             self.critic = DataParallelPPOCritic(config=self.config,
                                                 critic_module=self.critic_module,
-                                                critic_optimizer=self.critic_optimizer)
+                                                critic_optimizer=self.critic_optimizer,
+                                                critic_model_config=self.critic_model_config)
         elif self.critic_strategy == 'megatron':
             from alpha_seed.workers.ppo_critic_megatron import MegatronPPOCritic
             self.critic_module, self.critic_optimizer, self.critic_lr_scheduler, self.critic_model_config = self._build_critic_model_optimizer_mariana(

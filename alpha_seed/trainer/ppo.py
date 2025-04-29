@@ -1949,8 +1949,12 @@ class RayPPOTrainer(object):
                         else:
                             response_length = self.config.data.max_response_length
                         valid_response_length = batch.batch['attention_mask'][:, prompt_length:].sum(-1)
-                        is_overlong = (response_length == valid_response_length) & (batch.batch['raw_scores'].sum(-1)
-                                                                                    < 0)
+                        is_vlm = self.config.data['image_key'] is not None
+                        if is_vlm:
+                            is_overlong = (response_length == valid_response_length) & (raw_scores_log == 0)
+                        else:
+                            is_overlong = (response_length
+                                           == valid_response_length) & (batch.batch['raw_scores'].sum(-1) < 0)
                         # batch.batch['attention_mask'][is_overlong] = 0
                         # batch.batch['answer_attention_mask'][is_overlong] = 0
                         batch.batch['overlong_mask'] = (~is_overlong).int()

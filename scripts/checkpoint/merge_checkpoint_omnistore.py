@@ -81,6 +81,7 @@ if __name__ == '__main__':
                         help='the directory of the corresponding HuggingFace configs. If not specified, it is assumed '
                         'that the HuggingFace subdirectory is under the load-dir directory, in the form of '
                         '${load-dir}/huggingface/.')
+    parser.add_argument('--dtype', required=False)
     args, unknown = parser.parse_known_args()
     print(f'Ignore unknown arguments: {unknown}')
 
@@ -121,6 +122,8 @@ if __name__ == '__main__':
             untie_embeddings=untie_embeddings,
             return_dict=True,
         )
+        if args.dtype == 'bf16':
+            state_dict['model'] = {key: value.bfloat16() for key, value in state_dict['model'].items()}
         print(f'Merge omnistore checkpoint successfully! cost time: {time.time() - time_begin}s')
 
         print('Step4: load state_dict to huggingface model')

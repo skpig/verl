@@ -46,11 +46,9 @@ try:
 except ImportError:
     MegavisionMetricsCtx = None
 
-from alpha_seed.utils.server_client import validate_client_config, KVStore, ServerHealthCheck, TaskRunner, \
-    ClientTaskRunner, check_all_workers_alive, recreate_actor
 # rule-based reward score
 from alpha_seed.utils.reward_score.extra_reward import add_length_reward, punish_format_return_positions
-from alpha_seed.utils.reward_score import math_v1, verifier_service, gsm8k, math_v2, model_score_fn, logic_puzzle, oj_utils, math_verifier, response_post_proc, gpqa_verifier, math_deepscale, code_local_verifier
+from alpha_seed.utils.reward_score import verifier_service, oj_utils, response_post_proc, _select_rm_score_fn
 from alpha_seed.utils.duplicate import para_dup
 from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRefWorker
 from alpha_seed.workers.streaming_service.streaming_rollout import RemoteAsyncXPerfGPTRollout
@@ -62,35 +60,6 @@ user_email = os.getenv('ARNOLD_LARK_RECEIVER', '')
 task_url = os.getenv('ARNOLD_ORIGIN_PLATFORM_URL', '')
 ARNOLD_REGION = os.getenv("ARNOLD_REGION", "CN")
 ENABLE_REDIS_TRITON_CACHE = int(os.getenv("ENABLE_REDIS_TRITON_CACHE", '1'))
-
-
-def _select_rm_score_fn(reward_style):
-    if reward_style == "model-raw_score":
-        return model_score_fn.raw_score
-    elif reward_style == "model-raw_score_reflection_penalty":
-        return model_score_fn.raw_score_reflection_penalty
-    elif reward_style == "code-sandbox":
-        return oj_utils.compute_score_client
-    elif reward_style == "code-localexec":
-        return code_local_verifier.compute_score
-    elif reward_style == 'rule-openai/gsm8k':
-        return gsm8k.compute_score
-    elif reward_style == 'rule-lighteval/MATH':
-        return math_v1.compute_score
-    elif reward_style == 'rule-lighteval/MATH_v2':
-        return math_v2.compute_score
-    elif reward_style == 'rule/deepscale':
-        return math_deepscale.deepscaler_reward_fn
-    elif reward_style == "rule-math_verifier":
-        return math_verifier.compute_score
-    elif reward_style == "rule-boxed_gpqa":
-        return gpqa_verifier.compute_score
-    elif reward_style == "verifier_service":
-        return verifier_service.compute_score_client
-    else:
-        if reward_style.startswith("rule-logic_puzzle"):
-            return logic_puzzle.compute_score
-        raise NotImplementedError
 
 
 def post_process_solution_str(config, solution_str, eos_token):
@@ -186,6 +155,7 @@ class RewardManager():
         self.punish_score = dict(map(lambda x: (x.split(':')[0], float(x.split(':')[1])), self.punish_score.split(',')))
         self.need_punish_trunc = self.config.reward_model.get('need_punish_trunc', False)
         self.trunc_punish_score = self.config.reward_model.get('trunc_punish_score', -5)
+        self.log_image = self.config.reward_model.get('log_image', True)
         self.len_ema_without_overlong = self.config.reward_model.get(
             'len_ema_without_overlong', False)  # 在计算平均长度时不考虑超长的，这部分反正会被打压（配合trunc_punish_score一起用）
         self.length_ema_method = self.config.reward_model.get('length_ema_method', 'mean')
@@ -279,6 +249,8 @@ class RewardManager():
             valid_response_ids = response_ids[:valid_response_length]
 
             # decode
+            # the image placeholder in input_ids is negative
+            valid_prompt_ids = [x for x in valid_prompt_ids if x >= 0]
             prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=False)
             solution_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=False)
 
@@ -321,7 +293,12 @@ class RewardManager():
                 score_fn_inputs["code_sandbox_psm"] = self.config.trainer.code_sandbox_psm
             if reward_style == "verifier_service":
                 score_fn_inputs["verifier_service_psm"] = self.config.trainer.verifier_service_psm
-            score = compute_score_fn(**score_fn_inputs)
+
+            if self.config.data.image_key is not None and format_reward != 0:
+                score = 0
+            else:
+                score = compute_score_fn(**score_fn_inputs)
+
             is_para_dup = para_dup.find_single_turn_duplicate(solution_str)[0]
             is_trunc = (response_length == valid_response_length) and score == -1
 
@@ -355,6 +332,7 @@ class RewardManager():
         verifier_total_cnt = 0
         dup_cnt = 0
         dup_lens = []
+        timeout_cnt = 0
         not_dup_lens = []
         from tqdm import tqdm
         all_ngram = []
@@ -405,12 +383,17 @@ class RewardManager():
                 if score == -2:
                     score = -1
                     verifier_fail_cnt += 1
+            if reward_style == "verifier_math":
+                if score == -2:
+                    timeout_cnt += 1
+                    score = -0.1
             # train的时候做这个norm，但是打点的时候恢复，打原始值
             # eval的时候不做这个norm
             if need_norm:
                 score = (score - self.mean) / self.std
             raw_scores[idx, valid_response_length - 1] = score
             raw_reward = score
+            all_raw_scores.append(raw_reward)
 
             format_scores[idx, valid_response_length - 1] = format_reward
 
@@ -447,6 +430,11 @@ class RewardManager():
             all_final_scores.append(round(score, 1))
             all_final_scores_to_lens[round(score, 1)].append(valid_response_length)
 
+            all_format_scores.append(format_reward)
+            all_length_rewards.append(length_reward)
+            all_overlong_rewards.append(overlong_reward)
+            all_dup_punish_scores.append(dup_punish_reward)
+
             if reward_style not in already_print_data_sources:
                 already_print_data_sources[reward_style] = 0
 
@@ -454,13 +442,26 @@ class RewardManager():
                 already_print_data_sources[reward_style] += 1
                 if reward_style == "code-sandbox":
                     ground_truth = ''  # 对于OJ问题，ground_truth会比较大，扛不住
+                if self.log_image:
+                    from xperf_gpt.multi_models.preprocess.data_decoder import BytesDecoder
+                    if 'raw_image' in data[idx].non_tensor_batch and len(data[idx].non_tensor_batch['raw_image']) > 0:
+                        img = wandb.Image(BytesDecoder()(data[idx].non_tensor_batch['raw_image'][0]))
+                    else:
+                        img = None
+                else:
+                    img = None
+                if self.config.data.image_key is not None:
+                    solution_str_save = solution_str_post_proc.split("boxed{")[-1][-80:]
+                else:
+                    solution_str_save = solution_str_post_proc[-32:]
+
                 self.log_table.append([
-                    global_index, global_step, prompt_str, solution_str, ground_truth, score,
-                    solution_str_post_proc[-32:], is_para_dup, is_trunc, valid_response_length
+                    global_index, global_step, img, prompt_str, solution_str, ground_truth, score, solution_str_save,
+                    is_para_dup, is_trunc, valid_response_length
                 ])
             save_to_hdfs.append([
-                global_index, idx, global_step, prompt_str, solution_str, ground_truth, score,
-                solution_str_post_proc[-32:], is_para_dup, is_trunc, valid_response_length
+                global_index, idx, global_step, prompt_str, solution_str, ground_truth, score, solution_str_save,
+                is_para_dup, is_trunc, valid_response_length
             ])
 
         raw_counter = Counter(counter_raw_scores)
@@ -471,6 +472,7 @@ class RewardManager():
         dup_punish_counter = Counter(all_dup_punish_scores)
 
         all_final_scores_to_lens = {key: sum(value) / len(value) for key, value in all_final_scores_to_lens.items()}
+        counter = Counter(all_final_scores)
         prefix = "" if not is_validation else "val/"
         log_data = {
             prefix + "oj/fail_rate": oj_fail_cnt / oj_total_cnt if oj_total_cnt > 0 else -1,
@@ -479,7 +481,8 @@ class RewardManager():
             prefix + "dup/dup_response_len": sum(dup_lens) / max(1, len(dup_lens)),
             prefix + "dup/not_dup_response_len": sum(not_dup_lens) / max(1, len(not_dup_lens)),
             prefix + 'unique_2gram': len(set(all_ngram)) / (len(all_ngram) + 1),
-            prefix + 'current_mean_len': current_mean_len
+            prefix + 'current_mean_len': current_mean_len,
+            prefix + 'timeout_cnt': timeout_cnt,
         }
         log_counter = {prefix + f"score_counter/raw_{key}": value for key, value in raw_counter.items()}
         log_counter.update({prefix + f"score_counter/final_{key}": value for key, value in final_counter.items()})
@@ -489,6 +492,7 @@ class RewardManager():
         log_counter.update({
             prefix + f"score_counter/dup_punish_{key}": value for key, value in dup_punish_counter.items()
         })
+        log_counter.update({prefix + f"score_counter/{key}": value for key, value in counter.items()})
 
         log_score_to_lens = {prefix + f"score_to_lens/{key}": value for key, value in all_final_scores_to_lens.items()}
         log_score = {
@@ -516,8 +520,8 @@ class RewardManager():
             log_table = {
                 f"gen&score_{self.rm_name}_{global_step}":
                     wandb.Table(columns=[
-                        "Index", "Step", "Prompt", "Gen Sequence", "GroundTruth", "Score", "Gen Sequence PostProc",
-                        "Is_Dup", "Is_Trunc", "Len"
+                        "Index", "Step", "Image", "Prompt", "Gen Sequence", "GroundTruth", "Score",
+                        "Gen Sequence PostProc", "Is_Dup", "Is_Trunc", "Len"
                     ],
                                 data=self.log_table)
             }
@@ -693,6 +697,7 @@ def init_ray(config: DictConfig):
                 'TOKENIZERS_PARALLELISM': 'true',
                 'BPEX_NO_WARN_ON_UNTUNED_CASE': '1',
                 'WANDB_IGNORE_STEP_ORDER': '1',
+                "THINK_TEMPLATE": os.getenv("THINK_TEMPLATE", "v2"),
                 # 'NCCL_DEBUG': 'WARN'
             }
         }

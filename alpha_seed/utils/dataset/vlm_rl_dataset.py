@@ -109,7 +109,7 @@ class RLHFDatasetVL(RLHFDataset):
 
     def __init__(self, *args, **kwargs):
         self.processor = kwargs.pop('processor', None)
-        self.num_limit = kwargs.pop('num_limit', -1)
+        self.num_limit = kwargs.pop('num_limit', None)
         self.image_key = kwargs.pop('image_key', 'image')
         self.bytes_decoder = BytesDecoder()
         super().__init__(*args, **kwargs)
@@ -187,12 +187,10 @@ class RLHFDatasetVL(RLHFDataset):
                 row_dict_ret['raw_image'] = []
                 row_dict_ret['pixel_values'] = inputs['pixel_values']
                 row_dict_ret['image_grid_hw'] = torch.tensor(inputs['image_grid_hw'])
-                row_dict_ret['num_image_tokens'] = inputs['num_image_tokens']
             else:
                 row_dict_ret['raw_image'] = []
                 row_dict_ret['pixel_values'] = None
                 row_dict_ret['image_grid_hw'] = None
-                row_dict_ret['num_image_tokens'] = None
 
             # reward_model is required
             row_dict_ret['reward_model'] = {}
@@ -248,6 +246,7 @@ class RLHFDatasetVL(RLHFDataset):
         # type cast to save memory
         cast_type('input_ids', torch.int32)
         cast_type('attention_mask', torch.int8)
+        row_dict_ret['data_source'] = row_dict['data_source']
         row_dict_ret['off_policy_steps'] = torch.zeros([1]).to(torch.int8)
         return row_dict_ret
 
@@ -346,12 +345,6 @@ class RLHFDatasetGUI(RLHFDatasetVL):
             row_dict['attention_mask'] = attention_mask[0]
             row_dict['pixel_values'] = inputs['pixel_values']
             row_dict['image_grid_hw'] = torch.tensor(inputs['image_grid_hw'])
-            num_image_sum = sum(inputs['num_image_tokens'])
-            image_token_id = -100
-            input_ids_sum = (row_dict['input_ids'] == image_token_id).sum().item()
-            if num_image_sum != input_ids_sum:
-                raise ValueError(
-                    f"num_image_tokens ({num_image_sum}) not euqual to image_token in input_ids {input_ids_sum}")
 
             # reward_model is required
             row_dict['reward_model'] = {}

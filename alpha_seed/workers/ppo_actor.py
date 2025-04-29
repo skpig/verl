@@ -16,6 +16,8 @@ Single Process Actor
 """
 from typing import Iterable, ContextManager
 import itertools
+import math
+
 import gc
 import torch
 from tensordict import TensorDict
@@ -38,7 +40,10 @@ from verl.utils.model import compute_position_id_with_mask
 
 from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
 from dist_attn.ulysses.ops import gather_outputs
-from alpha_seed.workers.hybrid_engine.fsdp_gather import ulysses_pad_and_slice_inputs
+
+from alpha_seed.utils.functional import rearrange_micro_data_proto
+from alpha_seed.workers.hybrid_engine.fsdp_gather import ulysses_pad_and_slice_inputs, ulysses_pad
+from alpha_seed.models.transformers.modeling_vlm import get_image_inputs, get_image_keys
 from alpha_seed.utils.observility.training_stats import sync_training_stats
 from alpha_seed.utils.observility import get_profiler_context_wrapped, profile_step
 from alpha_seed import core_algos
@@ -106,10 +111,11 @@ class DataParallelPPOActor(BasePPOActor):
         self.entropy_from_logits = verl_F.entropy_from_logits
         self.loss_fn = default_loss_fn
 
-    def _forward_micro_batch(self, micro_batch: TensorDict, temperature, compute_entropy):
+    def _forward_micro_batch(self, micro_batch: TensorDict, temperature, compute_entropy, non_tensor_batch):
         from flash_attn.bert_padding import index_first_axis, rearrange
 
         response_length = micro_batch['responses'].size(-1)
+        image_kwargs = get_image_inputs(non_tensor_batch)
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
             if not self.use_rmpad:
                 raise NotImplementedError('only support rmpad mode')
@@ -128,8 +134,12 @@ class DataParallelPPOActor(BasePPOActor):
             # handle ulysses sequence parallelism
             sp_size = get_ulysses_sequence_parallel_world_size()
             total_nnz = input_ids_rmpad.size(1)
-            input_ids_rmpad, position_ids_rmpad, pad_size = ulysses_pad_and_slice_inputs(
-                input_ids_rmpad, position_ids_rmpad, sp_size)
+            if 'vision_config' in self.actor_model_config:
+                input_ids_rmpad, position_ids_rmpad, pad_size = ulysses_pad(input_ids_rmpad, position_ids_rmpad,
+                                                                            sp_size)
+            else:
+                input_ids_rmpad, position_ids_rmpad, pad_size = ulysses_pad_and_slice_inputs(
+                    input_ids_rmpad, position_ids_rmpad, sp_size)
             input_ids_rmpad_rolled, _, _ = ulysses_pad_and_slice_inputs(input_ids_rmpad_rolled, None, sp_size)
             input_ids_rmpad_rolled = input_ids_rmpad_rolled.squeeze(0)
             batch_size, seqlen = input_ids.shape
@@ -146,6 +156,9 @@ class DataParallelPPOActor(BasePPOActor):
                     'temperature': temperature,
                     'fuse_lm_head_ce_loss': True,
                 }
+
+                # merge two dict
+                kwargs.update(image_kwargs)
                 output = self.actor_module(
                     **kwargs,
                     use_cache=False,
@@ -153,7 +166,10 @@ class DataParallelPPOActor(BasePPOActor):
                 )
                 full_log_probs_rmpad = output.loss * (-1.0)
             else:
-                output = self.actor_module(input_ids=input_ids_rmpad, position_ids=position_ids_rmpad, use_cache=False)
+                output = self.actor_module(input_ids=input_ids_rmpad,
+                                           position_ids=position_ids_rmpad,
+                                           use_cache=False,
+                                           **image_kwargs)
 
                 if self.config.get('logits_clamp', 0) != 0:
                     from alpha_seed.utils.functional import clip_by_value_preserve_gradient
@@ -237,33 +253,40 @@ class DataParallelPPOActor(BasePPOActor):
             max_token_len = data.meta_info['max_token_len']
         else:
             micro_batch_size = data.meta_info['micro_batch_size']
-            micro_batch_size = 1
         temperature = data.meta_info['temperature']  # temperature must be in the data.meta_info to avoid slient error
 
         select_keys = ['responses', 'input_ids', 'attention_mask']
-        batch = data.select(batch_keys=select_keys).batch
+        image_keys = get_image_keys(data.non_tensor_batch)
+        selected_data = data.select(batch_keys=select_keys, non_tensor_batch_keys=image_keys)
         entropy_lst = []
         log_prob_lst = []
         # Note: mismatched data order (here vs. upldate policy) can lead to
         # mismatched log probs. In order to match them, we need to split
         # batch into mini batches (same with training).
-        for mini_batch in batch.split(self.config.ppo_mini_batch_size):
+        chunk_size = math.ceil(selected_data.batch.batch_size[0] / self.config.ppo_mini_batch_size)
+        for batch_idx, mini_batch in enumerate(selected_data.chunk(chunk_size)):
             if use_dynamic_bsz:
-                micro_batches, num_micro_batches, indices = rearrange_micro_batches(batch=mini_batch,
-                                                                                    max_token_len=max_token_len)
+                indices, micro_batches, non_tensor_batches = rearrange_micro_data_proto(max_token_len, mini_batch)
             else:
-                micro_batches = mini_batch.split(micro_batch_size)
+                micro_batches = mini_batch.chunk(math.ceil(mini_batch.batch.batch_size[0] / micro_batch_size))
                 num_micro_batches = len(micro_batches)
 
             mini_batch_entropy = []
             mini_batch_log_prob = []
             with torch.no_grad():
-                for i, micro_batch in enumerate(micro_batches):
-                    assert micro_batch.device == torch.device('cpu')
-                    micro_batch = micro_batch.cuda()
+                for i, micro_batch_proto in enumerate(micro_batches):
+                    if use_dynamic_bsz:
+                        non_tensor_batch = non_tensor_batches[i]
+                        assert micro_batch_proto.device == torch.device('cpu')
+                        micro_batch = micro_batch_proto.cuda()
+                    else:
+                        non_tensor_batch = micro_batch_proto.non_tensor_batch
+                        assert micro_batch_proto.batch.device == torch.device('cpu')
+                        micro_batch = micro_batch_proto.batch.cuda()
                     entropy, log_probs, _ = self._forward_micro_batch(micro_batch=micro_batch,
                                                                       temperature=temperature,
-                                                                      compute_entropy=True)
+                                                                      compute_entropy=True,
+                                                                      non_tensor_batch=non_tensor_batch)
                     mini_batch_log_prob.append(log_probs)
                     mini_batch_entropy.append(entropy)
             # release root module unshard memory
@@ -370,7 +393,7 @@ class DataParallelPPOActor(BasePPOActor):
             batch_full_token_count_mask *= data.batch['overlong_mask'].unsqueeze(-1)
         batch_full_token_count = max(1, batch_full_token_count_mask.sum().item())
 
-        dataloader = make_mini_step_dataloader(data, self.config.ppo_mini_batch_size)
+        dataloader = make_mini_step_dataloader(data, self.config.ppo_mini_batch_size, return_dataproto=True)
         metrics = {}
 
         first_mini_ppo_kl_sum = 0
@@ -380,23 +403,29 @@ class DataParallelPPOActor(BasePPOActor):
         for batch_idx, mini_batch in enumerate(dataloader):
             with self.profiler_context as p, metrics_exec_context:
                 if self.config.use_dynamic_bsz:
-                    micro_batches, _, _ = rearrange_micro_batches(batch=mini_batch,
-                                                                  max_token_len=self.config.ppo_max_token_len)
+                    indices, micro_batches, non_tensor_batches = rearrange_micro_data_proto(
+                        self.config.ppo_max_token_len, mini_batch)
                 else:
                     # split batch into micro_batches
-                    micro_batches = mini_batch.split(self.config.ppo_micro_batch_size)
+                    micro_chunk_size = math.ceil(mini_batch.batch.batch_size[0] / self.config.ppo_micro_batch_size)
+                    micro_batches = mini_batch.chunk(micro_chunk_size)
                 self._optimizer_zero_grad()
 
                 minibatch_early_stop = False
 
                 # compute minibatch full token count
-                mini_batch_full_token_count_mask = mini_batch['attention_mask'][:, -response_length:]
-                if 'overlong_mask' in mini_batch.keys():
-                    mini_batch_full_token_count_mask *= mini_batch['overlong_mask'].unsqueeze(-1)
+                mini_batch_full_token_count_mask = mini_batch.batch['attention_mask'][:, -response_length:]
+                if 'overlong_mask' in mini_batch.batch.keys():
+                    mini_batch_full_token_count_mask *= mini_batch.batch['overlong_mask'].unsqueeze(-1)
                 mini_batch_full_token_count = max(1, mini_batch_full_token_count_mask.sum().item())
 
-                for i, micro_data in enumerate(micro_batches):
-
+                for i, micro_batch in enumerate(micro_batches):
+                    if self.config.use_dynamic_bsz:
+                        micro_data = micro_batch
+                        non_tensor_batch = non_tensor_batches[i]
+                    else:
+                        micro_data = micro_batch.batch
+                        non_tensor_batch = micro_batch.non_tensor_batch
                     assert micro_data.device == torch.device('cpu')
                     micro_data = micro_data.cuda()  # actor device is cpu when using offload
                     entropy_coeff = self.config.entropy_coeff
@@ -407,7 +436,8 @@ class DataParallelPPOActor(BasePPOActor):
 
                     full_entropy, log_prob, seqlen = self._forward_micro_batch(micro_batch=micro_data,
                                                                                temperature=temperature,
-                                                                               compute_entropy=compute_entropy)
+                                                                               compute_entropy=compute_entropy,
+                                                                               non_tensor_batch=non_tensor_batch)
 
                     policy_loss, micro_data_metric = self.loss_fn(self.config, micro_data, full_entropy, log_prob)
 
@@ -601,9 +631,12 @@ def make_mini_step_dataloader(data, ppo_mini_batch_size, return_dataproto=False)
         select_keys.append('eos_ids')
     if 'token_level_scores' in data.batch.keys():
         select_keys.append('token_level_scores')
+    non_tensor_keys = get_image_keys(data.non_tensor_batch)
+    if non_tensor_keys:
+        assert return_dataproto
     if return_dataproto:
         mini_steps = data.batch.batch_size[0] // ppo_mini_batch_size
-        dataloader = data.select(batch_keys=select_keys).chunk(mini_steps)
+        dataloader = data.select(batch_keys=select_keys, non_tensor_batch_keys=non_tensor_keys).chunk(mini_steps)
     else:
         batch = data.select(batch_keys=select_keys).batch
         dataloader = batch.split(ppo_mini_batch_size)

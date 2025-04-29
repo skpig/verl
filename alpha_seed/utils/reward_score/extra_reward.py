@@ -1,5 +1,10 @@
 import re
 import torch
+import os
+
+
+def extract_answer_failed_reward():
+    return -0.1
 
 
 def add_length_reward(thinking_len, correct_reward, config, current_mean_len=None):
@@ -195,7 +200,76 @@ def add_length_reward(thinking_len, correct_reward, config, current_mean_len=Non
 #     return final_reward
 
 
-def punish_format_return_positions(text, config):
+def filter_thinking_part_v1(response):
+    format_pattern = r"^<\|begin_of_thought\|>.*?<\|end_of_thought\|>\s*<\|begin_of_solution\|>.*?<\|end_of_solution\|>$"
+    if not re.match(format_pattern, response, re.DOTALL):
+        return "", False
+    match = re.search(r'<\|begin_of_solution\|>(.*?)<\|end_of_solution\|>', response, re.DOTALL)
+    assert match
+    extracted_response = match.group(1)
+    success = True
+    return extracted_response, success
+
+
+def filter_thinking_part_v2(response, eos_token=None):
+    response_start = 0
+    success = False
+    think_start = response.find('<think>', response_start)
+    think_end = response.rfind('</think>', response_start)
+    if think_start != -1 and think_end != -1 and think_start < think_end:
+        response_start = think_end + len('</think>')
+        success = True
+    if eos_token is not None:
+        response_end = response.find(eos_token, response_start)
+    else:
+        response_end = len(response)
+    response = response[response_start:response_end]
+    return response, success
+
+
+def filter_thinking_part(response, eos_token=None):
+    think_template = os.getenv("THINK_TEMPLATE", "v2")
+    print("[debug think_template 1 ]", think_template)
+    if think_template == 'v1':
+        return filter_thinking_part_v1(response)
+    elif think_template == 'v2':
+        return filter_thinking_part_v2(response)
+    else:
+        raise NotImplementedError
+
+
+def punish_format_return_positions_vlm(text, config):
+    think_template = os.getenv("THINK_TEMPLATE", "v2")
+    print(f"[debug think_template] {think_template}")
+    if think_template == 'v1':
+        pattern = re.compile(r'(<\|begin_of_thought\|>)|(<\|end_of_thought\|>)|'
+                             r'(<\|begin_of_solution\|>)|(<\|end_of_solution\|>)')
+
+        # 查找所有出现的 token 及其起始索引
+        matches = [(match.group(), match.start()) for match in pattern.finditer(text)]
+
+        # 提取 tokens 和索引
+        tokens = [match[0] for match in matches]
+        indices = {match[0]: match[1] for match in matches}  # special token 索引的字典
+        indices_ls = [indices[token] for token in tokens]  # special token index的列表
+
+        extracted_response, is_vaild = filter_thinking_part_v1(text)
+    elif think_template == 'v2':
+        think_start = text.find('<think>', 0)
+        think_end = text.find('</think>', 0)
+        indices_ls = [think_start, think_end]
+
+        extracted_response, is_vaild = filter_thinking_part_v2(text)
+    else:
+        raise NotImplementedError
+
+    if not is_vaild:
+        return config.reward_model.format_punish_score, None
+
+    return 0, indices_ls
+
+
+def punish_format_return_positions_default(text, config):
     pattern = re.compile(
         r'^(?P<leading>\n{0,2})'  # optional leading whitespace
         r'(?P<thinking_open><(thinking|think|\|object_ref_start\|)>)'
@@ -227,6 +301,15 @@ def punish_format_return_positions(text, config):
         positions['thinking_open'][0], positions['thinking_close'][0], positions['answer_open'][0],
         positions['answer_close'][0]
     ]
+
+
+def punish_format_return_positions(text, config):
+    is_vlm = config.data['image_key'] is not None
+
+    if is_vlm:
+        return punish_format_return_positions_vlm(text, config)
+    else:
+        return punish_format_return_positions_default(text, config)
 
 
 # def punish_format(generation, config):

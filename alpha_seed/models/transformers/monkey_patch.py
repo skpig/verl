@@ -24,6 +24,7 @@ from torch.distributed._tensor.placement_types import Placement
 from torch.distributed.device_mesh import DeviceMesh
 from collections import defaultdict
 from seed_models import M8Config
+from alpha_seed.utils.functional import get_text_model_type
 
 
 def get_ignore_modules_in_mixed_precision(model_type):
@@ -62,7 +63,7 @@ def update_gate_ema_m8(fsdp_module):
 
 
 #### Seed Models
-def apply_monkey_patch_to_p6():
+def apply_monkey_patch_to_p6(config):
     from seed_models.models.p6.modeling_p6 import P6FlashAttention2, P6ForCausalLM
     from verl.models.transformers.seed_mlp import swiglu_mlp_forward
     from alpha_seed.models.transformers.modeling_p6 import flash_attn2_rmpad_forward, p6_model_forward
@@ -73,7 +74,7 @@ def apply_monkey_patch_to_p6():
     apply_liger_kernel_to_p6()
 
 
-def apply_monkey_patch_to_p6_dense():
+def apply_monkey_patch_to_p6_dense(config):
     from seed_models.models.p6dense.modeling_p6d import P6DenseFlashAttention2, P6DenseForCausalLM, P6DenseMLP
     from alpha_seed.models.transformers.modeling_p6d import flash_attn2_rmpad_forward, p6d_model_forward, mlp_tp_forward
     P6DenseFlashAttention2.forward = flash_attn2_rmpad_forward
@@ -83,7 +84,7 @@ def apply_monkey_patch_to_p6_dense():
     apply_liger_kernel_to_p6d()
 
 
-def apply_monkey_patch_to_p7():
+def apply_monkey_patch_to_p7(config):
     from seed_models.models.p7.modeling_p7 import P7FlashAttention2, P7ForCausalLM
     from alpha_seed.models.transformers.modeling_p7 import flash_attn2_rmpad_forward, p7_model_forward
     P7FlashAttention2.forward = flash_attn2_rmpad_forward
@@ -92,7 +93,7 @@ def apply_monkey_patch_to_p7():
     apply_liger_kernel_to_p7()
 
 
-def apply_monkey_patch_to_m8():
+def apply_monkey_patch_to_m8(config):
     from seed_models.models.m8.modeling_m8 import M8FlashAttention2, M8FusedMoeBlock, M8PreTrainedModel, M8ForCausalLM
     from .modeling_m8 import flash_attn2_rmpad_forward, _fused_moe_ep_forward, release_m8_kv_mirror, m8_casual_lm_forward
     M8FlashAttention2.forward = flash_attn2_rmpad_forward
@@ -103,7 +104,7 @@ def apply_monkey_patch_to_m8():
     M8PreTrainedModel.release_act_memory = release_m8_kv_mirror
 
 
-def apply_monkey_patch_to_ds3():
+def apply_monkey_patch_to_ds3(config):
     from seed_models.models.deepseek_v3.modeling_deepseek import DeepseekV3FlashAttention2, DeepseekV3MLP, DeepseekV3FusedMoE, DeepseekV3ForCausalLM
     from seed_models.integrations import apply_liger_kernel_to_deepseek_v3
     from .modeling_ds import flash_attn2_forward, moe_ep_forward, mlp_tp_forward, deepseek_v3_casual_lm_forward
@@ -114,12 +115,22 @@ def apply_monkey_patch_to_ds3():
     apply_liger_kernel_to_deepseek_v3()
 
 
+def apply_monkey_patch_to_vlm(config):
+    text_type = get_text_model_type(config)
+    _PATCH_NAME_TO_FUNC[text_type](config)
+    from seed_models.models.seed_vl.modeling_seed_vl import SeedVLForConditionalGeneration
+    from .modeling_vlm import get_dummy_image_features, get_sp_input_embeds
+    SeedVLForConditionalGeneration.get_image_features = get_dummy_image_features
+    SeedVLForConditionalGeneration.get_input_embeds = get_sp_input_embeds
+
+
 _PATCH_NAME_TO_FUNC = {
     'seed_p6': apply_monkey_patch_to_p6,
     'seed_p6dense': apply_monkey_patch_to_p6_dense,
     'seed_p7': apply_monkey_patch_to_p7,
     'seed_m8': apply_monkey_patch_to_m8,
     'deepseek_v3': apply_monkey_patch_to_ds3,
+    'seed_vl': apply_monkey_patch_to_vlm
 }
 
 from transformers import PretrainedConfig
@@ -127,11 +138,9 @@ from transformers import PretrainedConfig
 
 def apply_monkey_patch(config: PretrainedConfig, verbose=True):
     model_type = config.model_type
-    if model_type == 'seed_vl':
-        model_type = config.text_config.model_type
     success_apply_monkey_patch = False
     if model_type in _PATCH_NAME_TO_FUNC:
-        _PATCH_NAME_TO_FUNC[model_type]()
+        _PATCH_NAME_TO_FUNC[model_type](config)
         success_apply_monkey_patch = True
 
     if success_apply_monkey_patch and verbose:

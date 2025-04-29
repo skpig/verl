@@ -16,6 +16,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--load-dir', required=True)
     parser.add_argument('--save-path', required=False)
+    parser.add_argument('--dtype', required=False)
+    parser.add_argument('--no-save-megatron', action='store_false', dest='save_megatron')
     args = parser.parse_args()
 
     match = re.search(r'global_step_(\d+)', args.load_dir)
@@ -28,7 +30,7 @@ if __name__ == '__main__':
 
     print(f"Downloading ckpt from {args.load_dir}")
     local_dir = copy_local_path_from_hdfs(args.load_dir)
-    hf_load_dir = os.path.join(args.load_dir, "../../huggingface")
+    hf_load_dir = os.path.join(args.load_dir, "huggingface")
     print(f"Downloading hf path from {hf_load_dir}")
     hf_path = copy_local_path_from_hdfs(hf_load_dir)
 
@@ -42,6 +44,8 @@ if __name__ == '__main__':
         safetensors_format=True,
         return_dict=True,
     )
+    if args.dtype == 'bf16':
+        state_dict['model'] = {key: value.bfloat16() for key, value in state_dict['model'].items()}
     print(f'Merge omnistore checkpoint successfully! cost time: {time.time() - time_begin}s')
     config = AutoConfig.from_pretrained(hf_path)
 
@@ -62,14 +66,17 @@ if __name__ == '__main__':
     del state_dict
     del model
 
-    print(f'Upload huggingface model from {hf_path} to {args.load_dir}')
-    hdfs_io.copy(hf_path, args.load_dir)
+    hf_save_dir = os.path.join(args.save_path, "huggingface")
+    print(f'Upload huggingface model from {hf_path} to {hf_save_dir}')
+    hdfs_io.makedirs(hf_save_dir, exist_ok=True)
+    hdfs_io.copy(hf_path, hf_save_dir)
 
-    # upload back to hdfs
-    print(f'Step4: convert model to megatron/xperf format and upload to {args.save_path}')
-    # convert to megatron for autoeval
-    megatron_save_path = os.path.join(args.load_dir, "megatron")
-    convert_seed_models_to_megatron(hf_path=hf_path,
-                                    local_path=local_dir,
-                                    output_path=megatron_save_path,
-                                    validate=False)
+    if args.save_megatron:
+        # upload back to hdfs
+        print(f'Step4: convert model to megatron/xperf format and upload to {args.save_path}')
+        # convert to megatron for autoeval
+        megatron_save_path = os.path.join(args.save_path, "megatron")
+        convert_seed_models_to_megatron(hf_path=hf_path,
+                                        local_path=local_dir,
+                                        output_path=megatron_save_path,
+                                        validate=False)
