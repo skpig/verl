@@ -46,11 +46,12 @@ class Tracking:
             # 获取上一个运行的ID
             api = Api()
             runs = api.runs(f"skpig/{project_name}")
-            if runs:
+            if runs and runs[-1].name == experiment_name:
                 last_run_id = runs[-1].id # 最后一个运行的ID
                 resume_id = last_run_id
-                if input("是否继续上次的运行？(y/n)") == "n":
-                    resume_id = None
+                # if input(f"是否继续上次的运行？{runs[-1].url}(y/n)") == "n":
+                #     resume_id = None
+                print("继续上次的wandb运行")
             else:
                 resume_id = None
 
@@ -227,7 +228,7 @@ class ValidationGenerationsLogger:
         import wandb
 
         # Create column names for all samples
-        columns = ['id', 'input', 'output', 'score']
+        columns = ['id', 'input', 'output', 'score', 'format_score']
 
         # Create a new table with same columns and existing data
         # Workaround for https://github.com/wandb/wandb/issues/2981#issuecomment-1997445737
@@ -235,7 +236,7 @@ class ValidationGenerationsLogger:
 
         # Add new samples to the table
         for i, sample in enumerate(samples):
-            new_table.add_data(i, sample[0], sample[1], sample[2])
+            new_table.add_data(i, sample[0], sample[1], sample[2], sample[3])
 
         # Update reference and log
         wandb.log({f"{tag}/generations": new_table}, step=step)

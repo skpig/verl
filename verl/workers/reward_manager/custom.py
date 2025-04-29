@@ -91,33 +91,28 @@ def parallel_compute_score_sync(
     evaluation_func, completions, references, tasks, extra_info=None, num_processes=40
 ):
     scores = []
+    # for completion, reference, task, task_extra_info in zip(completions, references, tasks, extra_info):
+    #     """Single"""
+    #     try:
+    #         result = evaluation_func(task, completion, reference, task_extra_info)
+    #     except Exception as e:
+    #         print(f"==== Error processing completion ====\n {completion[:10]}\n==== Error: {e} ====")
+    #         traceback.print_exc()
+    #     scores.append(result)
+    # return scores 
+
     with concurrent.futures.ProcessPoolExecutor(max_workers=num_processes) as executor:
-        if extra_info is None:
-            extra_info = [None] * len(tasks)
         futures = []
         for completion, reference, task, task_extra_info in zip(completions, references, tasks, extra_info):
             future = executor.submit(evaluation_func, task, completion, reference, task_extra_info)
             futures.append(future)
-        #     try:
-        #         result = evaluation_func(task, completion, reference, task_extra_info)
-        #     except Exception as e:
-        #         print(f"==== Error processing completion ====\n {completion[:10]}\n==== Error: {e} ====")
-        #         traceback.print_exc()
-        #     futures.append(result)
-        # return futures
+        
+        futures, unfinished = concurrent.futures.wait(futures, timeout=100)
 
-        for future in concurrent.futures.as_completed(futures):
+        for future in futures:
             try:
-                result = future.result(timeout=100.0) # 设置超时时间为 300 秒
+                result = future.result()  # 设置超时时间为 100 秒
                 scores.append(result)
-            except concurrent.futures.TimeoutError:
-                print(f"计算超时: {future}")
-                scores.append({
-                    "score": 0,
-                    "acc": 0,
-                    "format": 0,
-                    "pred": "Error",
-                })
             except Exception as e:
                 traceback.print_exc()
                 print(f"计算出错: {e}")
@@ -127,6 +122,16 @@ def parallel_compute_score_sync(
                     "format": 0,
                     "pred": "Error",
                 })
+
+        for future in unfinished:
+            future.cancel()
+            print(f"取消失败: {e}")
+            scores.append({
+                "score": 0,
+                "acc": 0,
+                "format": 0,
+                "pred": "Error",
+            })
 
     return scores
 

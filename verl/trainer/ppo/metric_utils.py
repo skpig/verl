@@ -55,6 +55,49 @@ def _compute_response_info(batch: DataProto) -> Dict[str, Any]:
         response_length=response_length,
     )
 
+
+
+@ray.remote
+def _maybe_log_train_generations(batch, global_steps, tokenizer, cache_file_path, experiment_name):
+    """Log a table of validation samples to the configured logger (wandb or swanlab)"""
+
+
+    """TODO: Add more statistics here"""
+    LOG_FREQ = 5
+
+    if global_steps % LOG_FREQ != 0:
+        return
+
+    input_texts = [tokenizer.decode(ids, skip_special_tokens=True) for ids in batch.batch['prompts']] # (bsz,)
+    response_texts = [tokenizer.decode(ids, skip_special_tokens=True) for ids in batch.batch['responses']] # (bsz,)
+
+    """ Save in local file """
+    df = pd.DataFrame({
+        'query_index': batch.batch['index'].tolist(),
+        'query': input_texts,
+        'rollout_index': batch.batch['rollout_index'].tolist(),
+        'rollout': response_texts,
+        'seq_level_rewards': batch.batch['token_level_rewards'].sum(-1).tolist(),
+        'seq_level_scores': batch.batch['token_level_scores'].sum(-1).tolist() if 'token_level_scores' in batch.batch else None,
+        'token_level_scores': map_token_scores_to_chars(batch.batch['responses'], batch.batch['token_level_scores'], batch.batch['response_mask']) if 'token_level_scores' in batch.batch else None,
+    })
+    df['step_num'] = global_steps
+    df['run_name'] = experiment_name
+
+    df = df.sort_values(by=['query_index', 'rollout_index'])
+
+
+    # load old df on the next few steps
+    if os.path.exists(cache_file_path) and global_steps // LOG_FREQ != 1:
+        old_df = pd.read_parquet(cache_file_path, engine='pyarrow')
+        df = pd.concat([old_df, df], ignore_index=True)
+    # save new df
+    dir_name = os.path.dirname(cache_file_path)
+    if not os.path.exists(dir_name):
+        os.makedirs(dir_name, exist_ok=False)
+    df.to_parquet(cache_file_path, engine='pyarrow')
+
+
 @ray.remote
 def compute_rollout_metrics(batch: DataProto, tokenizer) -> Dict[str, Any]:
     # rollouts = [(index, tokenizer.decode(token_ids, skip_special_tokens=True)) for index, token_ids in zip(batch.batch['index'], batch.batch['responses'])]
@@ -165,6 +208,12 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
     valid_adv = torch.masked_select(advantages, response_mask)
     valid_returns = torch.masked_select(returns, response_mask)
 
+    # rollout metrics about reward
+    format = batch.non_tensor_batch['format']
+    AnsMatch = format & 1
+    StepOrd = (format >> 1) & 1
+    num_steps = batch.non_tensor_batch['#steps']
+
     if use_critic:
         values = batch.batch["values"]
         valid_values = torch.masked_select(values, response_mask)
@@ -212,6 +261,17 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
         "prompt_length/max": torch.max(prompt_length).detach().item(),
         "prompt_length/min": torch.min(prompt_length).detach().item(),
         "prompt_length/clip_ratio": torch.mean(torch.eq(prompt_length, max_prompt_length).float()).detach().item(),
+
+        # rollout metrics
+        "rollout/AnsMatch/mean": np.mean(AnsMatch).item(),
+        "rollout/AnsMatch/max": np.max(AnsMatch).item(),
+        "rollout/AnsMatch/min": np.min(AnsMatch).item(),
+        "rollout/StepOrd/mean": np.mean(StepOrd).item(),
+        "rollout/StepOrd/max": np.max(StepOrd).item(),
+        "rollout/StepOrd/min": np.min(StepOrd).item(),
+        "rollout/#steps/mean": np.mean(num_steps).item(),
+        "rollout/#steps/max": np.max(num_steps).item(),
+        "rollout/#steps/min": np.min(num_steps).item(),
     }
     return metrics
 

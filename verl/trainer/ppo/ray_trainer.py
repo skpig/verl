@@ -568,7 +568,7 @@ class RayPPOTrainer:
 
         print(f"Dumped generations to {filename}")
 
-    def _maybe_log_val_generations(self, inputs, outputs, scores):
+    def _maybe_log_val_generations(self, inputs, outputs, scores, format_scores):
         """Log a table of validation samples to the configured logger (wandb or swanlab)"""
 
         generations_to_log = self.config.trainer.log_val_generations
@@ -579,7 +579,7 @@ class RayPPOTrainer:
         import numpy as np
 
         # Create tuples of (input, output, score) and sort by input text
-        samples = list(zip(inputs, outputs, scores))
+        samples = list(zip(inputs, outputs, scores, format_scores))
         samples.sort(key=lambda x: x[0])  # Sort by input text
 
         # Use fixed random seed for deterministic shuffling
@@ -695,10 +695,11 @@ class RayPPOTrainer:
         indices = np.random.choice(len(input_texts), generations_to_log)
         input_texts = [input_texts[i] for i in indices]
         response_texts = [response_texts[i] for i in indices]
-        seq_level_scores = [batch.batch['token_level_rewards'][i].sum(-1).item() for i in indices]
+        seq_level_scores = [batch.batch['token_level_scores'][i].sum(-1).item() for i in indices]
+        format_scores = batch.non_tensor_batch['format'][indices].tolist()
 
         # Create tuples of (input, output, score) and sort by input text
-        samples = list(zip(input_texts, response_texts, seq_level_scores))
+        samples = list(zip(input_texts, response_texts, seq_level_scores, format_scores))
 
         # Log to each configured logger
         self.validation_generations_logger.log(self.config.trainer.logger, 'train', samples, self.global_steps)
@@ -808,7 +809,7 @@ class RayPPOTrainer:
 
             data_source_lst.append(test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0]))
 
-        self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
+        self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores, format_scores=reward_extra_infos_dict['format'])
 
         # dump generations
         val_data_dir = self.config.trainer.get("validation_data_dir", None)

@@ -426,14 +426,17 @@ def verify_format(model_output: str):
     # 修改正则表达式以支持多位数的编号
     reasoning_pattern = r'## Reasoning step ([0-9]+):'
     reasoning_matches = [(match.start(), match.group(1)) for match in re.finditer(reasoning_pattern, model_output)]
+
+    num_steps = -1
     
     if reasoning_matches:
         reasoning_steps = [int(step) for _, step in reasoning_matches]
         expected_steps = list(range(1, len(reasoning_steps) + 1))
         if reasoning_steps == expected_steps:
             result |= REASONING_ORDER_BIT
+            num_steps = len(reasoning_steps)
     
-    return result
+    return result, num_steps
 
 
 def compute_score(model_output: str, ground_truth: str) -> bool:
@@ -441,14 +444,16 @@ def compute_score(model_output: str, ground_truth: str) -> bool:
     ground_truth = str(ground_truth)
 
     is_matched, extracted_model_output = match_answer(model_output)
+    format_correctness, num_steps = verify_format(model_output)
 
     # grade simple algebra questions. if succeeded, return; otherwise, proceed to more complex grading
     if grade_answer(extracted_model_output, ground_truth):
         return {
             "score": 1.0,
             "acc": 1,
-            "format": verify_format(model_output),
+            "format": format_correctness,
             "pred": extracted_model_output,
+            "#steps": num_steps,
         }
 
     try:
@@ -462,7 +467,6 @@ def compute_score(model_output: str, ground_truth: str) -> bool:
     except:
         is_correct = False
 
-    format_correctness = verify_format(model_output)
 
 
     return {
@@ -470,4 +474,5 @@ def compute_score(model_output: str, ground_truth: str) -> bool:
         "acc": 1 if is_correct else 0,
         "format": format_correctness,
         "pred": extracted_model_output,
+        "#steps": num_steps,
     }
