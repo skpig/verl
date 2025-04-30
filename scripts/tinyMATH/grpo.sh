@@ -86,11 +86,13 @@ CMD="python3 -m verl.trainer.main_ppo \
 verl_version=$(conda list | grep 'vllm' | awk '{print $2}')
 
 # 定义比较函数
-function version_gt() { test "$(printf '%s\n' "$@" | sort -V | head -n 1)" != "$(printf '%s\n' "$@" | sort -V | tail -n 1)"; }
+function version_gt() {
+    dpkg --compare-versions "$1" gt "$2"
+}
 
 # 条件判断分支语句
 if version_gt "$verl_version" "0.8"; then
-    echo "vllm版本大于0.8"
+    echo "vllm版本${verl_version}大于0.8"
     CMD="${CMD} \
         actor_rollout_ref.rollout.enforce_eager=False \
         actor_rollout_ref.rollout.free_cache_engine=False "

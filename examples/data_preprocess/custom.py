@@ -53,7 +53,8 @@ Your answer here
 
     return [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt}
+        {"role": "user", "content": user_prompt},
+        {"role": "assistant", "content": "## Reasoning step 1:\n"}
     ]
 
 def process_numinamath_dataset():
