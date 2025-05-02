@@ -17,7 +17,7 @@ from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 from typing import Callable, Optional
-
+import warnings
 import torch
 from sympy import ground_roots
 from transformers import PreTrainedTokenizer
@@ -91,15 +91,24 @@ def parallel_compute_score_sync(
     evaluation_func, completions, references, tasks, extra_info=None, num_processes=40
 ):
     scores = []
-    # for completion, reference, task, task_extra_info in zip(completions, references, tasks, extra_info):
-    #     """Single"""
-    #     try:
-    #         result = evaluation_func(task, completion, reference, task_extra_info)
-    #     except Exception as e:
-    #         print(f"==== Error processing completion ====\n {completion[:10]}\n==== Error: {e} ====")
-    #         traceback.print_exc()
-    #     scores.append(result)
-    # return scores 
+    # with warnings.catch_warnings():
+    #     warnings.simplefilter("error", SyntaxWarning)
+    #     for completion, reference, task, task_extra_info in zip(completions, references, tasks, extra_info):
+    #         """Single"""
+    #         try:
+    #             result = evaluation_func(task, completion, reference, task_extra_info)
+    #         except Exception as e:
+    #             print(f"==== Error processing completion ====\n {completion}\n==== Error: {e} ====")
+    #             traceback.print_exc()
+    #             result = {
+    #                 "score": 0,
+    #                 "acc": 0,
+    #                 "format": 0,
+    #                 "pred": "Error",
+    #             }
+    #         scores.append(result)
+    #     return scores
+
 
     with concurrent.futures.ProcessPoolExecutor(max_workers=num_processes) as executor:
         futures = []
@@ -107,12 +116,19 @@ def parallel_compute_score_sync(
             future = executor.submit(evaluation_func, task, completion, reference, task_extra_info)
             futures.append(future)
         
-        futures, unfinished = concurrent.futures.wait(futures, timeout=100)
-
         for future in futures:
             try:
-                result = future.result()  # 设置超时时间为 100 秒
+                result = future.result(timeout=30)  # 设置超时时间为 100 秒
                 scores.append(result)
+            except SyntaxWarning as w:
+                traceback.print_exc()
+                print(f"捕获到 SyntaxWarning: {w}")
+                scores.append({
+                    "score": 0,
+                    "acc": 0,
+                    "format": 0,
+                    "pred": "SyntaxWarning",
+                })
             except Exception as e:
                 traceback.print_exc()
                 print(f"计算出错: {e}")
@@ -122,16 +138,6 @@ def parallel_compute_score_sync(
                     "format": 0,
                     "pred": "Error",
                 })
-
-        for future in unfinished:
-            future.cancel()
-            print(f"取消失败: {e}")
-            scores.append({
-                "score": 0,
-                "acc": 0,
-                "format": 0,
-                "pred": "Error",
-            })
 
     return scores
 

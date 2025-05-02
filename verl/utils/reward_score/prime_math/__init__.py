@@ -19,6 +19,9 @@ Call grade_answer(given_answer: str, ground_truth: str).
 FROM: https://github.com/openai/prm800k/blob/main/prm800k/grading/grader.py
 """
 
+from errno import EXDEV
+import traceback
+import warnings
 import contextlib
 import os
 import re
@@ -431,7 +434,7 @@ def verify_format(model_output: str):
     
     if reasoning_matches:
         reasoning_steps = [int(step) for _, step in reasoning_matches]
-        expected_steps = list(range(1, len(reasoning_steps) + 1))
+        expected_steps = list(range(2, len(reasoning_steps) + 2))
         if reasoning_steps == expected_steps:
             result |= REASONING_ORDER_BIT
             num_steps = len(reasoning_steps)
@@ -440,23 +443,25 @@ def verify_format(model_output: str):
 
 
 def compute_score(model_output: str, ground_truth: str) -> bool:
+    warnings.simplefilter("error", SyntaxWarning)
+
     model_output = str(model_output)
     ground_truth = str(ground_truth)
 
     is_matched, extracted_model_output = match_answer(model_output)
     format_correctness, num_steps = verify_format(model_output)
 
-    # grade simple algebra questions. if succeeded, return; otherwise, proceed to more complex grading
-    if grade_answer(extracted_model_output, ground_truth):
-        return {
-            "score": 1.0,
-            "acc": 1,
-            "format": format_correctness,
-            "pred": extracted_model_output,
-            "#steps": num_steps,
-        }
-
     try:
+        # grade simple algebra questions. if succeeded, return; otherwise, proceed to more complex grading
+        if grade_answer(extracted_model_output, ground_truth):
+            return {
+                "score": 1.0,
+                "acc": 1,
+                "format": format_correctness,
+                "pred": extracted_model_output,
+                "#steps": num_steps,
+            }
+
         if "\pi" in extracted_model_output or "\pi" in ground_truth:
             equivs = []
             for pi in [math.pi, 3.14]:
@@ -464,7 +469,14 @@ def compute_score(model_output: str, ground_truth: str) -> bool:
             is_correct = any(equivs)
         else:
             is_correct = math_equal(extracted_model_output, ground_truth, timeout=False)
+    except SyntaxWarning:
+        # Handle the case where sympy hangs
+        print(f"Sympy hang detected\n====\n{model_output}\n==\n{ground_truth}\n==\n")
+        traceback.print_exc()
+        is_correct = False
     except:
+        print(f"Error detected\n====\n{model_output}\n==\n{ground_truth}\n==\n")
+        traceback.print_exc()
         is_correct = False
 
 

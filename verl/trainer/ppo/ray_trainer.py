@@ -263,6 +263,7 @@ def _timer(name: str, timing_raw: Dict[str, float]):
     if name not in timing_raw:
         timing_raw[name] = 0
     timing_raw[name] += timer.last
+    print("Duration of {}: {:.2f} seconds".format(name, timer.last))
 
 
 class RayPPOTrainer:
