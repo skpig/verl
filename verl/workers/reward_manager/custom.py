@@ -128,6 +128,7 @@ def parallel_compute_score_sync(
                     "acc": 0,
                     "format": 0,
                     "pred": "SyntaxWarning",
+                    "#steps": -1,
                 })
             except Exception as e:
                 traceback.print_exc()
@@ -137,6 +138,7 @@ def parallel_compute_score_sync(
                     "acc": 0,
                     "format": 0,
                     "pred": "Error",
+                    "#steps": -1,
                 })
 
     return scores

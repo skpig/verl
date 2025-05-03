@@ -470,13 +470,16 @@ def compute_score(model_output: str, ground_truth: str) -> bool:
         else:
             is_correct = math_equal(extracted_model_output, ground_truth, timeout=False)
     except SyntaxWarning:
-        # Handle the case where sympy hangs
-        print(f"Sympy hang detected\n====\n{model_output}\n==\n{ground_truth}\n==\n")
-        traceback.print_exc()
+        with open(f'.cache/reward_error/grader_error_{os.getpid()}.log', 'w') as f:
+            f.write(f"SyntaxError detected\n====\n{model_output}\n==\n{ground_truth}\n==\n")
+            traceback.print_exc(file=f)
+            f.write('\n')
         is_correct = False
     except:
-        print(f"Error detected\n====\n{model_output}\n==\n{ground_truth}\n==\n")
-        traceback.print_exc()
+        with open(f'.cache/reward_error/grader_error_{os.getpid()}.log', 'w') as f:
+            f.write(f"Error detected\n====\n{model_output}\n==\n{ground_truth}\n==\n")
+            traceback.print_exc(file=f)
+            f.write('\n')
         is_correct = False
 
 
