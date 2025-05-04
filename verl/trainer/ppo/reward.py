@@ -83,7 +83,8 @@ def load_reward_manager(config, tokenizer, num_examine, **reward_kwargs):
     else:
         raise NotImplementedError
 
-    compute_score = get_custom_reward_fn(config)
+    from verl.utils.reward_score.math_verify import compute_score
+    # compute_score = get_custom_reward_fn(config)
     return reward_manager_cls(
         tokenizer=tokenizer,
         num_examine=num_examine,

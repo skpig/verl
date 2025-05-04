@@ -191,7 +191,7 @@ reward_model:
     log: False
 
 custom_reward_function:
-  path: null
+  path: /home/huangbz/verl/verl/utils/reward_score/math_verify.py
   name: compute_score
 
 algorithm:

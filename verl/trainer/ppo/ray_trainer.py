@@ -673,6 +673,8 @@ class RayPPOTrainer:
         # load old df on the next few steps
         if os.path.exists(self.cache_file_path) and self.global_steps // LOG_FREQ != 1:
             old_df = pd.read_parquet(self.cache_file_path, engine='pyarrow')
+            # remove old df with the same step_num
+            old_df = old_df[old_df['step_num'] != self.global_steps]
             df = pd.concat([old_df, df], ignore_index=True)
         # save new df
         dir_name = os.path.dirname(self.cache_file_path)

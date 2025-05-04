@@ -51,12 +51,13 @@ def get_custom_reward_fn(config):
     print(f"using customized reward function '{function_name}' from '{file_path}'")
     raw_fn = getattr(module, function_name)
 
-    reward_kwargs = dict(reward_fn_config.get("reward_kwargs", {}))
+    # reward_kwargs = dict(reward_fn_config.get("reward_kwargs", {}))
 
-    def wrapped_fn(*args, **kwargs):
-        return raw_fn(*args, **kwargs, **reward_kwargs)
+    # def wrapped_fn(*args, **kwargs):
+    #     return raw_fn(*args, **kwargs, **reward_kwargs)
 
-    return wrapped_fn
+    # return wrapped_fn
+    return raw_fn
 
 
 @hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)
