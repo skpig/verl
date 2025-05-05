@@ -250,7 +250,7 @@ class RewardManager():
 
             # decode
             # the image placeholder in input_ids is negative
-            valid_prompt_ids = [x for x in valid_prompt_ids if x >= 0]
+            valid_prompt_ids = valid_prompt_ids[valid_prompt_ids >= 0]
             prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=False)
             solution_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=False)
 
