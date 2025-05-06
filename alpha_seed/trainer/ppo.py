@@ -53,7 +53,7 @@ from alpha_seed.utils import ndtimeline
 from alpha_seed.utils.tracking_utils import async_process_batch_samples_to_wandb
 from alpha_seed.utils.dataset.rl_dataset import RLHFDataset
 from alpha_seed.utils.multithreads import ThreadPoolManager
-from alpha_seed.utils.ckpt import find_latest_ckpt_path_
+from alpha_seed.workers.actors.checkpoint.utils import find_latest_ckpt_path_
 from alpha_seed.trainer.utils.dataloader_mgr import DataLoaderMgr
 from alpha_seed.workers.actors.sample_pool import SamplePool
 
@@ -1131,7 +1131,8 @@ class RayPPOTrainer(object):
             return 0, None
 
         remote_checkpoint_folder = os.path.join(self.config.trainer.default_hdfs_dir, 'checkpoints')
-        remote_global_step_folder = find_latest_ckpt_path_()(remote_checkpoint_folder)  # None if no latest
+        remote_global_step_folder = find_latest_ckpt_path_(remote_checkpoint_folder,
+                                                           self.use_standalone_rollout)  # None if no latest
         # find remote_global_step_folder
         if self.config.trainer.resume_steps == 'auto':
             if remote_global_step_folder is None:
