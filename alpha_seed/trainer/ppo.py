@@ -32,6 +32,7 @@ from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Type, Tuple, Union, List
+import hdfs_io
 
 import wandb
 import ray
@@ -828,7 +829,7 @@ class RayPPOTrainer(object):
         init_futures.append(
             self.actor_rollout_wg.init_model(
                 remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init,
-                from_scratch=from_scratch))
+                from_scratch=self.build_model_from_scratch(from_step, 'actor')))
 
         if self.use_standalone_rollout:
             self.standalone_rollout_wg = self.all_wg['standalone_rollout']
@@ -1093,10 +1094,29 @@ class RayPPOTrainer(object):
 
         use_ref_ema = self.config.actor_rollout_ref.ref.ema < 1
 
-        actor_upload_future = self.actor_rollout_wg.save_checkpoint(
-            actor_local_path, actor_remote_path,
-            specified_ckpt_version if specified_ckpt_version is not None else self.config.trainer.ckpt_version,
-            self.global_step, self.ckpt_global_uploader, self.config.trainer.ckpt_enable_shm, 'actor')
+        actor_upload_future = None
+        if self.config.trainer.critic_warmup > self.global_step:
+            # critic warmup ckpt
+            if not os.path.exists(actor_local_path):
+                os.makedirs(actor_local_path)
+            ignore_marker = os.path.join(actor_local_path, self._ckpt_ignore_marker_name('actor'))
+            print(f'Actor is not optimized so its checkpoint will not be saved. A marker file {ignore_marker} '
+                  f'will be uploaded to {remote_global_step_folder}.')
+            with open(ignore_marker, 'wb') as fout:
+                pkl.dump('actor', fout)
+            ray.get(
+                self.ckpt_global_uploader.register_upload_task.remote('actor', self.global_step,
+                                                                      ray.get_runtime_context().get_node_id(),
+                                                                      ignore_marker, remote_global_step_folder))
+            self.ckpt_global_uploader.start_uploading.remote('actor', self.global_step)
+        else:
+            actor_upload_future = self.actor_rollout_wg.save_checkpoint(
+                actor_local_path, actor_remote_path,
+                specified_ckpt_version if specified_ckpt_version is not None else self.config.trainer.ckpt_version,
+                self.global_step, self.ckpt_global_uploader, self.config.trainer.ckpt_enable_shm, 'actor')
+
+        if actor_upload_future is not None:
+            ray.get(actor_upload_future)
 
         if self.use_critic:
             critic_upload_future = self.critic_wg.save_checkpoint(
@@ -1113,8 +1133,6 @@ class RayPPOTrainer(object):
                 self.global_step, self.ckpt_global_uploader, self.config.trainer.ckpt_enable_shm, 'ref')
         else:
             ref_uploader_future = None
-
-        ray.get(actor_upload_future)
 
         if critic_upload_future is not None:
             ray.get(critic_upload_future)
@@ -1148,6 +1166,29 @@ class RayPPOTrainer(object):
         global_step = int(remote_global_step_folder.split('global_step_')[-1])
         return global_step, remote_global_step_folder
 
+    def build_model_from_scratch(self, resume_from_step, role=''):
+        from_scratch = resume_from_step == 0
+        if from_scratch:
+            return from_scratch
+
+        # if resuming ckpt
+        if self.config.trainer.resume_steps == 'auto':
+            remote_checkpoint_folder = os.path.join(self.config.trainer.default_hdfs_dir, 'checkpoints')
+            remote_global_step_folder = find_latest_ckpt_path_(remote_checkpoint_folder, self.use_standalone_rollout)
+        else:
+            remote_global_step_folder = self.config.trainer.resume_steps
+        if hdfs_io.hexists(os.path.join(remote_global_step_folder,
+                                        self._ckpt_ignore_marker_name(role))) and not hdfs_io.hexists(
+                                            os.path.join(remote_global_step_folder, role)):
+            print(f'Build {role} from scratch though resuming ckpt step is not 0 because {role} ckpt for step was not '
+                  'saved due to the model was not optimized.')
+            from_scratch = True
+        return from_scratch
+
+    @staticmethod
+    def _ckpt_ignore_marker_name(role):
+        return f'{role}_not_optimized_ignore.txt'
+
     def load_checkpoint(self):
         global_step = self.global_step
         remote_global_step_folder = self.resume_folder  # None if no latest
@@ -1159,8 +1200,15 @@ class RayPPOTrainer(object):
         critic_remote_path = os.path.join(remote_global_step_folder, 'critic')
         ref_remote_path = os.path.join(remote_global_step_folder, 'ref')
         # load actor
-        self.actor_rollout_wg.load_checkpoint(actor_remote_path, self.config.trainer.ckpt_version,
-                                              self.config.trainer.ckpt_enable_shm, 'actor')
+        if hdfs_io.hexists(
+                os.path.join(remote_global_step_folder,
+                             self._ckpt_ignore_marker_name('actor'))) and not hdfs_io.hexists(actor_remote_path):
+            # critic warmup ckpt
+            print('Ignore to load actor checkpoint which does not exist because it has not been optimized and thus '
+                  'not been saved.')
+        else:
+            self.actor_rollout_wg.load_checkpoint(actor_remote_path, self.config.trainer.ckpt_version,
+                                                  self.config.trainer.ckpt_enable_shm, 'actor')
         # load critic
         if self.use_critic:
             self.critic_wg.load_checkpoint(critic_remote_path, self.config.trainer.ckpt_version,
