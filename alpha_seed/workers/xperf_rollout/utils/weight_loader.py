@@ -32,7 +32,7 @@ from alpha_seed.workers.xperf_rollout.utils.bf16_convert_helper import (
     _reshard_fsdp_state_dict_to_xperf_p4, _reshard_fsdp_state_dict_to_xperf_p5, _reshard_fsdp_state_dict_to_xperf_p6,
     _reshard_fsdp_state_dict_to_xperf_p6dense, _reshard_fsdp_state_dict_to_xperf_p7,
     _reshard_fsdp_state_dict_to_xperf_deepseek_v3, _reshard_fsdp_state_dict_to_xperf_m8,
-    _reshard_fsdp_state_dict_to_xperf_vl)
+    _reshard_fsdp_state_dict_to_xperf_vl, _reshard_fsdp_state_dict_to_xperf_m10)
 
 # megatron
 from alpha_seed.workers.xperf_rollout.utils.bf16_convert_helper import (_reshard_fsdp_state_dict_to_xperf_m8_megatron)
@@ -80,8 +80,10 @@ def get_xperf_gpt_weight_bind_fn(model_config: PretrainedConfig,
             return partial(_reshard_fsdp_state_dict_to_xperf_vl, model_config=model_config)
         elif model_config.model_type == 'deepseek_v3':
             return partial(_reshard_fsdp_state_dict_to_xperf_deepseek_v3, model_config=model_config)
+        elif model_config.model_type == "seed_m10":
+            return partial(_reshard_fsdp_state_dict_to_xperf_m10, model_config=model_config)
         else:
-            raise NotImplementedError(f'Unsupported model type {model_config.model_type} in WFP8 quant mode')
+            raise NotImplementedError(f'Unsupported model type {model_config.model_type} in default bf16 mode')
 
     elif backend == 'megatron':
         if quant_mode == "WFP8":

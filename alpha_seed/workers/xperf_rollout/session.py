@@ -468,7 +468,7 @@ class InferenceSession:
                 if len(input_ids) <= self.max_length:
                     self.waiting.append(query)
                 query.off_policy_steps = off_policy_steps[idx]
-                query.meta_info = prompt_meta_info[idx] if prompt_meta_info is not None else None
+                query.meta_info = prompt_meta_info[idx] if prompt_meta_info is not None else {}
                 query.top_k = top_k[idx] if prompt_meta_info is not None else None
                 query.top_p = top_p[idx] if prompt_meta_info is not None else None
                 query.temperature = temperature[idx] if prompt_meta_info is not None else None
@@ -830,11 +830,13 @@ class InferenceSession:
         self.infer_scheduler.record("cur_steps", [self.current_steps])
 
     def async_execute(self, update_weight_event):
+        import time
         torch.manual_seed(int(os.getenv('XPERF_RANDOM_SEED', '0')))
         self.current_steps = 0
         self.finished_num = 0
         tokens_len = None
         accepted_len = None
+        last_time = 0
 
         def _check_stop_event():
             while (self._should_terminate(None, 1.0, stop_event=update_weight_event)):
@@ -844,21 +846,31 @@ class InferenceSession:
                     query.reset_compute()
                     self.waiting.append(query)
                 self.running = []
-                import time
                 time.sleep(0.01)
+
+        def _idle():
+            return (len(self.waiting) == 0 and len(self.running) == 0)
 
         while (True):
             try:
                 _check_stop_event()
                 # each rank should have the same running and waiting
-                self.waiting = self._fetch_from_pending_queries()
-                if (len(self.waiting) == 0 and len(self.running) == 0):
+                if (_idle()) or (self.step % 20 == 0):
+                    self.waiting = self._fetch_from_pending_queries()
+                if _idle():
                     continue
                 self.current_steps += 1
                 self.running, self.waiting = self._select_running_queries()
                 forward_inputs = self._prepare_forward_inputs(self.running)
                 context_input = forward_inputs['context_input']
                 decode_input = forward_inputs['decode_input']
+                # if self.current_steps % 100 == 0:
+                #     ctx_tokens = context_input.shape[0] if context_input is not None else 0
+                #     dec_tokens = decode_input.shape[0] if decode_input is not None else 0
+                #     print(
+                #         f"{self.current_steps}: ctx_tokens: {ctx_tokens}, dec_tokens: {dec_tokens}, swap tokens: {self.cache_manager.page_swap_out_token}, per step: {(time.time() - last_time) / 100 * 1000} ms"
+                #     )
+                #     last_time = time.time()
                 next_tokens, _, _, log_probs, probs_gt_threshold_num, probs_lt_threshold_sum = self.infer_scheduler.forward_and_sample(
                     context_input=context_input,
                     decode_input=decode_input,

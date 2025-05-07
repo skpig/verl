@@ -49,11 +49,11 @@ def main(global_config):
     p7_path = 'hdfs://haruna/home/byte_data_seed/ssd_lq/public/seed_models/Seed-2B5-P7_32k_sft29_32gpu'
     m8_path = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/M8_680m_SFT_hf'
     p6_path_qwen = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/qwen2.5_32b_v3.1.2_o1-mini-monologue_241201_hf'
-
+    m10_path = 'hdfs://haruna/home/byte_data_seed/ssd_lq/public/seed_models/m10_680m'
     from verl.utils.seed import CHAT_TEMPLATE
     from omegaconf import OmegaConf
 
-    model_path = copy_local_path_from_hdfs(m8_path)
+    model_path = copy_local_path_from_hdfs(m10_path)
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     tokenizer.padding_side = "left"
 
@@ -92,7 +92,8 @@ def main(global_config):
             sync_module_states=False,
             device_id=torch.cuda.current_device(),
             device_mesh=device_mesh)
-
+        from torch.distributed.fsdp import StateDictType
+        FSDP.set_state_dict_type(actor_module_fsdp, StateDictType.SHARDED_STATE_DICT)
     elif backend == 'megatron':
         from alpha_seed.models.mariana.checkpoint_utils import load_partial_pretrain
         from alpha_seed.models.mariana.config_utils import convert_hf_config_to_mariana, update_megatron_config
@@ -101,15 +102,13 @@ def main(global_config):
 
         from mariana.utils.megatron import initialize_megatron_args
 
-        from mariana.models.text.config import TrainConfig, MegatronConfig
+        from mariana.models.text.config import MegatronConfig
 
         # TODO: ignore pulling model file if resuming ckpt
-        local_path = copy_local_path_from_hdfs(model_path)
 
         # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect
         # TODO(zhangchi.usc1992): 1. support create from random initialized model. 2. Support init with FSDP directly
         megatron_config = MegatronConfig(**global_config.mariana.megatron)
-        local_path = copy_local_path_from_hdfs(model_path)
 
         model_config = convert_hf_config_to_mariana(hf_config=config,
                                                     model_implementation=global_config.mariana.model_implementation)
@@ -185,9 +184,9 @@ def main(global_config):
 
         return eos_callback_fn
 
-    rollout = AsyncXPerfGPTRollout(config=global_config.actor_rollout_ref.rollout,
-                                   tokenizer=tokenizer,
-                                   model_hf_config=config)
+    rollout = AsyncXPerfGPTRollout(config=global_config.actor_rollout_ref.rollout)
+    rollout.initialize(local_path=model_path)
+    rollout.setup_rollout()
 
     if backend == 'fsdp':
         from alpha_seed.workers.hybrid_engine.fsdp_xperfgpt import FSDPXPerfGPTShardingManager
@@ -210,22 +209,22 @@ def main(global_config):
     from verl import DataProto
 
     prompt = "Natalia sold clips to 48 of her friends in April, and then she sold half as many clips in May. How many clips did Natalia sell altogether in April and May?"
-
     chat = [{'role': 'user', 'content': prompt}]
 
     sentences = tokenizer.apply_chat_template(chat, add_generation_prompt=True, tokenize=False)
-
+    # sentences = "小炒肉怎么做"
     input_data = tokenizer(sentences, return_tensors='pt').to('cuda')
 
     input_ids = input_data['input_ids']
     attention_mask = input_data['attention_mask']
-    off_policy_steps = torch.tensor([0]).to('cuda')
 
     data = {
         'input_ids': input_ids,
         'attention_mask': attention_mask,
-        'off_policy_steps': off_policy_steps,
-        'rollout_log_probs': torch.randn(input_ids.shape[0], global_config.data.max_response_length)
+        'off_policy_steps': torch.zeros(input_ids.shape[0], global_config.data.max_response_length),
+        'rollout_log_probs': torch.randn(input_ids.shape[0], global_config.data.max_response_length),
+        'probs_gt_threshold_num': torch.zeros(input_ids.shape[0], global_config.data.max_response_length),
+        'probs_lt_threshold_sum': torch.zeros(input_ids.shape[0], global_config.data.max_response_length),
     }
 
     non_tensors = {
@@ -238,9 +237,11 @@ def main(global_config):
         non_tensors=non_tensors,
         meta_info={'generation_kwargs': global_config.actor_rollout_ref.rollout.train_generate_kwargs})
 
-    load_megatron_model_to_gpu(models=models, load_grad=False)
+    if backend == 'megatron':
+        load_megatron_model_to_gpu(models=models, load_grad=False)
     with sharding_manager:
-        offload_megatron_model_to_cpu(models=models)
+        if backend == 'megatron':
+            offload_megatron_model_to_cpu(models=models)
         data = sharding_manager.preprocess_data(data)
         output = next(rollout.generate_sequences(data))
         output = sharding_manager.postprocess_data(output)
@@ -258,4 +259,5 @@ def main(global_config):
 
 
 if __name__ == '__main__':
+    torch.cuda.set_device(int(os.getenv("LOCAL_RANK", "0")))
     main()

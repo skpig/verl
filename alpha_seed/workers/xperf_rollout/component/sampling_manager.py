@@ -5,8 +5,9 @@ from typing import Dict
 
 
 def _sample(probs: torch.Tensor):
+    assert not torch.isnan(probs).any(), "find nan in probs"
     noise = torch.empty_like(probs).exponential_(1)
-    return torch.argmax(probs / noise, dim=-1).reshape(-1, 1)
+    return torch.argmax(probs / noise, dim=-1).reshape(-1, 1)  # if probs contains nan, return 0
 
 
 class Sampler:

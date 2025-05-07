@@ -82,7 +82,7 @@ class Query:
         self.cur_batch_pad_token = 0
         self.nll_loss = None
         self.is_finished = False
-        self.meta_info = None
+        self.meta_info = {}
 
         self.first_scheduled_time = 0
         self.first_token_time = 0
