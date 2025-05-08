@@ -124,6 +124,7 @@ class Query:
         self.new_token_ids = []
         self.context_shift = 0
         self.prefix_already_computed_len = 0
+        self.hidden_states = None
         return
 
 

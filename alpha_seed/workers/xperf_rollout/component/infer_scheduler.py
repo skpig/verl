@@ -11,23 +11,27 @@ class InferScheduler():
                  sampler,
                  return_full_hidden_states,
                  return_padding_tensor,
+                 return_full_hidden_states_after_layernorm,
                  last_token_only,
                  context_only,
                  enable_cuda_graph=False,
                  enable_metrics=False,
                  max_ngram_size=0,
-                 num_pred_tokens=0):
+                 num_pred_tokens=0,
+                 enable_mtp_decoding=False):
         self.cache_manager = cache_manager
         self.engine = engine
         self.sampler = sampler
         self.return_full_hidden_states = return_full_hidden_states
         self.return_padding_tensor = return_padding_tensor
+        self.return_full_hidden_states_after_layernorm = return_full_hidden_states_after_layernorm
         self.last_token_only = last_token_only
         self.context_only = context_only
         self.enable_metrics = enable_metrics
         self.max_ngram_size = max_ngram_size
         self.num_pred_tokens = num_pred_tokens
         self.enable_cuda_graph = enable_cuda_graph
+        self.enable_mtp_decoding = enable_mtp_decoding
         self.init_cuda_graph()
         self.init_metrics()
 
@@ -154,13 +158,22 @@ class InferScheduler():
                            history_ids: List[List[int]],
                            keys: torch.Tensor = None,
                            code_books: torch.Tensor = None,
-                           sample_kwargs: dict = None):
+                           sample_kwargs: dict = None,
+                           draft_input: torch.Tensor = None,
+                           draft_total_length: torch.Tensor = None,
+                           target_hidden_states: torch.Tensor = None):
         accepted_len = None
-        if keys is None:
+        forward_spec = keys is not None or (self.enable_mtp_decoding and context_input is None)
+        if not forward_spec:
             # 1. forward
             output = self.internal_inference_orca(context_input, decode_input, total_length, kv_index, orca_updated,
                                                   context_shifts)
-            logits = output if not self.return_full_hidden_states else output[0]
+            if self.return_full_hidden_states:
+                logits = output[0]
+                target_hidden_states = list(output[1].split(total_length.tolist(), dim=0))
+            else:
+                logits = output
+                target_hidden_states = None
 
             # 2. sample
             if self.context_only:
@@ -168,23 +181,21 @@ class InferScheduler():
             else:
                 next_tokens, log_probs, probs_gt_threshold_num, probs_lt_threshold_sum = self.sampler.sample(
                     logits, need_torch_tensor=True, history_ids=history_ids, sample_kwargs=sample_kwargs)
-
-            return next_tokens, accepted_len, output, log_probs, probs_gt_threshold_num, probs_lt_threshold_sum
+            return next_tokens, accepted_len, target_hidden_states, log_probs, probs_gt_threshold_num, probs_lt_threshold_sum
         else:
-            # forward ngrams
-            accpeted_tokens, accepted_len = self.engine.forward_spec(
-                decode_input_ids=decode_input,
-                decode_total_length=total_length,
-                keys=keys,
-                code_books=code_books,
+            # forward mtp spec
+            accpeted_tokens, accepted_len, target_hidden_states = self.engine.forward_spec(
+                draft_model=self.engine,
+                draft_input_ids=draft_input,
+                eagle_hidden_states=target_hidden_states,
+                draft_total_length=draft_total_length,
+                draft_context_shifts=total_length - draft_total_length - 1,
                 kv_cache_index=kv_index,
-                draft_model=None,
-                draft_input_ids=None,
-                eagle_hidden_states=None,
-                draft_total_length=None,
-                draft_context_shifts=None,
+                k=self.num_pred_tokens,
                 sampler=self.sampler,
-                max_ngram_size=self.max_ngram_size,
-                num_pred_tokens=self.num_pred_tokens,
             )
-            return accpeted_tokens, accepted_len, None
+            target_hidden_states = target_hidden_states.split(self.num_pred_tokens + 1)
+            target_hidden_states = [
+                hidden_states[:accepted_len[i] + 1] for i, hidden_states in enumerate(target_hidden_states)
+            ]
+            return accpeted_tokens, accepted_len, target_hidden_states, None, None, None

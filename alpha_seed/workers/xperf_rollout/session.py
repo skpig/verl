@@ -113,6 +113,7 @@ class InferenceSession:
         standalone=False,
         schedule_strategy="default", # ['default','fifo']
         step_profiler: StepProfiler = None,
+        enable_mtp_decoding=False,
     ):
         """Initialize inference session with hardware/performance parameters"""
         # Memory management
@@ -135,6 +136,7 @@ class InferenceSession:
         self.enable_ngrams_decoding = enable_ngrams_decoding
         self.schedule_strategy = schedule_strategy
         self.step_profiler = step_profiler
+        self.enable_mtp_decoding = enable_mtp_decoding
 
         self.record_input_prompt = True
         self.tokenizer = None
@@ -155,6 +157,9 @@ class InferenceSession:
             self.max_ngram_size = max_ngram_size
             self.num_pred_tokens = num_pred_tokens
             self.enable_ngrams_when_bs_below = enable_ngrams_when_bs_below
+        elif self.enable_mtp_decoding:
+            self.max_ngram_size = 0
+            self.num_pred_tokens = 1
         else:
             self.max_ngram_size = 0
             self.num_pred_tokens = 0
@@ -190,6 +195,7 @@ class InferenceSession:
         self.common_prefix_tensor_len = 0
         self.return_full_hidden_states = False
         self.return_padding_tensor = False
+        self.return_full_hidden_states_after_layernorm = True
         self.last_token_only = True
         self.eos_callback_fn = None
         self.stop_signal_tensor = torch.tensor([0.0]).float().cuda()
@@ -222,13 +228,21 @@ class InferenceSession:
             "save_mp_checkpoint_path": None,
             "return_full_hidden_states": False,
             "return_padding_tensor": False,
-            "last_token_only": False,
+            "return_full_hidden_states_after_layernorm": True,
+            "last_token_only": True,
             "stop_sequence_tokens": None,
             "record_input_prompt": None,
             "enable_metrics": False,
             "constraint_decoding": None,
             "decode_output": True,
         }
+
+        if self.enable_mtp_decoding:
+            kwargs.update({
+                "return_full_hidden_states": True,
+                "return_full_hidden_states_after_layernorm": False,
+                "last_token_only": False,
+            })
 
         for param, default in params_with_defaults.items():
             if param in kwargs:
@@ -287,6 +301,7 @@ class InferenceSession:
             dtype=torch.bfloat16,
             vocab_tp=self.vocab_tp,
             multi_stream=1,
+            use_mtp=self.enable_mtp_decoding,
             **generation_config)
         init_inference_kwargs.update(kwargs)  # overridable by kwargs
         if use_xperf_custom:
@@ -324,12 +339,14 @@ class InferenceSession:
             sampler=self.sampler,
             return_full_hidden_states=self.return_full_hidden_states,
             return_padding_tensor=self.return_padding_tensor,
+            return_full_hidden_states_after_layernorm=self.return_full_hidden_states_after_layernorm,
             last_token_only=self.last_token_only,
             context_only=False,
             enable_cuda_graph=self.enable_cuda_graph,
             enable_metrics=self.enable_metrics,
             max_ngram_size=self.max_ngram_size,
             num_pred_tokens=self.num_pred_tokens,
+            enable_mtp_decoding=self.enable_mtp_decoding,
         )
         if vit_config is not None:
             if vit_config['vit_model'] not in EVA_VIT_CONFIGS.keys():
@@ -583,6 +600,12 @@ class InferenceSession:
         code_books_list = []
         max_code_book_len = -1
         sample_kwargs = {"top_k": [], "top_p": [], "temperature": []}
+        # for MTP
+        max_draft_len = -1
+        draft_list = []
+        draft_total_length = []
+        target_hidden_states = []
+        prefill_only = self.enable_mtp_decoding and any([query.is_context_computing for query in running])
 
         for index, query in enumerate(running):
             context_len = len(query.input_ids) - query.prefix_already_computed_len
@@ -622,7 +645,7 @@ class InferenceSession:
                     query.kv_slot_ids)
                 context_shift.append(current_context_shift)
 
-            else:
+            elif not prefill_only:
                 phase1_index.append(index)
                 phase1_list.append(query.new_token_ids[-1])
                 phase1_total_length.append(context_len + len(query.new_token_ids) + query.prefix_already_computed_len)
@@ -635,6 +658,14 @@ class InferenceSession:
                         key = [self.pad_token_id] * (self.max_ngram_size - len(key)) + key
                     keys_list.append(key)
                     code_books_list.append(query.code_book)
+                if self.enable_mtp_decoding:
+                    if len(query.new_token_ids) <= 1:
+                        draft_list.append(query.input_ids[1:] + query.new_token_ids)
+                    else:
+                        draft_list.append(query.new_token_ids[-query.accepted_len[-1] - 1:])
+                    max_draft_len = max(len(draft_list[-1]), max_draft_len)
+                    draft_total_length.append(len(draft_list[-1]))
+                    target_hidden_states.append(query.hidden_states)
             # set sample args for each query
             for k, v in sample_kwargs.items():
                 v.append(getattr(query, k, None))
@@ -668,6 +699,17 @@ class InferenceSession:
             results['decode_input'] = decode_input
         else:
             results['decode_input'] = None
+
+        if len(draft_list) > 0:
+            for i, query in enumerate(draft_list):
+                draft_list[i] = [self.pad_token_id] * (max_draft_len - len(query)) + query
+            results['draft_input'] = torch.tensor(draft_list, dtype=torch.int64, device="cuda")
+            results['draft_total_length'] = torch.tensor(draft_total_length, dtype=torch.int, device="cuda")
+            results['target_hidden_states'] = torch.cat(target_hidden_states, dim=0)
+        else:
+            results['draft_input'] = None
+            results['draft_total_length'] = None
+            results['target_hidden_states'] = None
 
         results['forward_index'] = phase0_index + phase1_index
 
@@ -786,8 +828,6 @@ class InferenceSession:
         self.prepare_context_inputs(input_ids_list, logits_masks, prompt_meta_info)
         self.current_steps = 0
         self.finished_num = 0
-        tokens_len = None
-        accepted_len = None
         if self.step_profiler is not None:
             self.step_profiler.reset_exec()
         while (not self._should_terminate(prompts, complete_ratio, stop_event)):
@@ -799,7 +839,7 @@ class InferenceSession:
             forward_inputs = self._prepare_forward_inputs(self.running)
             context_input = forward_inputs['context_input']
             decode_input = forward_inputs['decode_input']
-            next_tokens, _, _, log_probs, probs_gt_threshold_num, probs_lt_threshold_sum = self.infer_scheduler.forward_and_sample(
+            next_tokens, accepted_len, hidden_states, log_probs, probs_gt_threshold_num, probs_lt_threshold_sum = self.infer_scheduler.forward_and_sample(
                 context_input=context_input,
                 decode_input=decode_input,
                 total_length=forward_inputs['total_length'],
@@ -807,7 +847,10 @@ class InferenceSession:
                 orca_updated=True,
                 context_shifts=forward_inputs['context_shifts'],
                 history_ids=forward_inputs['history_ids'],
-                sample_kwargs=forward_inputs['sample_kwargs'])
+                sample_kwargs=forward_inputs['sample_kwargs'],
+                draft_input=forward_inputs['draft_input'],
+                draft_total_length=forward_inputs['draft_total_length'],
+                target_hidden_states=forward_inputs['target_hidden_states'])
 
             if self.engine.module.tp_size > 1 and next_tokens is not None:
                 assert self.tp_group is not None, "tp_group not set!"
@@ -815,12 +858,12 @@ class InferenceSession:
                 torch.distributed.broadcast(next_tokens, src=tp_src_rank, group=self.tp_group)
 
             self._update_running_batch(next_tokens=next_tokens,
-                                       tokens_len=tokens_len,
                                        accepted_len=accepted_len,
                                        index_in_running_batch=forward_inputs['forward_index'],
                                        log_probs=log_probs,
                                        probs_gt_threshold_num=probs_gt_threshold_num,
-                                       probs_lt_threshold_sum=probs_lt_threshold_sum)
+                                       probs_lt_threshold_sum=probs_lt_threshold_sum,
+                                       hidden_states=hidden_states)
             self.infer_scheduler.next_step()
             if self.step_profiler is not None:
                 ctx_tokens = context_input.shape[0] if context_input is not None else 0
@@ -834,8 +877,6 @@ class InferenceSession:
         torch.manual_seed(int(os.getenv('XPERF_RANDOM_SEED', '0')))
         self.current_steps = 0
         self.finished_num = 0
-        tokens_len = None
-        accepted_len = None
         last_time = 0
 
         def _check_stop_event():
@@ -855,7 +896,7 @@ class InferenceSession:
             try:
                 _check_stop_event()
                 # each rank should have the same running and waiting
-                if (_idle()) or (self.step % 20 == 0):
+                if (_idle()) or (self.current_steps % 20 == 0):
                     self.waiting = self._fetch_from_pending_queries()
                 if _idle():
                     continue
@@ -871,7 +912,7 @@ class InferenceSession:
                 #         f"{self.current_steps}: ctx_tokens: {ctx_tokens}, dec_tokens: {dec_tokens}, swap tokens: {self.cache_manager.page_swap_out_token}, per step: {(time.time() - last_time) / 100 * 1000} ms"
                 #     )
                 #     last_time = time.time()
-                next_tokens, _, _, log_probs, probs_gt_threshold_num, probs_lt_threshold_sum = self.infer_scheduler.forward_and_sample(
+                next_tokens, accepted_len, hidden_states, log_probs, probs_gt_threshold_num, probs_lt_threshold_sum = self.infer_scheduler.forward_and_sample(
                     context_input=context_input,
                     decode_input=decode_input,
                     total_length=forward_inputs['total_length'],
@@ -879,7 +920,10 @@ class InferenceSession:
                     orca_updated=True,
                     context_shifts=forward_inputs['context_shifts'],
                     history_ids=forward_inputs['history_ids'],
-                    sample_kwargs=forward_inputs['sample_kwargs'])
+                    sample_kwargs=forward_inputs['sample_kwargs'],
+                    draft_input=forward_inputs['draft_input'],
+                    draft_total_length=forward_inputs['draft_total_length'],
+                    target_hidden_states=forward_inputs['target_hidden_states'])
 
                 if self.engine.module.tp_size > 1 and next_tokens is not None:
                     assert self.tp_group is not None, "tp_group not set!"
@@ -887,12 +931,12 @@ class InferenceSession:
                     torch.distributed.broadcast(next_tokens, src=tp_src_rank, group=self.tp_group)
 
                 self._update_running_batch(next_tokens=next_tokens,
-                                           tokens_len=tokens_len,
                                            accepted_len=accepted_len,
                                            index_in_running_batch=forward_inputs['forward_index'],
                                            log_probs=log_probs,
                                            probs_gt_threshold_num=probs_gt_threshold_num,
-                                           probs_lt_threshold_sum=probs_lt_threshold_sum)
+                                           probs_lt_threshold_sum=probs_lt_threshold_sum,
+                                           hidden_states=hidden_states)
                 self.infer_scheduler.next_step()
                 if self.step_profiler is not None:
                     ctx_tokens = context_input.shape[0] if context_input is not None else 0
@@ -934,28 +978,33 @@ class InferenceSession:
 
     def _update_running_batch(self,
                               next_tokens,
-                              tokens_len,
                               index_in_running_batch,
                               accepted_len=None,
                               log_probs=None,
                               probs_gt_threshold_num=None,
-                              probs_lt_threshold_sum=None):
+                              probs_lt_threshold_sum=None,
+                              hidden_states=None):
         next_running = [[], []]
         next_tokens = next_tokens.cpu().tolist()
         if accepted_len is not None:
-            assert (accepted_len.shape[0] == len(self.running))
+            assert (accepted_len.shape[0] == len(index_in_running_batch))
+            accepted_len = accepted_len.cpu().tolist()
         if log_probs is not None:
-            assert (log_probs.shape[0] == len(self.running)), "log_probs shape mismatch, {} vs {}".format(
-                log_probs.shape[0], len(self.running))
+            assert (log_probs.shape[0] == len(index_in_running_batch)), "log_probs shape mismatch, {} vs {}".format(
+                log_probs.shape[0], len(index_in_running_batch))
             log_probs = log_probs.cpu().tolist()
         if probs_gt_threshold_num is not None:
-            assert (probs_gt_threshold_num.shape[0] == len(self.running))
+            assert (probs_gt_threshold_num.shape[0] == len(index_in_running_batch))
             probs_gt_threshold_num = probs_gt_threshold_num.cpu().tolist()
         if probs_lt_threshold_sum is not None:
-            assert (probs_lt_threshold_sum.shape[0] == len(self.running))
+            assert (probs_lt_threshold_sum.shape[0] == len(index_in_running_batch))
             probs_lt_threshold_sum = probs_lt_threshold_sum.cpu().tolist()
         running_index_to_i = {idx: i for i, idx in enumerate(index_in_running_batch)}
         for idx, query in enumerate(self.running):
+            # prefill only step
+            if idx not in running_index_to_i:
+                next_running[1].append(query)
+                continue
             i = running_index_to_i[idx]
             # decoding
             if (query._is_to_decoding_compute()):
@@ -963,10 +1012,10 @@ class InferenceSession:
                 query_next_tokens = next_tokens[i]
                 if isinstance(query_next_tokens, int):
                     query_next_tokens = [query_next_tokens]
-                query_next_tokens_len = 1 if tokens_len is None else tokens_len[i]
+                query_next_tokens_len = 1 if accepted_len is None else accepted_len[i] + 1
                 # Ngrams need more kv-cache per forward
                 finished_sequences = False
-                query.accepted_len.append(accepted_len[i] if accepted_len is not None else -1)
+                query.accepted_len.append(accepted_len[i] if accepted_len is not None else 0)
                 query.new_token_log_probs.append(log_probs[i] if log_probs is not None else 0)
                 query.probs_gt_threshold_num.append(
                     probs_gt_threshold_num[i] if probs_gt_threshold_num is not None else 0)
@@ -981,6 +1030,9 @@ class InferenceSession:
                     if finished_sequences:
                         break
                 if not finished_sequences:
+                    if self.enable_mtp_decoding:
+                        query.hidden_states = hidden_states[i] if query.hidden_states is None or len(
+                            query.new_token_ids) > 1 else torch.cat([query.hidden_states, hidden_states[i]], dim=0)
                     next_running[1].append(query)
                 else:
                     if self.eos_callback_fn:
@@ -991,6 +1043,9 @@ class InferenceSession:
                     self.infer_scheduler.record("finished_tokens_by_step", [self.current_steps])
             # still prefill
             else:
+                if self.enable_mtp_decoding:
+                    query.hidden_states = hidden_states[i] if query.hidden_states is None else torch.cat(
+                        [query.hidden_states, hidden_states[i]], dim=0)
                 next_running[0].append(query)
 
         self.running = next_running[0] + next_running[1]
