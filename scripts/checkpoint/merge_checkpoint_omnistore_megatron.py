@@ -111,20 +111,27 @@ if __name__ == '__main__':
     )
     print(f'Merge omnistore checkpoint successfully! cost time: {time.time() - time_begin}s')
 
+    print('Step3: force convert state dict to bf16')
+    time_begin = time.time()
+    for key in state_dict['model'].keys():
+        if state_dict['model'][key].dtype != torch.bfloat16:
+            state_dict['model'][key] = state_dict['model'][key].to(torch.bfloat16)
+    print(f'Force convert state dict to bf16 cost time: {time.time() - time_begin}s')
+
     thread_map = {}
-    print('Step3: async save and upload converted xperf model')
+    print('Step4: async save and upload converted xperf model')
     thread_map['xperf'] = threading.Thread(target=save_local_and_upload_merged_megatron_ckpt,
                                            args=(state_dict['model'], os.path.join(args.save_path, 'megatron')))
     thread_map['xperf'].start()
 
-    print('Step4: async convert to hf format and save')
+    print('Step5: async convert to hf format and save')
     thread_map['hf'] = threading.Thread(
         target=infer_model_type_and_convert_to_hf,
         args=(state_dict['model'], hf_path, args.save_path),
     )
     thread_map['hf'].start()
 
-    print('Step5: wait async upload hf and xperf merged ckpt')
+    print('Step6: wait async upload hf and xperf merged ckpt')
     time_begin = time.time()
     for k, v in thread_map.items():
         v.join()
