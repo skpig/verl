@@ -65,7 +65,7 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None) -> b
 
 
     verify_func = math_metric(
-        gold_extraction_target=(ExprExtractionConfig(), LatexExtractionConfig()),
+        gold_extraction_target=(LatexExtractionConfig(), ExprExtractionConfig()),
         pred_extraction_target=(ExprExtractionConfig(), LatexExtractionConfig()),
     )
     ret_score = 0.0
@@ -73,7 +73,7 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None) -> b
     # Wrap the ground truth in \boxed{} format for verification
     ground_truth_boxed = "\\boxed{" + ground_truth + "}"
     try:
-        ret_score, _ = verify_func([ground_truth_boxed], [model_output])
+        ret_score, (extracted_gold, extracted_model_output) = verify_func([ground_truth_boxed], [model_output])
     except Exception:
         ret_score = 0.
         os.makedirs('.cache/reward_error', exist_ok=True)
@@ -86,18 +86,18 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None) -> b
 
     format_correctness, num_steps = verify_format(model_output)
 
-    extracted_model_output = parse(model_output, (ExprExtractionConfig(), LatexExtractionConfig()))
-    if len(extracted_model_output) == 0:
-        extracted_model_output = "None extraction"
-    elif len(extracted_model_output) == 1:
-        extracted_model_output = f"{extracted_model_output[0]}"
-    else:
-        extracted_model_output = extracted_model_output[1] if isinstance(extracted_model_output[1], str) else f"{extracted_model_output[0]}"
+    # extracted_model_output = parse(model_output, (ExprExtractionConfig(), LatexExtractionConfig()))
+    # if len(extracted_model_output) == 0:
+    #     extracted_model_output = "None extraction"
+    # elif len(extracted_model_output) == 1:
+    #     extracted_model_output = f"{extracted_model_output[0]}"
+    # else:
+    #     extracted_model_output = extracted_model_output[1] if isinstance(extracted_model_output[1], str) else f"{extracted_model_output[0]}"
 
     return {
         "score": ret_score,
         "acc": 1 if ret_score > 0 else 0,
         "format": format_correctness,
-        "pred": extracted_model_output,
+        "pred": extracted_model_output[-1] if len(extracted_model_output) > 0 else "None extraction",
         "#steps": num_steps,
     }

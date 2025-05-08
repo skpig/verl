@@ -46,12 +46,17 @@ class Tracking:
             # 获取上一个运行的ID
             api = Api()
             runs = api.runs(f"skpig/{project_name}")
-            if runs and runs[-1].name == experiment_name:
-                last_run_id = runs[-1].id # 最后一个运行的ID
-                resume_id = last_run_id
-                # if input(f"是否继续上次的运行？{runs[-1].url}(y/n)") == "n":
-                #     resume_id = None
-                print("继续上次的wandb运行")
+            if runs:
+                for run in reversed(runs):
+                    if run.name == experiment_name:
+                        last_run_id = run.id # 最后一个运行的ID
+                        resume_id = last_run_id
+                        # if input(f"是否继续上次的运行？{runs[-1].url}(y/n)") == "n":
+                        #     resume_id = None
+                        print("继续上次的wandb运行")
+                        break
+                else:
+                    resume_id = None
             else:
                 resume_id = None
 

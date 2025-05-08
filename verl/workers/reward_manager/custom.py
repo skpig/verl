@@ -21,6 +21,7 @@ import warnings
 import torch
 from sympy import ground_roots
 from transformers import PreTrainedTokenizer
+from tqdm import tqdm
 
 from verl import DataProto
 from verl.utils.reward_score import _default_compute_score
@@ -116,7 +117,7 @@ def parallel_compute_score_sync(
             future = executor.submit(evaluation_func, task, completion, reference, task_extra_info)
             futures.append(future)
         
-        for future in futures:
+        for future in tqdm(futures):
             try:
                 result = future.result(timeout=30)  # 设置超时时间为 100 秒
                 scores.append(result)
