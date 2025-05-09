@@ -511,6 +511,8 @@ class RayPPOTrainer:
             processor=self.processor,
             config=self.config.data,
         )
+        # only keep 100 samples for test
+        # self.val_dataset.dataframe = self.val_dataset.dataframe.select(range(100)) 
         # consider the design of single controller with a large val dataset in multi-modal scenarios
         # may lead to oom issues
         val_batch_size = self.config.data.val_batch_size or len(self.val_dataset)
@@ -1080,17 +1082,19 @@ class RayPPOTrainer:
 
         from verl.utils.tracking import Tracking
 
-        logger = Tracking(
-            project_name=self.config.trainer.project_name,
-            experiment_name=self.config.trainer.experiment_name,
-            default_backend=self.config.trainer.logger,
-            config=OmegaConf.to_container(self.config, resolve=True),
-        )
 
         self.global_steps = 0
 
         # load checkpoint before doing anything
         self._load_checkpoint()
+
+        logger = Tracking(
+            project_name=self.config.trainer.project_name,
+            experiment_name=self.config.trainer.experiment_name,
+            default_backend=self.config.trainer.logger,
+            config=OmegaConf.to_container(self.config, resolve=True),
+            resume_step=self.global_steps,
+        )
 
         # perform validation before training
         # currently, we only support validation using the reward_function.

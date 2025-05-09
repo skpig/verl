@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Union
 class Tracking:
     supported_backend = ["wandb", "mlflow", "swanlab", "vemlp_wandb", "tensorboard", "console"]
 
-    def __init__(self, project_name, experiment_name, default_backend: Union[str, List[str]] = "console", config=None):
+    def __init__(self, project_name, experiment_name, default_backend: Union[str, List[str]] = "console", config=None, resume_step=0):
         if isinstance(default_backend, str):
             default_backend = [default_backend]
         for backend in default_backend:
@@ -60,13 +60,21 @@ class Tracking:
             else:
                 resume_id = None
 
-            run = wandb.init(
-                project=project_name,
-                name=experiment_name,
-                config=config,
-                resume='allow',
-                id=resume_id
-            )
+            if resume_id is None:
+                run = wandb.init(
+                    project=project_name,
+                    name=experiment_name,
+                    config=config,
+                )
+            else:
+                run = wandb.init(
+                    project=project_name,
+                    name=experiment_name,
+                    config=config,
+                    resume_from=f"{resume_id}?_step={resume_step}"
+                    # resume='allow',
+                    # id=resume_id
+                )
             run.mark_preempting()
             self.logger["wandb"] = wandb
 
