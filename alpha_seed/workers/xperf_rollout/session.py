@@ -15,15 +15,18 @@ from alpha_seed.workers.xperf_rollout.component.infer_scheduler import InferSche
 from alpha_seed.workers.xperf_rollout.component.sampling_manager import Sampler
 from alpha_seed.workers.xperf_rollout.utils.custom_xperf_convert_helper import XCustomInferenceModuleAdapter
 from xperf_gpt.multi_models.visual.eva_vit import EVA_VIT_CONFIGS
-from alpha_seed.workers.xperf_rollout.component.query import Query, InflightQueue
+from alpha_seed.workers.xperf_rollout.component.query import Query, InflightQueue, batch_sync_tp_queries
 from alpha_seed.utils.observility import get_profiler_context_wrapped
 from xperf_gpt.utils import (logging_rank, logging_rank_only)
 from typing import List, Dict
 import logging
 import os
+import time
 import torch
 import copy
 import logging
+import pickle
+import dill
 from threading import Lock
 from transformers import AutoTokenizer
 from xperf_gpt.multi_models.visual.inferencer import VITInferencer
@@ -113,6 +116,7 @@ class InferenceSession:
         standalone=False,
         schedule_strategy="default", # ['default','fifo']
         step_profiler: StepProfiler = None,
+        plugin_config=None,
         enable_mtp_decoding=False,
     ):
         """Initialize inference session with hardware/performance parameters"""
@@ -180,14 +184,18 @@ class InferenceSession:
         Contains currently executing queries
         Represents active workloads consuming system resources
         Maintains real-time status of in-process operations
+        4. Paused Queue
+        Contains queries that are paused, similar to waiting queue, but these queries waits for an
+        external event (e.g. tool calling) before they can be resumed.
         
         Workflow:
-            Requests flow from Pending → Running → (Waiting if interrupted) → Finished. 
+            Requests flow from Pending → Running → (Waiting/Paused if interrupted) → Finished. 
             The waiting queue enables stateful handling of mid-execution interruptions through check-pointing mechanisms.
         '''
         self.pending = InflightQueue()
-        self.waiting = []
-        self.running = []
+        self.waiting: List[Query] = []
+        self.running: List[Query] = []
+        self.paused: List[Query] = []
 
         self.finished = {}
         self.stop_sequence_tokens: List[List[int]] = []
@@ -200,6 +208,8 @@ class InferenceSession:
         self.eos_callback_fn = None
         self.stop_signal_tensor = torch.tensor([0.0]).float().cuda()
         self.update_weights_lock = Lock()
+        self.tp_group = None
+        self.plugin_config = plugin_config
 
     def _validate_paged_attention_config(self):
         """Validate paged attention configuration constraints"""
@@ -367,6 +377,8 @@ class InferenceSession:
         for key, value in kwargs.items():
             if key == "stop_sequence_tokens":
                 self.__dict__[key] = value
+            elif key == "plugin_config":
+                self.__dict__[key] = value
             elif value is None:
                 continue
             elif key not in self.__dict__.keys():
@@ -452,6 +464,10 @@ class InferenceSession:
     def prepare_context_inputs(self, input_ids_list, logits_masks, prompt_meta_info: List[Dict] = None):
         code_books = [None for _ in range(len(input_ids_list))]
         off_policy_steps = [0 for _ in range(len(input_ids_list))]
+        plugin_configs = [None for _ in range(len(input_ids_list))]
+        agent_env_strs = [None for _ in range(len(input_ids_list))]
+        resume_states = [None for _ in range(len(input_ids_list))]
+
         if prompt_meta_info is not None:
             assert (len(input_ids_list) == len(prompt_meta_info)
                    ), "input_ids_list and prompt_meta_info should have the same length, but got {} and {}".format(
@@ -463,6 +479,9 @@ class InferenceSession:
             temperature = [meta_info.get("temperature", None) for meta_info in prompt_meta_info]
             max_new_tokens = [meta_info.get("max_new_tokens", self.max_new_tokens) for meta_info in prompt_meta_info]
             max_length = [meta_info.get("max_length", self.max_length) for meta_info in prompt_meta_info]
+            plugin_configs = [meta_info.get("plugin", self.plugin_config) for meta_info in prompt_meta_info]
+            agent_env_strs = [meta_info.get("agent_env", None) for meta_info in prompt_meta_info]
+            resume_states = [meta_info.get("resume_states", None) for meta_info in prompt_meta_info]
         for idx, input_ids in enumerate(input_ids_list):
             code_book = self._prepare_codebooks(input_ids, code_book=code_books[idx])
             prompt = ""
@@ -491,6 +510,16 @@ class InferenceSession:
                 query.temperature = temperature[idx] if prompt_meta_info is not None else None
                 query.max_new_tokens = max_new_tokens[idx] if prompt_meta_info is not None else self.max_new_tokens
                 query.max_length = max_length[idx] if prompt_meta_info is not None else self.max_length
+                plugin_enabled = plugin_configs[idx].get('enable', False)
+                if plugin_enabled:
+                    query.set_plugin_query(plugin_configs[idx],
+                                           tokenizer=self.tokenizer,
+                                           env_strs=agent_env_strs[idx],
+                                           tp_group=self.tp_group)
+                resume_state = resume_states[idx]
+                if resume_state is not None:
+                    query.set_resume_state(dill.loads(resume_state))
+
                 self.finished[query.id] = query
         logging_rank(logging.info, "[prepare_context_inputs] total queries: {}".format(idx + 1))
 
@@ -552,6 +581,33 @@ class InferenceSession:
             return responses
         else:
             return ordered_query
+
+    def _finish_query(self, query):
+        if self.eos_callback_fn:
+            self.eos_callback_fn(query)
+        query.set_finished()
+        self.finished_num += 1
+        self.cache_manager.release_query(query)
+        self.infer_scheduler.record("finished_tokens_by_step", [self.current_steps])
+
+    def _try_resume_paused_queries(self):
+        if len(self.paused) == 0:
+            return
+        batch_sync_tp_queries(self.paused, tp_group=self.tp_group)
+        new_paused = []
+        for query in self.paused:
+            query.try_resume_from_paused()
+            if query.meet_pause_condition():
+                new_paused.append(query)
+            else:
+                threshold = self.num_pred_tokens + 1 if self.enable_ngrams_decoding else 0
+                if self._exceed_length_condition(query, tokens_threshold=threshold):
+                    self.finished[query.id].output_prompt = self.tokenizer.batch_decode([query.new_token_ids
+                                                                                        ]) if self.decode_output else ""
+                    self._finish_query(query)
+                else:
+                    self.waiting.append(query)
+        self.paused = new_paused
 
     # Preparing queries for next forward
     def _select_running_queries(self):
@@ -831,11 +887,17 @@ class InferenceSession:
         if self.step_profiler is not None:
             self.step_profiler.reset_exec()
         while (not self._should_terminate(prompts, complete_ratio, stop_event)):
-            self.current_steps += 1
+            self._try_resume_paused_queries()
             self.running, self.waiting = self._select_running_queries()
             if len(self.running) == 0:
                 assert (len(self.waiting) == 0)
-                break
+                if len(self.paused) > 0:
+                    # all queries are paused, wait for a while
+                    time.sleep(0.1)
+                    continue
+                else:
+                    break
+            self.current_steps += 1
             forward_inputs = self._prepare_forward_inputs(self.running)
             context_input = forward_inputs['context_input']
             decode_input = forward_inputs['decode_input']
@@ -869,6 +931,14 @@ class InferenceSession:
                 ctx_tokens = context_input.shape[0] if context_input is not None else 0
                 dec_tokens = decode_input.shape[0] if decode_input is not None else 0
                 self.step_profiler.record_step(ctx_tokens=ctx_tokens, dec_tokens=dec_tokens)
+
+        # wait all paused queries to resume. this is necessary for plugin call:
+        # paused queries may have pending plugin calls, which makes it impossible to be serialized
+        # and get_resume_state could fail.
+        while len(self.paused) > 0:
+            self._try_resume_paused_queries()
+            time.sleep(0.1)
+
         torch.cuda.synchronize()
         self.infer_scheduler.record("cur_steps", [self.current_steps])
 
@@ -898,10 +968,14 @@ class InferenceSession:
                 # each rank should have the same running and waiting
                 if (_idle()) or (self.current_steps % 20 == 0):
                     self.waiting = self._fetch_from_pending_queries()
+                self._try_resume_paused_queries()
+                self.running, self.waiting = self._select_running_queries()
                 if _idle():
+                    if len(self.paused) > 0:
+                        time.sleep(0.1)
                     continue
                 self.current_steps += 1
-                self.running, self.waiting = self._select_running_queries()
+
                 forward_inputs = self._prepare_forward_inputs(self.running)
                 context_input = forward_inputs['context_input']
                 decode_input = forward_inputs['decode_input']
@@ -985,6 +1059,7 @@ class InferenceSession:
                               probs_lt_threshold_sum=None,
                               hidden_states=None):
         next_running = [[], []]
+        new_paused = []
         next_tokens = next_tokens.cpu().tolist()
         if accepted_len is not None:
             assert (accepted_len.shape[0] == len(index_in_running_batch))
@@ -1013,34 +1088,36 @@ class InferenceSession:
                 if isinstance(query_next_tokens, int):
                     query_next_tokens = [query_next_tokens]
                 query_next_tokens_len = 1 if accepted_len is None else accepted_len[i] + 1
-                # Ngrams need more kv-cache per forward
                 finished_sequences = False
-                query.accepted_len.append(accepted_len[i] if accepted_len is not None else 0)
-                query.new_token_log_probs.append(log_probs[i] if log_probs is not None else 0)
-                query.probs_gt_threshold_num.append(
-                    probs_gt_threshold_num[i] if probs_gt_threshold_num is not None else 0)
-                query.probs_lt_threshold_sum.append(
-                    probs_lt_threshold_sum[i] if probs_lt_threshold_sum is not None else 0)
+                paused_triggered = False
                 for token_idx in range(query_next_tokens_len):
                     next_token = query_next_tokens[token_idx]
-                    query.new_token_ids.append(next_token)
-                    query.is_context_computing = False
-                    query.new_token_len += 1
-                    finished_sequences = self._meet_eos_condition(query, query.new_token_ids[-1])
-                    if finished_sequences:
+                    query.add_token(
+                        token_id=next_token,
+                        accepted_len=accepted_len[i] if accepted_len is not None else 0,
+                        log_prob=log_probs[i] if log_probs is not None else 0,
+                        probs_gt_threshold_num=probs_gt_threshold_num[i] if probs_gt_threshold_num is not None else 0,
+                        probs_lt_threshold_sum=probs_lt_threshold_sum[i] if probs_lt_threshold_sum is not None else 0,
+                    )
+                    if query.meet_pause_condition():
+                        self.cache_manager.release_query(query)
+                        query.reset_compute()
+                        new_paused.append(query)
+                        paused_triggered = True
                         break
+                    elif self._meet_eos_condition(query, next_token):
+                        finished_sequences = True
+                        break
+
                 if not finished_sequences:
-                    if self.enable_mtp_decoding:
-                        query.hidden_states = hidden_states[i] if query.hidden_states is None or len(
-                            query.new_token_ids) > 1 else torch.cat([query.hidden_states, hidden_states[i]], dim=0)
-                    next_running[1].append(query)
+                    if not paused_triggered:
+                        if self.enable_mtp_decoding:
+                            query.hidden_states = hidden_states[i] if query.hidden_states is None or len(
+                                query.new_token_ids) > 1 else torch.cat([query.hidden_states, hidden_states[i]], dim=0)
+
+                        next_running[1].append(query)
                 else:
-                    if self.eos_callback_fn:
-                        self.eos_callback_fn(query)
-                    query.set_finished()
-                    self.finished_num += 1
-                    self.cache_manager.release_query(query)
-                    self.infer_scheduler.record("finished_tokens_by_step", [self.current_steps])
+                    self._finish_query(query)
             # still prefill
             else:
                 if self.enable_mtp_decoding:
@@ -1049,3 +1126,4 @@ class InferenceSession:
                 next_running[0].append(query)
 
         self.running = next_running[0] + next_running[1]
+        self.paused.extend(new_paused)

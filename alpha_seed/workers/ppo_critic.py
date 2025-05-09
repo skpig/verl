@@ -149,8 +149,9 @@ class DataParallelPPOCritic(BasePPOCritic):
 
     def _make_minibatch_iterator(self, data: DataProto) -> Iterable[DataProto]:
         select_keys = ['input_ids', 'responses', 'attention_mask', 'values', 'returns']
-        if 'overlong_mask' in data.batch.keys():
-            select_keys.append('overlong_mask')
+        for opt_key in ['overlong_mask', 'model_output_mask']:
+            if opt_key in data.batch:
+                select_keys.append(opt_key)
         data = data.select(batch_keys=select_keys)
         return data.make_iterator(mini_batch_size=self.config.ppo_mini_batch_size,
                                   epochs=self.config.ppo_epochs if not data.meta_info.get('phasic_update', False) else
@@ -241,8 +242,9 @@ class DataParallelPPOCritic(BasePPOCritic):
             dataloader = self._make_minibatch_iterator(data)
         else:
             select_keys = ['input_ids', 'responses', 'attention_mask', 'values', 'returns']
-            if 'overlong_mask' in data.batch.keys():
-                select_keys.append('overlong_mask')
+            for opt_key in ['overlong_mask', 'model_output_mask']:
+                if opt_key in data.batch.keys():
+                    select_keys.append(opt_key)
             batch = data.select(batch_keys=select_keys).batch
             image_keys = get_image_keys(data.non_tensor_batch)
             selected_data = data.select(batch_keys=select_keys, non_tensor_batch_keys=image_keys)
@@ -285,7 +287,13 @@ class DataParallelPPOCritic(BasePPOCritic):
 
                     response_length = responses.size(1)
 
-                    eos_mask = attention_mask[:, -response_length - 1:-1]
+                    if self.config.use_model_output_mask:
+                        loss_mask = micro_data['model_output_mask']
+                        eos_mask = torch.hstack(
+                            (attention_mask[:, -response_length - 1:-response_length], loss_mask[:,
+                                                                                                 -response_length:-1]))
+                    else:
+                        eos_mask = attention_mask[:, -response_length - 1:-1]
 
                     vpreds, seqlen = self._forward_micro_batch(micro_data, non_tensor_batch)
 

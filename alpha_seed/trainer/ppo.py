@@ -143,7 +143,10 @@ def calculate_score_in_length_ranges(raw_scores_log, response_length, ranges):
     return scores
 
 
-def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty='kl'):
+def apply_kl_penalty(data: DataProto,
+                     kl_ctrl: core_algos.AdaptiveKLController,
+                     kl_penalty='kl',
+                     use_model_output_mask=False):
     rollout_log_probs = data.batch['rollout_log_probs']
     probs_gt_threshold_num = data.batch['probs_gt_threshold_num']
     probs_lt_threshold_sum = data.batch['probs_lt_threshold_sum']
@@ -152,8 +155,13 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
     response_length = responses.size(1)
     token_level_scores = data.batch['token_level_scores']
     batch_size = data.batch.batch_size[0]
-    attention_mask = data.batch['attention_mask']
-    response_mask = attention_mask[:, -response_length:]
+
+    if use_model_output_mask:
+        loss_mask = data.batch['model_output_mask']
+        response_mask = loss_mask[:, -response_length:]
+    else:
+        attention_mask = data.batch['attention_mask']
+        response_mask = attention_mask[:, -response_length:]
 
     # compute kl between ref_policy and current policy
     if 'ref_log_prob' in data.batch.keys():
@@ -217,13 +225,19 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
 
 def compute_advantage(data: DataProto, gamma, lam, use_variable_lambda, variable_lambda_scalar, adv_estimator,
                       upgo_loss_version, num_bon, adv_whiten, use_async_gen, use_separate_critic_lam, critic_lam,
-                      group_mode):
+                      group_mode, use_model_output_mask):
     # TODO: add other ways to estimate advantages
     token_level_rewards = data.batch['token_level_rewards']
     responses = data.batch['responses']
     response_length = responses.size(1)
-    attention_mask = data.batch['attention_mask']
-    response_mask = attention_mask[:, -response_length:]
+
+    if use_model_output_mask:
+        loss_mask = data.batch['model_output_mask']
+        response_mask = loss_mask[:, -response_length:]
+    else:
+        attention_mask = data.batch['attention_mask']
+        response_mask = attention_mask[:, -response_length:]
+
     if adv_estimator == 'gae':
         values = data.batch['values']
         origin_advantages, advantages, returns = core_algos.compute_gae_advantage_return(
@@ -1393,37 +1407,26 @@ class RayPPOTrainer(object):
         # print the size of each data proto before training
         print_dataproto_size(batch, head='Before generation')
 
-        if 'rollout_log_probs' not in batch:
-            batch.batch['rollout_log_probs'] = torch.zeros(batch.batch['input_ids'].shape[0],
-                                                           self.config.data.max_response_length,
-                                                           dtype=torch.bfloat16,
-                                                           device=batch.batch['input_ids'].device).fill_(-1)
+        def _get_response_tensor(dtype, pad_val=-1):
+            return torch.zeros(batch.batch['input_ids'].shape[0],
+                               self.config.data.max_response_length,
+                               dtype=dtype,
+                               device=batch.batch['input_ids'].device).fill_(pad_val)
 
-        if 'probs_gt_threshold_num' not in batch:
-            batch.batch['probs_gt_threshold_num'] = torch.zeros(batch.batch['input_ids'].shape[0],
-                                                                self.config.data.max_response_length,
-                                                                dtype=torch.bfloat16,
-                                                                device=batch.batch['input_ids'].device).fill_(-1)
+        gen_batch_required_keys = ['input_ids', 'attention_mask']
+        for key in ['rollout_log_probs', 'probs_gt_threshold_num', 'probs_lt_threshold_sum', 'off_policy_steps']:
+            if key not in batch:
+                batch.batch[key] = _get_response_tensor(dtype=torch.bfloat16)
+            gen_batch_required_keys.append(key)
 
-        if 'probs_lt_threshold_sum' not in batch:
-            batch.batch['probs_lt_threshold_sum'] = torch.zeros(batch.batch['input_ids'].shape[0],
-                                                                self.config.data.max_response_length,
-                                                                dtype=torch.bfloat16,
-                                                                device=batch.batch['input_ids'].device).fill_(-1)
-
-        if 'off_policy_steps' not in batch:
-            batch.batch['off_policy_steps'] = torch.zeros(batch.batch['input_ids'].shape[0],
-                                                          self.config.data.max_response_length,
-                                                          dtype=torch.bfloat16,
-                                                          device=batch.batch['input_ids'].device).fill_(-1)
+        if self.config.algorithm.use_model_output_mask:
+            if (key := 'model_output_mask') not in batch:
+                batch.batch[key] = _get_response_tensor(dtype=torch.int8, pad_val=0)
+            gen_batch_required_keys.append(key)
 
         if self.config.data.num_prompts_per_data > 1:
             batch = batch.unfold_column_chunks(self.config.data.num_prompts_per_data,
-                                               split_keys=[
-                                                   'input_ids', 'attention_mask', 'off_policy_steps',
-                                                   'rollout_log_probs', 'probs_gt_threshold_num',
-                                                   'probs_lt_threshold_sum'
-                                               ])
+                                               split_keys=gen_batch_required_keys)
 
         # hybrid rollout
         if self.config.algorithm.prior_sampling.enable:
@@ -1459,10 +1462,7 @@ class RayPPOTrainer(object):
         batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(batch))], dtype=object)
         batch.check_consistency()
 
-        gen_batch = batch.pop(batch_keys=[
-            'input_ids', 'attention_mask', 'off_policy_steps', 'rollout_log_probs', 'probs_gt_threshold_num',
-            'probs_lt_threshold_sum'
-        ])
+        gen_batch = batch.pop(batch_keys=gen_batch_required_keys)
         # assign the non_tensor_batch uid to the generator as well.
         gen_batch.non_tensor_batch = batch.non_tensor_batch
 
@@ -1611,10 +1611,7 @@ class RayPPOTrainer(object):
             standalone_batch = make_interleave(standalone_batch, self.standalone_rollout_wg.world_size)
 
             standalone_batch = DataProto.concat(standalone_batch)
-            standalone_gen_batch = standalone_batch.pop(batch_keys=[
-                'input_ids', 'attention_mask', 'off_policy_steps', 'rollout_log_probs', 'probs_gt_threshold_num',
-                'probs_lt_threshold_sum'
-            ])
+            standalone_gen_batch = standalone_batch.pop(batch_keys=gen_batch.batch.keys())
 
             standalone_gen_batch.non_tensor_batch = standalone_batch.non_tensor_batch
             standalone_gen_batch.meta_info[
@@ -2094,9 +2091,11 @@ class RayPPOTrainer(object):
 
                     with Timer(name='adv', logger=None) as timer:
                         # compute rewards. apply_kl_penalty if available
-                        batch, kl_metrics = apply_kl_penalty(batch,
-                                                             kl_ctrl=self.kl_ctrl,
-                                                             kl_penalty=self.config.algorithm.kl_penalty)
+                        batch, kl_metrics = apply_kl_penalty(
+                            batch,
+                            kl_ctrl=self.kl_ctrl,
+                            kl_penalty=self.config.algorithm.kl_penalty,
+                            use_model_output_mask=self.config.algorithm.use_model_output_mask)
                         metrics.update(kl_metrics)
 
                         # compute advantages
@@ -2114,6 +2113,7 @@ class RayPPOTrainer(object):
                             group_mode=self.config.algorithm.group_mode,
                             use_separate_critic_lam=self.config.algorithm.use_separate_critic_lam,
                             critic_lam=self.config.algorithm.critic_lam,
+                            use_model_output_mask=self.config.algorithm.use_model_output_mask,
                         )
                         metrics.update(adv_metrics)
                     metrics['timing/adv'] = timer.last
@@ -2283,7 +2283,12 @@ class RayPPOTrainer(object):
 
                             advantages = batch.batch['advantages']
                             response_length = batch.batch['responses'].shape[-1]
-                            response_mask = batch.batch['attention_mask'][:, -response_length:]
+                            if self.config.algorithm.use_model_output_mask:
+                                loss_mask = batch.batch['model_output_mask']
+                                response_mask = loss_mask[:, -response_length:]
+                            else:
+                                attention_mask = batch.batch['attention_mask']
+                                response_mask = attention_mask[:, -response_length:]
                             idx = torch.arange(advantages.shape[1]).unsqueeze(dim=0).tile(advantages.shape[0], 1)
                             adv_idx_corr = self.cal_corr(advantages, idx, response_mask)
                             metrics['critic/advantages/adv_idx_corr'] = adv_idx_corr.mean()

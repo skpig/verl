@@ -117,31 +117,22 @@ class ValidateManager(object):
         for val_epoch_idx in range(val_epoch):
             for val_idx, test_data in enumerate(self.val_dataloader):
                 test_batch = DataProto.from_single_dict(test_data)
-                if 'rollout_log_probs' not in test_batch:
-                    test_batch.batch['rollout_log_probs'] = torch.zeros(
-                        test_batch.batch['input_ids'].shape[0],
-                        self.config.data.max_response_length,
-                        dtype=torch.bfloat16,
-                        device=test_batch.batch['input_ids'].device).fill_(-1)
-                if 'probs_gt_threshold_num' not in test_batch:
-                    test_batch.batch['probs_gt_threshold_num'] = torch.zeros(
-                        test_batch.batch['input_ids'].shape[0],
-                        self.config.data.max_response_length,
-                        dtype=torch.bfloat16,
-                        device=test_batch.batch['input_ids'].device).fill_(-1)
 
+                def _get_response_tensor(dtype, pad_val=-1):
+                    return torch.zeros(test_batch.batch['input_ids'].shape[0],
+                                       self.config.data.max_response_length,
+                                       dtype=dtype,
+                                       device=test_batch.batch['input_ids'].device).fill_(pad_val)
+
+                if 'rollout_log_probs' not in test_batch:
+                    test_batch.batch['rollout_log_probs'] = _get_response_tensor(dtype=torch.bfloat16)
+                if 'probs_gt_threshold_num' not in test_batch:
+                    test_batch.batch['probs_gt_threshold_num'] = _get_response_tensor(dtype=torch.bfloat16)
                 if 'probs_lt_threshold_sum' not in test_batch:
-                    test_batch.batch['probs_lt_threshold_sum'] = torch.zeros(
-                        test_batch.batch['input_ids'].shape[0],
-                        self.config.data.max_response_length,
-                        dtype=torch.bfloat16,
-                        device=test_batch.batch['input_ids'].device).fill_(-1)
+                    test_batch.batch['probs_lt_threshold_sum'] = _get_response_tensor(dtype=torch.bfloat16)
                 if 'off_policy_steps' not in test_batch:
-                    test_batch.batch['off_policy_steps'] = torch.zeros(
-                        test_batch.batch['input_ids'].shape[0],
-                        self.config.data.max_response_length,
-                        dtype=torch.bfloat16,
-                        device=test_batch.batch['input_ids'].device).fill_(-1)
+                    test_batch.batch['off_policy_steps'] = _get_response_tensor(dtype=torch.bfloat16)
+
                 prompt_names = test_batch.non_tensor_batch['prompt_names'][0]
                 num_prompts_per_data = len(prompt_names)
 
@@ -157,17 +148,14 @@ class ValidateManager(object):
                                                               dtype=object)
 
                 test_gen_batch = test_batch.pop([
-                    'input_ids', 'attention_mask', 'off_policy_steps', 'rollout_log_probs', 'probs_gt_threshold_num',
-                    'probs_lt_threshold_sum'
+                    'input_ids',
+                    'attention_mask',
+                    'off_policy_steps',
+                    'rollout_log_probs',
+                    'probs_gt_threshold_num',
+                    'probs_lt_threshold_sum',
                 ])
-                # for VLM with images
-                image_keys = get_image_keys(test_batch.non_tensor_batch)
-                for key in image_keys:
-                    test_gen_batch.non_tensor_batch[key] = test_batch.non_tensor_batch[key]
-                # copy relevant non-tensor info
-                non_tensor_infos = ['uid', 'reward_model']
-                for key in non_tensor_infos:
-                    test_gen_batch.non_tensor_batch[key] = test_batch.non_tensor_batch[key]
+                test_gen_batch.non_tensor_batch = test_batch.non_tensor_batch
 
                 test_gen_batch.meta_info = {
                     'eos_token_id': self.tokenizer.eos_token_id,

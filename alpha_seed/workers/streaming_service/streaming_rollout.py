@@ -59,6 +59,7 @@ from alpha_seed.workers.xperf_rollout.utils.logits_manipulate import logits_mani
 from alpha_seed.utils.observility import get_profiler_context_wrapped, profile_step
 from functools import partial
 import omegaconf
+import dill
 
 import ray
 
@@ -223,7 +224,8 @@ class AsyncXPerfGPTRollout(object):
                                           enable_cuda_graph=enable_cuda_graph,
                                           standalone=self.is_standalone,
                                           schedule_strategy=self.config.schedule_strategy,
-                                          step_profiler=step_profiler)
+                                          step_profiler=step_profiler,
+                                          plugin_config=self.config.plugin)
         inference_sess.max_off_policy_steps = self.config.get('max_off_policy_steps', 5)
         with tempfile.NamedTemporaryFile(mode='w', suffix=".json") as f:
             print(f"load xperf config ... {text_cfg}")
@@ -433,6 +435,10 @@ class AsyncXPerfGPTRollout(object):
             response_probs_lt_threshold_sum = []
             is_finished = []
             off_policy_steps = []
+            model_output_masks = []
+            env_states = []
+            query_metrics = []
+            resume_states = []
             for prompt, v in zip(original_query_pool, self.inference_engine.get_inorder_responses()):
                 response_output_ids = (v.input_ids + v.new_token_ids)[len(prompt):]
                 response_outputs.append(response_output_ids)
@@ -441,17 +447,34 @@ class AsyncXPerfGPTRollout(object):
                 response_probs_lt_threshold_sum.append(v.probs_lt_threshold_sum)
                 is_finished.append(v.is_finished)
                 off_policy_steps.append([-1] * len(v.new_token_log_probs))
+                model_output_masks.append(v.model_output_mask)
+                env_states.append(v.env_state_bytes)
+                query_metrics.append(v.metrics)
+                resume_states.append(dill.dumps(v.get_resume_state()))
+
             metrics = {}
             if hasattr(self.inference_engine.infer_scheduler,
                        "init_metrics") and self.inference_engine.infer_scheduler.enable_metrics:
                 metrics = self.inference_engine.infer_scheduler.metrics
+            query_metrics_dict = dict()
+            for q_metrics in query_metrics:
+                for key, val in q_metrics.items():
+                    if key not in query_metrics_dict:
+                        query_metrics_dict[key] = val
+                    if type(val) != type(query_metrics_dict[key]):
+                        continue
+                    query_metrics_dict[key] += val
+            metrics.update(query_metrics_dict)
             self.inference_engine.empty_cache()
             data_pack = DataPack(response_outputs=response_outputs,
                                  response_log_probs=response_log_probs,
                                  response_probs_gt_threshold_num=response_probs_gt_threshold_num,
                                  response_probs_lt_threshold_sum=response_probs_lt_threshold_sum,
+                                 response_model_output_mask=model_output_masks,
                                  this_turn_off_policy_steps=off_policy_steps,
                                  is_finished=is_finished,
+                                 env_states=env_states,
+                                 resume_states=resume_states,
                                  metrics=metrics)
             self.output_queue.put(data_pack)
 

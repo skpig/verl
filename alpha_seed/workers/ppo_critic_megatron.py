@@ -229,7 +229,12 @@ class MegatronPPOCritic(BasePPOCritic):
 
             response_length = responses.size(1)
 
-            eos_mask = attention_mask[:, -response_length - 1:-1]
+            if self.config.use_model_output_mask:
+                loss_mask = micro_batch['model_output_mask']
+                eos_mask = torch.hstack(
+                    (attention_mask[:, -response_length - 1:-response_length], loss_mask[:, -response_length:-1]))
+            else:
+                eos_mask = attention_mask[:, -response_length - 1:-1]
 
             # assert not torch.any(torch.isnan(vpreds)).item()
 
@@ -398,8 +403,9 @@ class MegatronPPOCritic(BasePPOCritic):
         data = data.to(torch.cuda.current_device())
 
         select_keys = ['input_ids', 'responses', 'attention_mask', 'values', 'returns']
-        if 'overlong_mask' in data.batch.keys():
-            select_keys.append('overlong_mask')
+        for opt_key in ['overlong_mask', 'model_output_mask']:
+            if opt_key in data.batch:
+                select_keys.append(opt_key)
         batch = data.select(batch_keys=select_keys).batch
 
         response = batch['responses']

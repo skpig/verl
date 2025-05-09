@@ -4,6 +4,8 @@ import uuid
 import torch
 from threading import Lock
 import asyncio
+import copy
+from .query_plugin import QueryPlugin, batch_sync_tp_plugin_queries
 
 
 @dataclass
@@ -42,6 +44,7 @@ class Query:
     is_finished: bool
     off_policy_steps: int
     meta_info: Optional[Dict]
+    plugin_query: QueryPlugin
 
     def __init__(self,
                  input_ids,
@@ -53,7 +56,7 @@ class Query:
                  constraint_decoding_predictor=None):
         self.id = uuid.uuid4()
         self.idx = idx
-        self.original_input_ids = input_ids
+        self.original_input_ids = copy.copy(input_ids)
         self.input_ids = input_ids
         self.code_book = code_book
         self.accepted_len = []
@@ -97,6 +100,8 @@ class Query:
         self.max_length = None
         self.input_embedding = None
 
+        self.plugin_query = None
+
     # Check whether current query is going to enter the decoding stage
     def _is_to_decoding_compute(self):
         # already in decode stage
@@ -126,6 +131,77 @@ class Query:
         self.prefix_already_computed_len = 0
         self.hidden_states = None
         return
+
+    @property
+    def original_input_len(self):
+        return len(self.original_input_ids)
+
+    @property
+    def output_tokens(self) -> List[int]:
+        return (self.input_ids + self.new_token_ids)[self.original_input_len:]
+
+    def add_token(self, token_id, accepted_len=-1, log_prob=0.0, probs_gt_threshold_num=0, probs_lt_threshold_sum=0.0):
+        self.accepted_len.append(accepted_len)
+        self.new_token_log_probs.append(log_prob)
+        self.probs_gt_threshold_num.append(probs_gt_threshold_num)
+        self.probs_lt_threshold_sum.append(probs_lt_threshold_sum)
+
+        self.new_token_ids.append(token_id)
+        self.is_context_computing = False
+        self.new_token_len += 1
+        if self.plugin_query:
+            self.plugin_query.record_model_token(token_id)
+
+    def set_plugin_query(self, plugin_config, tokenizer, env_strs, tp_group):
+        self.plugin_query = QueryPlugin(query=self,
+                                        config=plugin_config,
+                                        tokenizer=tokenizer,
+                                        env_strs=env_strs,
+                                        tp_group=tp_group)
+
+    def meet_pause_condition(self) -> bool:
+        if self.plugin_query:
+            return self.plugin_query.meet_pause_condition()
+        return False
+
+    def try_resume_from_paused(self):
+        if self.plugin_query:
+            self.plugin_query.try_resume_from_paused()
+
+    def get_resume_state(self) -> Dict:
+        """States that should be consistent between off-policy and on-policy steps"""
+        if self.plugin_query:
+            state = dict()
+            state['plugin_query'] = self.plugin_query.get_resume_state()
+            return state
+        return None
+
+    def set_resume_state(self, state: Dict):
+        if state is None:
+            return
+        if self.plugin_query:
+            self.plugin_query.set_resume_state(state['plugin_query'])
+
+    @property
+    def env_state_bytes(self) -> bytes:
+        if self.plugin_query:
+            return self.plugin_query.env_state_bytes
+        return None
+
+    @property
+    def model_output_mask(self) -> List[bool]:
+        if self.plugin_query:
+            return self.plugin_query.model_output_mask
+        return [True] * (len(self.input_ids) + len(self.new_token_ids) - self.original_input_len)
+
+    @property
+    def metrics(self) -> Dict:
+        ret = dict()
+        if self.plugin_query:
+            plugin_metrics = self.plugin_query.metrics
+            for key, val in plugin_metrics.items():
+                ret[f"plugin/{key}"] = val
+        return ret
 
 
 @dataclass
@@ -162,6 +238,7 @@ class AsyncQuery(Query):
         query.temperature = sampling_kwargs.get("temperature", 1.0)
         query.max_new_tokens = sampling_kwargs.get("max_new_tokens", 32)
         query.max_length = sampling_kwargs.get("max_length", 1024)
+        query.meta_info = {}
         return query
 
 
@@ -194,3 +271,11 @@ class InflightQueue:
     def __iter__(self):
         with self.lock:
             return iter(self.queue.copy())
+
+
+def batch_sync_tp_queries(queries: List[Query], tp_group):
+    plugin_queries = []
+    for query in queries:
+        if query.plugin_query is not None:
+            plugin_queries.append(query.plugin_query)
+    batch_sync_tp_plugin_queries(plugin_queries, tp_group=tp_group)

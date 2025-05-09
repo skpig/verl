@@ -218,8 +218,9 @@ class DataParallelPPOActor(BasePPOActor):
 
     def _make_minibatch_iterator(self, data: DataProto) -> Iterable[DataProto]:
         select_keys = ['responses', 'input_ids', 'attention_mask', 'old_log_probs', 'advantages', 'upgo_advantages']
-        if 'ref_log_prob' in data.batch.keys():
-            select_keys.append('ref_log_prob')
+        for opt_key in ['ref_log_prob', 'model_output_mask']:
+            if opt_key in data.batch.keys():
+                select_keys.append(opt_key)
         data = data.select(batch_keys=select_keys)
         return data.make_iterator(mini_batch_size=self.config.ppo_mini_batch_size,
                                   epochs=self.config.ppo_epochs,
@@ -505,7 +506,11 @@ def default_loss_fn(config, micro_data, full_entropy, log_prob):
     responses = micro_data['responses']
     response_length = responses.size(1)
     attention_mask = micro_data['attention_mask']
-    response_mask = attention_mask[:, -response_length:]
+    if config.use_model_output_mask:
+        loss_mask = micro_data['model_output_mask']
+        response_mask = loss_mask[:, -response_length:]
+    else:
+        response_mask = attention_mask[:, -response_length:]
 
     use_rollout_log_probs = config.get("use_rollout_log_probs", False)
     if use_rollout_log_probs:
@@ -621,16 +626,11 @@ def make_mini_step_dataloader(data, ppo_mini_batch_size, return_dataproto=False)
     select_keys = [
         'responses', 'input_ids', 'attention_mask', 'old_log_probs', 'advantages', 'upgo_advantages', 'off_policy_steps'
     ]
-    if 'ref_log_prob' in data.batch.keys():
-        select_keys.append('ref_log_prob')
-    if 'rollout_log_probs' in data.batch.keys():
-        select_keys.append('rollout_log_probs')
-    if 'overlong_mask' in data.batch.keys():
-        select_keys.append('overlong_mask')
-    if 'eos_ids' in data.batch.keys():
-        select_keys.append('eos_ids')
-    if 'token_level_scores' in data.batch.keys():
-        select_keys.append('token_level_scores')
+    for opt_key in [
+            'ref_log_prob', 'rollout_log_probs', 'overlong_mask', 'eos_ids', 'token_level_scores', 'model_output_mask'
+    ]:
+        if opt_key in data.batch.keys():
+            select_keys.append(opt_key)
     non_tensor_keys = get_image_keys(data.non_tensor_batch)
     if non_tensor_keys:
         assert return_dataproto

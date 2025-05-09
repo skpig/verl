@@ -64,6 +64,7 @@ actor_rollout_ref:
     offpolicy_kl_loss_weight: 0.0
     lm_loss_weight: 0.0
     kl_penalty: ${algorithm.kl_penalty}
+    use_model_output_mask: ${algorithm.use_model_output_mask}
     entropy_coeff: 0.001
     ppo_epochs: 1
     shuffle: True
@@ -142,7 +143,15 @@ actor_rollout_ref:
     quant_mode: "NO_QUANT"
     gpu_memory_utilization: 0.7
     schedule_strategy: default # [default,fifo]
-    train_generate_kwargs:
+    plugin: &plugin_config
+      enable: False
+      names: []
+      args: null # null or dict[name, kwargs]
+      pause_condition: on_trigger # [on_trigger, on_eos]
+      max_round: null
+      edit_history: null  # [null]
+      timeout: 300
+    train_generate_kwargs: &train_gen_config
       top_k: -1 # 0 for hf rollout, -1 for vllm rollout
       top_p: 1.0
       temperature: 1.0
@@ -151,13 +160,10 @@ actor_rollout_ref:
       eta_epsilon: -1 # 1e-6 to open
       logits_clamp: ${actor_rollout_ref.actor.logits_clamp}
       max_new_tokens: ${data.max_response_length}
+      plugin_config: ${actor_rollout_ref.rollout.plugin}
     val_generate_kwargs:
-      # for validation
-      top_k: -1 # 0 for hf rollout, -1 for vllm rollout
+      <<: *train_gen_config
       top_p: 0.7
-      temperature: 1.0
-      do_sample: True
-      max_new_tokens: ${data.max_response_length}
     profile:
       filename: p6_400m_ppo_rollout
       profile_on_ranks:
@@ -229,6 +235,7 @@ critic:
   cliprange_value_low: null
   cliprange_value_high: null
   loss_average_method: "sample"
+  use_model_output_mask: ${algorithm.use_model_output_mask}
   act_offload: False
   act_offload_upbound: null
   act_offload_buff_size: 40
@@ -329,6 +336,7 @@ algorithm:
   group_mode: "normal"
   priority_sample: False
   TD_priority_ratio: 0.0
+  use_model_output_mask: ${actor_rollout_ref.rollout.train_generate_kwargs.plugin_config.enable}
 
 trainer:
   total_epochs: 30

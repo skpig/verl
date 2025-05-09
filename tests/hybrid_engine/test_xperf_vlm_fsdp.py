@@ -74,6 +74,9 @@ rollout_config = OmegaConf.create({
         "enable": False,
         "backbone": "m8",
     },
+    "plugin": {
+        "enable": False
+    }
 })
 
 print(

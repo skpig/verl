@@ -231,7 +231,7 @@ class CacheManager:
         # Decode stage: Allocate kv_slot_ids for vllm if needed
         elif self.use_vllm:
             tokens_num = len(query.input_ids) + len(query.new_token_ids) + self.num_pred_tokens
-            if tokens_num >= len(query.kv_slot_ids) * self.slot_block_size:
+            while tokens_num >= len(query.kv_slot_ids) * self.slot_block_size:
                 if self.get_available_slot_num() < 1:
                     return UpdateQueryStatus.NEED_SWAP_OUT
                 query.kv_slot_ids.append(self.available_slot_table.popleft())

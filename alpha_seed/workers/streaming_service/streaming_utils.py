@@ -2,6 +2,7 @@ import ray
 import torch
 import numpy as np
 import torch.nn.functional as F
+from typing import *
 
 
 def rmpad(item):
@@ -94,6 +95,17 @@ def record_xperf_metrics(batch_info, metrics, logger, global_step, prefix=''):
                                                                                                 len(per_token_latency))
     metrics[f'rollout/{prefix}/tps'] = total_tokens / (sum(per_token_latency) + 1e-6) * 1000
     metrics[f'rollout/{prefix}/bs_avg'] = 0 if len(tokens_num) == 0 else (total_tokens / len(tokens_num))
+
+    # plugin metrics
+    for key, val in xperf_metrics.items():
+        if not key.startswith('plugin/'):
+            continue
+        metrics_key = f"rollout/{prefix}/{key}"
+        if isinstance(val, list):
+            import wandb
+            metrics[metrics_key] = wandb.Histogram(val)
+        else:
+            metrics[metrics_key] = val
     batch_info.meta_info.pop('xperf_metrics')
     return
 
@@ -126,7 +138,7 @@ def _postprocess(off_p_list, on_p_list, target_length, pad_token=-1, mode="off_p
     list_padded = []
     for i, on_p_list_i in enumerate(on_p_list):
         off_p_list_i = off_p_list[i]
-        prev_index = torch.nonzero(off_p_list_i == -1)
+        prev_index = torch.nonzero(off_p_list_i == pad_token)
         if prev_index.numel() == 0:
             prev_index = -1
         else:
@@ -154,8 +166,11 @@ class DataPack:
     response_probs_lt_threshold_sum: list
     this_turn_off_policy_steps: list
     response_outputs: list
+    response_model_output_mask: list
     is_finished: list
     metrics: dict
+    env_states: Optional[list] = None
+    resume_states: Optional[list] = None
 
     @classmethod
     def create_from_completion(cls, message):
@@ -163,6 +178,7 @@ class DataPack:
                              response_log_probs=[message.response_log_probs],
                              response_probs_gt_threshold_num=[message.response_probs_gt_threshold_num],
                              response_probs_lt_threshold_sum=[message.response_probs_lt_threshold_sum],
+                             response_model_output_mask=[[True] * len(message.raw_output_ids)],
                              this_turn_off_policy_steps=[[-1 for _ in range(len(message.raw_output_ids))]],
                              is_finished=[message.is_finished],
                              metrics=message.metrics)
@@ -174,18 +190,20 @@ class DataPack:
                              response_log_probs=[message['response_log_probs']],
                              response_probs_gt_threshold_num=[message['response_probs_gt_threshold_num']],
                              response_probs_lt_threshold_sum=[message['response_probs_lt_threshold_sum']],
+                             response_model_output_mask=[[True] * len(message['raw_output_ids'])],
                              this_turn_off_policy_steps=[[-1 for _ in range(len(message['raw_output_ids']))]],
                              is_finished=[message['is_finished']],
                              metrics=message['metrics'])
         return data_pack
 
 
-def pack_to_dataproto(prompts, tokenizer, data_pack, config):
+def pack_to_dataproto(prompts, tokenizer, data_pack: DataPack, config):
     max_new_tokens = prompts.meta_info.get('generation_kwargs').get('max_new_tokens', config.response_length)
     prompts.batch = prompts.batch.cpu()
     prompt_ids = prompts.batch['input_ids']  # (bs, prompt_length)
     # left-padded attention_mask
     attention_mask = prompts.batch['attention_mask']
+    off_policy_model_output_mask = prompts.batch.get('model_output_mask', None)
     off_turn_off_policy_steps = prompts.batch["off_policy_steps"]
     off_policy_response_log_probs = prompts.batch["rollout_log_probs"]
     off_policy_probs_gt_threshold_num = prompts.batch["probs_gt_threshold_num"]
@@ -195,7 +213,8 @@ def pack_to_dataproto(prompts, tokenizer, data_pack, config):
     # remove warning
     tokenizer.deprecation_warnings['Asking-to-pad-a-fast-tokenizer'] = True
     with patch.object(tokenizer, "padding_side", "right"):
-        response_outputs = tokenizer.pad(dict(input_ids=data_pack.response_outputs),
+        truncated_response_outputs = [seq[:max_new_tokens] for seq in data_pack.response_outputs]
+        response_outputs = tokenizer.pad(dict(input_ids=truncated_response_outputs),
                                          padding="max_length",
                                          max_length=max_new_tokens,
                                          return_tensors="pt")
@@ -216,8 +235,17 @@ def pack_to_dataproto(prompts, tokenizer, data_pack, config):
                                        data_pack.this_turn_off_policy_steps,
                                        max_new_tokens,
                                        mode="off_policy_step")
-    response_ids = response_outputs["input_ids"].to(torch.int32)
-    response_attention_mask = response_outputs["attention_mask"].to(torch.int8)
+    if off_policy_model_output_mask is not None:
+        response_model_output_mask = _postprocess(off_policy_model_output_mask,
+                                                  data_pack.response_model_output_mask,
+                                                  max_new_tokens,
+                                                  mode='model_output_mask',
+                                                  pad_token=0)
+    else:
+        response_model_output_mask = None
+    response_ids = response_outputs["input_ids"][:, :max_new_tokens].to(torch.int32)
+    response_attention_mask = response_outputs["attention_mask"][:, :max_new_tokens].to(torch.int8)
+
     attention_mask = torch.hstack((attention_mask, response_attention_mask))
     input_ids = torch.hstack((prompt_ids, response_ids))
 
@@ -231,10 +259,16 @@ def pack_to_dataproto(prompts, tokenizer, data_pack, config):
         'is_finished': torch.Tensor(data_pack.is_finished).to(torch.int8),
         'off_policy_steps': response_off_policy.to(torch.int8),
     }
+    if response_model_output_mask is not None:
+        batch['model_output_mask'] = response_model_output_mask.to(torch.int8)
     from verl import DataProto
     out = DataProto.from_dict(batch)
     data_pack.metrics["off_policy_steps"] = response_off_policy.tolist()
     out.meta_info["xperf_metrics"] = data_pack.metrics
     out.meta_info["generation_kwargs"] = prompts.meta_info['generation_kwargs']
     out.non_tensor_batch = prompts.non_tensor_batch
+    if data_pack.env_states is not None:
+        out.non_tensor_batch['env_states'] = np.array(data_pack.env_states, dtype=object)
+    if data_pack.resume_states is not None:
+        out.non_tensor_batch['resume_states'] = np.array(data_pack.resume_states, dtype=object)
     return out
