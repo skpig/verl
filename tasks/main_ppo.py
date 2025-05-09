@@ -24,6 +24,7 @@ import warnings
 import contextlib
 import json
 from datetime import datetime
+from transformers import AutoTokenizer
 from multiprocessing import Process
 from collections import Counter
 # rule-based reward score
@@ -85,9 +86,9 @@ class RemoteClient:
     A centralized remote client that pipelines any function with generation at [EOS] 
     """
 
-    def __init__(self, config, tokenizer) -> None:
+    def __init__(self, config, tokenizer_path) -> None:
         self.config = config
-        self.tokenizer = tokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
         self.results = {}
 
         self.call_oj = ray.remote(num_cpus=1)(oj_utils.compute_score)
@@ -916,7 +917,8 @@ def config_to_trainer_kwargs(config):
         val_reward_fn = RewardManager(tokenizer=tokenizer, config=config, logger=logger, rm_name="val")
 
         # we will always start a remote client
-        kwargs['remote_client'] = RemoteClient.options(name='remote_client').remote(config=config, tokenizer=tokenizer)
+        kwargs['remote_client'] = RemoteClient.options(name='remote_client').remote(config=config,
+                                                                                    tokenizer_path=local_path)
 
         kwargs['tokenizer'] = tokenizer
         kwargs['logger'] = logger
