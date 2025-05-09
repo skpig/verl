@@ -135,16 +135,6 @@ class CacheManager:
         self.page_swap_out_bs = 0
         self.page_swap_out_token = 0
 
-        def release_running_query(query):
-            self.release_query(query)
-            query.kv_slot_ids = []
-            query.is_context_computing = True
-            query.input_ids.extend(query.new_token_ids)
-            query.global_new_token_ids.extend(query.new_token_ids)
-            query.new_token_ids = []
-            query.context_shift = 0
-            query.prefix_already_computed_len = 0
-
         # see if any queries can be continued
         idx = 0
         while idx < len(phase1_running):
@@ -161,7 +151,8 @@ class CacheManager:
                 waiting.append(to_swap_query)
                 self.page_swap_out_bs += 1
                 self.page_swap_out_token += len(to_swap_query.input_ids) + len(to_swap_query.new_token_ids)
-                release_running_query(to_swap_query)
+                self.release_query(to_swap_query)
+                to_swap_query.reset_compute()
                 status = self._update_query(query)
 
             if status == UpdateQueryStatus.SUCCESS:
@@ -174,7 +165,8 @@ class CacheManager:
                     waiting.append(query)
                     self.page_swap_out_bs += 1
                     self.page_swap_out_token += len(query.input_ids) + len(query.new_token_ids)
-                    release_running_query(query)
+                    self.release_query(query)
+                    query.reset_compute()
 
         waiting = sort_queue(waiting, reverse=True)
         phase0_running = []

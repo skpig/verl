@@ -126,6 +126,7 @@ class Query:
         self.kv_slot_ids = []
         self.is_context_computing = True
         self.input_ids.extend(self.new_token_ids)
+        self.global_new_token_ids.extend(self.new_token_ids)
         self.new_token_ids = []
         self.context_shift = 0
         self.prefix_already_computed_len = 0
