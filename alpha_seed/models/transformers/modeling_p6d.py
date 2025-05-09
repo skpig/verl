@@ -58,22 +58,25 @@ def make_p6d_plan():
 
 
 def flash_attn2_rmpad_forward(
-    self: P6DenseFlashAttention2,
-    hidden_states: torch.Tensor,
-    attention_mask: Optional[torch.Tensor] = None,
-    position_ids: Optional[torch.LongTensor] = None,
-    cu_seqlens: Optional[torch.IntTensor] = None,
-    past_key_value: Optional[Cache] = None,
-    output_attentions: bool = False,
-    use_cache: bool = False,
-    cache_position: Optional[torch.LongTensor] = None,
-    position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
-    max_seqlen: int = None,
+        self: P6DenseFlashAttention2,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        cu_seqlens: Optional[torch.IntTensor] = None,
+        past_key_value: Optional[Cache] = None,
+        output_attentions: bool = False,
+        use_cache: bool = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
+        max_seqlen: int = None,
+        **kwargs,  # swallow flash_attn_kwargs
 ) -> Tuple[torch.Tensor, None, None]:
     assert cu_seqlens is None
     assert not output_attentions
     assert (not past_key_value) and (not use_cache)
     assert position_embeddings is not None
+    kwargs.pop('flash_attn_kwargs', None)
+    assert len(kwargs) == 0
     if position_ids.size(0) != 1:
         raise RuntimeError(f"You are using an old version of seed models, please upgrade to the latest one.")
 
@@ -97,6 +100,10 @@ def flash_attn2_rmpad_forward(
     query_states = query_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
     key_states = key_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
     value_states = value_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
+
+    if getattr(self.config, 'use_qk_rmsnorm', False):
+        query_states = self.q_norm(query_states)
+        key_states = self.k_norm(key_states)
 
     if sp_size > 1:
         # (batch_size, num_head / sp_size, seq_length, head_size)

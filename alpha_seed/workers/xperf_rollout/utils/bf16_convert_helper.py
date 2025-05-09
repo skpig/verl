@@ -652,7 +652,7 @@ def _reshard_fsdp_state_dict_to_xperf_p6dense(tp_model, state_dict, device_mesh:
 
     assert model_config.num_key_value_heads % tp_size == 0
 
-    head_dim = model_config.hidden_size // model_config.num_attention_heads
+    head_dim = getattr(model_config, 'head_dim', None) or (model_config.hidden_size // model_config.num_attention_heads)
     hidden_size = model_config.hidden_size
     num_heads = model_config.num_attention_heads
     num_kv_heads = model_config.num_key_value_heads
@@ -693,8 +693,8 @@ def _reshard_fsdp_state_dict_to_xperf_p6dense(tp_model, state_dict, device_mesh:
     assert_not_nan(tp_model.wte_weight.data)
     assert_not_nan(tp_model.lm_head_weight.data)
 
-    for layer_index, (ln_1, qkv_w, qkv_bias, dense_w, dense_bias, ln_2, fc12, _, fc2,
-                      *_) in enumerate(tp_model.layers_weight):
+    for layer_index, (ln_1, qkv_w, qkv_bias, dense_w, dense_bias, ln_2, fc12, _, fc2, _,
+                      *extra_params) in enumerate(tp_model.layers_weight):
         # model.layers.0.input_layernorm.weight
         ln_1_weight = state_dict.pop(f'model.layers.{layer_index}.input_layernorm.weight').full_tensor()
         ln_1_weight = torch.unsqueeze(ln_1_weight, dim=0).to(torch.bfloat16)
@@ -779,7 +779,7 @@ def _reshard_fsdp_state_dict_to_xperf_p6dense(tp_model, state_dict, device_mesh:
 
         qkv_weight = torch.cat((q_proj_weight, k_proj_weight, v_proj_weight), dim=0).contiguous().view(-1, hidden_size)
 
-        assert qkv_w.data.shape == qkv_weight.shape
+        assert qkv_w.data.shape == qkv_weight.shape, f"{qkv_w.data.shape} != {qkv_weight.shape}"
         qkv_w.data = qkv_weight.contiguous()
 
         assert_not_nan(qkv_w.data)
@@ -789,6 +789,17 @@ def _reshard_fsdp_state_dict_to_xperf_p6dense(tp_model, state_dict, device_mesh:
             assert qkv_bias.data.shape == qkv_bias_hf.shape
             qkv_bias.data = qkv_bias_hf.contiguous()
             assert_not_nan(qkv_bias.data)
+
+        if getattr(model_config, 'use_qk_rmsnorm', False):
+            q_norm, k_norm, *_ = extra_params
+            q_norm_weight = state_dict.pop(f'model.layers.{layer_index}.self_attn.q_norm.weight').full_tensor().to(
+                torch.bfloat16)[None, :]
+            k_norm_weight = state_dict.pop(f'model.layers.{layer_index}.self_attn.k_norm.weight').full_tensor().to(
+                torch.bfloat16)[None, :]
+            assert q_norm.data.shape == q_norm_weight.shape
+            assert k_norm.data.shape == k_norm_weight.shape
+            q_norm.data = q_norm_weight.contiguous()
+            k_norm.data = k_norm_weight.contiguous()
 
         # model.layers.0.self_attn.o_proj.weight
         o_proj_weight = state_dict.pop(f'model.layers.{layer_index}.self_attn.o_proj.weight').full_tensor().to(

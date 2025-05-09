@@ -80,6 +80,7 @@ def flash_attn2_rmpad_forward(
     **kwargs,
 ):
     assert (not use_cache) and (not past_key_value)
+    kwargs.pop("flash_attn_kwargs", None)
     assert len(kwargs) == 0
     assert position_embeddings is not None
     assert cu_seqlens is None

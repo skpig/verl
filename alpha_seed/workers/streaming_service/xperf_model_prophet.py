@@ -37,7 +37,7 @@ class XperfModelProphet:
         self.kv_num_layers = self.num_layers
         if "kv_mirror_imitated_layers" in model_cfg:
             self.kv_num_layers -= len(model_cfg["kv_mirror_imitated_layers"])
-        self.head_dim = self.hidden_size // self.num_heads
+        self.head_dim = model_cfg.get('head_dim', None) or (self.hidden_size // self.num_heads)
         self.intermediate_size = model_cfg.get("ffn_internal_dim",
                                                self.hidden_size * 5 - self.num_kv_heads * self.head_dim)
         self.moe_ffn_internal_dim = model_cfg.get("moe_ffn_internal_dim", 0)
@@ -84,7 +84,13 @@ class XperfModelProphet:
             c_attn_weight = element_sz * self.hidden_size * (self.num_kv_heads * 2 + self.num_heads) * self.head_dim
             c_proj_weight = element_sz * self.hidden_size * self.num_heads * self.head_dim
 
-            return c_attn_weight + c_proj_weight
+            norm_size = 0
+            if getattr(self.model_cfg, 'querynorm', False):
+                norm_size += element_sz * self.head_dim
+            if getattr(self.model_cfg, 'keynorm', False):
+                norm_size += element_sz * self.head_dim
+
+            return c_attn_weight + c_proj_weight + norm_size
 
         def calc_gpt2_model_size():
             # ffn
