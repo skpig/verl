@@ -18,6 +18,7 @@ from .checkpoint_manager import BaseCheckpointManager
 from ray.actor import ActorHandle
 
 from alpha_seed.utils.version import check_omnistore_version
+from alpha_seed.trainer.utils.lineage import safely_do, report_checkpoint_saved
 
 REQUIRED_OMNISTORE_VERSION = '0.7.14'
 ACTUAL_OMNISTORE_VERSION = check_omnistore_version(REQUIRED_OMNISTORE_VERSION)
@@ -268,6 +269,8 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
         torch.distributed.barrier()
 
         self.previous_save_local_path = path
+        safely_do(lambda: report_checkpoint_saved(path=hdfs_path, step=global_step, tag=role, omnistore={}),
+                  rank=self.rank)()
         print(f'[rank-{self.rank}]: Finish saving checkpoint {path}')
 
     def save_callback(self, role, global_step, ckpt_global_uploader_ref, *args, **kwargs):

@@ -27,6 +27,8 @@ import os
 import copy
 import json
 import queue
+from alpha_seed.trainer.utils.lineage import (report_job_config, report_data_loaded, report_trial_ckpts_load,
+                                              report_rl_ckpts_load, safely_do)
 from multiprocessing import Process
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
@@ -649,12 +651,16 @@ class RayPPOTrainer(object):
         import concurrent.futures
         # TODO: FIXME@liu: use threadActorPool instead, make it distributed
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=512)
+        safely_do(lambda: report_job_config(config), rank=0)()
 
     def _create_dataloader(self):
         self.dataloader_mgr = DataLoaderMgr(self.config, self.tokenizer, self.is_vlm, self.processor)
         self.train_dataloader = self.dataloader_mgr.train_dataloader
         self.val_dataloader = self.dataloader_mgr.val_dataloader
         self.total_training_steps = self.dataloader_mgr.total_training_steps
+        safely_do(
+            lambda: report_data_loaded(train_files=self.config.data.train_files, val_files=self.config.data.val_files),
+            rank=0)()
 
     def _create_kl_control(self):
         # define KL control
@@ -685,6 +691,7 @@ class RayPPOTrainer(object):
         self.resource_pool_manager.create_resource_pool()
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
 
+        worker_configs = {}
         # create actor and rollout
         if self.hybrid_engine:
             if self.use_standalone_reference_policy or not self.use_reference_policy:
@@ -694,6 +701,7 @@ class RayPPOTrainer(object):
                                                          config=self.config.actor_rollout_ref,
                                                          role=role)
                 self.resource_pool_to_cls[resource_pool]['actor_rollout'] = actor_rollout_cls
+                worker_configs['actor_rollout'] = self.config.actor_rollout_ref
             elif self.use_colocate_reference_policy:
                 role = 'rollout' if self.config.trainer.val_only else 'actor_rollout_ref'
                 resource_pool = self.resource_pool_manager.get_resource_pool(Role.ActorRolloutRef)
@@ -701,6 +709,7 @@ class RayPPOTrainer(object):
                                                          config=self.config.actor_rollout_ref,
                                                          role=role)
                 self.resource_pool_to_cls[resource_pool]['actor_rollout_ref'] = actor_rollout_cls
+                worker_configs['actor_rollout_ref'] = self.config.actor_rollout_ref
             else:
                 raise NotImplementedError('Must instantiate actor and rollout')
 
@@ -710,6 +719,7 @@ class RayPPOTrainer(object):
                                                    config=self.config.actor_rollout_ref,
                                                    role='standalone_rollout')
                 self.resource_pool_to_cls[resource_pool]['standalone_rollout'] = rollout_cls
+                worker_configs['standalone_rollout'] = self.config.actor_rollout_ref
 
             if self.use_rollout_server:
                 resource_pool = self.resource_pool_manager.get_resource_pool(Role.RolloutServer)
@@ -717,6 +727,7 @@ class RayPPOTrainer(object):
                                                    config=self.config.actor_rollout_ref,
                                                    role='rollout_server')
                 self.resource_pool_to_cls[resource_pool]['rollout_server'] = rollout_cls
+                worker_configs['rollout_server'] = self.config.actor_rollout_ref
 
             if self.use_standalone_validator:
                 resource_pool = self.resource_pool_manager.get_resource_pool(Role.Validator)
@@ -724,6 +735,7 @@ class RayPPOTrainer(object):
                                                      config=self.config.actor_rollout_ref,
                                                      role='standalone_validator')
                 self.resource_pool_to_cls[resource_pool]['standalone_validator'] = validator_cls
+                worker_configs['standalone_validator'] = self.config.actor_rollout_ref
         else:
             raise NotImplementedError
 
@@ -733,6 +745,7 @@ class RayPPOTrainer(object):
             critic_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Critic], config=self.config.critic)
             self.resource_pool_to_cls[resource_pool]['critic'] = critic_cls
             self.use_critic = True
+            worker_configs['critic'] = self.config.critic
         else:
             # support GRPO and ReMax
             if self.config.algorithm.adv_estimator == 'grpo':
@@ -751,6 +764,7 @@ class RayPPOTrainer(object):
                                                   config=self.config.actor_rollout_ref,
                                                   role='ref')
             self.resource_pool_to_cls[resource_pool]['ref'] = ref_policy_cls
+            worker_configs['ref'] = self.config.actor_rollout_ref
 
         # create a reward model if reward_fn is None
         if self.use_rm:
@@ -758,6 +772,7 @@ class RayPPOTrainer(object):
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel)
             rm_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RewardModel], config=self.config.reward_model)
             self.resource_pool_to_cls[resource_pool]['rm'] = rm_cls
+            worker_configs['rm'] = self.config.reward_model
 
         self.rollout_pool = RolloutPool.get_or_create_actor(self.config)
         self.rollout_pool_warmup_step = self.config.actor_rollout_ref.rollout.rollout_pool.get("warmup_step", 0)
@@ -771,6 +786,7 @@ class RayPPOTrainer(object):
             if len(class_dict) == 0:
                 continue
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
+
             if self.config.server_client.role == "client":
                 # call this function to initialize resource_pool's placement_groups
                 # by attaching to existing ones
@@ -969,6 +985,7 @@ class RayPPOTrainer(object):
             if self.use_standalone_validator:
                 self.standalone_validator_wg.set_eos_callback_fn(sandbox_callback_fn)
 
+        safely_do(lambda: report_rl_ckpts_load(worker_configs=worker_configs), rank=0)()
         self.global_step = from_step
         self.resume_folder = resume_folder
         self._start_server()
@@ -1203,7 +1220,10 @@ class RayPPOTrainer(object):
     def _ckpt_ignore_marker_name(role):
         return f'{role}_not_optimized_ignore.txt'
 
-    def load_checkpoint(self):
+    def load_checkpoint(self, is_self_load=False):
+        """is_self_load True if the checkpoint is from current job (for example convert to omnistore), 
+                        False if the checkpoint is from other job
+        """
         global_step = self.global_step
         remote_global_step_folder = self.resume_folder  # None if no latest
 
@@ -1213,6 +1233,7 @@ class RayPPOTrainer(object):
         actor_remote_path = os.path.join(remote_global_step_folder, 'actor')
         critic_remote_path = os.path.join(remote_global_step_folder, 'critic')
         ref_remote_path = os.path.join(remote_global_step_folder, 'ref')
+        checkpoint_infos = {}
         # load actor
         if hdfs_io.hexists(
                 os.path.join(remote_global_step_folder,
@@ -1223,18 +1244,26 @@ class RayPPOTrainer(object):
         else:
             self.actor_rollout_wg.load_checkpoint(actor_remote_path, self.config.trainer.ckpt_version,
                                                   self.config.trainer.ckpt_enable_shm, 'actor')
+        self.actor_rollout_wg.load_checkpoint(actor_remote_path, self.config.trainer.ckpt_version,
+                                              self.config.trainer.ckpt_enable_shm, 'actor')
+        checkpoint_infos[actor_remote_path] = {"tag": "actor", "step": global_step}
         # load critic
         if self.use_critic:
             self.critic_wg.load_checkpoint(critic_remote_path, self.config.trainer.ckpt_version,
                                            self.config.trainer.ckpt_enable_shm)
+            checkpoint_infos[critic_remote_path] = {"tag": "critic", "step": global_step}
 
         # load ref
         use_ref_ema = self.config.actor_rollout_ref.ref.ema < 1
         if use_ref_ema:
             self.actor_rollout_wg.load_checkpoint(ref_remote_path, self.config.trainer.ckpt_version,
                                                   self.config.trainer.ckpt_enable_shm, 'ref')
+            checkpoint_infos[ref_remote_path] = {"tag": "ref", "step": global_step}
 
-        # load dataloader
+        if not is_self_load:
+            safely_do(lambda: report_trial_ckpts_load(checkpoint_infos=checkpoint_infos), rank=0)()
+
+            # load dataloader
         self.train_dataloader = self.dataloader_mgr._load_dataloader(remote_global_step_folder)
 
         # load replay buffer
@@ -2349,7 +2378,7 @@ class RayPPOTrainer(object):
         self.global_step = 0
 
         # load checkpoint before doing anything
-        _ = self.load_checkpoint()
+        _ = self.load_checkpoint(is_self_load=True)
         # save omnistore ckpt
         self.save_checkpoint(specified_ckpt_version='omnistore')
         ray.get(self.ckpt_global_uploader.wait_all.remote(self.global_step, False))

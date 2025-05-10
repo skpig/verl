@@ -19,6 +19,7 @@ import warnings
 import functools
 import re
 from typing import Optional, Tuple
+from alpha_seed.trainer.utils.lineage import report_checkpoint_saved, report_job_config, report_data_loaded, report_trial_started, safely_do
 import torch
 import torch.distributed as dist
 from torch import nn, optim
@@ -102,6 +103,8 @@ class SFTTrainer(object):
         self.sp_size = config.model.sp_size
         self.tp_size = config.model.tp_size
 
+        safely_do(lambda: report_job_config(config), rank=self.rank)()
+
         assert self.world_size % (
             config.model.sp_size * config.model.tp_size
         ) == 0, f"world_size {self.world_size} % (sp_size {config.model.sp_size} * tp_size {config.model.tp_size}) != 0"
@@ -124,9 +127,14 @@ class SFTTrainer(object):
         # normalize dp size
         self._normalize_config_bsz()
 
+        safely_do(
+            lambda: report_data_loaded(train_files=self.config.data.train_files, val_files=self.config.data.val_files),
+            rank=self.rank)()
         self._build_dataloader()
+
         # build model
         override_model_config = OmegaConf.to_container(config.model.override_config)
+        safely_do(lambda: report_trial_started(checkpoint_paths=[self.config.model.path]), rank=self.rank)()
         self._build_model_optimizer(override_model_config)
 
     def _normalize_config_bsz(self):
@@ -387,12 +395,20 @@ class SFTTrainer(object):
             torch.distributed.all_reduce(loss, op=torch.distributed.ReduceOp.AVG)
         return loss
 
-    def save_checkpoint(self, step):
+    def save_checkpoint(self, step: int, epoch: int = -1):
+        base_dir = os.path.join(self.config.trainer.default_hdfs_dir, "checkpoints")
+
         omnistore.FSDPCheckpointer.save(
-            os.path.join(self.config.trainer.default_hdfs_dir, "checkpoints"),
+            base_dir,
             {"model": self.fsdp_model},
             global_steps=step,
         )
+
+        path = os.path.join(base_dir, f'global_step_{step}')
+
+        safely_do(lambda: report_checkpoint_saved(
+            default_hdfs_path=self.config.trainer.default_hdfs_dir, path=path, step=step, epoch=epoch, omnistore={}),
+                  rank=self.rank)()
 
     def fit(self):
         if self.rank == 0:
@@ -410,7 +426,7 @@ class SFTTrainer(object):
 
                 metric.update({"train/elapsed_time_per_step": timer.last})
                 if global_step % self.config.trainer.save_steps == 0:
-                    self.save_checkpoint(step=global_step)
+                    self.save_checkpoint(step=global_step, epoch=epoch)
 
                 # validation
                 if global_step % self.config.trainer.eval_interval == 0:
@@ -430,7 +446,7 @@ class SFTTrainer(object):
                 global_step += 1
 
             # save checkpoint
-            self.save_checkpoint(step=global_step)
+            self.save_checkpoint(step=global_step, epoch=epoch)
 
             if self.rank == 0:
                 local_path = os.path.join(self.config.trainer.default_local_dir, "huggingface")

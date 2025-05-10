@@ -14,6 +14,7 @@ from transformers import PretrainedConfig, PreTrainedTokenizer
 
 from .checkpoint_manager import BaseCheckpointManager
 from ray.actor import ActorHandle
+from alpha_seed.trainer.utils.lineage import safely_do, report_checkpoint_saved
 
 
 class CheckpointManagerV1(BaseCheckpointManager):
@@ -125,3 +126,6 @@ class CheckpointManagerV1(BaseCheckpointManager):
         torch.distributed.barrier()
 
         self.previous_save_local_path = local_path
+        safely_do(lambda: report_checkpoint_saved(
+            path=hdfs_path, step=global_step, default_hdfs_path=default_hdfs_path, tag=role),
+                  rank=self.rank)()
