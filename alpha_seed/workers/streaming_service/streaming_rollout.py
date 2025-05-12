@@ -325,6 +325,7 @@ class AsyncXPerfGPTRollout(object):
         await query.wait_until_done()
         query._event = None
         query._loop = None
+        query.input_embedding = None
         if query._exception is not None:
             raise query._exception
         return query
@@ -358,8 +359,9 @@ class AsyncXPerfGPTRollout(object):
         self.input_queue = queue.Queue()
         self.output_queue = queue.Queue()
         self.stop_event = threading.Event()
+        self.stop_event.set()
         self.process_thread = threading.Thread(
-            target=self.generate if self.role != "rollout_server" else self.async_generate, args=())
+            target=self.generate if self.config.mode == "batch" else self.async_generate, args=())
         self.process_thread.start()
 
     def set_rollout_callback_function(self, eos_callback_fn):
@@ -526,6 +528,11 @@ class AsyncXPerfGPTRollout(object):
     def async_generate(self):
         torch.cuda.set_device(int(os.getenv('LOCAL_RANK', '0')))
         while True:
+            import time
+            time.sleep(1)
+            if self.stop_event.is_set():
+                continue
+            print(self.stop_event)
             with logging_set_level(self.config.get('logging_level', 'WARN')), self.profiler_context as p:
                 try:
                     self.reset_status()

@@ -104,7 +104,10 @@ class AsyncXPerfGPTRolloutServer(OpenAIProxy):
         self.tokenizer = tokenizer
         self.model_hf_config = model_hf_config
         self.actor_cls = actor_cls
-        self.world_size = self.config.rollout_server.nnodes * self.config.rollout_server.n_gpus_per_node
+        if self.config.actor_rollout_ref.rollout.mode == "server":
+            self.world_size = self.config.trainer.nnodes * self.config.trainer.n_gpus_per_node
+        else:
+            self.world_size = self.config.rollout_server.nnodes * self.config.rollout_server.n_gpus_per_node
         self.tp_size = self.config.actor_rollout_ref.rollout.tensor_model_parallel_size
         self.dp_size = self.config.actor_rollout_ref.rollout.get("attention_data_parallel_size", 1)
         self.mp_size = self.tp_size * self.dp_size
@@ -190,6 +193,8 @@ class AsyncXPerfGPTRolloutServer(OpenAIProxy):
         return self.inflight_query_num
 
     def attach_actors(self, worker_group):
+        if worker_group is None:
+            return
         self.worker_group = worker_group
         self.workers = worker_group._workers
         self.sub_cls_name = worker_group.sub_cls_name
@@ -202,8 +207,8 @@ class AsyncXPerfGPTRolloutServer(OpenAIProxy):
         # worker_helper = WorkerHelper()
         # free_port_addr = list(worker_helper.get_availale_master_addr_port())
         config = uvicorn.Config(self.app, host=host, port=8001, loop="asyncio", timeout_keep_alive=300, backlog=16384)
-        # logging.getLogger("uvicorn.access").disabled = True
-        # logging.getLogger("uvicorn").propagate = False
+        logging.getLogger("uvicorn.access").disabled = True
+        logging.getLogger("uvicorn").propagate = False
         server = uvicorn.Server(config)
         self.server_task = asyncio.create_task(server.serve())
 

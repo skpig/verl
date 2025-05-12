@@ -143,6 +143,7 @@ actor_rollout_ref:
     quant_mode: "NO_QUANT"
     gpu_memory_utilization: 0.7
     schedule_strategy: default # [default,fifo]
+    mode: "batch" # [batch, server]
     plugin: &plugin_config
       enable: False
       names: []

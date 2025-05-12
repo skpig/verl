@@ -1,5 +1,6 @@
 import os
 import time
+import asyncio
 from collections import defaultdict
 import uuid
 import json
@@ -44,6 +45,15 @@ class ValidateManager(object):
         if self.fast_result:
             print('Using fast result on wandb mode.')
         assert len(self.val_dataloader) == 1, "for bon metrics computation"
+        self.loop = None
+
+        def _run_loop():
+            self.loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self.loop)
+            self.loop.run_forever()
+
+        self.thread = threading.Thread(target=_run_loop, daemon=True)
+        self.thread.start()
 
     def validate(self,
                  val_epoch=1,
@@ -103,6 +113,34 @@ class ValidateManager(object):
                 if val_log is not None:
                     self.logger.log(data=val_log, step=global_step, backend="tracking")
         return
+
+    async def _dispatch_parallel_requests(self, validator_wg, test_batch, global_step):
+        from alpha_seed.workers.agents.math.aiohttp_handler import process_single_batch
+        from alpha_seed.workers.agents import TaskContext
+        import asyncio
+        validator_wg.toggle_inference_server_state(sleep=False)
+        context = TaskContext(self.config, self.tokenizer, self.val_reward_fn, global_step)  # add more context object
+
+        # submit the training batch to the rollout server
+        running_batch = []
+        for item in test_batch.chunk(len(test_batch)):
+            task = asyncio.create_task(process_single_batch(item, context))
+            running_batch.append(task)
+        print(f"[INFO] {global_step} generate streaming[submit], batch size: {len(test_batch)}")
+        await asyncio.gather(*running_batch)
+
+        print(f"[INFO] {global_step} generate streaming[as_completed], batch size: {len(test_batch)}")
+
+        done, _ = await asyncio.wait(running_batch, timeout=0, return_when=asyncio.ALL_COMPLETED)
+        results = []
+        for task in done:
+            if task.exception():
+                raise task.exception()
+            else:
+                results.append(task.result())
+        batch = DataProto.concat(results)
+        validator_wg.toggle_inference_server_state(sleep=True)
+        return batch
 
     def _validate(self, val_epoch, need_log, log_file, is_async, global_step, validator_wg):
         print(f'{time.time()} start validate with fast_result={self.fast_result}')
@@ -173,7 +211,14 @@ class ValidateManager(object):
                 for i in range(pad_size):
                     test_gen_batch_padded.non_tensor_batch['uid'][-1 - i] = None
 
-                test_output_gen_batch = validator_wg.generate_sequences(test_gen_batch_padded)
+                if self.config.actor_rollout_ref.rollout.mode == "batch":
+                    test_output_gen_batch = validator_wg.generate_sequences(test_gen_batch_padded)
+                else:
+                    test_output_gen_batch = asyncio.run_coroutine_threadsafe(
+                        self._dispatch_parallel_requests(validator_wg=validator_wg,
+                                                         test_batch=test_gen_batch_padded,
+                                                         global_step=global_step), self.loop).result()
+
                 test_output_gen_batch.batch['prompts'] = test_output_gen_batch.batch['input_ids'][:, :self.config.data.
                                                                                                   max_prompt_length]
                 test_output_gen_batch.batch['responses'] = test_output_gen_batch.batch['input_ids'][:, self.config.data.

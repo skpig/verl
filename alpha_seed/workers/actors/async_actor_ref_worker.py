@@ -40,6 +40,8 @@ from verl.utils.import_utils import import_external_libs
 from verl.utils.debug import log_gpu_memory_usage
 from verl.utils.torch_functional import get_constant_schedule_with_warmup
 from alpha_seed.trainer.optim import get_optimizer_from_config
+from alpha_seed.workers.xperf_rollout.component.query import Query
+from alpha_seed.workers.xperf_rollout.utils.layout_convert_helper import offload_to_device
 
 from alpha_seed.utils import ndtimeline
 from alpha_seed.workers.hybrid_engine.fsdp_gather import DataGatherManager
@@ -1237,6 +1239,40 @@ class AsyncActorRolloutRefWorker(Worker):
         gc.collect()
         torch.cuda.empty_cache()
         self.__init__(config, role)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def add_inflight_query(self, query: Query):
+        return self.rollout.add_inflight_query(query)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    async def get_inflight_query(self, query_id):
+        return await self.rollout.get_inflight_query(query_id)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def setup_standalone_worker_comm(self, hybrid_master_address, standalone_master_address, port, role):
+        self.sharding_manager.weights_communicater.setup_standalone_worker_comm(hybrid_master_address,
+                                                                                standalone_master_address, port, role)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
+    def toggle_inference_server_state(self, sleep):
+        if self.config.rollout.mode == "batch":
+            return
+        if sleep:
+            self.rollout.stop_event.set()
+            while (self.rollout.inference_engine.stop_signal_tensor.item()
+                   != self.rollout.inference_engine.engine.module.tp_size):
+                import time
+                time.sleep(0.01)
+            self.sharding_manager.__exit__(None, None, None)
+            self.rollout.inference_engine.status = "idle"
+            return
+        assert (self.rollout.inference_engine.status == "idle")
+        if self.config.actor.train_memory_offload:
+            self.to("cuda", model=True, optimizer=False)
+        self.sharding_manager.__enter__()
+        with self.rollout.inference_engine.update_weights_lock:
+            self.rollout.stop_event.clear()
+            self.rollout.inference_engine.stop_signal_tensor.zero_()
 
 
 def summerize_data(data: Union[dict, tuple, list], name: str = 'summary', level: int = 0, show_value=False) -> str:

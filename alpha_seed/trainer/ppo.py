@@ -33,13 +33,12 @@ from multiprocessing import Process
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Type, Tuple, Union, List
+from typing import Type, List
 import hdfs_io
 
 import wandb
 import ray
 import pandas as pd
-from omegaconf import OmegaConf, open_dict
 import numpy as np
 from codetiming import Timer
 
@@ -54,7 +53,6 @@ from alpha_seed.workers.ppo_actor import make_mini_step_dataloader
 from alpha_seed.utils.observility.pretty_print import pprint
 from alpha_seed.utils import ndtimeline
 from alpha_seed.utils.tracking_utils import async_process_batch_samples_to_wandb
-from alpha_seed.utils.dataset.rl_dataset import RLHFDataset
 from alpha_seed.utils.multithreads import ThreadPoolManager
 from alpha_seed.workers.actors.checkpoint.utils import find_latest_ckpt_path_
 from alpha_seed.trainer.utils.dataloader_mgr import DataLoaderMgr
@@ -988,7 +986,8 @@ class RayPPOTrainer(object):
         safely_do(lambda: report_rl_ckpts_load(worker_configs=worker_configs), rank=0)()
         self.global_step = from_step
         self.resume_folder = resume_folder
-        self._start_server()
+        if self.config.actor_rollout_ref.rollout.mode == "server":
+            self._start_server()
 
     def _start_server(self):
         import asyncio
@@ -1009,7 +1008,7 @@ class RayPPOTrainer(object):
             from alpha_seed.workers.streaming_service.streaming_rollout_server import AsyncXPerfGPTRolloutServer
             self.server = AsyncXPerfGPTRolloutServer(self.config, self.tokenizer)
             async with self.server as rollout:
-                rollout.attach_actors(self.rollout_server_wg)
+                rollout.attach_actors(self.actor_rollout_wg)
                 await asyncio.Future()
 
         asyncio.run_coroutine_threadsafe(listen(), background_loop)
@@ -1512,6 +1511,41 @@ class RayPPOTrainer(object):
 
         return gen_batch, batch
 
+    async def _dispatch_parallel_requests(self, gen_batch):
+        from alpha_seed.workers.agents.math.aiohttp_handler import process_single_batch
+        from alpha_seed.workers.agents import TaskContext
+        import asyncio
+        with Timer(name='binding', logger=None) as timer:
+            self.actor_rollout_wg.toggle_inference_server_state(sleep=False)
+        context = TaskContext(self.config, self.tokenizer, self.reward_fn, self.global_step)  # add more context object
+
+        # submit the training batch to the rollout server
+        running_batch = []
+        for item in gen_batch.chunk(len(gen_batch)):
+            task = asyncio.create_task(process_single_batch(item, context))
+            running_batch.append(task)
+        print(f"[INFO] {self.global_step} generate streaming[submit], batch size: {len(gen_batch)}")
+        await asyncio.gather(*running_batch)
+
+        print(f"[INFO] {self.global_step} generate streaming[as_completed], batch size: {len(gen_batch)}")
+
+        done, _ = await asyncio.wait(running_batch, timeout=0, return_when=asyncio.ALL_COMPLETED)
+        results = []
+        for task in done:
+            if task.exception():
+                raise task.exception()
+            else:
+                results.append(task.result())
+
+        self.actor_rollout_wg.toggle_inference_server_state(sleep=True)
+        batch = DataProto.concat(results)
+        batch.meta_info.update({
+            'memory/gen_max_allocated': 0,
+            'memory/gen_max_reserved': 0,
+            'timing/weight_binding': timer.last
+        })
+        return batch
+
     def _generate(self, batch, start_step, metrics, standalone_batch, pending_batch):
         ready_batch = []
 
@@ -1519,7 +1553,12 @@ class RayPPOTrainer(object):
 
         with Timer(name='gen', logger=None) as timer:
             with tensorcore_collection():
-                gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+                if self.config.actor_rollout_ref.rollout.mode == "batch":
+                    gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+                else:
+                    gen_batch_output = asyncio.run_coroutine_threadsafe(
+                        self._dispatch_parallel_requests(gen_batch=gen_batch), self.loop).result()
+
                 # TODO: The following two lines should be memory view. However it's not. Let's remove it by removing all its dependency
                 gen_batch_output.batch['prompts'] = gen_batch_output.batch['input_ids'][:, :self.config.data.
                                                                                         max_prompt_length]
@@ -1915,7 +1954,7 @@ class RayPPOTrainer(object):
                                     metrics=metrics,
                                     standalone_batch=standalone_batch,
                                     pending_batch=pending_batch)
-                        metrics['time/generate'] = timer.last
+                        metrics['timing/generate'] = timer.last
                         if batch is None or len(
                                 batch) == 0 or self.global_step < self.rollout_pool_warmup_step + start_step:
                             self.global_step += 1

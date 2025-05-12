@@ -87,7 +87,7 @@ if __name__ == '__main__':
                         "messages": content,
                         "top_p": 1.0,
                         "top_k": 1,
-                        "max_tokens": 1,
+                        "max_tokens": 16,
                         "max_length": 1024
                     },
             ) as resp:

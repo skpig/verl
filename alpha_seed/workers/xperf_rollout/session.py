@@ -140,8 +140,8 @@ class InferenceSession:
         self.enable_ngrams_decoding = enable_ngrams_decoding
         self.schedule_strategy = schedule_strategy
         self.step_profiler = step_profiler
+        self.status = "idle"
         self.enable_mtp_decoding = enable_mtp_decoding
-
         self.record_input_prompt = True
         self.tokenizer = None
         self.max_off_policy_steps = 5
@@ -834,7 +834,6 @@ class InferenceSession:
                 if (not query.is_finished and query.off_policy_steps >= self.max_off_policy_steps):
                     skip_break = True
             if not skip_break and self.stop_signal_tensor.item() == self.engine.module.tp_size:
-                self.stop_signal_tensor.fill_(0.0)
                 return True
         return False
 
@@ -958,13 +957,17 @@ class InferenceSession:
                     self.waiting.append(query)
                 self.running = []
                 time.sleep(0.01)
+                return True
+            return False
 
         def _idle():
             return (len(self.waiting) == 0 and len(self.running) == 0)
 
         while (True):
             try:
-                _check_stop_event()
+                self.status = "running"
+                if (_check_stop_event()):
+                    break
                 # each rank should have the same running and waiting
                 if (_idle()) or (self.current_steps % 20 == 0):
                     self.waiting = self._fetch_from_pending_queries()
