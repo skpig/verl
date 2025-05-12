@@ -53,7 +53,7 @@ async def _internal_call(item, config):
         print("Request was cancelled!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         raise  # Re-raise to propagate the cancellation
     except Exception as e:
-        print(f"Error occurred!!!!!!!!!!!!!!!!!!")
+        print(f"Error occurred!!!!!!!!!!!!!!!!!!", e)
         raise  # Re-raise the exception to propagate it further
     return completion
 

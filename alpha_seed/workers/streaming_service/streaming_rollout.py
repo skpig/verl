@@ -359,9 +359,11 @@ class AsyncXPerfGPTRollout(object):
         self.input_queue = queue.Queue()
         self.output_queue = queue.Queue()
         self.stop_event = threading.Event()
-        self.stop_event.set()
-        self.process_thread = threading.Thread(
-            target=self.generate if self.config.mode == "batch" else self.async_generate, args=())
+        if self.config.mode == "server" or self.role == "rollout_server":
+            self.stop_event.set()
+        self.process_thread = threading.Thread(target=self.async_generate if self.config.mode == "server" or
+                                               self.role == "rollout_server" else self.generate,
+                                               args=())
         self.process_thread.start()
 
     def set_rollout_callback_function(self, eos_callback_fn):
@@ -532,7 +534,6 @@ class AsyncXPerfGPTRollout(object):
             time.sleep(1)
             if self.stop_event.is_set():
                 continue
-            print(self.stop_event)
             with logging_set_level(self.config.get('logging_level', 'WARN')), self.profiler_context as p:
                 try:
                     self.reset_status()
@@ -597,6 +598,9 @@ class RemoteAsyncXPerfGPTRollout(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
     def stop_server_before_weights_update(self):
+        if self.rollout_actor.stop_event.is_set():
+            return
+
         with self.rollout_actor.inference_engine.update_weights_lock:
             self.rollout_actor.stop_event.set()
 
@@ -614,4 +618,5 @@ class RemoteAsyncXPerfGPTRollout(Worker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
     def restart_server_after_weights_update(self):
         with self.rollout_actor.inference_engine.update_weights_lock:
+            self.rollout_actor.reset_status()
             self.rollout_actor.stop_event.clear()

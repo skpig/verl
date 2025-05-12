@@ -986,7 +986,7 @@ class RayPPOTrainer(object):
         safely_do(lambda: report_rl_ckpts_load(worker_configs=worker_configs), rank=0)()
         self.global_step = from_step
         self.resume_folder = resume_folder
-        if self.config.actor_rollout_ref.rollout.mode == "server":
+        if self.config.actor_rollout_ref.rollout.mode == "server" or self.use_rollout_server:
             self._start_server()
 
     def _start_server(self):
@@ -1008,7 +1008,8 @@ class RayPPOTrainer(object):
             from alpha_seed.workers.streaming_service.streaming_rollout_server import AsyncXPerfGPTRolloutServer
             self.server = AsyncXPerfGPTRolloutServer(self.config, self.tokenizer)
             async with self.server as rollout:
-                rollout.attach_actors(self.actor_rollout_wg)
+                rollout.attach_actors(self.actor_rollout_wg if self.config.actor_rollout_ref.rollout.mode ==
+                                      "server" else self.rollout_server_wg)
                 await asyncio.Future()
 
         asyncio.run_coroutine_threadsafe(listen(), background_loop)
@@ -1348,7 +1349,6 @@ class RayPPOTrainer(object):
         # bind weights...
         start = time.time()
         self.rollout_server_wg.stop_server_before_weights_update()
-
         # update the rollout server, do weights binding
         with Timer(name='update_rollout_server', logger=None) as timer:
             actor_fut = self.actor_rollout_wg.update_standalone_worker("standalone_rollout_server")
