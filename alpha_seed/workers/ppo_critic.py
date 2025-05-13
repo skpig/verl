@@ -240,6 +240,7 @@ class DataParallelPPOCritic(BasePPOCritic):
 
         if self.config.shuffle:
             dataloader = self._make_minibatch_iterator(data)
+            chunk_size = math.ceil(data.batch.batch_size[0] / self.config.ppo_mini_batch_size)
         else:
             select_keys = ['input_ids', 'responses', 'attention_mask', 'values', 'returns']
             for opt_key in ['overlong_mask', 'model_output_mask']:
@@ -313,7 +314,8 @@ class DataParallelPPOCritic(BasePPOCritic):
                                                                    cliprange_value_high=cliprange_value_high,
                                                                    overlong_mask=overlong_mask,
                                                                    loss_average_method=self.config.loss_average_method)
-                    seq_level_vf_lst.append(seq_vf)
+                    if (batch_idx < chunk_size) or (not self.config.shuffle):
+                        seq_level_vf_lst.append(seq_vf)
                     if self.config.use_dynamic_bsz:
                         loss = vf_loss * (len(micro_data) / self.config.ppo_mini_batch_size)
                     else:
