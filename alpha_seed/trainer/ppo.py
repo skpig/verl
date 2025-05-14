@@ -1426,6 +1426,10 @@ class RayPPOTrainer(object):
             batch.batch['responses'] = batch.batch['input_ids'][:, self.config.data.max_prompt_length:]
             batch.meta_info['generation_kwargs'] = self.config.actor_rollout_ref.rollout.train_generate_kwargs
             batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask'], dim=-1).tolist()
+            if 'pixel_values' in batch.non_tensor_batch:
+                batch.meta_info['global_img_token_num'] = [
+                    t.shape[0] if t is not None else 0 for t in batch.non_tensor_batch['pixel_values']
+                ]
             metrics['rollout/training_batch'] = len(batch)
             pprint(f'training batches {len(batch)}.')
         print("generate streaming... ", time.time() - outside_start)
@@ -1702,6 +1706,10 @@ class RayPPOTrainer(object):
             batch.batch["responses"][:, -1] = self.tokenizer.eos_token_id
         batch.meta_info['generation_kwargs'] = self.config.actor_rollout_ref.rollout.train_generate_kwargs
         batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask'], dim=-1).tolist()
+        if 'pixel_values' in batch.non_tensor_batch:
+            batch.meta_info['global_img_token_num'] = [
+                t.shape[0] if t is not None else 0 for t in batch.non_tensor_batch['pixel_values']
+            ]
         metrics['rollout/training_batch'] = len(batch)
         pprint(f'training batches {len(batch)}.')
 
@@ -2038,6 +2046,11 @@ class RayPPOTrainer(object):
                                     'generation_kwargs'] = self.config.actor_rollout_ref.rollout.train_generate_kwargs
                                 batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask'],
                                                                                 dim=-1).tolist()
+                                if 'pixel_values' in batch.non_tensor_batch:
+                                    batch.meta_info['global_img_token_num'] = [
+                                        t.shape[0] if t is not None else 0
+                                        for t in batch.non_tensor_batch['pixel_values']
+                                    ]
                                 metrics['rollout/training_batch'] = len(batch)
                                 for key in rollout_pool_metrics:  # fix: mean acc for each rollout batch
                                     if '/acc_' in key and type(rollout_pool_metrics[key]) in [float, int]:

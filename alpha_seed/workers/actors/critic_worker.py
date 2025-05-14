@@ -486,7 +486,10 @@ class CriticWorker(Worker):
             delta_time = timer.last
 
             global_num_tokens = data.meta_info['global_token_num']
-            estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
+            kwargs = {}
+            if 'global_img_token_num' in data.meta_info:
+                kwargs['images_seqlens'] = data.meta_info['global_img_token_num']
+            estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time, **kwargs)
             metrics['mfu/critic'] = estimated_flops * self.config.ppo_epochs / promised_flops / self.world_size
 
             if self.critic_strategy in ('fsdp', 'vescale-fsdp2'):

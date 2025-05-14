@@ -4,10 +4,9 @@ set -x
 SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/ssd_lq/user/caisonghua_new/checkpoints/m8_2b5_32k_seedvit_400m_baseline_openthought_8k_simplified_sys
 
 TRAIN_FILE=hdfs://haruna/home/byte_data_seed/hl_lq/iccv/user/xiaoboqin/data/rlhf/math/mmathcot_v4_hard_w_sys_for_rl.parquet
-# TODO: change test file
-#TEST_FILE=hdfs://haruna/home/byte_data_seed/hl_lq/iccv/user/xiaoboqin/data/rlhf/math/eval_mathvision_fix_w_instruct_for_rl.parquet
-TEST_FILE=$TRAIN_FILE
+TEST_FILE=hdfs://haruna/home/byte_data_seed/hl_lq/iccv/user/lingyue/data/rl/eval_alphaseed_mathvision_fix_v2_dot.parquet
 default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/caisonghua/test/vlm_grpo
+
 
 # 训练长度
 max_prompt_length=8192
@@ -15,8 +14,6 @@ max_response_length=1024
 # batch size && 训练epoch
 train_batch_size=16
 ppo_mini_batch_size=1024
-# val_batch_size=6834
-# # TODO caisonghua for debug purpose
 train_batch_size=16
 ppo_mini_batch_size=16
 val_batch_size=8
@@ -39,7 +36,7 @@ clip_ratio2=2.0
 weight_decay=0.1
 adv_estimator=grpo
 kl_loss_weight=0.0004
-num_bon=16
+num_bon=2
 bon_strategy=all
 kl_penalty=low_var_kl
 temperature=1.2
@@ -56,8 +53,6 @@ use_dynamic_bsz=True
 actor_ppo_max_token_len=36864
 critic_ppo_max_token_len=36864
 infer_ppo_max_token_len=36864
-# actor_sp_size=2
-# critic_sp_size=2
 
 actor_sp_size=2
 critic_sp_size=2
@@ -153,5 +148,4 @@ python3 tasks/main_ppo.py \
     critic.profile.filename=actor.tp${xperf_tp_size}.fsdp${fsdp_size} \
     actor_rollout_ref.actor.profile.enable=False \
     actor_rollout_ref.actor.profile.upload_to_mlx=False \
-    actor_rollout_ref.actor.profile.filename=actor.tp${xperf_tp_size}.fsdp${fsdp_size} \
-    actor_rollout_ref.actor.act_offload=True
+    actor_rollout_ref.actor.profile.filename=actor.tp${xperf_tp_size}.fsdp${fsdp_size}
