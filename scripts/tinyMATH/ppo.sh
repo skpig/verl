@@ -22,8 +22,8 @@ OFFLOAD=True
 FORWARD_BSZ=16
 BACKWARD_BSZ=8
 TOTAL_EPOCHS=1
-FORWARD_MAX_TOKEN_LEN=$((4 * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN)))
-BACKWARD_MAX_TOKEN_LEN=$((2 * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN)))
+FORWARD_MAX_TOKEN_LEN=$((16 * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN)))
+BACKWARD_MAX_TOKEN_LEN=$((4 * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN)))
 # For async rollout mode, dataset should return raw chat.
 rollout_mode="sync"
 if [ "$rollout_mode" = "async" ]; then
