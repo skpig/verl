@@ -1,19 +1,21 @@
 # BASE_MODEL=${MY_MODEL_DIR}Qwen/Qwen2.5-3B
 # TEMPLATE_TYPE=base # or chat
-BASE_MODEL=${MY_MODEL_DIR}Qwen/Qwen2.5-3B-Instruct
+BASE_MODEL=${MY_MODEL_DIR}Qwen/Qwen2.5-1.5B-Instruct
 TEMPLATE_TYPE=chat # or chat
-DATA_DIR=${MY_DATA_DIR}countdown
+DATA_DIR=${MY_DATA_DIR}
 REWARD_FILE=/home/huangbz/verl/verl/utils/reward_score/countdown.py 
 REWARD_NAME=compute_score
+TRAIN_FILE="${MY_DATA_DIR}countdown/train.parquet"
+TEST_FILES="['${MY_DATA_DIR}countdown/test.parquet','${MY_DATA_DIR}samsum/test.parquet','${MY_DATA_DIR}wmt/test.parquet']"
 
 RUN_ID=$1
 
 # Model settings
 ROLLOUT_N=5
-MAX_PROMPT_LEN=256
+MAX_PROMPT_LEN=512
 MAX_RESPONSE_LEN=1024
 BATCH_SIZE=512
-MINI_BSZ=512
+MINI_BSZ=64
 
 # Performance tuning
 N_GPUS=4
@@ -21,8 +23,8 @@ ROLLOUT_TP_SIZE=1
 FORWARD_BSZ=16
 BACKWARD_BSZ=8
 TOTAL_EPOCHS=1
-FORWARD_MAX_TOKEN_LEN=$((12 * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN)))
-BACKWARD_MAX_TOKEN_LEN=$((6 * MAX_PROMPT_LEN + MAX_RESPONSE_LEN))
+FORWARD_MAX_TOKEN_LEN=$((48 * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN)))
+BACKWARD_MAX_TOKEN_LEN=$((20 * MAX_PROMPT_LEN + MAX_RESPONSE_LEN))
 
 PROJ_NAME="TinyZero"
 MODEL_NAME=$(basename $BASE_MODEL)
@@ -30,7 +32,13 @@ DATA_NAME=$(basename $DATA_DIR)
 EXPERIMENT_NAME="ID${RUN_ID}_${DATA_NAME}_grpo_${MODEL_NAME}_n${ROLLOUT_N}_resplen${MAX_RESPONSE_LEN}_bsz${BATCH_SIZE}-${MINI_BSZ}"
 
 python3 data_preprocess/countdown.py \
-  --local_dir $DATA_DIR \
+  --local_dir "${DATA_DIR}countdown" \
+  --template_type $TEMPLATE_TYPE
+python3 data_preprocess/wmt.py \
+  --local_dir "${DATA_DIR}wmt" \
+  --template_type $TEMPLATE_TYPE
+python3 data_preprocess/samsum.py \
+  --local_dir "${DATA_DIR}samsum" \
   --template_type $TEMPLATE_TYPE
 
 DATA_DIR="${DATA_DIR}_${TEMPLATE_TYPE}"
@@ -41,8 +49,8 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
  custom_reward_function.path=$REWARD_FILE \
  custom_reward_function.name=$REWARD_NAME \
  algorithm.adv_estimator=grpo \
- data.train_files=$DATA_DIR/train.parquet \
- data.val_files=$DATA_DIR/test.parquet \
+  data.train_files=$TRAIN_FILE \
+  data.val_files=$TEST_FILES \
  data.train_batch_size=$BATCH_SIZE \
  data.val_batch_size=1312 \
  data.max_prompt_length=$MAX_PROMPT_LEN \
@@ -71,7 +79,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
  trainer.n_gpus_per_node=$N_GPUS \
  trainer.nnodes=1 \
  trainer.save_freq=10 \
- trainer.test_freq=10 \
+ trainer.test_freq=3 \
  trainer.project_name=$PROJ_NAME \
  trainer.experiment_name=$EXPERIMENT_NAME \
  trainer.total_epochs=$TOTAL_EPOCHS

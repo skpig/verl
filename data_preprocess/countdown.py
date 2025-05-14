@@ -80,11 +80,11 @@ if __name__ == '__main__':
     parser.add_argument('--max_target', type=int, default=1000)
     parser.add_argument('--min_number', type=int, default=1)
     parser.add_argument('--max_number', type=int, default=100)
-    parser.add_argument('--train_size', type=int, default=327680)
+    parser.add_argument('--train_size', type=int, default=32768)
     parser.add_argument('--test_size', type=int, default=512)
 
     args = parser.parse_args()
-    args.local_dir += f'_{args.template_type}'
+    # args.local_dir += f'_{args.template_type}'
     # if os.path.exists(args.local_dir):
     #     print(f"Directory {args.local_dir} already exists. Exiting.")
     #     exit(0)

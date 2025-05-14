@@ -202,6 +202,6 @@ trainer:
   default_hdfs_dir: null
   del_local_ckpt_after_load: False
   default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
-  max_actor_ckpt_to_keep: null
-  max_critic_ckpt_to_keep: null
+  max_actor_ckpt_to_keep: 1
+  max_critic_ckpt_to_keep: 1
   reward_scale_fn: 'max_only' # 'identity'不改变, 'max_only'只保留最大的reward=1, 'z_normalize'根据当前batch高斯归一化到[-1,1]区间, 'linear0center'从0,1放缩到-1,1区间

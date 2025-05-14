@@ -12,7 +12,7 @@ data:
   template_type: chat
   shuffle: True
   filter_overlong_prompts: False # for large-scale dataset, filtering overlong prompts could be timeconsuming. You should disable this and set `truncation='left'
-  truncation: error
+  truncation: right
   image_key: images
 
 actor_rollout_ref:

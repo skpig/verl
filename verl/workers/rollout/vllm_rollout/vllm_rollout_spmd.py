@@ -124,6 +124,7 @@ class vLLMRollout(BaseRollout):
             enable_chunked_prefill=config.enable_chunked_prefill,
             enable_prefix_caching=True,
             trust_remote_code=trust_remote_code,
+            seed=42,
         )
 
         # Offload vllm model to reduce peak memory usage
@@ -218,7 +219,8 @@ class vLLMRollout(BaseRollout):
                 'top_k': -1,
                 'min_p': 0.0,
                 'temperature': 0,
-                'n': 1  # if greedy, only 1 response
+                'n': 1,  # if greedy, only 1 response
+                # 'seed': 42
             }
         elif is_validate:
             # TODO: try **

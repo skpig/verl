@@ -74,7 +74,7 @@ def evaluate_equation(equation_str):
         return None
 
 
-def compute_score(data_source, solution_str, ground_truth, extra_info=None, method='strict'):
+def coutdown_compute_score(data_source, solution_str, ground_truth, extra_info=None, method='strict'):
     """The scoring function for countdown task.
     
     Args:
@@ -140,3 +140,49 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None, meth
             msgs.append("Error evaluating equation")
             print("\n".join(msgs), flush=True)
         return format_score, "Invalid equation (%)"
+
+
+def summarization_compute_score(data_source, solution_str, ground_truth, extra_info=None, method='strict'):
+    """The scoring function for summarization task.
+    
+    Args:
+        solution_str: the solution text
+        ground_truth: dictionary containing target number and available numbers
+        method: the method to extract the solution
+        format_score: the score for correct format but wrong answer
+        score: the score for the correct answer
+    """
+
+    # use ROUGE-L for the summarization task
+    from rouge import Rouge
+    rouge = Rouge()
+    scores = rouge.get_scores(solution_str, ground_truth)
+    score = scores[0]['rouge-l']['f']
+    return score, "N_A"
+
+def translation_compute_score(data_source, solution_str, ground_truth, extra_info=None, method='strict'):
+    """The scoring function for translation task.
+    
+    Args:
+        solution_str: the solution text
+        ground_truth: dictionary containing target number and available numbers
+        method: the method to extract the solution
+        format_score: the score for correct format but wrong answer
+        score: the score for the correct answer
+    """
+
+    # use BLEU for the translation task
+    from nltk.translate.bleu_score import sentence_bleu
+    reference = [ground_truth.split()]
+    candidate = solution_str.split()
+    score = sentence_bleu(reference, candidate)
+    return score, "N_A"
+
+
+def compute_score(data_source, solution_str, ground_truth, extra_info=None, method='strict'):
+    if data_source == 'countdown':
+        return coutdown_compute_score(data_source, solution_str, ground_truth, extra_info, method)
+    elif data_source == 'samsum':
+        return summarization_compute_score(data_source, solution_str, ground_truth, extra_info, method)
+    elif data_source == 'wmt':
+        return translation_compute_score(data_source, solution_str, ground_truth, extra_info, method)
