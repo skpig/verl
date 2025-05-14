@@ -32,7 +32,7 @@ class VanillaReplayBufferClient():
         keys = list(self.__pool.keys())
         while keys:  # raises StopIteration on every next() if keys is empty
             random_key = random.choice(keys)
-            yield random_key, self.__pool[random_key]
+            yield random_key
 
     def delete(self, key: str):
         self.__pool.pop(key)
@@ -59,7 +59,11 @@ class RolloutPool:
             assert len(replay_buffer_name) != 0
             cache_size_limit_in_mb = self.config.actor_rollout_ref.rollout.get("replay_buffer_in_memory_cache_limit_mb",
                                                                                1024)
-            self.pool = PersistableReplayBufferClient(replay_buffer_name, cache_size_limit_in_mb=cache_size_limit_in_mb)
+            hdfs_path = self.config.actor_rollout_ref.rollout.get("replay_buffer_hdfs_path", None)
+            from verl.utils.replay_buffer.samplers.uniform_key_sampler import UniformKeySampler
+            self.samplers = [UniformKeySampler()]  # uniform sampling
+            self.pool = PersistableReplayBufferClient(replay_buffer_name, cache_size_limit_in_mb, hdfs_path,
+                                                      self.samplers)
 
         self.pool_size = 0
         self.history_pool = dict()
@@ -137,13 +141,17 @@ class RolloutPool:
             self.pool_size -= self.num_bon
         complete_bon_bsz = len(return_batch)
 
-        sampler = self.pool.sample()
+        if self.replay_buffer_type == "persistable":
+            sampler = self.samplers[0].sample()
+        else:  # default
+            sampler = self.pool.sample()
         while len(return_batch) < return_batch_size:
             try:
-                _, ready_batch = next(sampler)
+                index = next(sampler)
             except StopIteration:  # The pool is empty
                 break
 
+            ready_batch = self.pool.get(index)
             if len(return_batch) + len(ready_batch) > return_batch_size:
                 break
             return_batch.extend(ready_batch)
