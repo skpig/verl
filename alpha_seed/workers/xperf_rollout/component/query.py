@@ -231,7 +231,7 @@ class AsyncQuery(Query):
         await self._event.wait()
 
     @classmethod
-    def from_request(cls, input_ids, request_id, sampling_kwargs):
+    def from_request(cls, input_ids, request_id, sampling_kwargs, meta_info=None):
         query = AsyncQuery(input_ids, code_book=None, input_prompt='', idx=request_id, prefix_already_computed_len=0)
         query.id = request_id
         query.top_k = sampling_kwargs.get("top_k", 0)
@@ -239,7 +239,7 @@ class AsyncQuery(Query):
         query.temperature = sampling_kwargs.get("temperature", 1.0)
         query.max_new_tokens = sampling_kwargs.get("max_new_tokens", 32)
         query.max_length = sampling_kwargs.get("max_length", 1024)
-        query.meta_info = {}
+        query.meta_info = meta_info or {}
         return query
 
 

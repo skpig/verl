@@ -55,3 +55,10 @@ jobs:
           - ray start --num-cpus=100 --head
           - pytest tests/agents -v
           - ray stop --force
+      - name: rollout
+        commands:
+          - cd -
+          - ray stop --force
+          - ray start --num-cpus=100 --head
+          - pytest tests/rollout -v
+          - ray stop --force

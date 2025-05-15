@@ -27,6 +27,7 @@ import os
 import copy
 import json
 import queue
+from functools import partial
 from alpha_seed.trainer.utils.lineage import (report_job_config, report_data_loaded, report_trial_ckpts_load,
                                               report_rl_ckpts_load, safely_do)
 from multiprocessing import Process
@@ -42,16 +43,15 @@ import pandas as pd
 import numpy as np
 from codetiming import Timer
 
-from alpha_seed.trainer.tensorcore_collect import tensorcore_collection
 from alpha_seed.utils.select_strategy.bon_strategy import *
 from alpha_seed.utils.select_strategy.league_training_strategy import *
 from alpha_seed.utils.validator.validation_manager import *
-from alpha_seed.workers.streaming_service.streaming_utils import pad, process_output
 from alpha_seed.workers.actors.checkpoint import CkptGlobalUploader
 from alpha_seed.workers.actors.rollout_pool import RolloutPool
 from alpha_seed.workers.ppo_actor import make_mini_step_dataloader
 from alpha_seed.utils.observility.pretty_print import pprint
 from alpha_seed.utils import ndtimeline
+from alpha_seed.utils.functional import print_dataproto_size
 from alpha_seed.utils.tracking_utils import async_process_batch_samples_to_wandb
 from alpha_seed.utils.multithreads import ThreadPoolManager
 from alpha_seed.workers.actors.checkpoint.utils import find_latest_ckpt_path_
@@ -64,7 +64,6 @@ from single_controller.ray.base import create_colocated_worker_cls
 from verl import DataProto
 from verl.utils.fs import copy_local_path_from_hdfs
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
-from alpha_seed.workers.streaming_service.streaming_utils import record_xperf_metrics
 from hdfs_io import makedirs, hput, hcopy, hexists
 
 try:
@@ -533,19 +532,6 @@ def compute_data_metrics(self, batch: DataProto):
     return DataProto.from_dict({'dummy': torch.ones(size=(1,))}, meta_info={'metrics': metrics})
 
 
-def print_dataproto_size(data: DataProto, head):
-    size_of_tensordict = 0
-    for key, tensor in data.batch.items():
-        size_of_tensordict += tensor.element_size() * tensor.numel()
-    size_of_numpy_array = 0
-    for key, numpy_array in data.non_tensor_batch.items():
-        size_of_numpy_array += numpy_array.nbytes
-
-    size_of_numpy_array /= 1024**3
-    size_of_tensordict /= 1024**3
-    print(f'{head}, Size of tensordict: {size_of_tensordict} GB, size of non_tensor_batch: {size_of_numpy_array} GB')
-
-
 def save_dataproto(data: DataProto, path, prefix=''):
     torch.save(data.batch, f"{prefix}.batch.pt")
     torch.save(data.non_tensor_batch, f"{prefix}.non_tensor_batch.pt")
@@ -620,7 +606,6 @@ class RayPPOTrainer(object):
         self.use_colocate_reference_policy = Role.ActorRolloutRef in role_worker_mapping
         self.use_standalone_rollout = self.config.streaming_rollout.nnodes > 0
         self.use_standalone_validator = self.config.streaming_validator.nnodes > 0
-        self.use_rollout_server = self.config.rollout_server.nnodes > 0
         self.use_reference_policy = self.use_standalone_reference_policy or self.use_colocate_reference_policy
         self.use_rm = Role.RewardModel in role_worker_mapping
 
@@ -675,13 +660,23 @@ class RayPPOTrainer(object):
         else:
             self.kl_ctrl = core_algos.FixedKLController(kl_coef=0.)
 
-    def _create_validation_manager(self):
-        self.validation_manager = ValidateManager(self.config, self.logger, self.val_dataloader, self.tokenizer,
-                                                  self.use_rm, self.val_reward_fn)
+    def _create_rollout_manager(self):
+        from alpha_seed.workers.streaming_service.rollout_manager import RolloutManager
+        self.rollout_manager = RolloutManager(config=self.config, logger=self.logger, tokenizer=self.tokenizer)
+        hybrid_wg = self.actor_rollout_wg
+        self.rollout_manager.initialize(hybrid_wg=hybrid_wg,
+                                        rollout_pool=self.rollout_pool,
+                                        train_standalone_wg=self.standalone_rollout_wg,
+                                        val_standalone_wg=self.standalone_validator_wg)
 
-        self.validation_manager.actor_rollout_wg = self.actor_rollout_wg
-        if self.use_standalone_validator:
-            self.validation_manager.standalone_validator_wg = self.standalone_validator_wg
+    def _create_validation_manager(self):
+        self.validation_manager = ValidateManager(self.config,
+                                                  self.logger,
+                                                  self.val_dataloader,
+                                                  self.tokenizer,
+                                                  self.use_rm,
+                                                  self.val_reward_fn,
+                                                  rollout_manager=self.rollout_manager)
 
     def init_workers(self, kv_store=None, ckpt_global_uploader=None, from_step=0, resume_folder=None):
         """Init resource pool and worker group"""
@@ -718,14 +713,6 @@ class RayPPOTrainer(object):
                                                    role='standalone_rollout')
                 self.resource_pool_to_cls[resource_pool]['standalone_rollout'] = rollout_cls
                 worker_configs['standalone_rollout'] = self.config.actor_rollout_ref
-
-            if self.use_rollout_server:
-                resource_pool = self.resource_pool_manager.get_resource_pool(Role.RolloutServer)
-                rollout_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.RolloutServer],
-                                                   config=self.config.actor_rollout_ref,
-                                                   role='rollout_server')
-                self.resource_pool_to_cls[resource_pool]['rollout_server'] = rollout_cls
-                worker_configs['rollout_server'] = self.config.actor_rollout_ref
 
             if self.use_standalone_validator:
                 resource_pool = self.resource_pool_manager.get_resource_pool(Role.Validator)
@@ -852,8 +839,6 @@ class RayPPOTrainer(object):
 
         init_futures = []
 
-        hybrid_master_address = self.actor_rollout_wg.get_master_addr()
-
         init_futures.append(
             self.actor_rollout_wg.init_model(
                 remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init,
@@ -861,7 +846,6 @@ class RayPPOTrainer(object):
 
         if self.use_standalone_rollout:
             self.standalone_rollout_wg = self.all_wg['standalone_rollout']
-            standalone_rollout_address = self.standalone_rollout_wg.get_master_addr()
 
             init_futures.append(
                 self.standalone_rollout_wg.init_model(
@@ -870,53 +854,14 @@ class RayPPOTrainer(object):
         else:
             self.standalone_rollout_wg = None
 
-        if self.use_rollout_server:
-            self.rollout_server_wg = self.all_wg['rollout_server']
-            self.rollout_server_wg.setup_rollout()
-            rollout_server_addr = self.rollout_server_wg.get_master_addr()
-            self.actor_rollout_wg.setup_standalone_worker_comm(hybrid_master_address, rollout_server_addr, "17821",
-                                                               "standalone_rollout_server")
-            self.rollout_server_wg.setup_standalone_worker_comm(hybrid_master_address, rollout_server_addr, "17821",
-                                                                "standalone_rollout_server")
-            actor_fut = self.actor_rollout_wg.update_standalone_worker("standalone_rollout_server")
-            standalone_fut = self.rollout_server_wg.update_standalone_worker("standalone_rollout_server")
-            # note that we should wait for the weight sync to be completed to avoid standalone fail and driver continues
-            ray.get(actor_fut)
-            ray.get(standalone_fut)
-        else:
-            self.rollout_server_wg = None
-
         if self.use_standalone_validator:
             self.standalone_validator_wg = self.all_wg['standalone_validator']
-            standalone_validator_address = self.standalone_validator_wg.get_master_addr()
             init_futures.append(
                 self.standalone_validator_wg.init_model(
                     remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init,
                     from_scratch=from_scratch))
-
-        tasks_mgr = ThreadPoolManager()
-
-        if self.use_standalone_rollout:
-            self.actor_rollout_wg.setup_standalone_worker_comm(hybrid_master_address, standalone_rollout_address,
-                                                               "12345", "standalone_rollout")
-            self.standalone_rollout_wg.setup_standalone_worker_comm(hybrid_master_address, standalone_rollout_address,
-                                                                    "12345", "standalone_rollout")
-            # offload standalone_rollout_wg FSDP GPU memory
-            tasks_mgr.submit_task(self.standalone_rollout_wg.to, 'cpu')
-
-        if self.use_standalone_validator:
-            self.actor_rollout_wg.setup_standalone_worker_comm(hybrid_master_address, standalone_validator_address,
-                                                               "14567", "standalone_validator")
-            self.standalone_validator_wg.setup_standalone_worker_comm(hybrid_master_address,
-                                                                      standalone_validator_address, "14567",
-                                                                      "standalone_validator")
-            # offload standalone_validator_wg FSDP GPU memory
-            tasks_mgr.submit_task(self.standalone_validator_wg.to, 'cpu')
-
-        try:
-            tasks_mgr.wait_for_completion()  # Wait for tasks to complete
-        except Exception as e:
-            raise e
+        else:
+            self.standalone_validator_wg = None
 
         if self.config.actor_rollout_ref.actor.kl_loss_weight >= 1e-10:
             # 两种情况下使用kl loss，一种是grpo，另一种是在rewards里不加kl惩罚
@@ -945,75 +890,13 @@ class RayPPOTrainer(object):
             self.rm_wg.init_model(remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init,
                                   from_scratch=True)  # blocking
 
-        remote_reward_style = []
-        if self.config.trainer.use_remote_sandbox:
-            remote_reward_style.append('code-sandbox')
-        if self.config.trainer.use_remote_verifier:
-            remote_reward_style.append('verifier_service')
-        # add more reward style here that are going to be pipelined inside generation
-
-        # set the eos_callback_fn of actor_rollout
-        from xperf_gpt.inference.session import Query
-
-        def sandbox_callback_fn(query: Query):
-            input_ids = query.input_ids + query.new_token_ids
-            req_id = query.meta_info['uid']
-            reward_model = query.meta_info['reward_model']
-            reward_style = reward_model['style']
-            ground_truth = reward_model['ground_truth']
-
-            # note that the uid of padding dataproto should be None
-            if reward_style in remote_reward_style and req_id is not None:
-                # get the sandbox ray handler
-                handler = ray.get_actor('remote_client')
-                # this is non-blocking
-                handler.add_requests.remote(req_id=req_id,
-                                            input_ids=input_ids,
-                                            ground_truth=ground_truth,
-                                            reward_style=reward_style)
-
         # ensure errors in model_init will be raised
         for fut in init_futures:
             ray.get(fut)
 
-        if self.config.trainer.use_remote_sandbox:
-            self.actor_rollout_wg.set_eos_callback_fn(sandbox_callback_fn)
-            if self.standalone_rollout_wg is not None:
-                self.standalone_rollout_wg.set_eos_callback_fn(sandbox_callback_fn)
-            if self.use_standalone_validator:
-                self.standalone_validator_wg.set_eos_callback_fn(sandbox_callback_fn)
-
         safely_do(lambda: report_rl_ckpts_load(worker_configs=worker_configs), rank=0)()
         self.global_step = from_step
         self.resume_folder = resume_folder
-        if self.config.actor_rollout_ref.rollout.mode == "server" or self.use_rollout_server:
-            self._start_server()
-
-    def _start_server(self):
-        import asyncio
-        import threading
-        from contextlib import suppress
-        self.server = None
-
-        def start_background_loop(loop):
-            asyncio.set_event_loop(loop)
-            with suppress(asyncio.CancelledError):
-                loop.run_forever()
-
-        background_loop = asyncio.new_event_loop()
-        background_thread = threading.Thread(target=start_background_loop, args=(background_loop,), daemon=True)
-        background_thread.start()
-
-        async def listen():
-            from alpha_seed.workers.streaming_service.streaming_rollout_server import AsyncXPerfGPTRolloutServer
-            self.server = AsyncXPerfGPTRolloutServer(self.config, self.tokenizer)
-            async with self.server as rollout:
-                rollout.attach_actors(self.actor_rollout_wg if self.config.actor_rollout_ref.rollout.mode ==
-                                      "server" else self.rollout_server_wg)
-                await asyncio.Future()
-
-        asyncio.run_coroutine_threadsafe(listen(), background_loop)
-        print("Server started in background. Main thread is free to continue...")
 
     def save_checkpoint(self, specified_ckpt_version=None):
         """Save checkpoint to hdfs.
@@ -1306,15 +1189,7 @@ class RayPPOTrainer(object):
                 self.acc_per_query = pkl.load(fin)
                 print("acc_per_query RESUMED!!!!!!")
 
-        # async resume
-        # we only resume standalone buffer when the number of warmup steps is zero. This is reasonable because
-        # 1. warmup and load old standalone is conflict. 2. when the prompt/response length changes, we can't load
-        if self.rollout_pool_warmup_step == 0 and hexists(
-                f"{remote_global_step_folder}/standalone_gen_batch_output.batch.pt"):
-            pprint('resume standalone rollout.')
-            self.standalone_gen_batch_output_resume = load_dataproto(path=remote_global_step_folder,
-                                                                     prefix='standalone_gen_batch_output')
-            self.standalone_batch_resume = load_dataproto(path=remote_global_step_folder, prefix='standalone_batch')
+        self.rollout_manager.resume(remote_global_step_folder, load_dataproto_fn=load_dataproto)
 
     def _balance_batch(self, batch, metrics, logging_prefix='global_seqlen'):
         # Note that the reorder is in place
@@ -1339,128 +1214,14 @@ class RayPPOTrainer(object):
         metrics.update(global_balance_stats)
         print_dataproto_size(batch, head='After Sequence Balancing')
 
-    async def _generate_streaming(self, batch, start_step, metrics, standalone_batch, pending_batch):
-        # from alpha_seed.workers.agents.math.handler import process_single_batch, process_single_batch_v2
-        from alpha_seed.workers.agents.math.aiohttp_handler import process_single_batch
-
-        from alpha_seed.workers.agents import TaskContext
-        import asyncio
-        import time
-        # bind weights...
-        start = time.time()
-        self.rollout_server_wg.stop_server_before_weights_update()
-        # update the rollout server, do weights binding
-        with Timer(name='update_rollout_server', logger=None) as timer:
-            actor_fut = self.actor_rollout_wg.update_standalone_worker("standalone_rollout_server")
-            standalone_fut = self.rollout_server_wg.update_standalone_worker("standalone_rollout_server")
-            # note that we should wait for the weight sync to be completed to avoid standalone fail and driver continues
-            ray.get(actor_fut)
-            ray.get(standalone_fut)
-        self.actor_rollout_wg.release_param_and_cache()
-        metrics['timing/update_rollout_server'] = timer.last
-
-        # restart the rollout server
-        self.rollout_server_wg.restart_server_after_weights_update()
-        print(f"[INFO] {self.global_step} generate streaming[update weights and restart] {time.time() - start}")
-
-        outside_start = time.time()
-        ready_batch = []
-        gen_batch, batch = self._preprocess_batch(batch, metrics, start_step)
-        gen_batch.union(batch)
-        context = TaskContext(self.config, self.tokenizer, self.reward_fn, self.global_step)  # add more context object
-
-        # submit the training batch to the rollout server
-        start = time.time()
-        running_batch = []
-        for item in gen_batch.chunk(len(gen_batch)):
-            task = asyncio.create_task(process_single_batch(item, context))
-            running_batch.append(task)
-        print(
-            f"[INFO] {self.global_step} generate streaming[submit], batch size: {len(gen_batch)}, {time.time() - start}"
-        )
-        start = time.time()
-
-        # warmup
-        if self.global_step - start_step < 1:
-            await asyncio.gather(*running_batch)
-
-        print(
-            f"[INFO] {self.global_step} generate streaming[as_completed], batch size: {len(gen_batch)}, {time.time() - start}"
-        )
-        start = time.time()
-
-        done, pending = await asyncio.wait(running_batch + pending_batch, timeout=0, return_when=asyncio.ALL_COMPLETED)
-        pending = list(pending)
-        results = []
-        for task in done:
-            if task.exception():
-                raise task.exception()
-            else:
-                results.append(task.result())
-
-        ready_batch = results
-        finished_num = len(results)
-        pprint(
-            f'stop hybrid rollout, completed_batch {finished_num}, incompleted_batch {len(running_batch + pending_batch) - finished_num} '
-            + f'ready_queue {len(ready_batch)}, pending_queue {len(pending)}.')
-        metrics['rollout/hybrid_completed_batch'] = finished_num
-        metrics['rollout/hybrid_incompleted_batch'] = len(batch) - finished_num
-        print(
-            f"[INFO] {self.global_step} generate streaming[stop and get batch], batch size: {len(gen_batch)}, {time.time() - start}"
-        )
-        ray.get(self.rollout_pool.fill_rollout_pool.remote(ready_batch))
-
-        if self.global_step - start_step < 1:
-            return [], standalone_batch, pending
-
-        # get the training batch
-        return_batch_size = self.config.data.train_batch_size * \
-            self.config.trainer.league_training_config.buffer_size * \
-            self.num_bon
-        train_batch = ray.get(self.rollout_pool.get_train_batch.remote(return_batch_size))
-        batch = []
-        if len(train_batch) > 0:
-            batch = DataProto.concat(train_batch)
-            batch.pop(batch_keys=['is_finished'])
-            batch.batch['prompts'] = batch.batch['input_ids'][:, :self.config.data.max_prompt_length]
-            batch.batch['responses'] = batch.batch['input_ids'][:, self.config.data.max_prompt_length:]
-            batch.meta_info['generation_kwargs'] = self.config.actor_rollout_ref.rollout.train_generate_kwargs
-            batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask'], dim=-1).tolist()
-            if 'pixel_values' in batch.non_tensor_batch:
-                batch.meta_info['global_img_token_num'] = [
-                    t.shape[0] if t is not None else 0 for t in batch.non_tensor_batch['pixel_values']
-                ]
-            metrics['rollout/training_batch'] = len(batch)
-            pprint(f'training batches {len(batch)}.')
-        print("generate streaming... ", time.time() - outside_start)
-        return batch, standalone_batch, pending
-
-    def _preprocess_batch(self, batch, metrics, start_step):
+    def _preprocess_batch_before_gen(self, batch, metrics, start_step):
         # print the size of each data proto before training
         print_dataproto_size(batch, head='Before generation')
 
-        def _get_response_tensor(dtype, pad_val=-1):
-            return torch.zeros(batch.batch['input_ids'].shape[0],
-                               self.config.data.max_response_length,
-                               dtype=dtype,
-                               device=batch.batch['input_ids'].device).fill_(pad_val)
-
-        gen_batch_required_keys = ['input_ids', 'attention_mask']
-        for key in ['rollout_log_probs', 'probs_gt_threshold_num', 'probs_lt_threshold_sum', 'off_policy_steps']:
-            if key not in batch:
-                batch.batch[key] = _get_response_tensor(dtype=torch.bfloat16)
-            gen_batch_required_keys.append(key)
-
-        if self.config.algorithm.use_model_output_mask:
-            if (key := 'model_output_mask') not in batch:
-                batch.batch[key] = _get_response_tensor(dtype=torch.int8, pad_val=0)
-            gen_batch_required_keys.append(key)
-
         if self.config.data.num_prompts_per_data > 1:
             batch = batch.unfold_column_chunks(self.config.data.num_prompts_per_data,
-                                               split_keys=gen_batch_required_keys)
+                                               split_keys=['input_ids', 'attention_mask', 'prompt_names'])
 
-        # hybrid rollout
         if self.config.algorithm.prior_sampling.enable:
             repeat_num = self.compute_repeat_num_per_query(batch)
             save_repeat_num = pd.DataFrame({
@@ -1493,227 +1254,7 @@ class RayPPOTrainer(object):
         # create a uid for each data inside the batch
         batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(batch))], dtype=object)
         batch.check_consistency()
-
-        gen_batch = batch.pop(batch_keys=gen_batch_required_keys)
-        # assign the non_tensor_batch uid to the generator as well.
-        gen_batch.non_tensor_batch = batch.non_tensor_batch
-
-        gen_batch.meta_info.update({
-            'generation_kwargs':
-                self.config.actor_rollout_ref.rollout.train_generate_kwargs,
-            'complete_ratio':
-                1.0 if self.global_step < start_step + self.config.streaming_rollout.warmup_step else
-                self.config.actor_rollout_ref.rollout.get("complete_ratio", 1.0)
-        })
-        pprint(f'start hybrid rollout, input batches {len(gen_batch)}.')
-
-        if gen_batch.meta_info['complete_ratio'] == 0 and not self.use_rollout_server:
-            assert self.rollout_pool_warmup_step > 0, "rollout_pool_warmup_step must be greater than 0 when complete_ratio = 0"
-
-        if self.global_step < self.rollout_pool_warmup_step + start_step:
-            gen_batch.meta_info['complete_ratio'] = 1.0
-
-        return gen_batch, batch
-
-    async def _dispatch_parallel_requests(self, gen_batch):
-        from alpha_seed.workers.agents.math.aiohttp_handler import process_single_batch
-        from alpha_seed.workers.agents import TaskContext
-        import asyncio
-        with Timer(name='binding', logger=None) as timer:
-            self.actor_rollout_wg.toggle_inference_server_state(sleep=False)
-        context = TaskContext(self.config, self.tokenizer, self.reward_fn, self.global_step)  # add more context object
-
-        # submit the training batch to the rollout server
-        running_batch = []
-        for item in gen_batch.chunk(len(gen_batch)):
-            task = asyncio.create_task(process_single_batch(item, context))
-            running_batch.append(task)
-        print(f"[INFO] {self.global_step} generate streaming[submit], batch size: {len(gen_batch)}")
-        await asyncio.gather(*running_batch)
-
-        print(f"[INFO] {self.global_step} generate streaming[as_completed], batch size: {len(gen_batch)}")
-
-        done, _ = await asyncio.wait(running_batch, timeout=0, return_when=asyncio.ALL_COMPLETED)
-        results = []
-        for task in done:
-            if task.exception():
-                raise task.exception()
-            else:
-                results.append(task.result())
-
-        self.actor_rollout_wg.toggle_inference_server_state(sleep=True)
-        batch = DataProto.concat(results)
-        batch.meta_info.update({
-            'memory/gen_max_allocated': 0,
-            'memory/gen_max_reserved': 0,
-            'timing/weight_binding': timer.last
-        })
         return batch
-
-    def _generate(self, batch, start_step, metrics, standalone_batch, pending_batch):
-        ready_batch = []
-
-        gen_batch, batch = self._preprocess_batch(batch, metrics, start_step)
-
-        with Timer(name='gen', logger=None) as timer:
-            with tensorcore_collection():
-                if self.config.actor_rollout_ref.rollout.mode == "batch":
-                    gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
-                else:
-                    gen_batch_output = asyncio.run_coroutine_threadsafe(
-                        self._dispatch_parallel_requests(gen_batch=gen_batch), self.loop).result()
-
-                # TODO: The following two lines should be memory view. However it's not. Let's remove it by removing all its dependency
-                gen_batch_output.batch['prompts'] = gen_batch_output.batch['input_ids'][:, :self.config.data.
-                                                                                        max_prompt_length]
-                gen_batch_output.batch['responses'] = gen_batch_output.batch['input_ids'][:, self.config.data.
-                                                                                          max_prompt_length:]
-
-            print_dataproto_size(gen_batch_output, head='After generation')
-        metrics['timing/gen'] = timer.last
-        metrics['rollout/hybrid_input_batch'] = len(batch)
-        metrics['memory/gen_max_allocated'] = gen_batch_output.meta_info['memory/gen_max_allocated']
-        metrics['memory/gen_max_reserved'] = gen_batch_output.meta_info['memory/gen_max_reserved']
-        metrics['timing/weight_binding'] = gen_batch_output.meta_info['timing/weight_binding']
-
-        # for debugging purpose only. we manually set all the attention_mask to 1 to
-        # test the training performance under maximum workload.
-        if self.config.trainer.set_fake_attention_mask:
-            with Timer(name='fake_mask', logger=None) as timer:
-                from verl.utils.model import create_random_mask
-                total_length = self.config.data.max_prompt_length + self.config.data.max_response_length
-
-                min_ratio_of_valid_token = self.config.trainer.fake_seqlen_ratio
-                max_ratio_of_valid_token = self.config.trainer.fake_seqlen_ratio
-
-                assert self.config.trainer.fake_seqlen_ratio > (self.config.data.max_prompt_length + 1) / total_length
-
-                max_ratio_of_left_padding = 0
-                attention_mask = create_random_mask(gen_batch_output.batch['input_ids'],
-                                                    max_ratio_of_valid_token=max_ratio_of_valid_token,
-                                                    max_ratio_of_left_padding=max_ratio_of_left_padding,
-                                                    min_ratio_of_valid_token=min_ratio_of_valid_token)
-
-                gen_batch_output.batch['attention_mask'] = attention_mask
-
-                # force actor and critic stop updating weights because the data is fake
-                self.config.actor_rollout_ref.actor.optim.lr = 0
-                self.config.critic.optim.lr = 0
-
-            metrics['timing/fake_mask'] = timer.last
-            pprint(f'set fake attention mask')
-
-        # only report metrics from one generation replica
-        record_xperf_metrics(gen_batch_output, metrics, self.logger, self.global_step, prefix='hybrid')
-
-        # stop hybrid rollout
-        finished_num, ready_batch, pending_batch = process_output(batch, gen_batch_output, self.tokenizer, ready_batch,
-                                                                  pending_batch, self.config)
-        pprint(f'stop hybrid rollout, completed_batch {finished_num}, incompleted_batch {len(batch) - finished_num} ' +
-               f'ready_queue {len(ready_batch)}, pending_queue {len(pending_batch)}.')
-        metrics['rollout/hybrid_completed_batch'] = finished_num
-        metrics['rollout/hybrid_incompleted_batch'] = len(batch) - finished_num
-
-        # stop standalone rollout to update model
-        if self.standalone_batch_resume is not None:
-            standalone_batch = self.standalone_batch_resume
-            self.standalone_batch_resume = None
-
-        with Timer(name='async_gen', logger=None) as timer:
-            finished_num = 0
-            if len(standalone_batch) > 0:
-                if not self.standalone_gen_batch_output_resume:
-                    gen_batch_output = self.standalone_rollout_wg.generate_sequences_get()
-                else:
-                    gen_batch_output = self.standalone_gen_batch_output_resume
-                    self.standalone_gen_batch_output_resume = None
-                if self.config.trainer.save_freq > 0 and (
-                        self.global_step - 1) % self.config.trainer.save_freq == 0 and self.global_step != 1:
-                    print(f"step {self.global_step}, saving... standalone_gen_batch")
-                    # save standalone_batch and gen_batch_output
-                    save_path = f"{self.config.trainer.default_hdfs_dir}/checkpoints/global_step_{self.global_step - 1}/"
-                    save_dataproto(gen_batch_output, path=save_path, prefix='standalone_gen_batch_output')
-                    save_dataproto(standalone_batch, path=save_path, prefix='standalone_batch')
-                # only report metrics from one generation replica
-                record_xperf_metrics(gen_batch_output, metrics, self.logger, self.global_step, prefix='standalone')
-                finished_num, ready_batch, pending_batch = process_output(standalone_batch,
-                                                                          gen_batch_output,
-                                                                          self.tokenizer,
-                                                                          ready_batch,
-                                                                          pending_batch,
-                                                                          self.config,
-                                                                          standalone=True)
-                pprint(
-                    f'stop standalone rollout, completed_batch {finished_num}, incompleted_batch {len(standalone_batch) - finished_num}'
-                    + f'ready_queue {len(ready_batch)}, pending_queue {len(pending_batch)}.')
-            metrics['rollout/standalone_completed_batch'] = finished_num
-            metrics['rollout/standalone_incompleted_batch'] = len(standalone_batch) - finished_num
-        metrics['timing/async_gen'] = timer.last
-
-        # update standalone rollout weights
-        with Timer(name='update_standalone', logger=None) as timer:
-            if self.standalone_rollout_wg is not None:
-                actor_fut = self.actor_rollout_wg.update_standalone_worker("standalone_rollout")
-                standalone_fut = self.standalone_rollout_wg.update_standalone_worker("standalone_rollout")
-                # note that we should wait for the weight sync to be completed to avoid standalone fail and driver continues
-                ray.get(actor_fut)
-                ray.get(standalone_fut)
-        self.actor_rollout_wg.release_param_and_cache()
-        metrics['timing/update_standalone'] = timer.last
-
-        # standalone generate (off policy)
-        standalone_batch = []
-        max_standalone_len = 0
-        # sort by staleness, put items with larger off_policy_steps at the end of the list so they can be popped early
-        pending_batch = sorted(pending_batch, key=lambda item: item.batch['off_policy_steps'].max().item())
-        while self.standalone_rollout_wg is not None and len(pending_batch) >= self.standalone_rollout_wg.world_size:
-            for _ in range(self.standalone_rollout_wg.world_size):
-                standalone_batch.append(pending_batch.pop())
-                max_standalone_len = max(max_standalone_len, standalone_batch[-1].batch['attention_mask'].sum(-1))
-        for i in range(len(standalone_batch)):
-            standalone_batch[i] = pad(standalone_batch[i], max_standalone_len, self.tokenizer)
-        if len(standalone_batch) > 0:
-
-            def make_interleave(batch: list, mp_size: int):
-                assert len(batch) % mp_size == 0
-                indices = sum([list(range(start, len(batch), mp_size)) for start in range(mp_size)], [])
-                return [batch[i] for i in indices]
-
-            # interleave standalone batch so that the data is still in FIFO order after dp compute dispatch
-            standalone_batch = make_interleave(standalone_batch, self.standalone_rollout_wg.world_size)
-
-            standalone_batch = DataProto.concat(standalone_batch)
-            standalone_gen_batch = standalone_batch.pop(batch_keys=gen_batch.batch.keys())
-
-            standalone_gen_batch.non_tensor_batch = standalone_batch.non_tensor_batch
-            standalone_gen_batch.meta_info[
-                'generation_kwargs'] = self.config.actor_rollout_ref.rollout.train_generate_kwargs
-            self.standalone_rollout_wg.generate_sequences_put(standalone_gen_batch)
-            pprint(f'start standalone rollout, input batches {len(standalone_gen_batch)}.')
-        metrics['rollout/standalone_input_batch'] = len(standalone_batch)
-
-        # get training batch from ready queue, make it stable by random pick
-        ray.get(self.rollout_pool.fill_rollout_pool.remote(ready_batch))
-        if self.global_step < self.rollout_pool_warmup_step + start_step:
-            return None, standalone_batch, pending_batch
-        return_batch_size = self.config.data.train_batch_size * \
-            self.config.trainer.league_training_config.buffer_size * \
-            self.num_bon
-        train_batch = ray.get(self.rollout_pool.get_train_batch.remote(return_batch_size))
-        batch = DataProto.concat(train_batch)
-        if self.config.algorithm.force_append_eos:
-            batch.batch["input_ids"][:, -1] = self.tokenizer.eos_token_id
-            batch.batch["responses"][:, -1] = self.tokenizer.eos_token_id
-        batch.meta_info['generation_kwargs'] = self.config.actor_rollout_ref.rollout.train_generate_kwargs
-        batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask'], dim=-1).tolist()
-        if 'pixel_values' in batch.non_tensor_batch:
-            batch.meta_info['global_img_token_num'] = [
-                t.shape[0] if t is not None else 0 for t in batch.non_tensor_batch['pixel_values']
-            ]
-        metrics['rollout/training_batch'] = len(batch)
-        pprint(f'training batches {len(batch)}.')
-
-        return batch, standalone_batch, pending_batch
 
     def get_mean_max_len_per_query(self, batch, metrics):
         if self.config.trainer.per_query_max_length is True:
@@ -1884,6 +1425,7 @@ class RayPPOTrainer(object):
     def fit(self):
         self._create_kl_control()
         self._create_dataloader()
+        self._create_rollout_manager()
         self._create_validation_manager()
 
         if self.save_batch_dir:
@@ -1913,22 +1455,6 @@ class RayPPOTrainer(object):
         self.global_step += 1
         start_step = self.global_step
 
-        # TODO: add staleness
-        standalone_batch = []
-        pending_batch = []
-        rollout_counter = 0
-        rollout_pool_metrics = {}
-        import asyncio
-        self.loop = None
-
-        def _run_loop():
-            self.loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(self.loop)
-            self.loop.run_forever()
-
-        self.thread = threading.Thread(target=_run_loop, daemon=True)
-        self.thread.start()
-
         while True:
             for batch_dict in self.train_dataloader:
                 metrics = {}
@@ -1946,25 +1472,21 @@ class RayPPOTrainer(object):
                             batch = self.sample_pool.get_gen_batch(self.config.data.train_batch_size)
                         self.get_mean_max_len_per_query(batch, metrics)
 
+                        batch = self._preprocess_batch_before_gen(batch, metrics, start_step)
                         # generate
                         with Timer(name='generate', logger=None) as timer:
-                            if self.use_rollout_server:
-                                batch, standalone_batch, pending_batch = asyncio.run_coroutine_threadsafe(
-                                    self._generate_streaming(batch=batch,
-                                                             start_step=start_step,
-                                                             metrics=metrics,
-                                                             standalone_batch=standalone_batch,
-                                                             pending_batch=pending_batch), self.loop).result()
-                            else:
-                                batch, standalone_batch, pending_batch = self._generate(
-                                    batch=batch,
-                                    start_step=start_step,
-                                    metrics=metrics,
-                                    standalone_batch=standalone_batch,
-                                    pending_batch=pending_batch)
+                            save_path = f"{self.config.trainer.default_hdfs_dir}/checkpoints/global_step_{self.global_step - 1}/"
+                            save_dataproto_fn = partial(save_dataproto, path=save_path)
+                            is_warmup_step = (self.global_step - start_step < 1)
+                            batch = self.rollout_manager.train_generate(batch,
+                                                                        step=self.global_step,
+                                                                        save_dataproto_fn=save_dataproto_fn,
+                                                                        is_warmup_step=is_warmup_step,
+                                                                        metrics=metrics)
                         metrics['timing/generate'] = timer.last
                         if batch is None or len(
                                 batch) == 0 or self.global_step < self.rollout_pool_warmup_step + start_step:
+                            self.logger.log(data=metrics, step=self.global_step)
                             self.global_step += 1
                             continue
                         if self.config.trainer.save_train_batch_dir is not None:

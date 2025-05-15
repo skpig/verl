@@ -4,6 +4,7 @@ from verl import DataProto
 import asyncio
 import os
 import aiohttp
+import copy
 ''' example input: 
 DataProtoItem(batch=TensorDict(
     fields={
@@ -16,29 +17,34 @@ DataProtoItem(batch=TensorDict(
     is_shared=False), non_tensor_batch= ... '''
 
 
-async def chat_completions(content, config):
+async def chat_completions(content, meta_info, config, port: int):
     try:
         timeout = aiohttp.ClientTimeout(total=9600)
         session = aiohttp.ClientSession(timeout=timeout)
-        async with session.post(url="http://0.0.0.0:8001/chat/completions",
+        generation_kwargs = meta_info['generation_kwargs']
+        async with session.post(url=f"http://0.0.0.0:{port}/chat/completions",
                                 headers={"Authorization": "Bearer token-abc123"},
                                 json={
                                     "model": "rollout",
                                     "messages": content,
-                                    "top_p": config.train_generate_kwargs['top_p'],
-                                    "top_k": config.train_generate_kwargs['top_k'],
-                                    "max_tokens": config.train_generate_kwargs['max_new_tokens'],
-                                    "max_length": config.prompt_length + config.response_length
+                                    "top_p": generation_kwargs['top_p'],
+                                    "top_k": generation_kwargs['top_k'],
+                                    "temperature": generation_kwargs['temperature'],
+                                    "max_tokens": generation_kwargs['max_new_tokens'],
+                                    "max_length": config.prompt_length + config.response_length,
+                                    "meta_info": meta_info,
                                 },
                                 timeout=timeout) as resp:
-            return await resp.json()
+            ret = await resp.json()
+            assert resp.status == 200, f"chat_completions failed msg: {ret}"
+            return ret
     except Exception as e:
         raise (e)
     finally:
         await session.close()
 
 
-async def _internal_call(item, config):
+async def _internal_call(item, config, port: int):
     completion = None
     try:
         item.batch = item.batch.reshape(-1)
@@ -47,7 +53,11 @@ async def _internal_call(item, config):
         valid_input_len = torch.sum(attention_mask)
         prompt_ids = input_ids[0, -valid_input_len:].tolist()
         data = {"prompt": prompt_ids}
-        completion = await chat_completions(data, config)
+        meta_info = copy.copy(item.meta_info)
+        meta_info['uid'] = item.non_tensor_batch['uid'][0]
+        meta_info['reward_model'] = item.non_tensor_batch['reward_model'][0]
+
+        completion = await chat_completions(data, meta_info, config, port)
     except asyncio.CancelledError:
         # Handle task cancellation (e.g., cleanup)
         print("Request was cancelled!!!!!!!!!!!!!!!!!!!!!!!!!!!")
@@ -62,8 +72,9 @@ async def process_single_batch(item, context):
     os.environ["no_proxy"] = ""
     tokenizer = context.tokenizer
     config = context.config.actor_rollout_ref.rollout
+    port = context.server_port
 
-    completion = await _internal_call(item, config)
+    completion = await _internal_call(item, config, port)
 
     from alpha_seed.workers.agents import DataPack, pack_to_dataproto
     data_pack = DataPack.create_from_completion_dict(completion['choices'][0]['message'])

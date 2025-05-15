@@ -125,6 +125,8 @@ class ChatCompletionRequest(BaseModel):
     # doc: end-chat-completion-sampling-params
 
     # doc: begin-chat-completion-extra-params
+    meta_info: Optional[Dict] = None
+
     # doc: end-chat-completion-extra-params
 
     def to_sampling_params(self):

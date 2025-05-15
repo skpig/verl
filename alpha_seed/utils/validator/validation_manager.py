@@ -28,7 +28,7 @@ class ValidateManager(object):
     The workergroup fetches latest weights from main task when it finishes the last iteration of validation
     """
 
-    def __init__(self, config, logger, val_dataloader, tokenizer, use_rm, val_reward_fn) -> None:
+    def __init__(self, config, logger, val_dataloader, tokenizer, use_rm, val_reward_fn, rollout_manager) -> None:
         self.config = config
         self.is_vlm = self.config.data['image_key'] is not None
         self.logger = logger
@@ -36,24 +36,14 @@ class ValidateManager(object):
         self.tokenizer = tokenizer
         self.use_rm = use_rm
         self.val_reward_fn = val_reward_fn
-        self.actor_rollout_wg = None
         self.rm_wg = None
-        self.standalone_validator_wg = None
         self.val_thread = None
         self.val_result_queue = queue.Queue()
         self.fast_result = os.getenv('WANDB_IGNORE_STEP_ORDER') == '1'
         if self.fast_result:
             print('Using fast result on wandb mode.')
         assert len(self.val_dataloader) == 1, "for bon metrics computation"
-        self.loop = None
-
-        def _run_loop():
-            self.loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(self.loop)
-            self.loop.run_forever()
-
-        self.thread = threading.Thread(target=_run_loop, daemon=True)
-        self.thread.start()
+        self.rollout_manager = rollout_manager
 
     def validate(self,
                  val_epoch=1,
@@ -78,17 +68,8 @@ class ValidateManager(object):
                         if val_log is not None:
                             self.logger.log(data=val_log, step=global_step, backend="tracking")
 
-        if is_async:
-            actor_fut = self.actor_rollout_wg.update_standalone_worker("standalone_validator")
-            standalone_fut = self.standalone_validator_wg.update_standalone_worker("standalone_validator")
-            validator_wg = self.standalone_validator_wg
-            ray.get(actor_fut)
-            ray.get(standalone_fut)
-        else:
-            validator_wg = self.actor_rollout_wg
-
         self.val_thread = threading.Thread(target=self._validate,
-                                           args=(val_epoch, need_log, log_file, is_async, global_step, validator_wg))
+                                           args=(val_epoch, need_log, log_file, is_async, global_step))
         self.val_thread.start()
 
         if is_async:
@@ -114,35 +95,7 @@ class ValidateManager(object):
                     self.logger.log(data=val_log, step=global_step, backend="tracking")
         return
 
-    async def _dispatch_parallel_requests(self, validator_wg, test_batch, global_step):
-        from alpha_seed.workers.agents.math.aiohttp_handler import process_single_batch
-        from alpha_seed.workers.agents import TaskContext
-        import asyncio
-        validator_wg.toggle_inference_server_state(sleep=False)
-        context = TaskContext(self.config, self.tokenizer, self.val_reward_fn, global_step)  # add more context object
-
-        # submit the training batch to the rollout server
-        running_batch = []
-        for item in test_batch.chunk(len(test_batch)):
-            task = asyncio.create_task(process_single_batch(item, context))
-            running_batch.append(task)
-        print(f"[INFO] {global_step} generate streaming[submit], batch size: {len(test_batch)}")
-        await asyncio.gather(*running_batch)
-
-        print(f"[INFO] {global_step} generate streaming[as_completed], batch size: {len(test_batch)}")
-
-        done, _ = await asyncio.wait(running_batch, timeout=0, return_when=asyncio.ALL_COMPLETED)
-        results = []
-        for task in done:
-            if task.exception():
-                raise task.exception()
-            else:
-                results.append(task.result())
-        batch = DataProto.concat(results)
-        validator_wg.toggle_inference_server_state(sleep=True)
-        return batch
-
-    def _validate(self, val_epoch, need_log, log_file, is_async, global_step, validator_wg):
+    def _validate(self, val_epoch, need_log, log_file, is_async, global_step):
         print(f'{time.time()} start validate with fast_result={self.fast_result}')
         metric_dict = {}
         reward_tensor_lst = []
@@ -155,21 +108,6 @@ class ValidateManager(object):
         for val_epoch_idx in range(val_epoch):
             for val_idx, test_data in enumerate(self.val_dataloader):
                 test_batch = DataProto.from_single_dict(test_data)
-
-                def _get_response_tensor(dtype, pad_val=-1):
-                    return torch.zeros(test_batch.batch['input_ids'].shape[0],
-                                       self.config.data.max_response_length,
-                                       dtype=dtype,
-                                       device=test_batch.batch['input_ids'].device).fill_(pad_val)
-
-                if 'rollout_log_probs' not in test_batch:
-                    test_batch.batch['rollout_log_probs'] = _get_response_tensor(dtype=torch.bfloat16)
-                if 'probs_gt_threshold_num' not in test_batch:
-                    test_batch.batch['probs_gt_threshold_num'] = _get_response_tensor(dtype=torch.bfloat16)
-                if 'probs_lt_threshold_sum' not in test_batch:
-                    test_batch.batch['probs_lt_threshold_sum'] = _get_response_tensor(dtype=torch.bfloat16)
-                if 'off_policy_steps' not in test_batch:
-                    test_batch.batch['off_policy_steps'] = _get_response_tensor(dtype=torch.bfloat16)
 
                 prompt_names = test_batch.non_tensor_batch['prompt_names'][0]
                 num_prompts_per_data = len(prompt_names)
@@ -185,53 +123,11 @@ class ValidateManager(object):
                 test_batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(test_batch))],
                                                               dtype=object)
 
-                test_gen_batch = test_batch.pop([
-                    'input_ids',
-                    'attention_mask',
-                    'off_policy_steps',
-                    'rollout_log_probs',
-                    'probs_gt_threshold_num',
-                    'probs_lt_threshold_sum',
-                ])
-                test_gen_batch.non_tensor_batch = test_batch.non_tensor_batch
-
-                test_gen_batch.meta_info = {
-                    'eos_token_id': self.tokenizer.eos_token_id,
-                    'pad_token_id': self.tokenizer.pad_token_id,
-                    'validate': True,
-                    'complete_ratio': 1,  # validation does not need timeout
-                }
-                test_gen_batch.meta_info[
-                    'generation_kwargs'] = self.config.actor_rollout_ref.rollout.val_generate_kwargs
-
-                # pad test_gen_batch to divisible by world_size. TODO(zhangchi.usc1992): shall we move this logic to dispatch?
-                test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, validator_wg.world_size)
-
-                # mark the paddig data uid to None
-                for i in range(pad_size):
-                    test_gen_batch_padded.non_tensor_batch['uid'][-1 - i] = None
-
-                if self.config.actor_rollout_ref.rollout.mode == "batch":
-                    test_output_gen_batch = validator_wg.generate_sequences(test_gen_batch_padded)
-                else:
-                    test_output_gen_batch = asyncio.run_coroutine_threadsafe(
-                        self._dispatch_parallel_requests(validator_wg=validator_wg,
-                                                         test_batch=test_gen_batch_padded,
-                                                         global_step=global_step), self.loop).result()
-
-                test_output_gen_batch.batch['prompts'] = test_output_gen_batch.batch['input_ids'][:, :self.config.data.
-                                                                                                  max_prompt_length]
-                test_output_gen_batch.batch['responses'] = test_output_gen_batch.batch['input_ids'][:, self.config.data.
-                                                                                                    max_prompt_length:]
-
-                test_output_gen_batch = unpad_dataproto(test_output_gen_batch, pad_size=pad_size)
+                test_batch = self.rollout_manager.val_generate(test_batch, step=global_step, is_async=is_async)
 
                 print(
                     f'{val_epoch_idx + 1}-th/{val_epoch} {val_idx + 1}-th/{len(self.val_dataloader)} validation generation end'
                 )
-                same_keys = test_batch.non_tensor_batch.keys() & test_output_gen_batch.non_tensor_batch.keys()
-                test_batch.pop(non_tensor_batch_keys=list(same_keys))
-                test_batch = test_batch.union(test_output_gen_batch)
 
                 if self.use_rm:
                     # we first compute reward model score
@@ -275,7 +171,7 @@ class ValidateManager(object):
                     test_batch.non_tensor_batch.get('prompt_names',
                                                     ['unknown'] * reward_tensor.shape[0]).reshape(-1, eval_bon)[:, 0])
                 if need_log:
-                    input_ids = test_output_gen_batch.batch['input_ids'].cpu().numpy()
+                    input_ids = test_batch.batch['input_ids'].cpu().numpy()
                     prompt_ids = input_ids[:, :self.config.data.max_prompt_length]
                     response_ids = input_ids[:, self.config.data.max_prompt_length:]
                     prompts = self.tokenizer.batch_decode(prompt_ids, skip_special_tokens=True)
@@ -288,7 +184,7 @@ class ValidateManager(object):
 
         # validation release memory
         if not is_async:
-            validator_wg.release_param_and_cache()
+            self.rollout_manager.hybrid_wg.release_param_and_cache()
 
         reward_tensor = torch.cat(reward_tensor_lst, dim=0).cpu()  # (valsize*num_prompt_per_data, eval_bon)
         reward_tensor = torch.clamp(reward_tensor, min=0)

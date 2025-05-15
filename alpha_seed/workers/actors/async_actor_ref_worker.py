@@ -812,24 +812,7 @@ class AsyncActorRolloutRefWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def set_eos_callback_fn(self, eos_callback_fn):
-        self.eos_callback_fn = eos_callback_fn
-
-        def make_eos_call_back_fn(device_mesh):
-            from xperf_gpt.inference.session import Query
-
-            def eos_callback_fn(query: Query):
-                if device_mesh is None:
-                    tp_rank = 0
-                else:
-                    tp_rank = device_mesh['tp'].get_local_rank()
-
-                if tp_rank == 0:
-                    # only happens on tp rank zero
-                    self.eos_callback_fn(query)
-
-            return eos_callback_fn
-
-        self.rollout.set_rollout_callback_function(eos_callback_fn=make_eos_call_back_fn(self.rollout.device_mesh))
+        self.rollout.set_rollout_callback_function(eos_callback_fn=eos_callback_fn)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def update_standalone_worker(self, role):

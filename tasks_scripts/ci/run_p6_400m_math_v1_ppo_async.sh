@@ -85,7 +85,8 @@ python3 tasks/main_ppo.py \
     +actor_rollout_ref.rollout.use_vllm=False \
     +actor_rollout_ref.rollout.num_slots=256 \
     +actor_rollout_ref.rollout.slot_block_size=512 \
-    +actor_rollout_ref.rollout.complete_ratio=1.0 \
+    +actor_rollout_ref.rollout.complete_ratio=0.0 \
+    actor_rollout_ref.rollout.mode=server \
     actor_rollout_ref.ref.log_prob_micro_batch_size=512 \
     actor_rollout_ref.ref.ema=0.99 \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
@@ -133,12 +134,10 @@ python3 tasks/main_ppo.py \
     trainer.resume_steps=disable \
     trainer.set_fake_attention_mask=False \
     trainer.fake_seqlen_ratio=0.5 \
-    streaming_rollout.nnodes=0 \
+    streaming_rollout.nnodes=1 \
     streaming_rollout.n_gpus_per_node=${N_GPUS_PER_NODE_STREAMING} \
     streaming_rollout.warmup_step=0 \
     streaming_rollout.force_eos=True \
     streaming_validator.nnodes=1 \
     streaming_validator.n_gpus_per_node=${N_GPUS_PER_NODE_STREAMING} \
-    rollout_server.nnodes=1 \
-    rollout_server.n_gpus_per_node=${N_GPUS_PER_NODE_STREAMING} \
     trainer.total_steps=${NUM_STEPS}

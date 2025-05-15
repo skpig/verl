@@ -58,7 +58,7 @@ class OpenAIProxy(ABC):
         else:
             input_ids = prompt
         request_id = str(uuid.uuid4())
-        return AsyncQuery.from_request(input_ids, request_id, request.to_sampling_params())
+        return AsyncQuery.from_request(input_ids, request_id, request.to_sampling_params(), request.meta_info)
 
     def create_response(self, query: AsyncQuery) -> JSONResponse:
         message = ChatCompletionMessageRollout(
@@ -98,20 +98,21 @@ class OpenAIProxy(ABC):
 
 class AsyncXPerfGPTRolloutServer(OpenAIProxy):
 
-    def __init__(self, config, tokenizer=None, model_hf_config=None, actor_cls=RemoteAsyncXPerfGPTRollout):
+    def __init__(self,
+                 config,
+                 tokenizer=None,
+                 model_hf_config=None,
+                 actor_cls=RemoteAsyncXPerfGPTRollout,
+                 port: int = 8000):
         super().__init__()
         self.config = config
         self.tokenizer = tokenizer
         self.model_hf_config = model_hf_config
         self.actor_cls = actor_cls
-        if self.config.actor_rollout_ref.rollout.mode == "server":
-            self.world_size = self.config.trainer.nnodes * self.config.trainer.n_gpus_per_node
-        else:
-            self.world_size = self.config.rollout_server.nnodes * self.config.rollout_server.n_gpus_per_node
+        self.port = port
         self.tp_size = self.config.actor_rollout_ref.rollout.tensor_model_parallel_size
         self.dp_size = self.config.actor_rollout_ref.rollout.get("attention_data_parallel_size", 1)
         self.mp_size = self.tp_size * self.dp_size
-        self.replica_num = self.world_size // self.mp_size
 
         self.server_task = None
         self.workers = []
@@ -199,21 +200,29 @@ class AsyncXPerfGPTRolloutServer(OpenAIProxy):
         self.workers = worker_group._workers
         self.sub_cls_name = worker_group.sub_cls_name
         self.fused_worker_execute_fn_name = worker_group.fused_worker_execute_fn_name
+        self.world_size = worker_group.world_size
+        self.replica_num = self.world_size // self.mp_size
         logging.info("[attach_actors] attach workerActor {}".format(len(self.workers)))
 
-    async def start_server(self, host="0.0.0.0", port=8000):
+    async def start_server(self, host="0.0.0.0"):
         # get a free port and addr
         # from single_controller.base.worker import WorkerHelper
         # worker_helper = WorkerHelper()
         # free_port_addr = list(worker_helper.get_availale_master_addr_port())
-        config = uvicorn.Config(self.app, host=host, port=8001, loop="asyncio", timeout_keep_alive=300, backlog=16384)
+        config = uvicorn.Config(self.app,
+                                host=host,
+                                port=self.port,
+                                loop="asyncio",
+                                timeout_keep_alive=300,
+                                backlog=16384)
         logging.getLogger("uvicorn.access").disabled = True
         logging.getLogger("uvicorn").propagate = False
-        server = uvicorn.Server(config)
-        self.server_task = asyncio.create_task(server.serve())
+        self.server = uvicorn.Server(config)
+        self.server_task = asyncio.create_task(self.server.serve())
 
     async def stop_server(self):
         """Gracefully shutdown the server"""
+        await self.server.shutdown()
         if self.server_task:
             self.server_task.cancel()
             try:
@@ -229,9 +238,4 @@ class AsyncXPerfGPTRolloutServer(OpenAIProxy):
 
     async def __aexit__(self, exc_type, exc, tb):
         """Async context manager shutdown"""
-        self.server_task.cancel()
-        try:
-            await self.server_task
-        except asyncio.CancelledError:
-            pass
         await self.stop_server()

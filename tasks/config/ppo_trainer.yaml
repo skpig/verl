@@ -386,17 +386,17 @@ trainer:
   per_query_max_length: False
   per_query_max_length_init: ${data.max_response_length}
 
+rollout_server:
+  handler: "math/aiohttp" # ["math/aiohttp"]
+  handler_kwargs: {}
+
 streaming_rollout:
   n_gpus_per_node: 0
   nnodes: 0
   warmup_step: 0
-  force_eos: False
+  force_eos: False # only works for batch mode
 
 streaming_validator:
-  n_gpus_per_node: 0
-  nnodes: 0
-
-rollout_server:
   n_gpus_per_node: 0
   nnodes: 0
 

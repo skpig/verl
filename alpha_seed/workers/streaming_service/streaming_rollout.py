@@ -367,7 +367,24 @@ class AsyncXPerfGPTRollout(object):
         self.process_thread.start()
 
     def set_rollout_callback_function(self, eos_callback_fn):
-        self.inference_engine.set_callback_function(eos_callback_fn=eos_callback_fn)
+
+        def make_eos_call_back_fn(eos_callback_fn, device_mesh):
+            from alpha_seed.workers.xperf_rollout.component.query import Query
+
+            def tp_eos_callback_fn(query: Query):
+                if device_mesh is None:
+                    tp_rank = 0
+                else:
+                    tp_rank = device_mesh['tp'].get_local_rank()
+
+                if tp_rank == 0:
+                    # only happens on tp rank zero
+                    eos_callback_fn(query)
+
+            return tp_eos_callback_fn
+
+        tp_eos_callback_fn = make_eos_call_back_fn(eos_callback_fn, self.device_mesh)
+        self.inference_engine.set_callback_function(eos_callback_fn=tp_eos_callback_fn)
 
     def reset_status(self):
         model = self.inference_engine.engine.module
@@ -534,6 +551,7 @@ class AsyncXPerfGPTRollout(object):
             time.sleep(1)
             if self.stop_event.is_set():
                 continue
+
             with logging_set_level(self.config.get('logging_level', 'WARN')), self.profiler_context as p:
                 try:
                     self.reset_status()
@@ -571,8 +589,8 @@ class RemoteAsyncXPerfGPTRollout(Worker):
     async def get_inflight_query(self, query_id):
         return await self.rollout_actor.get_inflight_query(query_id)
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
-    def setup_rollout(self):
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def init_model(self, *args, **kwargs):
         self.rollout_actor.initialize(self.config.model.path, True)
         self.rollout_actor.setup_rollout()
         from alpha_seed.workers.xperf_rollout.utils.weights_communicater import WeightsCommunicater
@@ -584,6 +602,10 @@ class RemoteAsyncXPerfGPTRollout(Worker):
         self.master_port = os.getenv('MASTER_PORT', '12345')
 
         print(f'Master address: {self.master_address}, Master port: {self.master_port}')
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def set_eos_callback_fn(self, eos_callback_fn):
+        self.rollout_actor.set_rollout_callback_function(eos_callback_fn)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def get_master_addr(self):

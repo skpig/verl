@@ -1,4 +1,5 @@
 import torch
+from verl import DataProto
 from verl.utils.seqlen_balancing import rearrange_micro_batches
 
 
@@ -43,3 +44,16 @@ def update_model_config(module_config, override_config_kwargs):
             if not hasattr(module_config, key):
                 print(f"WARN: {key} not exists in {module_config}", flush=True)
             setattr(module_config, key, val)
+
+
+def print_dataproto_size(data: DataProto, head):
+    size_of_tensordict = 0
+    for key, tensor in data.batch.items():
+        size_of_tensordict += tensor.element_size() * tensor.numel()
+    size_of_numpy_array = 0
+    for key, numpy_array in data.non_tensor_batch.items():
+        size_of_numpy_array += numpy_array.nbytes
+
+    size_of_numpy_array /= 1024**3
+    size_of_tensordict /= 1024**3
+    print(f'{head}, Size of tensordict: {size_of_tensordict} GB, size of non_tensor_batch: {size_of_numpy_array} GB')

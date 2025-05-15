@@ -6,5 +6,14 @@ from alpha_seed.workers.streaming_service.streaming_utils import DataPack, pack_
 class TaskContext:
     config: dict
     tokenizer: object
-    reward_fn: callable
     global_step: int
+    server_port: int
+
+
+def select_handler_fn(handler_type: str):
+    if handler_type == "math/aiohttp":
+        from .math.aiohttp_handler import process_single_batch
+
+        return process_single_batch
+    else:
+        raise NotImplementedError(f"unsupported handler type: {handler_type}")

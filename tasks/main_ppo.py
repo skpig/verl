@@ -731,7 +731,7 @@ def validate_config(config):
     # rollout
     # assert real_train_batch_size % config.actor_rollout_ref.rollout.micro_batch_size == 0
     complete_ratio = config.actor_rollout_ref.rollout.get("complete_ratio", 1.0)
-    if config.streaming_rollout.nnodes == 0 and config.rollout_server.nnodes == 0:
+    if config.streaming_rollout.nnodes == 0:
         assert complete_ratio == 1.0, f'When streaming rollout (server) is not enabled, complete_ratio must be 1. Got {complete_ratio}'
     else:
         assert complete_ratio < 1.0, f'When streaming rollout (server) is enabled, complete_ratio must be smaller than 1. Got {complete_ratio}.'
@@ -836,31 +836,28 @@ def config_to_trainer_kwargs(config):
 
     from alpha_seed.trainer.ppo import ResourcePoolManager, Role
 
+    standalone_rollout_cls = RemoteAsyncXPerfGPTRollout if config.actor_rollout_ref.rollout.mode == 'server' else AsyncActorRolloutRefWorker
     role_worker_mapping = {
         Role.ActorRolloutRef: AsyncActorRolloutRefWorker,
         Role.Critic: CriticWorker,
-        Role.Rollout: AsyncActorRolloutRefWorker,
-        Role.Validator: AsyncActorRolloutRefWorker,
-        Role.RolloutServer: RemoteAsyncXPerfGPTRollout
+        Role.Rollout: standalone_rollout_cls,
+        Role.Validator: standalone_rollout_cls,
     }
 
     # in server client, the pool id should follow the format of f"{RoleNameInMerlin}_pool"
     global_pool_id = 'hybrid_pool'
     standalone_pool_id = 'rollout_pool'
     validation_pool_id = 'validator_pool'
-    rollout_server_pool_id = 'server_pool'
     resource_pool_spec = {
         global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
         standalone_pool_id: [config.streaming_rollout.n_gpus_per_node] * config.streaming_rollout.nnodes,
         validation_pool_id: [config.streaming_validator.n_gpus_per_node] * config.streaming_validator.nnodes,
-        rollout_server_pool_id: [config.rollout_server.n_gpus_per_node] * config.rollout_server.nnodes,
     }
     mapping = {
         Role.ActorRolloutRef: global_pool_id,
         Role.Critic: global_pool_id,
         Role.Rollout: standalone_pool_id,
         Role.Validator: validation_pool_id,
-        Role.RolloutServer: rollout_server_pool_id
     }
 
     # we should adopt a multi-source reward function here
