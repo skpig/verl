@@ -324,7 +324,7 @@ class RolloutManager:
             gen_out_batch = self._val_batch_gen(gen_batch, step=step, metrics=metrics, is_standalone=is_async)
 
         same_keys = batch.non_tensor_batch.keys() & gen_out_batch.non_tensor_batch.keys()
-        gen_out_batch.pop(non_tensor_batch_keys=list(same_keys))
+        batch.pop(non_tensor_batch_keys=list(same_keys))
         batch.union(gen_out_batch)
         return batch
 
