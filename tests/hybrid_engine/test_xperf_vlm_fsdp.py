@@ -60,7 +60,7 @@ rollout_config = OmegaConf.create({
     "max_ctx_batch_size": 1,
     "rollout_pool": {},
     "schedule_strategy": "default",
-    "gpu_memory_utilization": 0.9,
+    "gpu_memory_utilization": 0.7,
     "profile": {
         "enable": False,
         "filename": "test",
