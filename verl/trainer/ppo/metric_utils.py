@@ -53,6 +53,7 @@ def _compute_response_info(batch: DataProto) -> Dict[str, Any]:
 
 @ray.remote
 def compute_rollout_metrics(batch: DataProto, tokenizer) -> Dict[str, Any]:
+    return dict()
     # rollouts = [(index, tokenizer.decode(token_ids, skip_special_tokens=True)) for index, token_ids in zip(batch.batch['index'], batch.batch['responses'])]
     # # sort by index
     # rollouts = sorted(rollouts, key=lambda x: x[0])
