@@ -8,7 +8,7 @@ import pandas as pd
 import uuid
 import time
 import threading
-from contextlib import suppress
+from contextlib import suppress, contextmanager, nullcontext
 from codetiming import Timer
 from omegaconf import OmegaConf
 from verl import DataProto
@@ -39,27 +39,36 @@ def _setup_standalone_comm(hybrid_wg, standalone_wg, role: str, port: int):
     standalone_wg.setup_standalone_worker_comm(hybrid_master_address, standalone_master_address, str(port), role)
 
 
-def _update_standalone_server_weights(hybrid_wg, server_wg, server_role: str):
-    # bind weights...
-    server_wg.stop_server_before_weights_update()
-
-    # update the rollout server, do weights binding
-    actor_fut = hybrid_wg.update_standalone_worker(server_role)
-    standalone_fut = server_wg.update_standalone_worker(server_role)
-    # note that we should wait for the weight sync to be completed to avoid standalone fail and driver continues
-    ray.get(actor_fut)
-    ray.get(standalone_fut)
-    hybrid_wg.release_param_and_cache()
-
-    # restart the rollout server
-    server_wg.restart_server_after_weights_update()
-
-
-def _update_standalone_batch_weights(hybrid_wg, standalone_wg, standalone_role: str):
+def _update_standalone_weights(hybrid_wg, standalone_wg, standalone_role: str):
     actor_fut = hybrid_wg.update_standalone_worker(standalone_role)
     standalone_fut = standalone_wg.update_standalone_worker(standalone_role)
     ray.get(actor_fut)
     ray.get(standalone_fut)
+    hybrid_wg.release_param_and_cache()
+
+
+@contextmanager
+def server_update_weights_ctx(server_wg):
+    toggled = False
+    try:
+        server_wg.stop_server_before_weights_update()
+        toggled = True
+        yield
+    finally:
+        if toggled:
+            server_wg.restart_server_after_weights_update()
+
+
+@contextmanager
+def hybrid_enable_server_ctx(hybrid_wg):
+    toggled = False
+    try:
+        hybrid_wg.toggle_inference_server_state(sleep=False)
+        toggled = True
+        yield
+    finally:
+        if toggled:
+            hybrid_wg.toggle_inference_server_state(sleep=True)
 
 
 class RolloutManager:
@@ -69,6 +78,7 @@ class RolloutManager:
         config: OmegaConf,
         logger: Tracking,
         tokenizer: AutoTokenizer,
+        port_bias: int = 8000,
     ):
         self.config = config
         self.logger = logger
@@ -90,9 +100,13 @@ class RolloutManager:
 
         self.rollout_pool_warmup_step = self.config.actor_rollout_ref.rollout.rollout_pool.get("warmup_step", 0)
 
-        self._hybrid_port = 8000
-        self._train_standalone_port = 8001
-        self._val_standalone_port = 8002
+        self._hybrid_port = port_bias
+        self._train_standalone_port = port_bias + 1
+        self._val_standalone_port = port_bias + 2
+        self._train_comm_port = port_bias + 3
+        self._val_comm_port = port_bias + 4
+
+        self._hybrid_wg_lock = threading.Lock()
 
     def _init_servers(self):
         if not self._use_server:
@@ -105,9 +119,15 @@ class RolloutManager:
 
         self.listen_loop = asyncio.new_event_loop()
         self.loop = asyncio.new_event_loop()
-        self._listen_thread = threading.Thread(target=start_background_loop, args=(self.listen_loop,), daemon=True)
+        self._listen_thread = threading.Thread(target=start_background_loop,
+                                               args=(self.listen_loop,),
+                                               daemon=True,
+                                               name="server_listen")
         self._listen_thread.start()
-        self._client_thread = threading.Thread(target=start_background_loop, args=(self.loop,), daemon=True)
+        self._client_thread = threading.Thread(target=start_background_loop,
+                                               args=(self.loop,),
+                                               daemon=True,
+                                               name="client")
         self._client_thread.start()
 
         self._server_futs = []
@@ -146,12 +166,12 @@ class RolloutManager:
             _setup_standalone_comm(self.hybrid_wg,
                                    standalone_wg=self.train_standalone_wg,
                                    role='standalone_rollout',
-                                   port=12345)
+                                   port=self._train_comm_port)
         if self.val_standalone_wg is not None:
             _setup_standalone_comm(self.hybrid_wg,
                                    standalone_wg=self.val_standalone_wg,
                                    role='standalone_validator',
-                                   port=14567)
+                                   port=self._val_comm_port)
 
     def _init_eos_callback(self):
         remote_reward_style = []
@@ -245,15 +265,12 @@ class RolloutManager:
             assert complete_ratio in (0.0, 1.0), "complete_ratio must be 1.0 or 0.0 for server mode"
             # hybrid server mode
             gen_batch.union(batch)
-            ready_batch, self.pending_batch = asyncio.run_coroutine_threadsafe(
-                self._train_server_gen(gen_batch,
-                                       step=step,
-                                       metrics=metrics,
-                                       pending_batch=copy.copy(self.pending_batch),
-                                       is_standalone=(complete_ratio == 0.0),
-                                       is_warmup_step=is_warmup_step),
-                self.loop,
-            ).result()
+            ready_batch, self.pending_batch = self._train_server_gen(gen_batch,
+                                                                     step=step,
+                                                                     metrics=metrics,
+                                                                     pending_batch=copy.copy(self.pending_batch),
+                                                                     is_standalone=(complete_ratio == 0.0),
+                                                                     is_warmup_step=is_warmup_step)
         else:
             # batch mode, hybrid + (optional) standalone
             ready_batch, self.standalone_batch, self.pending_batch = (self._train_batch_gen(
@@ -317,9 +334,7 @@ class RolloutManager:
 
         if self._use_server:
             gen_batch.union(batch)
-            gen_out_batch = asyncio.run_coroutine_threadsafe(
-                self._val_server_gen(gen_batch, step=step, metrics=metrics, is_standalone=is_async),
-                self.loop).result()
+            gen_out_batch = self._val_server_gen(gen_batch, step=step, metrics=metrics, is_standalone=is_async)
         else:
             gen_out_batch = self._val_batch_gen(gen_batch, step=step, metrics=metrics, is_standalone=is_async)
 
@@ -449,9 +464,9 @@ class RolloutManager:
 
         # update standalone rollout weights
         with Timer(name="update_standalone", logger=None) as timer:
-            if self.train_standalone_wg is not None:
-                _update_standalone_batch_weights(self.hybrid_wg, self.train_standalone_wg, "standalone_rollout")
-        self.hybrid_wg.release_param_and_cache()
+            with self._hybrid_wg_lock:
+                if self.train_standalone_wg is not None:
+                    _update_standalone_weights(self.hybrid_wg, self.train_standalone_wg, "standalone_rollout")
         metrics["timing/update_standalone"] = timer.last
 
         # standalone generate (off policy)
@@ -492,7 +507,7 @@ class RolloutManager:
         metrics["rollout/standalone_input_batch"] = len(standalone_batch)
         return ready_batch, standalone_batch, pending_batch
 
-    async def _train_server_gen(
+    def _train_server_gen(
         self,
         gen_batch: DataProto,
         step: int,
@@ -504,17 +519,14 @@ class RolloutManager:
         """streaming gen with server, only for train"""
         if is_standalone:
             with Timer(name="update_rollout_server", logger=None) as timer:
-                _update_standalone_server_weights(self.hybrid_wg,
-                                                  self.train_standalone_wg,
-                                                  server_role="standalone_rollout")
+                with server_update_weights_ctx(self.train_standalone_wg):
+                    with self._hybrid_wg_lock:
+                        _update_standalone_weights(self.hybrid_wg, self.train_standalone_wg, "standalone_rollout")
             print(f"[INFO] {step} generate streaming[update weights and restart] {timer.last}")
             metrics["timing/update_rollout_server"] = timer.last
             server_port = self._train_standalone_port
         else:
             server_port = self._hybrid_port
-
-        if not is_standalone:
-            self.hybrid_wg.toggle_inference_server_state(sleep=False)
 
         ready_batch = []
         handler_fn = select_handler_fn(self.config.rollout_server.handler)
@@ -525,23 +537,34 @@ class RolloutManager:
             server_port=server_port,
         )
 
-        # submit the training batch to the rollout server
-        start = time.time()
-        running_batch = []
-        for item in gen_batch.chunk(len(gen_batch)):
-            task = asyncio.create_task(handler_fn(item, context))
-            running_batch.append(task)
-        print(f"[INFO] {step} train generate server[submit], batch size: {len(gen_batch)}, {time.time() - start}")
-        start = time.time()
+        async def submit_and_wait():
+            # submit the training batch to the rollout server
+            start = time.time()
+            running_batch = []
+            for item in gen_batch.chunk(len(gen_batch)):
+                task = asyncio.create_task(handler_fn(item, context))
+                running_batch.append(task)
+            print(f"[INFO] {step} train generate server[submit], batch size: {len(gen_batch)}, {time.time() - start}")
+            start = time.time()
 
-        if is_warmup_step or (not is_standalone):
-            # for warmup, wait all ready
-            await asyncio.gather(*running_batch)
+            if is_warmup_step or (not is_standalone):
+                # for warmup, wait all ready
+                await asyncio.gather(*running_batch)
 
-        print(f"[INFO] {step} train generate server[as_completed], batch size: {len(gen_batch)}, {time.time() - start}")
-        start = time.time()
+            print(
+                f"[INFO] {step} train generate server[as_completed], batch size: {len(gen_batch)}, {time.time() - start}"
+            )
+            start = time.time()
 
-        done, pending = await asyncio.wait(running_batch + pending_batch, timeout=0, return_when=asyncio.ALL_COMPLETED)
+            done, pending = await asyncio.wait(running_batch + pending_batch,
+                                               timeout=0,
+                                               return_when=asyncio.ALL_COMPLETED)
+            return done, pending
+
+        with nullcontext() if is_standalone else self._hybrid_wg_lock:
+            with nullcontext() if is_standalone else hybrid_enable_server_ctx(self.hybrid_wg):
+                done, pending = asyncio.run_coroutine_threadsafe(submit_and_wait(), self.loop).result()
+
         pending = list(pending)
         results = []
         for task in done:
@@ -552,14 +575,18 @@ class RolloutManager:
 
         ready_batch = results
 
-        if not is_standalone:
-            self.hybrid_wg.toggle_inference_server_state(sleep=True)
-
+        dummy_batch = DataProto(meta_info={"xperf_metrics": self._merge_xperf_metrics(ready_batch)})
+        record_xperf_metrics(dummy_batch,
+                             metrics,
+                             self.logger,
+                             step,
+                             prefix="standalone" if is_standalone else "hybrid")
         return ready_batch, pending
 
     def _val_batch_gen(self, gen_batch: DataProto, step: int, metrics: Dict, is_standalone: bool) -> DataProto:
         if is_standalone:
-            _update_standalone_batch_weights(self.hybrid_wg, self.val_standalone_wg, "standalone_validator")
+            with self._hybrid_wg_lock:
+                _update_standalone_weights(self.hybrid_wg, self.val_standalone_wg, "standalone_validator")
             validator_wg = self.val_standalone_wg
         else:
             validator_wg = self.hybrid_wg
@@ -568,22 +595,24 @@ class RolloutManager:
             gen_out_batch_padded = validator_wg.generate_sequences(gen_batch_padded)
         metrics['timing/gen'] = timer.last
         gen_out_batch = unpad_dataproto(gen_out_batch_padded, pad_size)
+        record_xperf_metrics(gen_out_batch,
+                             metrics,
+                             self.logger,
+                             step,
+                             prefix="standalone" if is_standalone else "hybrid")
         return gen_out_batch
 
-    async def _val_server_gen(self, gen_batch: DataProto, step: int, metrics: Dict, is_standalone: bool) -> DataProto:
+    def _val_server_gen(self, gen_batch: DataProto, step: int, metrics: Dict, is_standalone: bool) -> DataProto:
         if is_standalone:
             with Timer(name="update_rollout_server", logger=None) as timer:
-                _update_standalone_server_weights(self.hybrid_wg,
-                                                  self.val_standalone_wg,
-                                                  server_role='standalone_validator')
-            print(f"[INFO] {step} generate streaming[update weights and restart] {timer.last}")
+                with server_update_weights_ctx(self.val_standalone_wg):
+                    with self._hybrid_wg_lock:
+                        _update_standalone_weights(self.hybrid_wg, self.val_standalone_wg, "standalone_validator")
+            print(f"[INFO] {step} val generate server[update weights and restart] {timer.last}")
             metrics["timing/update_rollout_server"] = timer.last
             server_port = self._val_standalone_port
         else:
             server_port = self._hybrid_port
-
-        if not is_standalone:
-            self.hybrid_wg.toggle_inference_server_state(sleep=False)
 
         ready_batch = []
         handler_fn = select_handler_fn(self.config.rollout_server.handler)
@@ -594,26 +623,47 @@ class RolloutManager:
             server_port=server_port,
         )
 
-        # submit the training batch to the rollout server
-        start = time.time()
-        running_batch = []
-        for item in gen_batch.chunk(len(gen_batch)):
-            task = asyncio.create_task(handler_fn(item, context))
-            running_batch.append(task)
-        print(f"[INFO] {step} val generate streaming[submit], batch size: {len(gen_batch)}, {time.time() - start}")
-        start = time.time()
+        async def _submit_and_wait():
+            # submit the training batch to the rollout server
+            start = time.time()
+            running_batch = []
+            for item in gen_batch.chunk(len(gen_batch)):
+                task = asyncio.create_task(handler_fn(item, context))
+                running_batch.append(task)
+            print(f"[INFO] {step} val generate streaming[submit], batch size: {len(gen_batch)}, {time.time() - start}")
+            start = time.time()
 
-        ready_batch = await asyncio.gather(*running_batch, return_exceptions=True)
-        print(f"[INFO] {step} val gen server[as_completed], batch size: {len(gen_batch)}")
+            ready_batch = await asyncio.gather(*running_batch, return_exceptions=True)
+            print(f"[INFO] {step} val gen server[as_completed], batch size: {len(gen_batch)}")
+            return ready_batch
+
+        with nullcontext() if is_standalone else self._hybrid_wg_lock:
+            with nullcontext() if is_standalone else hybrid_enable_server_ctx(self.hybrid_wg):
+                ready_batch = asyncio.run_coroutine_threadsafe(_submit_and_wait(), self.loop).result()
 
         for res in ready_batch:
             if isinstance(res, Exception):
                 raise res
 
-        if not is_standalone:
-            self.hybrid_wg.toggle_inference_server_state(sleep=True)
+        gen_out = DataProto.concat(ready_batch)
+        gen_out.meta_info['xperf_metrics'] = self._merge_xperf_metrics(ready_batch)
+        record_xperf_metrics(gen_out, metrics, self.logger, step, prefix="standalone" if is_standalone else "hybrid")
+        return gen_out
 
-        return DataProto.concat(ready_batch)
+    def _merge_xperf_metrics(self, batch_list: List[DataProto]) -> Dict:
+        """Merge per query xperf_metrics"""
+        merged_metrics = dict()
+        for item in batch_list:
+            if "xperf_metrics" not in item.meta_info:
+                continue
+            query_metrics = item.meta_info['xperf_metrics']
+            for key, val in query_metrics.items():
+                if key not in merged_metrics:
+                    merged_metrics[key] = val
+                if type(val) != type(merged_metrics[key]):
+                    continue
+                merged_metrics[key] += val
+        return merged_metrics
 
     def _prepare_gen_batch(self, batch: DataProto, is_train: bool):
 

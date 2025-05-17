@@ -79,6 +79,33 @@ class StepProfiler:
         self.step += 1
 
 
+class GetMaxSet:
+    """A sorted multiset data structure that can get the maximum value in O(logn)"""
+
+    def __init__(self):
+        from sortedcontainers import SortedDict
+        self.data = SortedDict()
+
+    def add_one(self, val: int):
+        key = -val
+        if key not in self.data:
+            self.data[key] = 0
+        self.data[key] += 1
+
+    def remove_one(self, val: int):
+        key = -val
+        self.data[key] -= 1
+        if self.data[key] == 0:
+            self.data.pop(key)
+
+    def is_empty(self):
+        return len(self.data) == 0
+
+    def get_max(self) -> int:
+        key = next(iter(self.data.keys()))
+        return -key
+
+
 class InferenceSession:
     """A session for managing inference process of a large language model.
     
@@ -198,6 +225,7 @@ class InferenceSession:
         self.paused: List[Query] = []
 
         self.finished = {}
+        self.unfinished_off_policy_steps_set = GetMaxSet()
         self.stop_sequence_tokens: List[List[int]] = []
         self.common_prefix = ""
         self.common_prefix_tensor_len = 0
@@ -521,6 +549,7 @@ class InferenceSession:
                     query.set_resume_state(dill.loads(resume_state))
 
                 self.finished[query.id] = query
+                self.unfinished_off_policy_steps_set.add_one(query.off_policy_steps)
         logging_rank(logging.info, "[prepare_context_inputs] total queries: {}".format(idx + 1))
 
     def build_prefix_kv_cache(self):
@@ -586,6 +615,7 @@ class InferenceSession:
         if self.eos_callback_fn:
             self.eos_callback_fn(query)
         query.set_finished()
+        self.unfinished_off_policy_steps_set.remove_one(query.off_policy_steps)
         self.finished_num += 1
         self.cache_manager.release_query(query)
         self.infer_scheduler.record("finished_tokens_by_step", [self.current_steps])
@@ -820,20 +850,22 @@ class InferenceSession:
         if stop_event is None and self.finished_num >= int(complete_ratio * len(prompts)):
             return True
         if stop_event is not None:
+            # wait for the max_off_policy rollout
+            if (not self.unfinished_off_policy_steps_set.is_empty()) and (
+                    self.unfinished_off_policy_steps_set.get_max() >= self.max_off_policy_steps):
+                return False
+
             # stop event break
             if (stop_event.is_set()):
                 self.stop_signal_tensor.fill_(1.0)
+            else:
+                self.stop_signal_tensor.zero_()
             # reuse first nccl layer to comm signal
             if self.engine.module.tp_size > 1:
                 assert self.tp_group is not None, "tp_group not set!"
                 torch.distributed.all_reduce(self.stop_signal_tensor, group=self.tp_group)
 
-            # wait for the max_off_policy rollout
-            skip_break = False
-            for query in self.finished.values():
-                if (not query.is_finished and query.off_policy_steps >= self.max_off_policy_steps):
-                    skip_break = True
-            if not skip_break and self.stop_signal_tensor.item() == self.engine.module.tp_size:
+            if self.stop_signal_tensor.item() == self.engine.module.tp_size:
                 return True
         return False
 
@@ -850,6 +882,7 @@ class InferenceSession:
         new_joins = self.pending.get_earliest(num_ready)
         for query in new_joins:
             self.finished[query.id] = query
+            self.unfinished_off_policy_steps_set.add_one(query.off_policy_steps)
         self.pending.truncate(num_ready)
         return self.waiting + new_joins
 
@@ -1024,6 +1057,7 @@ class InferenceSession:
                     query.set_finished(exception=e)
                 logging.error(f"Error handling request: {str(e)}")
                 raise (e)
+        self.status = "idle"
 
     def _exceed_length_condition(self, query, tokens_threshold):
         return query.new_token_len + tokens_threshold >= query.max_new_tokens or len(query.new_token_ids) + len(

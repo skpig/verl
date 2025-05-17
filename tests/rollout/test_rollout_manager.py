@@ -1,46 +1,15 @@
-import json
-import os
 from pathlib import Path
 import pytest
 import copy
-from functools import partial
 import time
-
-from single_controller.ray import RayResourcePool, RayClassWithInitArgs, RayWorkerGroup
 
 from omegaconf import OmegaConf
 
 from verl import DataProto
-from verl.utils.fs import copy_local_path_from_hdfs
-from verl.utils.tracking import Tracking
-from verl.single_controller.ray.base import create_colocated_worker_cls
-
-from transformers import AutoTokenizer
-
-import torch
-
-import ray
 import pandas as pd
 import numpy as np
 import uuid
-
-from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRefWorker
-from alpha_seed.workers.actors.rollout_pool import RolloutPool
-from alpha_seed.workers.streaming_service.streaming_rollout import RemoteAsyncXPerfGPTRollout
-from alpha_seed.workers.streaming_service.rollout_manager import RolloutManager
-
-
-@pytest.fixture(scope='function')
-def ray_fixture():
-    ray.init()
-    yield
-    ray.shutdown()
-
-
-def set_common_envs(monkeypatch):
-    monkeypatch.setenv('TOKENIZERS_PARALLELISM', "false")
-    monkeypatch.setenv("NCCL_DEBUG", "WARN")
-    monkeypatch.setenv("XPERF_DUMP_NAN", "0")
+from tests.test_utils import gpu_allocator, ray_fixture, set_common_envs, get_config, get_tokenizer, create_rollout_manager, PytestXdistEnv
 
 
 def get_dataproto(config, tokenizer):
@@ -53,10 +22,9 @@ def get_dataproto(config, tokenizer):
     ]
 
     data = []
-    reward_model = []
     for question, answer in qa_list:
         prompt = [{"role": "user", "content": question}]
-        reward_model.append({'style': 'rule-lighteval/MATH', 'ground_truth': str(answer)})
+        reward_model = {'style': 'rule-lighteval/MATH', 'ground_truth': str(answer)}
         data.append({"prompt": prompt, "reward_model": reward_model})
     df = pd.DataFrame(data)
 
@@ -83,23 +51,19 @@ def get_dataproto(config, tokenizer):
     batch = DataProto.from_dict(data)
     batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(batch))], dtype=object)
     batch.non_tensor_batch['rollout_id'] = np.array([str(uuid.uuid4()) for _ in range(len(batch))], dtype=object)
-    batch.non_tensor_batch['reward_model'] = np.array(reward_model, dtype=object)
+    batch.non_tensor_batch['reward_model'] = np.array(df['reward_model'].tolist(), dtype=object)
     batch.check_consistency()
     return batch
 
 
 def get_common_config():
-    default_conf_path = (Path(__file__).parent.parent.parent / "tasks/config/ppo_trainer.yaml")
-    default_conf = OmegaConf.load(default_conf_path)
     override_config = OmegaConf.create({
         "data": {
             "train_batch_size": 4,
         },
         "actor_rollout_ref": {
             "model": {
-                # "path": "hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/M8_680m_SFT_hf"
-                "path":
-                    "hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/p6_400m_moe_4T_sft_v27_bs128_lr4e-4_master_dyn_epoch4_hf"
+                "path": "hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/M8_680m_SFT_hf"
             },
             "rollout": {
                 "tensor_model_parallel_size": 2,
@@ -108,7 +72,7 @@ def get_common_config():
                 "rollout_pool": {
                     "warmup_step": 0,
                 },
-                "gpu_memory_utilization": 0.2
+                "gpu_memory_utilization": 0.5
             },
         },
         "trainer": {
@@ -127,23 +91,7 @@ def get_common_config():
             "n_gpus_per_node": 2,
         },
     })
-
-    config = OmegaConf.merge(default_conf, override_config)
-    return config
-
-
-def get_logger(config):
-    logger = Tracking(project_name=config.trainer.project_name,
-                      experiment_name=config.trainer.experiment_name,
-                      default_backend=config.trainer.logger,
-                      config=OmegaConf.to_container(config, resolve=True))
-    return logger
-
-
-def get_tokenizer(config):
-    local_path = copy_local_path_from_hdfs(config.actor_rollout_ref.model.path)
-    tokenizer = AutoTokenizer.from_pretrained(local_path)
-    return tokenizer
+    return get_config(override_config)
 
 
 def decode_output(output, tokenizer):
@@ -163,79 +111,14 @@ def _check_score(out_text, batch):
         assert score == 1.0
 
 
-def _create_rollout_wg_common(actor_rollout_ref_config, ngpus: int, role: str, name: str, is_server: bool):
-    resource_pool = RayResourcePool(process_on_nodes=[ngpus], use_gpu=True, name_prefix=name)
-    rollout_cls_with_init = RayClassWithInitArgs(
-        cls=RemoteAsyncXPerfGPTRollout if is_server else AsyncActorRolloutRefWorker,
-        config=actor_rollout_ref_config,
-        role=role)
-    class_dict = {name: rollout_cls_with_init}
-    worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
-    wg = RayWorkerGroup(resource_pool=resource_pool, ray_cls_with_init=worker_dict_cls)
-    wg_dict = wg.spawn(prefix_set=class_dict.keys())
-    wg = wg_dict[name]
-
-    ray.get(wg.init_model())
-    return wg
-
-
-def create_hybrid_wg(config):
-    assert config.trainer.nnodes == 1
-    return _create_rollout_wg_common(config.actor_rollout_ref,
-                                     ngpus=config.trainer.n_gpus_per_node,
-                                     role='rollout',
-                                     name='hybrid_rollout',
-                                     is_server=False)
-
-
-def create_streaming_rollout_wg(config):
-    if config.streaming_rollout.nnodes == 0:
-        return None
-    is_server = config.actor_rollout_ref.rollout.mode == 'server'
-    return _create_rollout_wg_common(config.actor_rollout_ref,
-                                     ngpus=config.streaming_rollout.n_gpus_per_node,
-                                     role='standalone_rollout',
-                                     name='streaming_rollout',
-                                     is_server=is_server)
-
-
-def create_streaming_validator_wg(config):
-    if config.streaming_validator.nnodes == 0:
-        return None
-    is_server = config.actor_rollout_ref.rollout.mode == 'server'
-    return _create_rollout_wg_common(config.actor_rollout_ref,
-                                     ngpus=config.streaming_validator.n_gpus_per_node,
-                                     role='standalone_validator',
-                                     name='streaming_validator',
-                                     is_server=is_server)
-
-
-def create_rollout_pool(config):
-    rollout_pool = RolloutPool.get_or_create_actor(config)
-    return rollout_pool
-
-
-class TestContext:
-
-    def __init__(self, config):
-        self.config = config
-        self.logger = get_logger(config)
-        self.tokenizer = get_tokenizer(config)
-
-        hybrid_wg = create_hybrid_wg(config)
-        streaming_rollout_wg = create_streaming_rollout_wg(config)
-        streaming_validator_wg = create_streaming_validator_wg(config)
-        rollout_pool = create_rollout_pool(config)
-        self.rollout_manager = RolloutManager(config, logger=self.logger, tokenizer=self.tokenizer)
-        self.rollout_manager.initialize(hybrid_wg,
-                                        rollout_pool=rollout_pool,
-                                        train_standalone_wg=streaming_rollout_wg,
-                                        val_standalone_wg=streaming_validator_wg)
+def mock_save_dataproto(data: DataProto, prefix: str = ''):
+    print(f"mock savedataproto prefix={prefix}")
 
 
 @pytest.mark.parametrize("complete_ratio", [1.0, 0.0, 0.5])
 @pytest.mark.parametrize("is_server", [True])
-def test_train_generate(monkeypatch, ray_fixture, complete_ratio, is_server):
+@pytest.mark.parametrize("gpu_allocator", [4], indirect=True)
+def test_train_generate(monkeypatch, gpu_allocator, ray_fixture, complete_ratio, is_server):
     if is_server and (0.0 < complete_ratio < 1.0):
         pytest.skip("skip is_server and 0<complete_ratio<1")
 
@@ -247,11 +130,9 @@ def test_train_generate(monkeypatch, ray_fixture, complete_ratio, is_server):
     config.streaming_rollout.nnodes = 1 if has_standalone else 0
     config.streaming_validator.nnodes = 0
 
-    ctx = TestContext(config)
-    batch = get_dataproto(config, ctx.tokenizer)
-
-    def mock_save_dataproto(data: DataProto, prefix: str = ''):
-        print(f"mock savedataproto prefix={prefix}")
+    tokenizer = get_tokenizer(config)
+    batch = get_dataproto(config, tokenizer)
+    rollout_manager = create_rollout_manager(config)
 
     input_batch = copy.deepcopy(batch)
 
@@ -260,15 +141,15 @@ def test_train_generate(monkeypatch, ray_fixture, complete_ratio, is_server):
             start = time.time()
             batch = copy.deepcopy(input_batch)
             is_warmup_step = i == 0
-            batch = ctx.rollout_manager.train_generate(batch,
-                                                       step=i,
-                                                       save_dataproto_fn=mock_save_dataproto,
-                                                       is_warmup_step=is_warmup_step)
+            batch = rollout_manager.train_generate(batch,
+                                                   step=i,
+                                                   save_dataproto_fn=mock_save_dataproto,
+                                                   is_warmup_step=is_warmup_step)
             if is_warmup_step:
                 warmup_elapsed = time.time() - start
                 assert batch is None
             else:
-                out_text = decode_output(batch, ctx.tokenizer)
+                out_text = decode_output(batch, tokenizer)
                 print(out_text)
                 _check_score(out_text, batch)
                 if complete_ratio < 1.0:
@@ -277,22 +158,90 @@ def test_train_generate(monkeypatch, ray_fixture, complete_ratio, is_server):
     except:
         raise
     finally:
-        ctx.rollout_manager.stop_servers()
+        rollout_manager.stop_servers()
 
 
 @pytest.mark.parametrize("is_standalone", [True, False])
 @pytest.mark.parametrize("is_server", [True, False])
-def test_val_generate(monkeypatch, ray_fixture, is_standalone, is_server):
+@pytest.mark.parametrize("gpu_allocator", [4], indirect=True)
+def test_val_generate(monkeypatch, gpu_allocator, ray_fixture, is_standalone, is_server):
     set_common_envs(monkeypatch)
     config = get_common_config()
     config.actor_rollout_ref.rollout.mode = 'server' if is_server else 'batch'
     config.streaming_rollout.nnodes = 0
     config.streaming_validator.nnodes = 1 if is_standalone else 0
 
-    ctx = TestContext(config)
-    batch = get_dataproto(config, ctx.tokenizer)
-    batch = ctx.rollout_manager.val_generate(batch, is_async=is_standalone)
-    out_text = decode_output(batch, ctx.tokenizer)
+    tokenizer = get_tokenizer(config)
+    batch = get_dataproto(config, tokenizer)
+    rollout_manager = create_rollout_manager(config)
+    batch = rollout_manager.val_generate(batch, is_async=is_standalone)
+    out_text = decode_output(batch, tokenizer)
     print(out_text)
-    ctx.rollout_manager.stop_servers()
+    rollout_manager.stop_servers()
     _check_score(out_text, batch)
+
+
+@pytest.mark.parametrize("is_server", [True, False])
+@pytest.mark.parametrize("train_standalone", [True, False])
+@pytest.mark.parametrize("val_standalone", [True, False])
+@pytest.mark.parametrize("gpu_allocator", [4], indirect=True)
+def test_streaming_train_val(monkeypatch, gpu_allocator, ray_fixture, is_server, train_standalone, val_standalone):
+    set_common_envs(monkeypatch)
+    config = get_common_config()
+    config.actor_rollout_ref.rollout.mode = 'server' if is_server else 'batch'
+    config.actor_rollout_ref.rollout.complete_ratio = 0.0 if train_standalone else 1.0
+    config.actor_rollout_ref.rollout.tensor_model_parallel_size = 1
+    config.streaming_rollout.nnodes = 1 if train_standalone else 0
+    config.streaming_rollout.n_gpus_per_node = 1
+    config.streaming_validator.nnodes = 1 if val_standalone else 0
+    config.streaming_validator.n_gpus_per_node = 1
+
+    tokenizer = get_tokenizer(config)
+    rollout_manager = create_rollout_manager(config)
+    import threading
+    val_stop = threading.Event()
+    val_batch = get_dataproto(config, tokenizer)
+
+    # run warmup step
+    start = time.time()
+    input_batch = get_dataproto(config, tokenizer)
+    _ = rollout_manager.train_generate(copy.deepcopy(input_batch),
+                                       step=0,
+                                       save_dataproto_fn=mock_save_dataproto,
+                                       is_warmup_step=True)
+    warmup_time = time.time() - start
+
+    def val_thread_fn():
+        val_step = 0
+        while not val_stop.is_set():
+            input_batch = copy.deepcopy(val_batch)
+            batch = rollout_manager.val_generate(input_batch, is_async=val_standalone)
+            out_text = decode_output(batch, tokenizer)
+            print("val:", out_text)
+            _check_score(out_text, batch)
+            val_step += 1
+
+    from concurrent.futures import ThreadPoolExecutor
+    executor = ThreadPoolExecutor(max_workers=1)
+
+    val_fut = executor.submit(val_thread_fn)
+
+    try:
+        for i in range(1, 3):
+            start = time.time()
+            batch = copy.deepcopy(input_batch)
+            batch = rollout_manager.train_generate(batch,
+                                                   step=i,
+                                                   save_dataproto_fn=mock_save_dataproto,
+                                                   is_warmup_step=False)
+            out_text = decode_output(batch, tokenizer)
+            print("train:", out_text)
+            _check_score(out_text, batch)
+            # mock training to overlap
+            time.sleep(warmup_time + 1)
+    except:
+        raise
+    finally:
+        val_stop.set()
+        val_fut.result()
+        rollout_manager.stop_servers()

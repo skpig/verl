@@ -321,8 +321,9 @@ class AsyncXPerfGPTRollout(object):
 
     async def get_inflight_query(self, query_id):
         with self.inference_engine.update_weights_lock:
-            query = self.inference_engine.pending.query_pool[query_id]
+            query = self.inference_engine.pending.query_pool.pop(query_id)
         await query.wait_until_done()
+        _ = self.inference_engine.finished.pop(query_id, None)
         query._event = None
         query._loop = None
         query.input_embedding = None
@@ -625,11 +626,10 @@ class RemoteAsyncXPerfGPTRollout(Worker):
 
         with self.rollout_actor.inference_engine.update_weights_lock:
             self.rollout_actor.stop_event.set()
-
-        while (self.rollout_actor.inference_engine.stop_signal_tensor.item()
-               != self.rollout_actor.inference_engine.engine.module.tp_size):
-            import time
-            time.sleep(0.01)
+            while self.rollout_actor.inference_engine.status != "idle":
+                # status == "idle" means all tp ranks have exited the running loop
+                import time
+                time.sleep(0.01)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def update_standalone_worker(self, role):
@@ -639,6 +639,7 @@ class RemoteAsyncXPerfGPTRollout(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
     def restart_server_after_weights_update(self):
+        assert self.rollout_actor.inference_engine.status == "idle"
         with self.rollout_actor.inference_engine.update_weights_lock:
             self.rollout_actor.reset_status()
             self.rollout_actor.stop_event.clear()

@@ -1247,13 +1247,13 @@ class AsyncActorRolloutRefWorker(Worker):
         if self.config.rollout.mode == "batch":
             return
         if sleep:
-            self.rollout.stop_event.set()
-            while (self.rollout.inference_engine.stop_signal_tensor.item()
-                   != self.rollout.inference_engine.engine.module.tp_size):
+            with self.rollout.inference_engine.update_weights_lock:
+                self.rollout.stop_event.set()
+            while self.rollout.inference_engine.status != "idle":
+                # status == "idle" means all tp ranks have exited the running loop
                 import time
                 time.sleep(0.01)
             self.sharding_manager.__exit__(None, None, None)
-            self.rollout.inference_engine.status = "idle"
             return
         assert (self.rollout.inference_engine.status == "idle")
         if self.config.actor.train_memory_offload:
@@ -1261,7 +1261,6 @@ class AsyncActorRolloutRefWorker(Worker):
         self.sharding_manager.__enter__()
         with self.rollout.inference_engine.update_weights_lock:
             self.rollout.stop_event.clear()
-            self.rollout.inference_engine.stop_signal_tensor.zero_()
 
 
 def summerize_data(data: Union[dict, tuple, list], name: str = 'summary', level: int = 0, show_value=False) -> str:

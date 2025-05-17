@@ -48,6 +48,7 @@ jobs:
           - pip3 install pylatexenc
           - pip3 install openai
           - pip3 install pydantic==1.10.15
+          - pip3 install pytest-xdist
       - name: agents
         commands:
           - cd -
@@ -60,5 +61,5 @@ jobs:
           - cd -
           - ray stop --force
           - ray start --num-cpus=100 --head
-          - pytest tests/rollout -v
+          - pytest -n 4 tests/rollout -v
           - ray stop --force
