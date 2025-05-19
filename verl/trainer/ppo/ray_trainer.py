@@ -744,6 +744,10 @@ class RayPPOTrainer:
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
 
+            # evaluate using reward_function
+            result = self.val_reward_fn(test_batch, return_dict=True)
+
+
             # repeat test batch
             test_batch = test_batch.repeat(
                 repeat_times=self.config.actor_rollout_ref.rollout.val_kwargs.n, interleave=True

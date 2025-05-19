@@ -22,6 +22,7 @@ import torch
 from sympy import ground_roots
 from transformers import PreTrainedTokenizer
 from tqdm import tqdm
+import json
 
 from verl import DataProto
 from verl.utils.reward_score import _default_compute_score
@@ -177,20 +178,21 @@ class CustomRewardManager:
         verify the batch and save as ``acc`` tensor
         """
         # valid_response_lst is a list of length N
-        valid_response_lst = []
-        for i in range(len(data)):
-            data_item = data[i]
+        # valid_response_lst = []
+        # for i in range(len(data)):
+        #     data_item = data[i]
 
-            prompt_ids = data_item.batch["prompts"]
-            prompt_length = prompt_ids.shape[-1]
-            response_ids = data_item.batch["responses"]
-            valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
-            valid_response_ids = response_ids[:valid_response_length]
-            valid_response_lst.append(valid_response_ids)
-        valid_response_lst = self.tokenizer.batch_decode(valid_response_lst, skip_special_tokens=True)
+        #     prompt_ids = data_item.batch["prompts"]
+        #     prompt_length = prompt_ids.shape[-1]
+        #     response_ids = data_item.batch["responses"]
+        #     valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
+        #     valid_response_ids = response_ids[:valid_response_length]
+        #     valid_response_lst.append(valid_response_ids)
+        # valid_response_lst = self.tokenizer.batch_decode(valid_response_lst, skip_special_tokens=True)
 
         # ground_truch_lst is a list of length N
         ground_truth_lst = [i["ground_truth"] for i in data.non_tensor_batch["reward_model"]]
+        valid_response_lst = [i["ground_truth"] for i in data.non_tensor_batch["reward_model"]]
 
         # data_source_lst is a list of length N
         data_source_lst = data.non_tensor_batch["data_source"]
@@ -229,12 +231,24 @@ class CustomRewardManager:
             else:
                 return data.batch["rm_scores"]
 
-        reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
+        reward_tensor = torch.zeros_like(data.batch["input_ids"], dtype=torch.float32)
         reward_extra_info = defaultdict(list)
 
         already_print_data_sources = {}
 
         rtn_lst = self.verify(data)
+
+        error_lst = []
+        with open('tmp.txt', 'w') as f:
+            for i in range(len(rtn_lst)):
+                if rtn_lst[i]['acc'] == 0:
+                    f.write(f"==== Error processing completion ====\n {data.non_tensor_batch['reward_model'][i]['ground_truth']}\n====\n")
+                    error_lst.append(i)
+        with open('tmp.json', 'w') as f:
+            json.dump(error_lst, f, indent=4)
+        exit(0)
+
+
 
         for i in range(len(data)):
             data_item = data[i]  # DataProtoItem
@@ -279,7 +293,7 @@ class CustomRewardManager:
                     reward_extra_info["overlong_reward"].append(overlong_reward)
                     reward_extra_info["overlong"].append(overlong_reward < 0)
 
-            reward_tensor[i, valid_response_length - 1] = reward
+            reward_tensor[i, - 1] = reward
 
             data_source = data.non_tensor_batch["data_source"][i]
             ground_truth = data.non_tensor_batch["reward_model"][i]["ground_truth"]

@@ -60,7 +60,7 @@ class Tracking:
             else:
                 resume_id = None
 
-            if resume_id is None:
+            if resume_id is None or resume_step == 0:
                 run = wandb.init(
                     project=project_name,
                     name=experiment_name,

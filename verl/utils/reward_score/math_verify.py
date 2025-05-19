@@ -72,8 +72,9 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None) -> b
 
     # Wrap the ground truth in \boxed{} format for verification
     ground_truth_boxed = "\\boxed{" + ground_truth + "}"
+    prediction_boxed = "\\boxed{" + model_output + "}"
     try:
-        ret_score, (extracted_gold, extracted_model_output) = verify_func([ground_truth_boxed], [model_output])
+        ret_score, (extracted_gold, extracted_model_output) = verify_func([ground_truth_boxed], [prediction_boxed])
     except Exception:
         ret_score = 0.
         os.makedirs('.cache/reward_error', exist_ok=True)
