@@ -194,6 +194,14 @@ class CriticWorker(Worker):
             block_cls = critic_module.language_model._no_split_modules + critic_module.vision_encoder._no_split_modules
         else:
             block_cls = critic_module._no_split_modules[0]
+
+            # also wrap MLP for M10
+            if critic_model_config.model_type == 'seed_m10':
+                block_cls = block_cls + ['M10MLP']
+
+        if self.rank == 0:
+            print(f'FSDP wrap module cls: {block_cls}')
+
         critic_module, _ = fully_shard(
             model=critic_module,
             block_cls=block_cls,

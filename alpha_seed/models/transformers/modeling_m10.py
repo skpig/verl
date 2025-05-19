@@ -18,17 +18,10 @@ import os
 from typing import Optional, Tuple, Union, List
 from transformers.modeling_outputs import MoeCausalLMOutputWithPast
 from bumi.function.flash_cross_entropy import FlashCrossEntropy
-from alpha_seed.models.transformers import *
-from alpha_seed.models.transformers.ops.memory_efficient_ops import compute_chunked_entropy_logprobs
 
-from seed_models.models.m8.modeling_m8 import (
-    apply_rotary_pos_emb,
-    repeat_kv,
-    KVMirrorManagerHook,
-    KVMirrorManager,
-    Cache,
-    M8FusedMoeBlock,
-)
+import seed_models
+from seed_models.models.m10.modeling_m10 import (apply_rotary_pos_emb, repeat_kv, Cache, M10FusedMoeBlock,
+                                                 M10FlashAttention2, M10ForCausalLM)
 from .modeling_flash_attention_utils import _flash_attention_forward, _flash_supports_window_size
 
 import torch
@@ -46,7 +39,7 @@ import logging
 logger = logging.getLogger(__file__)
 
 
-def make_m8_plan():
+def make_m10_plan():
     plan = {
         # attention block (TP)
         "k_proj": Shard(0),
@@ -54,20 +47,20 @@ def make_m8_plan():
         "v_proj": Shard(0),
         "o_proj": Shard(1),
         # moe experts (EP)
-        "moe.experts.fc1_1": Shard(0),
-        "moe.experts.fc1_2": Shard(0),
-        "moe.experts.fc2": Shard(0),
+        "moe.experts.gate_proj": Shard(0),
+        "moe.experts.up_proj": Shard(0),
+        "moe.experts.down_proj": Shard(0),
         # moe shared experts (TP)
-        "moe.experts_share.fc1_1": Shard(0),
-        "moe.experts_share.fc1_2": Shard(0),
-        "moe.experts_share.fc2": Shard(1),
+        "moe.shared_experts.gate_proj": Shard(0),
+        "moe.shared_experts.up_proj": Shard(0),
+        "moe.shared_experts.down_proj": Shard(1),
         # TODO: support Megatron sequence parallelism
     }
     return plan
 
 
 def flash_attn2_rmpad_forward(
-    self,
+    self: M10FlashAttention2,
     hidden_states: torch.Tensor,
     attention_mask: Optional[torch.Tensor] = None,
     position_ids: Optional[torch.LongTensor] = None,
@@ -77,22 +70,14 @@ def flash_attn2_rmpad_forward(
     use_cache: bool = False,
     position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.45
     max_seqlen: int = None,
-    gradient_checkpointing: bool = False,
     **kwargs,
 ):
     assert (not use_cache) and (not past_key_value)
-    flash_attn_kwargs = kwargs.pop("flash_attn_kwargs", None)
-    assert len(kwargs) == 0
+    kwargs.pop("flash_attn_kwargs", None)
+    kwargs.pop("gradient_checkpointing", None)
+    assert len(kwargs) == 0, f"kwargs should be empty. But Got {kwargs.keys()}"
     assert position_embeddings is not None
     assert cu_seqlens is None
-
-    if max_seqlen is None:
-        assert flash_attn_kwargs is not None
-        # from seed_models.utils.modeling_flash_attention_utils import GPUFlashAttentionKwargs
-        # assert isinstance(flash_attn_kwargs, GPUFlashAttentionKwargs)
-        # this leads to raise TypeError('TypedDict does not support instance and class checks')
-        max_seqlen = flash_attn_kwargs['max_seqlen_q']
-
     assert max_seqlen is not None
     assert self.q_proj.bias is None and self.k_proj.bias is None and \
            self.v_proj.bias is None and self.o_proj.bias is None
@@ -135,11 +120,18 @@ def flash_attn2_rmpad_forward(
     full_qlen = query_states.size(2)
     # =============== ulysses sp region ==================
 
-    if self.config.use_key_layernorm:
-        key_states = self.key_layernorm(key_states)
+    dtype = query_states.dtype
+    if self.config.use_query_layernorm:
+        query_states = self.q_norm(query_states)
         # in fsdp training mode, the norm will be autocasted to float32
-        if key_states.dtype != query_states.dtype:
-            key_states = key_states.to(query_states.dtype)
+        if query_states.dtype != dtype:
+            query_states = query_states.to(dtype)
+
+    if self.config.use_key_layernorm:
+        key_states = self.k_norm(key_states)
+        # in fsdp training mode, the norm will be autocasted to float32
+        if key_states.dtype != dtype:
+            key_states = key_states.to(dtype)
 
     if self.rope_cut:
         query_nope_states, query_states = torch.split(query_states,
@@ -165,25 +157,6 @@ def flash_attn2_rmpad_forward(
             "The current flash attention version does not support sliding window attention, for a more memory"
             " efficient implementation make sure to upgrade flash-attn library.")
 
-    args = [
-        key_states,
-        value_states,
-        self.layer_idx,
-        self.kv_mirror_layers,
-        self.kv_mirror_imitated_layers,
-        query_states.device,
-        gradient_checkpointing,
-    ]
-
-    is_recent_seed_models = hasattr(self, "is_first_forward_in_recompute")
-    if is_recent_seed_models:
-        args.append(self.is_first_forward_in_recompute)
-
-    key_states, value_states = KVMirrorManagerHook.apply(*args)
-
-    if is_recent_seed_models and gradient_checkpointing:
-        self.is_first_forward_in_recompute = not self.is_first_forward_in_recompute
-
     dropout_rate = 0.0 if not self.training else self.attention_dropout
 
     # In PEFT, usually we cast the layer norms in float32 for training stability reasons
@@ -208,9 +181,9 @@ def flash_attn2_rmpad_forward(
         key_states = key_states.to(target_dtype)
         value_states = value_states.to(target_dtype)
 
-    query_states.stat_meta = {"name": f"layer_{self.layer_idx}.M8FlashAttention2.query_states"}
-    key_states.stat_meta = {"name": f"layer_{self.layer_idx}.M8FlashAttention2.key_states"}
-    value_states.stat_meta = {"name": f"layer_{self.layer_idx}.M8FlashAttention2.value_states"}
+    query_states.stat_meta = {"name": f"layer_{self.layer_idx}.M10FlashAttention2.query_states"}
+    key_states.stat_meta = {"name": f"layer_{self.layer_idx}.M10FlashAttention2.key_states"}
+    value_states.stat_meta = {"name": f"layer_{self.layer_idx}.M10FlashAttention2.value_states"}
     # Reashape to the expected shape for Flash Attention
     query_states = query_states.transpose(1, 2)
     key_states = key_states.transpose(1, 2)
@@ -243,10 +216,15 @@ def flash_attn2_rmpad_forward(
     # ============== ulysses sp region ===================
     attn_output = attn_output.reshape(bsz, q_len, -1)
     attn_output = self.o_proj(attn_output)
+
     # ============== tensor parallel region ================
     if tp_size > 1:
         attn_output = allreduce_identity(attn_output, tp_group, "tp-ari")
     # ============== tensor parallel region ================
+
+    if self.config.use_attention_output_layernorm:
+        attn_output = self.o_norm(attn_output)
+
     attn_output = self.resid_dropout(attn_output)
     if not output_attentions:
         attn_weights = None
@@ -255,7 +233,7 @@ def flash_attn2_rmpad_forward(
 
 
 def _fused_moe_ep_forward(
-    self: M8FusedMoeBlock,
+    self: M10FusedMoeBlock,
     hidden_states: torch.Tensor,
     output_aux_losses: Optional[bool] = None,
 ):
@@ -281,9 +259,9 @@ def _fused_moe_ep_forward(
         routing_weights,
         selected_experts,
         hidden_states,
-        self.experts.fc1_1,
-        self.experts.fc1_2,
-        self.experts.fc2,
+        self.experts.gate_proj,
+        self.experts.up_proj,
+        self.experts.down_proj,
         ep_group,
     )
 
@@ -291,7 +269,7 @@ def _fused_moe_ep_forward(
     if ep_size > 1:
         hidden_states = identity_allreduce(hidden_states, group=ep_group, name="ep-iar")
 
-    experts_share_states = self.experts_share(hidden_states)
+    experts_share_states = self.shared_experts(hidden_states)
 
     if ep_size > 1:
         experts_share_states = allreduce_identity(experts_share_states, group=ep_group, name="ep-ari")
@@ -303,13 +281,8 @@ def _fused_moe_ep_forward(
     return final_hidden_states, router_logits, aux_loss
 
 
-def release_m8_kv_mirror(self):
-    KVMirrorManager.activations_dict.clear()
-    KVMirrorManager.activations_grad_dict.clear()
-
-
-def m8_casual_lm_forward(
-    self,
+def m10_casual_lm_forward(
+    self: M10ForCausalLM,
     input_ids: torch.LongTensor = None,
     attention_mask: Optional[torch.Tensor] = None,
     position_ids: Optional[torch.LongTensor] = None,
@@ -325,7 +298,6 @@ def m8_casual_lm_forward(
     return_dict: Optional[bool] = None,
     fuse_lm_head_ce_loss: Optional[bool] = None,
     temperature: Optional[float] = None,
-    compute_entropy: Optional[bool] = False,
 ) -> Union[Tuple, MoeCausalLMOutputWithPast]:
     r"""
     Args:
@@ -366,7 +338,7 @@ def m8_casual_lm_forward(
         output_aux_losses=output_aux_losses,
         return_dict=return_dict,
     )
-    loss = entropy = logits = log_probs = None
+
     hidden_states = outputs[0]
     if fuse_lm_head_ce_loss:
         assert labels is not None
@@ -383,8 +355,33 @@ def m8_casual_lm_forward(
                                           compute_accuracy, align_precision)
         logits = None
     else:
-        # loss computation is skipped
-        entropy, log_probs = compute_chunked_entropy_logprobs(self, hidden_states, labels, temperature, compute_entropy)
+        logits = self.lm_head(hidden_states)
+        assert temperature is None
+        loss = None
+        if labels is not None:
+            # Upcast to float if we need to compute the loss to avoid potential precision issues
+            logits = logits.float()
+            # Shift so that tokens < n predict n
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            # Flatten the tokens
+            shift_logits = shift_logits.view(-1, self.vocab_size)
+            shift_labels = shift_labels.view(-1)
+            if cu_seqlens is not None:
+                # Mask the last token of each sequence to torch.CrossEntropyLoss ignore_index, default is -100
+                shift_labels[cu_seqlens[1:-1] - 1] = -100
+            elif position_ids is not None and labels.dim() == 1:
+                position_ids_ = position_ids.flatten()
+                indices_q = torch.arange(position_ids_.size(0), device=position_ids_.device, dtype=torch.int32)
+                cu_seq_lens = torch.cat((
+                    indices_q[position_ids_ == 0],
+                    torch.tensor(position_ids_.size(), device=position_ids_.device, dtype=torch.int32),
+                ))
+                shift_labels[cu_seq_lens[1:-1] - 1] = -100
+
+            # Ensure tensors are on the same device
+            shift_labels = shift_labels.to(shift_logits.device)
+            loss = self.loss_fct(shift_logits, shift_labels)
 
     aux_loss = None
     if output_aux_losses:
@@ -393,18 +390,21 @@ def m8_casual_lm_forward(
         compute_device = aux_losses[0].device
         aux_loss = sum(layer_aux_loss.to(compute_device) for layer_aux_loss in aux_losses)
 
+        if labels is not None:
+            loss += self.router_aux_loss_coef * aux_loss.to(loss.device)  # make sure to reside in the same device
+
     if not return_dict:
         output = (logits,) + outputs[1:]
         if output_aux_losses:
             output = (aux_loss,) + output
         return (loss,) + output if loss is not None else output
 
-    return AlphaSeedMoeCausalLMOutputWithPast(loss=loss,
-                                              aux_loss=aux_loss,
-                                              logits=logits,
-                                              past_key_values=outputs.past_key_values,
-                                              hidden_states=outputs.hidden_states,
-                                              attentions=outputs.attentions,
-                                              router_logits=outputs.router_logits,
-                                              entropy=entropy,
-                                              log_probs=log_probs)
+    return MoeCausalLMOutputWithPast(
+        loss=loss,
+        aux_loss=aux_loss,
+        logits=logits,
+        past_key_values=outputs.past_key_values,
+        hidden_states=outputs.hidden_states,
+        attentions=outputs.attentions,
+        router_logits=outputs.router_logits,
+    )

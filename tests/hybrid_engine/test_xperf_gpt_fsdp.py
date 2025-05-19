@@ -49,7 +49,7 @@ def main(global_config):
     p7_path = 'hdfs://haruna/home/byte_data_seed/ssd_lq/public/seed_models/Seed-2B5-P7_32k_sft29_32gpu'
     m8_path = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/M8_680m_SFT_hf'
     p6_path_qwen = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/qwen2.5_32b_v3.1.2_o1-mini-monologue_241201_hf'
-    m10_path = 'hdfs://haruna/home/byte_data_seed/ssd_lq/public/seed_models/m10_680m'
+    m10_path = 'hdfs://haruna/home/byte_data_seed/ssd_lq/public/seed_models/m10_680m_new'
     from verl.utils.seed import CHAT_TEMPLATE
     from omegaconf import OmegaConf
 
@@ -57,7 +57,8 @@ def main(global_config):
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     tokenizer.padding_side = "left"
 
-    tokenizer.chat_template = CHAT_TEMPLATE
+    raw_template = """{% for message in messages %}{{ message['content'] }}{% endfor %}"""
+    tokenizer.chat_template = raw_template
 
     backend = global_config.actor_rollout_ref.actor.strategy
 

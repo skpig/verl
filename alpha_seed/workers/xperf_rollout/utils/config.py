@@ -482,8 +482,10 @@ def _get_m10_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
             config.num_attention_heads,
         "q_head_times":
             config.query_head_scale_factor,
+        # "num_layers":
+        #     config.num_hidden_layers + config.mtp_n_heads - 1,
         "num_layers":
-            config.num_hidden_layers + config.mtp_n_heads - 1,
+            config.num_hidden_layers,
         "num_kv_heads":
             config.num_key_value_heads,
         "has_mqa":

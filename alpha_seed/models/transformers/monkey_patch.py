@@ -115,6 +115,16 @@ def apply_monkey_patch_to_ds3(config):
     apply_liger_kernel_to_deepseek_v3()
 
 
+def apply_monkey_patch_to_m10(config):
+    from seed_models.integrations import apply_liger_kernel_to_m10
+    from seed_models.models.m10.modeling_m10 import M10FlashAttention2, M10FusedMoeBlock, M10ForCausalLM
+    from .modeling_m10 import flash_attn2_rmpad_forward, _fused_moe_ep_forward
+
+    M10FlashAttention2.forward = flash_attn2_rmpad_forward
+    M10FusedMoeBlock.forward = _fused_moe_ep_forward
+    apply_liger_kernel_to_m10(rope=True, rms=True)
+
+
 def apply_monkey_patch_to_vlm(config):
     text_type = get_text_model_type(config)
     _PATCH_NAME_TO_FUNC[text_type](config)
@@ -130,7 +140,8 @@ _PATCH_NAME_TO_FUNC = {
     'seed_p7': apply_monkey_patch_to_p7,
     'seed_m8': apply_monkey_patch_to_m8,
     'deepseek_v3': apply_monkey_patch_to_ds3,
-    'seed_vl': apply_monkey_patch_to_vlm
+    'seed_vl': apply_monkey_patch_to_vlm,
+    'seed_m10': apply_monkey_patch_to_m10
 }
 
 from transformers import PretrainedConfig
@@ -158,6 +169,9 @@ def get_parallel_plan(config, tp_mesh: DeviceMesh) -> Dict[str, Placement]:
             (hasattr(config, "text_config") and config.text_config.model_type == 'seed_m8'):
         from .modeling_m8 import make_m8_plan
         make_plan_fn = make_m8_plan
+    if config.model_type == 'seed_m10':
+        from .modeling_m10 import make_m10_plan
+        make_plan_fn = make_m10_plan
     if config.model_type == "deepseek_v3":
         from .modeling_ds import make_dsv3_plan
         make_plan_fn = make_dsv3_plan

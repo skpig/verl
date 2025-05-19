@@ -12,8 +12,9 @@ import seed_models
 p6_path = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/models/p6dense-0.5B-Instruct'
 p7_path = 'hdfs://haruna/home/byte_data_seed/ssd_lq/public/seed_models/Seed-2B5-P7_32k_sft29_32gpu'
 m8_path = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/25B_MoE_SFT29_32k_bsz6_lr2e5_tp4_hf'
+m10_path = 'hdfs://haruna/home/byte_data_seed/ssd_lq/public/seed_models/m10_680m_new'
 
-model_path = copy_local_path_from_hdfs(p6_path)
+model_path = copy_local_path_from_hdfs(m10_path)
 print(model_path)
 tokenizer = AutoTokenizer.from_pretrained(model_path)
 tokenizer.padding_side = "left"
@@ -48,7 +49,7 @@ attention_mask = input_data['attention_mask']
 
 data = {'input_ids': input_ids}
 
-output = model.generate(**data, max_new_tokens=512, do_sample=False, top_p=0.7, use_cache=True)
+# output = model.generate(**data, max_new_tokens=512, do_sample=False, top_p=0.7, use_cache=True)
 
-text_out = tokenizer.batch_decode(output, skip_special_tokens=False)
-print(text_out[0].replace(tokenizer.pad_token, ''))
+# text_out = tokenizer.batch_decode(output, skip_special_tokens=False)
+# print(text_out[0].replace(tokenizer.pad_token, ''))

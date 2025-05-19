@@ -314,7 +314,14 @@ class AsyncActorRolloutRefWorker(Worker):
         if hasattr(actor_module, "vision_encoder"):
             block_cls = actor_module.language_model._no_split_modules + actor_module.vision_encoder._no_split_modules
         else:
-            block_cls = actor_module._no_split_modules[0]
+            block_cls = actor_module._no_split_modules
+
+            # also wrap MLP for M10
+            if actor_model_config.model_type == 'seed_m10':
+                block_cls = block_cls + ['M10MLP']
+
+        if self.rank == 0:
+            print(f'FSDP wrap module cls: {block_cls}')
 
         actor_module_fsdp, metrics_context = fully_shard(
             model=actor_module,

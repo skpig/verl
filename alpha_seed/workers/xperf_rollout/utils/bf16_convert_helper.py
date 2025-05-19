@@ -2216,7 +2216,7 @@ def _reshard_fsdp_state_dict_to_xperf_m10(tp_model, state_dict, device_mesh: Dev
     tp_model.layernorm_weight.data = ln_f_weight.contiguous()
 
     # NOTE: lm_head == wte for m10, tie embedding
-    wte: DTensor = state_dict.pop(prefix + 'lm_head.weight').to(torch.bfloat16)
+    wte: DTensor = state_dict.pop('transformer.embed_tokens.weight').to(torch.bfloat16)
     wte_weight = wte.full_tensor()
 
     if device_mesh is not None and tp_model.wte_weight.data.shape != wte_weight.shape:
@@ -2249,16 +2249,18 @@ def _reshard_fsdp_state_dict_to_xperf_m10(tp_model, state_dict, device_mesh: Dev
         ln_1_weight = torch.stack((ln_1_weight,), dim=0).to(torch.bfloat16).reshape(1, ln_1_weight.shape[-1])
         assert ln_1.data.shape == ln_1_weight.shape
         ln_1.data = ln_1_weight.contiguous()
-        '''k norm'''
-        key_norm_weight = state_dict[
-            prefix + f'transformer.model.layers.{layer_index}.self_attention.k_norm.weight'].full_tensor()
+
+        # k norm
+        key_norm_weight = state_dict.pop(
+            prefix + f'transformer.model.layers.{layer_index}.self_attention.k_norm.weight').full_tensor()
         key_norm_weight = torch.stack((key_norm_weight,),
                                       dim=0).to(torch.bfloat16).reshape(1, key_norm_weight.shape[-1])
         assert key_norm.data.shape == key_norm_weight.shape
         key_norm.data = key_norm_weight.contiguous()
-        '''q norm'''
-        query_norm_weight = state_dict[
-            prefix + f'transformer.model.layers.{layer_index}.self_attention.q_norm.weight'].full_tensor()
+
+        # '''q norm'''
+        query_norm_weight = state_dict.pop(
+            prefix + f'transformer.model.layers.{layer_index}.self_attention.q_norm.weight').full_tensor()
         query_norm_weight = torch.stack((query_norm_weight,),
                                         dim=0).to(torch.bfloat16).reshape(1, query_norm_weight.shape[-1])
         assert q_norm.data.shape == query_norm_weight.shape
@@ -2266,24 +2268,24 @@ def _reshard_fsdp_state_dict_to_xperf_m10(tp_model, state_dict, device_mesh: Dev
 
         assert v_norm is None
         '''post_attention_layernorm'''
-        post_attention_layernorm_weight = state_dict[
-            prefix + f'transformer.model.layers.{layer_index}.self_attention.o_norm.weight'].full_tensor()
+        post_attention_layernorm_weight = state_dict.pop(
+            prefix + f'transformer.model.layers.{layer_index}.self_attention.o_norm.weight').full_tensor()
         post_attention_layernorm_weight = torch.stack(
             (post_attention_layernorm_weight,),
             dim=0).to(torch.bfloat16).reshape(1, post_attention_layernorm_weight.shape[-1])
         assert attn_outnorm.data.shape == post_attention_layernorm_weight.shape
         attn_outnorm.data = post_attention_layernorm_weight.contiguous()
         '''ffn_output_layernorm '''
-        ffn_output_layernorm_weight = state_dict[
-            prefix + f'transformer.model.layers.{layer_index}.ffn_output_layernorm.weight'].full_tensor()
+        ffn_output_layernorm_weight = state_dict.pop(
+            prefix + f'transformer.model.layers.{layer_index}.ffn_output_layernorm.weight').full_tensor()
         ffn_output_layernorm_weight = torch.stack(
             (ffn_output_layernorm_weight,), dim=0).to(torch.bfloat16).reshape(1, ffn_output_layernorm_weight.shape[-1])
         assert ffn_outnorm.data.shape == ffn_output_layernorm_weight.shape
         ffn_outnorm.data = ffn_output_layernorm_weight.contiguous()
 
         if context_norm is not None:
-            context_norm_weight = state_dict[
-                prefix + f'transformer.model.layers.{layer_index}.self_attention.c_norm.weight'].full_tensor()
+            context_norm_weight = state_dict.pop(
+                prefix + f'transformer.model.layers.{layer_index}.self_attention.c_norm.weight').full_tensor()
             context_norm_weight = torch.stack((context_norm_weight,),
                                               dim=0).to(torch.bfloat16).reshape(1, context_norm_weight.shape[-1])
             assert context_norm.data.shape == context_norm_weight.shape
@@ -2368,6 +2370,9 @@ def _reshard_fsdp_state_dict_to_xperf_m10(tp_model, state_dict, device_mesh: Dev
             prefix + f'transformer.model.layers.{layer_index}.mlp.moe.gate.wg').full_tensor().T.contiguous().float()
         gate_wg_ema = state_dict.pop(
             prefix + f'transformer.model.layers.{layer_index}.mlp.moe.gate.wg_ema').T.contiguous().float()
+
+        # remove useless ce_ema
+        state_dict.pop(f'transformer.model.layers.{layer_index}.mlp.moe.gate.ce_ema', None)
 
         gate_wg = (gate_wg + gate_wg_ema) * 0.5
 
@@ -2478,6 +2483,8 @@ def _reshard_fsdp_state_dict_to_xperf_m10(tp_model, state_dict, device_mesh: Dev
         if tp_model.use_ep:
             assert s_fc2_weight_merge.shape == share_fc2_w.shape, f'{s_fc2_weight_merge.shape=}, {share_fc2_w.shape=}'
             share_fc2_w.data = s_fc2_weight_merge.contiguous()
+
+    # assert len(state_dict) == 0, f'left state_dict: {state_dict.keys()}'
 
     # enforce check nan
     assert_not_nan(tp_model.layernorm_weight.data)
