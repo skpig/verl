@@ -143,7 +143,6 @@ class DataParallelPPOActor(BasePPOActor):
             input_ids_rmpad_rolled, _, _ = ulysses_pad_and_slice_inputs(input_ids_rmpad_rolled, None, sp_size)
             input_ids_rmpad_rolled = input_ids_rmpad_rolled.squeeze(0)
             batch_size, seqlen = input_ids.shape
-
             seqlen_rmpad = input_ids_rmpad.size(1)
 
             # forward
@@ -168,52 +167,36 @@ class DataParallelPPOActor(BasePPOActor):
             else:
                 output = self.actor_module(input_ids=input_ids_rmpad,
                                            position_ids=position_ids_rmpad,
+                                           labels=input_ids_rmpad_rolled,
                                            use_cache=False,
+                                           compute_entropy=compute_entropy,
                                            **image_kwargs)
-
-                if self.config.get('logits_clamp', 0) != 0:
-                    from alpha_seed.utils.functional import clip_by_value_preserve_gradient
-                    output.logits = clip_by_value_preserve_gradient(output.logits,
-                                                                    min=-self.config.logits_clamp,
-                                                                    max=self.config.logits_clamp)
-
-                logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
-                logits_rmpad.div_(temperature)
-
-                if compute_entropy:
-                    inplace_backward = False
-                else:
-                    inplace_backward = True
-
-                # TODO: we should carefully determine whether to turn on inplace_backward
-                full_log_probs_rmpad = -cross_entropy_loss(
-                    logits_rmpad, input_ids_rmpad_rolled, inplace_backward=inplace_backward)[0]  # (total_nnz,)
+                full_entropy_rmpad, full_log_probs_rmpad = output.entropy, output.log_probs
 
             if sp_size > 1:
                 full_log_probs_rmpad = gather_outputs(full_log_probs_rmpad,
                                                       gather_dim=0,
                                                       padding_dim=0,
                                                       unpad_dim_size=total_nnz)
-            full_output = pad_input(hidden_states=full_log_probs_rmpad.unsqueeze(-1),
-                                    indices=indices,
-                                    batch=batch_size,
-                                    seqlen=seqlen)
-            log_probs = full_output.squeeze(-1)[:, -response_length - 1:-1]  # [batch_size, response_length]
-
+            full_log_probs = pad_input(hidden_states=full_log_probs_rmpad.unsqueeze(-1),
+                                       indices=indices,
+                                       batch=batch_size,
+                                       seqlen=seqlen)
+            log_probs = full_log_probs.squeeze(-1)[:, -response_length - 1:-1]  # [batch_size, response_length]
             if compute_entropy:
-                entropy_rmpad = self.entropy_from_logits(logits_rmpad)  # (total_nnz // sp_size)
                 if sp_size > 1:
-                    entropy_rmpad = gather_outputs(entropy_rmpad, gather_dim=0, padding_dim=0,
-                                                   unpad_dim_size=total_nnz)  # (total_nnz,)
+                    full_entropy_rmpad = gather_outputs(full_entropy_rmpad,
+                                                        gather_dim=0,
+                                                        padding_dim=0,
+                                                        unpad_dim_size=total_nnz)  # (total_nnz,)
                 # pad it back
-                entropy = pad_input(hidden_states=entropy_rmpad.unsqueeze(-1),
+                entropy = pad_input(hidden_states=full_entropy_rmpad.unsqueeze(-1),
                                     indices=indices,
                                     batch=batch_size,
                                     seqlen=seqlen).squeeze(-1)[:,
                                                                -response_length - 1:-1]  # (batch_size, response_length)
             else:
                 entropy = None
-
             return entropy, log_probs, seqlen_rmpad
 
     def _make_minibatch_iterator(self, data: DataProto) -> Iterable[DataProto]:
@@ -439,7 +422,6 @@ class DataParallelPPOActor(BasePPOActor):
                                                                                temperature=temperature,
                                                                                compute_entropy=compute_entropy,
                                                                                non_tensor_batch=non_tensor_batch)
-
                     policy_loss, micro_data_metric = self.loss_fn(self.config, micro_data, full_entropy, log_prob)
 
                     if self.config.early_stop_by_kl != 0 and micro_data_metric[

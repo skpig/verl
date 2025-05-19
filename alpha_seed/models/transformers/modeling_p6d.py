@@ -29,6 +29,8 @@ from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_worl
 from dist_attn.ulysses.ops import gather_seq_scatter_heads, gather_heads_scatter_seq, gather_outputs
 
 import torch.nn.functional as F
+from alpha_seed.models.transformers import *
+from alpha_seed.models.transformers.ops.memory_efficient_ops import compute_chunked_entropy_logprobs
 
 from seed_models.models.p6dense.modeling_p6d import (
     P6DenseMLP,
@@ -214,6 +216,7 @@ def p6d_model_forward(
     cache_position: Optional[torch.LongTensor] = None,
     fuse_lm_head_ce_loss: Optional[bool] = None,
     temperature: Optional[float] = None,
+    compute_entropy: Optional[bool] = None,
 ) -> Union[Tuple, CausalLMOutputWithPast]:
     r"""
     Args:
@@ -261,7 +264,7 @@ def p6d_model_forward(
     )
 
     hidden_states = outputs[0]
-
+    loss = entropy = logits = log_probs = None
     if fuse_lm_head_ce_loss:
         assert labels is not None
         try:
@@ -282,43 +285,15 @@ def p6d_model_forward(
                                           compute_accuracy, align_precision)
         logits = None
     else:
-        logits = self.lm_head(hidden_states)
+        # loss computation is skipped
+        entropy, log_probs = compute_chunked_entropy_logprobs(self, hidden_states, labels, temperature, compute_entropy)
 
-        loss = None
-        if labels is not None:
-            # Upcast to float if we need to compute the loss to avoid potential precision issues
-            logits = logits.float()
-            # Shift so that tokens < n predict n
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-
-            # Flatten the tokens
-            shift_logits = shift_logits.view(-1, self.vocab_size)
-            shift_labels = shift_labels.view(-1)
-
-            if cu_seqlens is not None:
-                # Mask the last token of each sequence to torch.CrossEntropyLoss ignore_index, default is -100
-                shift_labels[cu_seqlens[1:-1] - 1] = -100
-            elif position_ids is not None:
-                position_ids_ = position_ids.flatten()
-                indices_q = torch.arange(position_ids_.size(0), device=position_ids_.device, dtype=torch.int32)
-                cu_seq_lens = torch.cat((
-                    indices_q[position_ids_ == 0],
-                    torch.tensor(position_ids_.size(), device=position_ids_.device, dtype=torch.int32),
-                ))
-                shift_labels[cu_seq_lens[1:-1] - 1] = -100
-            # Enable model parallelism
-            shift_labels = shift_labels.to(shift_logits.device)
-            loss = self.loss_fct(shift_logits, shift_labels)
-
-    if not return_dict:
-        output = (logits,) + outputs[1:]
-        return (loss,) + output if loss is not None else output
-
-    return CausalLMOutputWithPast(
-        loss=loss,
-        logits=logits,
-        past_key_values=outputs.past_key_values,
-        hidden_states=outputs.hidden_states,
-        attentions=outputs.attentions,
-    )
+    return AlphaSeedMoeCausalLMOutputWithPast(loss=loss,
+                                              aux_loss=None,
+                                              logits=logits,
+                                              past_key_values=outputs.past_key_values,
+                                              hidden_states=outputs.hidden_states,
+                                              attentions=outputs.attentions,
+                                              router_logits=None,
+                                              entropy=entropy,
+                                              log_probs=log_probs)
