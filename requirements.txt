@@ -3,7 +3,7 @@ accelerate
 codetiming
 datasets
 dill
-flash-attn
+# flash-attn
 hydra-core
 liger-kernel
 numpy
@@ -22,3 +22,7 @@ wandb
 packaging>=20.0
 uvicorn
 fastapi
+nltk
+langdetect
+traitlets
+math-verify
