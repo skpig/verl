@@ -591,8 +591,15 @@ class RolloutManager:
         else:
             validator_wg = self.hybrid_wg
         gen_batch_padded, pad_size = pad_dataproto_to_divisor(gen_batch, validator_wg.world_size)
+        # mark the paddig data uid to None
+        for i in range(pad_size):
+            gen_batch_padded.non_tensor_batch['uid'][-1 - i] = None
         with Timer(name="gen", logger=None) as timer:
             gen_out_batch_padded = validator_wg.generate_sequences(gen_batch_padded)
+            gen_out_batch_padded.batch["prompts"] = gen_out_batch_padded.batch["input_ids"][:, :self.config.data.
+                                                                                            max_prompt_length]
+            gen_out_batch_padded.batch["responses"] = gen_out_batch_padded.batch["input_ids"][:, self.config.data.
+                                                                                              max_prompt_length:]
         metrics['timing/gen'] = timer.last
         gen_out_batch = unpad_dataproto(gen_out_batch_padded, pad_size)
         record_xperf_metrics(gen_out_batch,
