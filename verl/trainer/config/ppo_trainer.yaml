@@ -126,7 +126,7 @@ actor_rollout_ref:
       # sampling parameters for validation (follow DAPO)
       top_k: -1 # 0 for hf rollout, -1 for vllm rollout
       top_p: 0.7
-      temperature: 1.0
+      temperature: 0.7 # follow DAPO
       n: 8
       do_sample: True # default eager for validation
     multi_turn:

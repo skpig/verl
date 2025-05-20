@@ -523,6 +523,7 @@ class ActorRolloutRefWorker(Worker):
                 log_gpu_memory_usage("After offload actor optimizer during init", logger=logger)
         # load from checkpoint
         if self._is_actor:
+            print("Init DP Actor Begin...")
             OmegaConf.set_struct(self.config.actor, True)
             with open_dict(self.config.actor):
                 self.config.actor.use_remove_padding = use_remove_padding
@@ -535,9 +536,12 @@ class ActorRolloutRefWorker(Worker):
                 self.actor = DataParallelOnlineRFTActor(config=self.config.actor,
                                                         actor_module=self.actor_module_fsdp,
                                                         actor_optimizer=self.actor_optimizer)
+            print("Init DP Actor Finished!")
 
         if self._is_rollout:
+            print("Init Rollout Begin...")
             self.rollout, self.rollout_sharding_manager = self._build_rollout(trust_remote_code=self.config.model.get("trust_remote_code", False))
+            print("Init Rollout Finished!")
 
         if self._is_ref:
             self.ref_module_fsdp = self._build_model_optimizer(

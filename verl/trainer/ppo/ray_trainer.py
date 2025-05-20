@@ -566,7 +566,7 @@ class RayPPOTrainer:
         samples = samples[:generations_to_log]
 
         # Log to each configured logger
-        self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
+        self.validation_generations_logger.log(self.config.trainer.logger, 'val', samples, self.global_steps)
 
     def map_token_scores_to_chars(self, batch_input_ids, batch_scores, batch_attention_mask):
         tokenizer = self.tokenizer
@@ -630,13 +630,19 @@ class RayPPOTrainer:
 
         """ Save in local file """
         df = pd.DataFrame({
-            'query_index': batch.batch['index'].tolist(),
-            'query': input_texts,
-            'rollout_index': batch.batch['rollout_index'].tolist(),
-            'rollout': response_texts,
-            'seq_level_rewards': batch.batch['token_level_rewards'].sum(-1).tolist(),
-            'seq_level_scores': batch.batch['token_level_scores'].sum(-1).tolist() if 'token_level_scores' in batch.batch else None,
-            'token_level_scores': self.map_token_scores_to_chars(batch.batch['responses'], batch.batch['token_level_scores'], batch.batch['response_mask']) if 'token_level_scores' in batch.batch else None,
+            'query_index': batch.batch['index'].tolist(), # int, (bsz,)
+            'query': input_texts, # str, (bsz,)
+            'rollout_index': batch.batch['rollout_index'].tolist(), # int, (bsz,)
+            'rollout': response_texts, # str, (bsz,)
+            'seq_level_scores': batch.batch['token_level_scores'].sum(-1).tolist(), # float16, (bsz,); LOG since it indicate the score given by reward model
+            
+            # Below is token level tensor
+            # TODO: mask is maybe needed
+            'advantage': batch.batch['advantages'].cpu().numpy().astype(np.float16), # float16, (bsz,response_length); LOG since it is the gradient coefficient
+            'token_level_rewards': batch.batch['token_level_rewards'].cpu().numpy().astype(np.float16), # float16, (bsz,response_length); LOG since it is the reward given by reward model with kl penalty, before transfomation to advantage
+            'old_log_probs': batch.batch['old_log_probs'].cpu().numpy().astype(np.float16), # float16, (bsz,response_length)
+            # 'log_probs': TODO:
+            # 'clip_frac': TODO:
         })
         df['step_num'] = self.global_steps
         df['run_name'] = self.config.trainer.experiment_name
