@@ -14,12 +14,12 @@
 # limitations under the License.
 """Pretrain utilities."""
 
+import gc
 import os
 import warnings
 from typing import Any, Dict
-import gc
+
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from megatron.core import ModelParallelConfig, mpu, tensor_parallel
 from megatron.core.distributed import DistributedDataParallel as DDP
@@ -31,7 +31,8 @@ from megatron.core.transformer.module import Float16Module
 from megatron.core.utils import get_attr_wrapped_model
 from transformers import PretrainedConfig
 
-from verl.utils.memory_buffer import build_memory_reference_from_module
+import verl.utils.megatron.tensor_parallel as tp_utils
+from verl.utils.model import normalize_model_name
 from verl.utils.torch_dtypes import PrecisionType
 
 
@@ -40,17 +41,16 @@ def get_model_config(model):
 
 
 def get_model(
-    model_provider_func, model_type=ModelType.encoder_or_decoder, wrap_with_ddp=True, use_distributed_optimizer=True
+    model_provider_func,
+    model_type=ModelType.encoder_or_decoder,
+    wrap_with_ddp=True,
+    use_distributed_optimizer=True,
+    transformer_config=None,
 ):
     """Build the model."""
     # Build model.
-    if (
-        mpu.get_pipeline_model_parallel_world_size() > 1
-        and mpu.get_virtual_pipeline_model_parallel_world_size() is not None
-    ):
-        assert model_type != ModelType.encoder_and_decoder, (
-            "Interleaved schedule not supported for model with both encoder and decoder"
-        )
+    if mpu.get_pipeline_model_parallel_world_size() > 1 and mpu.get_virtual_pipeline_model_parallel_world_size() is not None:
+        assert model_type != ModelType.encoder_and_decoder, "Interleaved schedule not supported for model with both encoder and decoder"
         model = []
         for i in range(mpu.get_virtual_pipeline_model_parallel_world_size()):
             mpu.set_virtual_pipeline_model_parallel_rank(i)
@@ -67,9 +67,7 @@ def get_model(
         add_decoder = True
         if model_type == ModelType.encoder_and_decoder:
             if mpu.get_pipeline_model_parallel_world_size() > 1:
-                assert mpu.get_pipeline_model_parallel_split_rank() is not None, (
-                    "Split rank needs to be specified for model with both encoder and decoder"
-                )
+                assert mpu.get_pipeline_model_parallel_split_rank() is not None, "Split rank needs to be specified for model with both encoder and decoder"
                 rank = mpu.get_pipeline_model_parallel_rank()
                 split_rank = mpu.get_pipeline_model_parallel_split_rank()
                 world_size = mpu.get_pipeline_model_parallel_world_size()
@@ -77,9 +75,7 @@ def get_model(
                 post_process = (rank == (split_rank - 1)) or (rank == (world_size - 1))
                 add_encoder = mpu.is_pipeline_stage_before_split()
                 add_decoder = mpu.is_pipeline_stage_after_split()
-            model = model_provider_func(
-                pre_process=pre_process, post_process=post_process, add_encoder=add_encoder, add_decoder=add_decoder
-            )
+            model = model_provider_func(pre_process=pre_process, post_process=post_process, add_encoder=add_encoder, add_decoder=add_decoder)
         else:
             model = model_provider_func(pre_process=pre_process, post_process=post_process)
         model.model_type = model_type
@@ -107,8 +103,9 @@ def get_model(
         )
 
     # GPU allocation.
-    for model_module in model:
-        model_module.cuda(torch.cuda.current_device())
+    if transformer_config is None or (not transformer_config.use_cpu_initialization):
+        for model_module in model:
+            model_module.cuda(torch.cuda.current_device())
 
     # Fp16 conversion.
     config: TransformerConfig = get_model_config(model[0])
@@ -162,10 +159,7 @@ def convert_config(hf_config: PretrainedConfig, megatron_config) -> TransformerC
     dt = PrecisionType.to_dtype(megatron_config.params_dtype)
     print(f"pipeline_dtype=megatron_config {dt}")
     qkv_bias = True if "Qwen2ForCausalLM" in hf_config.architectures else getattr(hf_config, "attention_bias", False)
-    overlap_p2p_comm = (
-        mpu.get_virtual_pipeline_model_parallel_world_size() is not None
-        and mpu.get_virtual_pipeline_model_parallel_world_size() > 1
-    )
+    overlap_p2p_comm = mpu.get_virtual_pipeline_model_parallel_world_size() is not None and mpu.get_virtual_pipeline_model_parallel_world_size() > 1
     batch_p2p_comm = False
     transformer_config = TransformerConfig(
         num_layers=hf_config.num_hidden_layers,
@@ -222,8 +216,7 @@ def mcore_model_parallel_config(
     # WARNING: Code should not reach this point. This function is deprecated and will be removed.
     # Please use hf_to_mcore_config_dense() from verl.models.mcore.config_converter instead.
     warnings.warn(
-        "Code should not reach this point. This function is deprecated and will be removed. "
-        "Please use hf_to_mcore_config_dense() from verl.models.mcore.config_converter instead.",
+        "Code should not reach this point. This function is deprecated and will be removed. Please use hf_to_mcore_config_dense() from verl.models.mcore.config_converter instead.",
         DeprecationWarning,
         stacklevel=2,
     )
@@ -299,23 +292,25 @@ def load_megatron_model_to_gpu(models, load_grad=True):
     gc.collect()
     torch.cuda.empty_cache()
 
+
 @torch.no_grad()
 def offload_megatron_copy_params(optimizers):
     """
     Offload optimizer parameters to CPU
-    
+
     Args:
         optimizers: The optimizer containing parameter groups to offload
     """
+
     def offload_tensor_to_cpu(tensor):
         if tensor is None:
             return
-        tensor.data = tensor.data.to('cpu', non_blocking=True)
+        tensor.data = tensor.data.to("cpu", non_blocking=True)
 
     def offload_group_to_cpu(group):
         if group is None:
             return
-            
+
         if isinstance(group, list):
             for param_group in group:
                 if isinstance(param_group, list):
@@ -328,18 +323,19 @@ def offload_megatron_copy_params(optimizers):
 
     # Offload all parameter groups to CPU
 
-    if hasattr(optimizers, 'shard_fp32_from_float16_groups'):
-        offload_group_to_cpu(getattr(optimizers, 'shard_fp32_from_float16_groups'))
+    if hasattr(optimizers, "shard_fp32_from_float16_groups"):
+        offload_group_to_cpu(optimizers.shard_fp32_from_float16_groups)
 
 
 @torch.no_grad()
 def load_megatron_copy_params(optimizers):
     """
     Load optimizer parameters back to GPU
-    
+
     Args:
         optimizers: The optimizer containing parameter groups to load
     """
+
     def load_tensor_to_gpu(tensor):
         if tensor is None:
             return
@@ -349,7 +345,7 @@ def load_megatron_copy_params(optimizers):
     def load_group_to_gpu(group):
         if group is None:
             return
-            
+
         if isinstance(group, list):
             for param_group in group:
                 if isinstance(param_group, list):
@@ -362,8 +358,8 @@ def load_megatron_copy_params(optimizers):
 
     # Load all parameter groups to GPU
 
-    if hasattr(optimizers, 'shard_fp32_from_float16_groups'):
-        load_group_to_gpu(getattr(optimizers, 'shard_fp32_from_float16_groups'))
+    if hasattr(optimizers, "shard_fp32_from_float16_groups"):
+        load_group_to_gpu(optimizers.shard_fp32_from_float16_groups)
 
 
 @torch.no_grad()
@@ -371,8 +367,8 @@ def offload_megatron_optimizer(optimizers):
     offload_megatron_copy_params(optimizers)
     opt_state_dict_values = optimizers.optimizer.state.values()
     for v in opt_state_dict_values:
-        v['exp_avg'] = v['exp_avg'].to('cpu', non_blocking=True)
-        v['exp_avg_sq'] = v['exp_avg_sq'].to('cpu', non_blocking=True)
+        v["exp_avg"] = v["exp_avg"].to("cpu", non_blocking=True)
+        v["exp_avg_sq"] = v["exp_avg_sq"].to("cpu", non_blocking=True)
     gc.collect()
     torch.cuda.empty_cache()
 
@@ -382,8 +378,8 @@ def load_megatron_optimizer(optimizers):
     load_megatron_copy_params(optimizers)
     opt_state_dict_values = optimizers.optimizer.state.values()
     for v in opt_state_dict_values:
-        v['exp_avg'] = v['exp_avg'].to(torch.cuda.current_device(), non_blocking=True)
-        v['exp_avg_sq'] = v['exp_avg_sq'].to(torch.cuda.current_device(), non_blocking=True)
+        v["exp_avg"] = v["exp_avg"].to(torch.cuda.current_device(), non_blocking=True)
+        v["exp_avg_sq"] = v["exp_avg_sq"].to(torch.cuda.current_device(), non_blocking=True)
     gc.collect()
     torch.cuda.empty_cache()
 
@@ -450,10 +446,10 @@ def convert_megatron_model_to_transformers_model(
         q_shard_list = []
         k_shard_list = []
         v_shard_list = []
-        hidden_size_per_head = config.hidden_size // config.num_attention_heads
+        hidden_size_per_head = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
 
         if config.num_key_value_heads >= tp_size:
-            q_size_tp = config.hidden_size // tp_size
+            q_size_tp = hidden_size_per_head * config.num_attention_heads // tp_size
             kv_size_tp = hidden_size_per_head * config.num_key_value_heads // tp_size
             total_size = q_size_tp + 2 * kv_size_tp
             for i in range(tp_size):
@@ -469,7 +465,7 @@ def convert_megatron_model_to_transformers_model(
                     k_shard_list.append(k_part)
                     v_shard_list.append(v_part)
         else:
-            q_size_tp = config.hidden_size // tp_size
+            q_size_tp = hidden_size_per_head * config.num_attention_heads // tp_size
             kv_size_tp = hidden_size_per_head
             total_size = q_size_tp + 2 * kv_size_tp
             for i in range(tp_size):
@@ -529,6 +525,9 @@ def convert_megatron_model_to_transformers_model(
                     )
                 else:
                     new_params[f"model.layers.{layer_number}.self_attn.qkv_proj.{param_type}"] = param
+        elif component == "q_layernorm" or component == "k_layernorm":
+            hf_component = component.replace("layer", "")
+            new_params[f"model.layers.{layer_number}.self_attn.{hf_component}.weight"] = param
         else:
             assert isinstance(param, list) and len(param) == 3
             assert param_type == "weight" or param_type == "bias"
@@ -579,9 +578,7 @@ def broadcast_from_megatron_pp(tensor: torch.Tensor):
     else:
         tensor_spec = None
     tensor_spec_output = [None] * mpu.get_pipeline_model_parallel_world_size()
-    torch.distributed.all_gather_object(
-        object_list=tensor_spec_output, obj=tensor_spec, group=mpu.get_pipeline_model_parallel_group()
-    )
+    torch.distributed.all_gather_object(object_list=tensor_spec_output, obj=tensor_spec, group=mpu.get_pipeline_model_parallel_group())
     # find the src rank
     target_tensor_spec = None
     src_rank = None
@@ -594,9 +591,7 @@ def broadcast_from_megatron_pp(tensor: torch.Tensor):
             src_rank = rank
     assert target_tensor_spec is not None
     if tensor is None:
-        tensor = torch.empty(
-            size=target_tensor_spec[0], dtype=target_tensor_spec[1], device=torch.cuda.current_device()
-        )
+        tensor = torch.empty(size=target_tensor_spec[0], dtype=target_tensor_spec[1], device=torch.cuda.current_device())
         if target_tensor_spec[2] is not None:
             tensor.tensor_model_parallel = target_tensor_spec[2]
         if target_tensor_spec[3] is not None:
@@ -626,8 +621,143 @@ def broadcast_str_from_megatron_pp(obj: Any):
 
     obj_output = [None] * torch.distributed.get_world_size(group=mpu.get_pipeline_model_parallel_group())
     obj_output[0] = target_obj
-    torch.distributed.broadcast_object_list(
-        object_list=obj_output, src=global_rank, group=mpu.get_pipeline_model_parallel_group()
-    )
+    torch.distributed.broadcast_object_list(object_list=obj_output, src=global_rank, group=mpu.get_pipeline_model_parallel_group())
 
     return obj_output[0]
+
+def default_tp_concat_fn(layer_name_mapping, name, train_params, infer_params, model_config, convert_qkv_gate_up_by_simple_split=False):
+    """
+    name: name of the parameter
+    train_params: training parameters
+    infer_params (Iterable[torch.Tensor]): a iterator towards list of parameters all-gathered from micro_dp_group
+    model_config: huggingface model_config
+    TODO(zhangchi.usc1992): currently, the implementation is adhoc. We can move this function to the model
+    definition so that it is model-agnostic. If the model doesn't implement this function, 
+    we can throw an error to force user disable TP HybridEngine.
+    """
+    from megatron.core import mpu
+
+    if layer_name_mapping.get("qkv_layer_name") in name and "layer_norm" not in name:
+        # if the tensor is qkv, for each param on tp, split into q, k, v
+        # concat q, k, v separately.
+        q_lst = []
+        k_lst = []
+        v_lst = []
+        assert model_config.num_attention_heads % model_config.num_key_value_heads == 0
+        num_q_per_kv = model_config.num_attention_heads // model_config.num_key_value_heads
+        assert infer_params[0].shape[0] % (num_q_per_kv + 2) == 0
+        kv_size_per_tp = infer_params[0].shape[0] // (num_q_per_kv + 2)
+        split_size = [kv_size_per_tp * num_q_per_kv, kv_size_per_tp, kv_size_per_tp]
+        for infer_param in infer_params:
+            num_query_groups_per_partition = model_config.num_key_value_heads // mpu.get_tensor_model_parallel_world_size(
+            )
+            for chunk in infer_param.chunk(num_query_groups_per_partition):
+                split_size = [
+                    kv_size_per_tp * num_q_per_kv // num_query_groups_per_partition,
+                    kv_size_per_tp // num_query_groups_per_partition,
+                    kv_size_per_tp // num_query_groups_per_partition
+                ]
+                q, k, v = chunk.split(split_size)
+                q_lst.append(q)
+                k_lst.append(k)
+                v_lst.append(v)
+        q = torch.cat(q_lst, dim=0)
+        k = torch.cat(k_lst, dim=0)
+        v = torch.cat(v_lst, dim=0)
+        if not convert_qkv_gate_up_by_simple_split:
+            infer_params = torch.cat((q, k, v), dim=0)
+        else:
+            infer_params = [q, k, v]
+
+    elif layer_name_mapping.get("gate_proj_layer_name") in name:
+        # if the tensor is gate and proj
+        gate_lst = []
+        up_lst = []
+        for infer_param in infer_params:
+            gate, up = infer_param.chunk(2)
+            gate_lst.append(gate)
+            up_lst.append(up)
+        gate = torch.cat(gate_lst, dim=0)
+        up = torch.cat(up_lst, dim=0)
+        if not convert_qkv_gate_up_by_simple_split:
+            infer_params = torch.cat((gate, up), dim=0)
+        else:
+            infer_params = [gate, up]
+
+    else:
+        # concat tensor
+        infer_params = torch.cat(infer_params, dim=tp_utils.get_tensor_parallel_partition_dim(train_params))
+
+    return infer_params
+
+
+def per_tensor_generator(actor_module, model_config, weight_converter, layer_name_mapping, convert_qkv_gate_up_by_simple_split=True):
+    from megatron.core import parallel_state as mpu
+    pp_rank = mpu.get_pipeline_model_parallel_rank()
+    pp_size = mpu.get_pipeline_model_parallel_world_size()
+    vpp_size = len(actor_module)
+    all_gather_group = mpu.get_tensor_model_parallel_group()
+    all_gather_group_size = torch.distributed.get_world_size(group=all_gather_group)
+
+    def tensor_generator():
+        for scan_vpp_idx in range(vpp_size):
+            yield from actor_module[scan_vpp_idx].named_parameters()
+
+    # we need first make all rank get full model information
+    meta_info = []
+    for scan_vpp_idx in range(vpp_size):
+        for idx, (name, _) in enumerate(actor_module[scan_vpp_idx].named_parameters()):
+            meta_info.append((pp_rank, scan_vpp_idx, idx, name))
+
+    obj_spec_output = [None] * mpu.get_pipeline_model_parallel_world_size()
+    torch.distributed.all_gather_object(
+        object_list=obj_spec_output, obj=meta_info, group=mpu.get_pipeline_model_parallel_group()
+    )
+    layer_list_meta = [item for sublist in obj_spec_output for item in sublist]
+
+    gen_func = tensor_generator()
+
+    # lazy load tensor for full model
+    for cur_pp_rank, scan_vpp_idx, idx, name in layer_list_meta:
+        if cur_pp_rank == pp_rank:
+            try:
+                cur_name, cur_tensor = next(gen_func)
+            except StopIteration:
+                cur_name, cur_tensor = None, None
+            cur_name = normalize_model_name(
+                name, cur_pp_rank, scan_vpp_idx, pp_size, vpp_size, model_config.num_hidden_layers
+            )
+        else:
+            cur_tensor, cur_name = None, None
+
+        # pp broadcast model tensor and name
+        cur_name = broadcast_str_from_megatron_pp(cur_name)
+        broad_pp_tensor = broadcast_from_megatron_pp(cur_tensor)
+
+        # (xya): this is a hack to fix the name of the parameters
+        while cur_name.startswith("module."):
+            cur_name = cur_name[len("module.") :]
+
+        # tp all gather
+        if tp_utils.is_tensor_parallel_param(broad_pp_tensor):
+            # allocate a new tensor with proper size
+            if all_gather_group_size <= 1:
+                infer_params = [broad_pp_tensor]
+            else:
+                infer_params = [torch.empty_like(broad_pp_tensor) for _ in range(all_gather_group_size)]
+                torch.distributed.all_gather(
+                    infer_params, broad_pp_tensor, group=mpu.get_tensor_model_parallel_group()
+                )
+            infer_params = default_tp_concat_fn(
+                layer_name_mapping, cur_name, broad_pp_tensor, infer_params, model_config, convert_qkv_gate_up_by_simple_split
+            )
+        else:
+            infer_params = broad_pp_tensor
+
+
+        if not isinstance(infer_params, list):
+            infer_params = [infer_params]
+        converted_names, converted_params = weight_converter.convert_param(cur_name, infer_params)
+
+        yield from zip(converted_names, converted_params)
+

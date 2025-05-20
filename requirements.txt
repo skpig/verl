@@ -3,13 +3,13 @@ accelerate
 codetiming
 datasets
 dill
-flash-attn
+# flash-attn
 hydra-core
 liger-kernel
 numpy
 pandas
 peft
-pyarrow>=15.0.0
+pyarrow>=19.0.0
 pybind11
 pylatexenc
 pre-commit
@@ -17,5 +17,12 @@ ray[default]
 tensordict<=0.6.2
 torchdata
 transformers
-# vllm==0.6.3.post1
+# vllm==0.8.4
 wandb
+packaging>=20.0
+uvicorn
+fastapi
+nltk
+langdetect
+traitlets
+math-verify

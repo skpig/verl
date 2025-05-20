@@ -28,7 +28,6 @@ import math
 # 定义不同检查对应的位
 ANSWER_MATCH_BIT = 1
 REASONING_ORDER_BIT = 2
-
 def verify_format(model_output: str):
     """
     Verify if the answer is in a valid format.
@@ -37,25 +36,55 @@ def verify_format(model_output: str):
     result = 0
     
     # 检查是否有且仅有一个 "## Answer:" 
-    answer_matches = re.findall(r'## Answer:', model_output)
+    answer_matches = re.findall(r'<answer>\n(.*?)\n</answer>', model_output, re.DOTALL)
     if len(answer_matches) == 1:
         result |= ANSWER_MATCH_BIT
     
-    # 查找所有 "## Reasoning step [1-9]+:" 
-    # 修改正则表达式以支持多位数的编号
-    reasoning_pattern = r'## Reasoning step ([0-9]+):'
-    reasoning_matches = [(match.start(), match.group(1)) for match in re.finditer(reasoning_pattern, model_output)]
+    # 1. 提取所有<think>...</think>标签
+    think_blocks = [i for i in re.findall(r'<think>\n.*?\n</think>', model_output, re.DOTALL)]
+    
+    # 2. 将所有标签拼接起来
+    concatenated = ''.join(think_blocks)
+    
+    # 3. 移除所有空白字符进行比较
+    text_no_whitespace = re.sub(r'\s+', '', model_output)
+    concatenated_no_whitespace = re.sub(r'\s+', '', concatenated)
+    
+    # 如果移除空白后完全相同，说明字符串只由<think>...</think>标签组成
+    if text_no_whitespace == concatenated_no_whitespace:
+        result |= REASONING_ORDER_BIT
 
-    num_steps = -1
-    
-    if reasoning_matches:
-        reasoning_steps = [int(step) for _, step in reasoning_matches]
-        expected_steps = list(range(2, len(reasoning_steps) + 2))
-        if reasoning_steps == expected_steps:
-            result |= REASONING_ORDER_BIT
-            num_steps = len(reasoning_steps)
-    
+    num_steps = len(think_blocks)
     return result, num_steps
+
+
+# def verify_format(model_output: str):
+#     """
+#     Verify if the answer is in a valid format.
+#     返回值为位掩码，不同位代表不同检查结果。
+#     """
+#     result = 0
+    
+#     # 检查是否有且仅有一个 "## Answer:" 
+#     answer_matches = re.findall(r'## Answer:', model_output)
+#     if len(answer_matches) == 1:
+#         result |= ANSWER_MATCH_BIT
+    
+#     # 查找所有 "## Reasoning step [1-9]+:" 
+#     # 修改正则表达式以支持多位数的编号
+#     reasoning_pattern = r'## Reasoning step ([0-9]+):'
+#     reasoning_matches = [(match.start(), match.group(1)) for match in re.finditer(reasoning_pattern, model_output)]
+
+#     num_steps = -1
+    
+#     if reasoning_matches:
+#         reasoning_steps = [int(step) for _, step in reasoning_matches]
+#         expected_steps = list(range(2, len(reasoning_steps) + 2))
+#         if reasoning_steps == expected_steps:
+#             result |= REASONING_ORDER_BIT
+#             num_steps = len(reasoning_steps)
+    
+#     return result, num_steps
 
 
 

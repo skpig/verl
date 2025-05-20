@@ -34,27 +34,29 @@ When tackling complex reasoning tasks, you should first thinks about the reasoni
 
 You should strictly follow the format below:
 
-## Reasoning step 1:
-Your reasoning process here
-
-## Reasoning step 2:
-Your reasoning process here
-
-## Reasoning step 3:
-Your reasoning process here
+<think>
+Your reasoning process step 1 here
+</think>
+<think>
+Your reasoning process step 2 here
+</think>
+<think>
+Your reasoning process step 3 here
+</think>
 ...
-## Reasoning step n:
-Your reasoning process here
-
-## Answer:
-Your answer here
+<think>
+Your reasoning process step N here
+</think>
+<answer>
+Put your final answer within \\ boxed {{}}.
+</answer>
 """
-    user_prompt = question + "\n\nPresent the answer in LaTex format: \\boxed{Your answer}"
+    user_prompt = question
 
     return [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
-        {"role": "assistant", "content": "## Reasoning step 1:\n"}
+        {"role": "assistant", "content": "<think>\n"}
     ]
 
 def process_numinamath_dataset():
