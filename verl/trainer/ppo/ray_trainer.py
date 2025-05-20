@@ -617,6 +617,7 @@ class RayPPOTrainer:
 
     def _maybe_log_train_generations(self, batch):
         """Log a table of validation samples to the configured logger (wandb or swanlab)"""
+        import numpy as np
 
 
         """TODO: Add more statistics here"""
@@ -666,8 +667,6 @@ class RayPPOTrainer:
 
 
         """Send to logger"""
-        import numpy as np
-
         generations_to_log = self.config.trainer.log_val_generations
 
         if generations_to_log == 0:
@@ -1030,7 +1029,7 @@ class RayPPOTrainer:
 
         # perform validation before training
         # currently, we only support validation using the reward_function.
-        if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True):
+        if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True) and self.global_steps == 0:
             val_metrics = self._validate()
             assert val_metrics, f"{val_metrics=}"
             pprint(f"Initial validation metrics: {val_metrics}")
