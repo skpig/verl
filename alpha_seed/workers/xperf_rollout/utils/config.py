@@ -391,9 +391,7 @@ def _get_vl_m8_xperf_vision_config(vision_config):
         xperf_vision_config[key] = getattr(vision_config, key)
     if hasattr(vision_config, 'transformer_config'):
         xperf_vision_config['transformer_config'] = getattr(vision_config, 'transformer_config')
-        if isinstance(xperf_vision_config['transformer_config']['norm_layer'], str):
-            # we may need to test performance of FusedLayerNorm
-            xperf_vision_config['transformer_config']['norm_layer'] = partial(torch.nn.LayerNorm, eps=1e-6)
+        xperf_vision_config['transformer_config']['norm_layer'] = partial(torch.nn.LayerNorm, eps=1e-6)
 
     # avoid init fail in xperf_gpt
     xperf_vision_config["vit_model_path"] = None

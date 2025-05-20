@@ -130,7 +130,7 @@ class RLHFDatasetVL(RLHFDataset):
 
         prompt_names = []
         if self.multi_prompts == "none":
-            pil_images = [self.bytes_decoder(img) for img in image] if image else None
+            pil_images = [self.bytes_decoder(img) for img in image] if image is not None and len(image) > 0 else None
             user_contents = [{"type": "text", "text": f"{self.tokenizer.bos_token}user\n "}]
             prompt_chunks = re.split(r"(<image>)", chat[0])
             for chunk in prompt_chunks:
@@ -183,7 +183,7 @@ class RLHFDatasetVL(RLHFDataset):
             row_dict_ret['input_ids'] = input_ids[0]
             row_dict_ret['prompt'] = prompt_with_chat_template
             row_dict_ret['attention_mask'] = attention_mask[0]
-            if image:
+            if image is not None and len(image) > 0:
                 row_dict_ret['raw_image'] = []
                 row_dict_ret['pixel_values'] = inputs['pixel_values']
                 row_dict_ret['image_grid_hw'] = torch.tensor(inputs['image_grid_hw'])
