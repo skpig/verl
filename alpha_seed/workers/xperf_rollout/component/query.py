@@ -1,3 +1,6 @@
+import copy
+import time
+import warnings
 from typing import *
 from dataclasses import dataclass
 import uuid
@@ -10,12 +13,13 @@ from .query_plugin import QueryPlugin, batch_sync_tp_plugin_queries
 
 @dataclass
 class Query:
-    id: Optional[uuid.UUID]
+    id: str
     idx: int
     original_input_ids: Optional[List[int]]
     input_ids: Optional[List[int]]
     input_embedding: Optional[torch.Tensor]
     code_book: Optional[List[int]]
+    constraint_decoding_predictor: Optional[Any]
     accepted_len: Optional[List[int]]
     input_prompt: Union[str, List[str]]
     input_len: Optional[int]
@@ -32,9 +36,11 @@ class Query:
     multiround_id: int
     multiround_len: int
     system_ids_len: int
-    first_scheduled_time: int
-    first_token_time: int
-    finished_time: int
+    created_time: float  # 此对象在request pool创建时间
+    received_time: float  # 在engine侧第一次收到进入队列的时间
+    first_scheduled_time: float  # 开始prefill的时间
+    first_token_time: float  # prefill完的时间
+    finished_time: float  # decode完的时间
     hidden_states: Optional[torch.Tensor]
     logits: Optional[torch.Tensor]
     logits_mask: Optional[torch.Tensor]
@@ -54,11 +60,12 @@ class Query:
                  system_ids_len=0,
                  code_book=None,
                  constraint_decoding_predictor=None):
-        self.id = uuid.uuid4()
+        self.id = uuid.uuid4().hex
         self.idx = idx
         self.original_input_ids = copy.copy(input_ids)
         self.input_ids = input_ids
         self.code_book = code_book
+        self.constraint_decoding_predictor = constraint_decoding_predictor
         self.accepted_len = []
         self.input_prompt = input_prompt
         self.prefix_already_computed_len = prefix_already_computed_len
@@ -87,9 +94,9 @@ class Query:
         self.is_finished = False
         self.meta_info = {}
 
-        self.first_scheduled_time = 0
-        self.first_token_time = 0
-        self.finished_time = 0
+        # timestamp units are all milliseconds
+        self.created_time = time.time() * 1000
+        self.reset_timestamp()
         self.is_jumping = False
         self.jump_tokens = 0
         self.off_policy_steps = 0
@@ -99,11 +106,12 @@ class Query:
         self.max_new_tokens = None
         self.max_length = None
         self.input_embedding = None
+        self._exception = None
 
         self.plugin_query = None
 
     # Check whether current query is going to enter the decoding stage
-    def _is_to_decoding_compute(self):
+    def is_to_decoding_compute(self):
         # already in decode stage
         if not self.is_context_computing:
             return True
@@ -118,9 +126,11 @@ class Query:
     def is_kv_cache_slot_allocated(self):
         return len(self.kv_slot_ids) > 0
 
-    def set_finished(self, is_partial=False):
+    def set_finished(self, is_partial=False, exception=None):
         self.is_finished = not is_partial
         self.global_new_token_ids.extend(self.new_token_ids)
+        self.finished_time = time.time() * 1000
+        self._exception = exception
 
     def reset_compute(self):
         self.kv_slot_ids = []
@@ -128,6 +138,7 @@ class Query:
         self.input_ids.extend(self.new_token_ids)
         self.global_new_token_ids.extend(self.new_token_ids)
         self.new_token_ids = []
+        self.input_embedding = None
         self.context_shift = 0
         self.prefix_already_computed_len = 0
         self.hidden_states = None
@@ -204,35 +215,24 @@ class Query:
                 ret[f"plugin/{key}"] = val
         return ret
 
+    def reset_timestamp(self):
+        self.received_time = 0
+        self.first_scheduled_time = 0
+        self.first_token_time = 0
+        self.finished_time = 0
 
-@dataclass
-class AsyncQuery(Query):
-
-    def __init__(self,
-                 input_ids,
-                 input_prompt,
-                 idx,
-                 prefix_already_computed_len=0,
-                 system_ids_len=0,
-                 code_book=None,
-                 constraint_decoding_predictor=None):
-        super().__init__(input_ids, input_prompt, idx, prefix_already_computed_len, system_ids_len, code_book,
-                         constraint_decoding_predictor)
-        self._event = None
-        self._loop = None
-        self._exception = None
-
-    def set_finished(self, is_partial=False, exception=None):
-        super().set_finished(is_partial)
-        self._loop.call_soon_threadsafe(self._event.set)
-        self._exception = exception
-
-    async def wait_until_done(self):
-        await self._event.wait()
+    def clone(self) -> 'Query':
+        ret = copy.copy(self)
+        # skip any gpu tensors, as they might be mutated shortly
+        if ret.input_embedding is not None and ret.input_embedding.device != torch.device('cpu'):
+            ret.input_embedding = None
+        if ret.hidden_states is not None and ret.hidden_states.device != torch.device('cpu'):
+            ret.hidden_states = None
+        return ret
 
     @classmethod
-    def from_request(cls, input_ids, request_id, sampling_kwargs, meta_info=None):
-        query = AsyncQuery(input_ids, code_book=None, input_prompt='', idx=request_id, prefix_already_computed_len=0)
+    def from_request(cls, input_ids, request_id, sampling_kwargs, meta_info=None) -> 'Query':
+        query = Query(input_ids, input_prompt='', code_book=None, idx=request_id, prefix_already_computed_len=0)
         query.id = request_id
         query.top_k = sampling_kwargs.get("top_k", 0)
         query.top_p = sampling_kwargs.get("top_p", 1.0)
@@ -243,17 +243,45 @@ class AsyncQuery(Query):
         return query
 
 
+class AsyncQuery:
+    """
+    the Query class wrapper with python async coroutines
+    """
+
+    def __init__(self, query: Query):
+        self._query = query
+        self._event = asyncio.Event()
+
+    def set_finished(self, is_partial=False, exception=None):
+        self._query.set_finished(is_partial, exception)
+        self._event.set()
+
+    async def wait_until_done(self):
+        await self._event.wait()
+
+    @property
+    def exception(self):
+        return self._query._exception
+
+    @property
+    def id(self):
+        return self._query.id
+
+    @property
+    def query(self):
+        return self._query
+
+
 class InflightQueue:
 
     def __init__(self):
-        self.query_pool = {}
-        self.queue = []
+        self.query_pool: Dict[str, AsyncQuery] = {}
+        self.queue: List[AsyncQuery] = []
         self.lock = Lock()
 
-    def append(self, item):
+    def append(self, item: AsyncQuery):
         with self.lock:
-            item._event = asyncio.Event()
-            item._loop = asyncio.get_running_loop()
+            item.query.received_time = time.time() * 1000
             self.query_pool[item.id] = item
             self.queue.append(item)
 
@@ -261,7 +289,7 @@ class InflightQueue:
         with self.lock:
             self.queue = self.queue[length:]
 
-    def get_earliest(self, length):
+    def get_earliest(self, length) -> List[AsyncQuery]:
         with self.lock:
             return self.queue[:length]
 
@@ -269,7 +297,7 @@ class InflightQueue:
         with self.lock:
             return len(self.queue)
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[AsyncQuery]:
         with self.lock:
             return iter(self.queue.copy())
 

@@ -1,6 +1,8 @@
 import torch
 from openai import AsyncOpenAI
 from verl import DataProto
+from alpha_seed.workers.streaming_service.streaming_utils import is_ipv6
+
 import asyncio
 import os
 ''' example input: 
@@ -15,9 +17,11 @@ DataProtoItem(batch=TensorDict(
     is_shared=False), non_tensor_batch= ... '''
 
 
-async def _internal_call(item, config):
+async def _internal_call(item, config, host, port):
     completion = None
-    async with AsyncOpenAI(api_key="useless-api-key", base_url="http://0.0.0.0:8001") as client:
+    if is_ipv6(host):
+        host = f'[{host}]'
+    async with AsyncOpenAI(api_key="useless-api-key", base_url=f"http://{host}:{port}") as client:
         try:
             item.batch = item.batch.reshape(-1)
             input_ids = item.batch['input_ids']
@@ -46,12 +50,12 @@ async def _internal_call(item, config):
     return completion
 
 
-async def process_single_batch(item, context):
+async def process_single_batch(item, context, host, port):
     os.environ["no_proxy"] = ""
     tokenizer = context.tokenizer
     config = context.config.actor_rollout_ref.rollout
 
-    completion = await _internal_call(item, config)
+    completion = await _internal_call(item, config, host, port)
 
     from alpha_seed.workers.agents import DataPack, pack_to_dataproto
     data_pack = DataPack.create_from_completion(completion.choices[0].message)
@@ -86,14 +90,14 @@ def reward_fn(data_item, completion, context):
     return final_reward
 
 
-async def process_single_batch_v2(item, context):
+async def process_single_batch_v2(item, context, host, port):
     os.environ["no_proxy"] = ""
     tokenizer = context.tokenizer
     config = context.config.actor_rollout_ref.rollout
     final_reward = 0
     round_idx = 0
     while (final_reward <= 0 and round_idx < 3):
-        completion = await _internal_call(item, config)
+        completion = await _internal_call(item, config, host, port)
         from alpha_seed.workers.agents import DataPack, pack_to_dataproto
         data_pack = DataPack.create_from_completion(completion.choices[0].message)
         out = pack_to_dataproto(item, tokenizer, data_pack, config)  # dataproto

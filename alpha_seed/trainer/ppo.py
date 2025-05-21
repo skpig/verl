@@ -15,12 +15,17 @@
 FSDP PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
+import itertools
+
+from ray import ObjectRef
+
 from alpha_seed.logging import refine_log
+from alpha_seed.utils.server_client import is_local_ray_instance
+from alpha_seed.workers.streaming_service.auto_scaling import HorizontalAutoScaling, ScalePolicyConfig
+from alpha_seed.workers.streaming_service.streaming_rollout import RemoteAsyncXPerfGPTRollout
 
 refine_log()
 
-import time
-import uuid
 import contextlib
 import random
 import os
@@ -30,22 +35,24 @@ import queue
 from functools import partial
 from alpha_seed.trainer.utils.lineage import (report_job_config, report_data_loaded, report_trial_ckpts_load,
                                               report_rl_ckpts_load, safely_do)
-from multiprocessing import Process
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Type, List
+from typing import Type, List, Union, Tuple
 import hdfs_io
 
-import wandb
-import ray
 import pandas as pd
 import numpy as np
 from codetiming import Timer
 
+from alpha_seed.trainer.tensorcore_collect import tensorcore_collection
+from alpha_seed.utils.profile.smi_dmon import NvidiaSmiQueryGPUTracer
+from alpha_seed.utils.profile.timeline import CallStackTracer, GCEventTracer, Tracer, export_chrome_trace, tl_time_between, trace_into
 from alpha_seed.utils.select_strategy.bon_strategy import *
 from alpha_seed.utils.select_strategy.league_training_strategy import *
 from alpha_seed.utils.validator.validation_manager import *
+from alpha_seed.workers.streaming_service.streaming_utils import pad, process_output
+from alpha_seed.workers.streaming_service.rollout_proxy import RolloutWorkerGroupProxy
 from alpha_seed.workers.actors.checkpoint import CkptGlobalUploader
 from alpha_seed.workers.actors.rollout_pool import RolloutPool
 from alpha_seed.workers.ppo_actor import make_mini_step_dataloader
@@ -61,6 +68,7 @@ from alpha_seed.workers.actors.sample_pool import SamplePool
 from single_controller.base import Worker
 from single_controller.ray import RayResourcePool, RayWorkerGroup, RayClassWithInitArgs
 from single_controller.ray.base import create_colocated_worker_cls
+from verl.single_controller.ray.replicated_worker_group import ReplicatedRayWorkerGroup, ScalingRayWorkerGroup
 from verl import DataProto
 from verl.utils.fs import copy_local_path_from_hdfs
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
@@ -110,10 +118,16 @@ class ResourcePoolManager:
     server_client_split: bool = False
 
     def create_resource_pool(self):
-        for resource_pool_name, process_on_nodes in self.resource_pool_spec.items():
-            resource_pool = RayResourcePool(process_on_nodes=process_on_nodes,
-                                            use_gpu=True,
-                                            name_prefix=resource_pool_name)
+        for resource_pool_name, (process_on_nodes, pool_name) in self.resource_pool_spec.items():
+            additional_res = []
+            if pool_name:
+                additional_res = [pool_name]
+            resource_pool = RayResourcePool(
+                process_on_nodes=process_on_nodes,
+                use_gpu=True,
+                name_prefix=resource_pool_name,
+                max_colocate_count=1,  # alphaseed里通过fused worker合并了之后，只占用1个gpu，因此不需要计算colocate count
+                additional_resources=additional_res)
             self.resource_pool_dict[resource_pool_name] = resource_pool
 
     def get_resource_pool(self, role: Role) -> RayResourcePool:
@@ -574,6 +588,11 @@ class RayPPOTrainer(object):
                  remote_client=None):
         # assert torch.cuda.is_available(), 'cuda must be available on driver'
 
+        self.standalone_rollout_wg = None  # worker group
+        self.standalone_validator_wg = None
+        self.critic_wg = None
+        self.ref_policy_wg = None
+        self.rm_wg = None
         self.all_wg = {}
         self.internal_wgs: List[RayWorkerGroup] = []
         self.internal_wg_roles = []
@@ -606,6 +625,7 @@ class RayPPOTrainer(object):
         self.use_colocate_reference_policy = Role.ActorRolloutRef in role_worker_mapping
         self.use_standalone_rollout = self.config.streaming_rollout.nnodes > 0
         self.use_standalone_validator = self.config.streaming_validator.nnodes > 0
+        self.use_elastic_streaming_rollout = self.config.streaming_rollout.elastic.enable and self.use_standalone_rollout
         self.use_reference_policy = self.use_standalone_reference_policy or self.use_colocate_reference_policy
         self.use_rm = Role.RewardModel in role_worker_mapping
 
@@ -631,9 +651,13 @@ class RayPPOTrainer(object):
         if config.trainer.default_hdfs_dir and config.trainer.save_cases_to_hdfs:
             self.save_batch_dir = os.path.join(config.trainer.default_hdfs_dir, "batch_data")
 
-        import concurrent.futures
-        # TODO: FIXME@liu: use threadActorPool instead, make it distributed
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=512)
+        self.request_managers = []
+        if self.config.actor_rollout_ref.rollout.mode == "server":
+            self.request_managers.append(ray.get_actor('RequestManager/hybrid_rollout'))
+            self.request_managers.append(ray.get_actor('RequestManager/standalone_rollout'))
+            self.request_managers.append(ray.get_actor('RequestManager/validation'))
+            self.request_managers.append(ray.get_actor('RequestManager/hybrid_validation'))
+
         safely_do(lambda: report_job_config(config), rank=0)()
 
     def _create_dataloader(self):
@@ -670,13 +694,8 @@ class RayPPOTrainer(object):
                                         val_standalone_wg=self.standalone_validator_wg)
 
     def _create_validation_manager(self):
-        self.validation_manager = ValidateManager(self.config,
-                                                  self.logger,
-                                                  self.val_dataloader,
-                                                  self.tokenizer,
-                                                  self.use_rm,
-                                                  self.val_reward_fn,
-                                                  rollout_manager=self.rollout_manager)
+        self.validation_manager = ValidateManager(self.config, self.logger, self.val_dataloader, self.tokenizer,
+                                                  self.use_rm, self.val_reward_fn, self.rollout_manager)
 
     def init_workers(self, kv_store=None, ckpt_global_uploader=None, from_step=0, resume_folder=None):
         """Init resource pool and worker group"""
@@ -706,7 +725,8 @@ class RayPPOTrainer(object):
             else:
                 raise NotImplementedError('Must instantiate actor and rollout')
 
-            if self.use_standalone_rollout:
+            # elastic rollout下不用提前创建好，所以不注册resource pool to class
+            if self.use_standalone_rollout and not self.use_elastic_streaming_rollout:
                 resource_pool = self.resource_pool_manager.get_resource_pool(Role.Rollout)
                 rollout_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Rollout],
                                                    config=self.config.actor_rollout_ref,
@@ -767,9 +787,12 @@ class RayPPOTrainer(object):
 
         # initialize WorkerGroup
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
+            # @type class_dict: {Str(name) -> RayClassWithInitArgs}
             # no role allocated to this resource pool
             if len(class_dict) == 0:
                 continue
+
+            role_names = list(class_dict.keys())
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
 
             if self.config.server_client.role == "client":
@@ -804,13 +827,17 @@ class RayPPOTrainer(object):
                 self.workers += wg_dict.workers
             else:
                 # create workers
+                # RayWorkerGroup初始化时，worker_dict_cls会被在resource_pool中进行实例化，
+                # 创建对应的actor，而actor的数量（也是world_size）由这个resource_pool最开始的spec所决定，因此这里的resource_pool是被切分过的
                 wg_dict = self.ray_worker_group_cls(resource_pool=resource_pool, ray_cls_with_init=worker_dict_cls)
                 if self.config.server_client.role == "server":
                     kv_store.set_key_val.remote(resource_pool.name_prefix, wg_dict.worker_names)
-            spawn_wg = wg_dict.spawn(prefix_set=class_dict.keys())
+
+            # 重新把fused worker里的不同的原始worker的方法分离出来到spawn_wg，然后all_wg里还是像原来访问当个worker那样访问
+            spawn_wg = wg_dict.spawn(prefix_set=role_names)
             self.all_wg.update(spawn_wg)
             self.internal_wgs.append(wg_dict)
-            self.internal_wg_roles.append(list(class_dict.keys()))
+            self.internal_wg_roles.append(role_names)
 
         # init ckpt global uploader
         uploader_tracker_role = 'actor'
@@ -837,31 +864,37 @@ class RayPPOTrainer(object):
         else:
             raise NotImplementedError
 
-        init_futures = []
+        # (方法名，要wait的futures), 方法名就是一个标注的名称，方便报错的时候可以找回哪个报错的对象
+        init_futures: List[Tuple[str, List[ObjectRef]]] = []
 
-        init_futures.append(
-            self.actor_rollout_wg.init_model(
-                remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init,
-                from_scratch=self.build_model_from_scratch(from_step, 'actor')))
+        actor_rollout_init_fut = self.actor_rollout_wg.init_model(
+            remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init,
+            from_scratch=self.build_model_from_scratch(from_step, 'actor'))
 
-        if self.use_standalone_rollout:
+        if self.use_standalone_rollout and not self.use_elastic_streaming_rollout:
+            # 使用固定副本数的standalone rollout，跟着actor_rollout_ref的逻辑一起走fusedworker在resource_pool定义好的资源上创建
             self.standalone_rollout_wg = self.all_wg['standalone_rollout']
-
-            init_futures.append(
-                self.standalone_rollout_wg.init_model(
-                    remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init,
-                    from_scratch=from_scratch))
-        else:
-            self.standalone_rollout_wg = None
+            init_futures.append(("standalone_rollout_wg_init_model",
+                                 self.standalone_rollout_wg.init_model(
+                                     remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init,
+                                     from_scratch=from_scratch)))
 
         if self.use_standalone_validator:
             self.standalone_validator_wg = self.all_wg['standalone_validator']
-            init_futures.append(
-                self.standalone_validator_wg.init_model(
-                    remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init,
-                    from_scratch=from_scratch))
-        else:
-            self.standalone_validator_wg = None
+            init_futures.append(('standalone_val_init_model',
+                                 self.standalone_validator_wg.init_model(
+                                     remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init,
+                                     from_scratch=from_scratch)))
+
+        # ensure errors in model_init will be raised
+        # wait for MODEL INITIALIZATION
+        for name, fut in init_futures:
+            try:
+                ray.get(fut)
+            except:
+                print(name)
+                raise
+        init_futures.clear()
 
         if self.config.actor_rollout_ref.actor.kl_loss_weight >= 1e-10:
             # 两种情况下使用kl loss，一种是grpo，另一种是在rewards里不加kl惩罚
@@ -869,8 +902,15 @@ class RayPPOTrainer(object):
 
         if self.use_critic:
             self.critic_wg = self.all_wg['critic']
-            self.critic_wg.init_model(remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init,
-                                      from_scratch=from_scratch)  # blocking
+            # 因为actor和critic是跑在同一个ray actor里，但他们的model各自调用init(也包括其他需要全局同步的nccl调用)，
+            # init时需要全局同步初始化，这里如果并发会出现不知道谁先走到nccl 同步调用，如果有的rank先跑了actor，有的先跑了critic，
+            # 而nccl又不兼容python async，就会互相等
+            # 因此这里必须先等actor初始化完了再跑critic 初始化
+            ray.get(actor_rollout_init_fut)
+            init_futures.append(('critic_wg_init_model',
+                                 self.critic_wg.init_model(
+                                     remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init,
+                                     from_scratch=from_scratch)))
 
         if self.use_standalone_reference_policy:
             if self.config.actor_rollout_ref.ref.ema == 1:
@@ -878,10 +918,10 @@ class RayPPOTrainer(object):
             else:
                 from_scratch_ref = from_scratch
             self.ref_policy_wg = self.all_wg['ref']
-            init_futures.append(
-                self.ref_policy_wg.init_model(
-                    remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init,
-                    from_scratch=from_scratch_ref))
+            init_futures.append(('ref_policy_init_model',
+                                 self.ref_policy_wg.init_model(
+                                     remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init,
+                                     from_scratch=from_scratch_ref)))
         elif self.use_colocate_reference_policy:
             self.ref_policy_wg = self.all_wg['actor_rollout_ref']
 
@@ -890,13 +930,19 @@ class RayPPOTrainer(object):
             self.rm_wg.init_model(remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init,
                                   from_scratch=True)  # blocking
 
-        # ensure errors in model_init will be raised
-        for fut in init_futures:
-            ray.get(fut)
-
         safely_do(lambda: report_rl_ckpts_load(worker_configs=worker_configs), rank=0)()
         self.global_step = from_step
         self.resume_folder = resume_folder
+
+        # wait for model communication setup and weight sync
+        # note(lixiang): make this separate from init_model to avoid deadlock
+        for name, fut in init_futures:
+            try:
+                ray.get(fut)
+            except:
+                print(name)
+                raise
+        init_futures.clear()
 
     def save_checkpoint(self, specified_ckpt_version=None):
         """Save checkpoint to hdfs.
@@ -1104,7 +1150,7 @@ class RayPPOTrainer(object):
         return f'{role}_not_optimized_ignore.txt'
 
     def load_checkpoint(self, is_self_load=False):
-        """is_self_load True if the checkpoint is from current job (for example convert to omnistore), 
+        """is_self_load True if the checkpoint is from current job (for example convert to omnistore),
                         False if the checkpoint is from other job
         """
         global_step = self.global_step
@@ -1294,6 +1340,7 @@ class RayPPOTrainer(object):
 
         cur_batch_len = []
         prompt_length = self.config.data.max_prompt_length
+        max_response_length = self.config.data.max_response_length
         overlonged_count = 0
         for i in range(batch.batch['input_ids'].shape[0]):
             valid_response_length = batch.batch['attention_mask'][i, prompt_length:].sum().item()  # TODO
@@ -1303,7 +1350,7 @@ class RayPPOTrainer(object):
             if 'max_new_tokens' in batch.non_tensor_batch:
                 query_max_len = batch.non_tensor_batch['max_new_tokens'][i]
             else:
-                query_max_len = self.config.data.max_response_length
+                query_max_len = max_response_length
             if valid_response_length >= query_max_len:
                 overlonged_count += 1
 
@@ -1439,8 +1486,8 @@ class RayPPOTrainer(object):
                 self.load_checkpoint()
 
         # perform validation before training
-        if self.val_reward_fn is not None and (self.config.trainer.eval_before_training or \
-            self.config.trainer.val_only):
+        if self.val_reward_fn is not None and (self.config.trainer.eval_before_training or
+                                               self.config.trainer.val_only):
             self.validation_manager.validate(val_epoch=self.config.trainer.val_epoch,
                                              need_log=self.config.trainer.need_log,
                                              log_file=self.config.trainer.log_file,
@@ -1933,6 +1980,19 @@ class RayPPOTrainer(object):
                     wandb.finish()
                     return
 
+                self._do_trace_profile(self.global_step)
+
+    def _do_trace_profile(self, global_step):
+        # tracing and timeline objects
+        if global_step == 10:
+            # export at TaskRunner process
+            spans: List[dict] = Tracer.merge_all()
+            for req_mgr in self.request_managers:
+                request_spans = ray.get(req_mgr.dump_request_trace.remote())
+                spans.extend(request_spans)
+            save_path = export_chrome_trace('trace.json.gz', spans)
+            os.system(f'mlx asset upload {save_path}')
+
     def do_ndtimeline_action(self, *args, **kwargs):
         """Call a function on each actor.
         Args:
@@ -1970,4 +2030,6 @@ class RayPPOTrainer(object):
                 ray.get(fut)
             futs = self.do_ndtimeline_action("flush_set_upload", global_step=step, ts=int(time.time()))
             self._timeline_futures = futs
+        for req_mgr in self.request_managers:
+            ray.get(req_mgr.set_global_step.remote(self.global_step))
         self._global_step = step

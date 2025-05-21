@@ -1,12 +1,16 @@
 from dataclasses import dataclass
+
+from omegaconf import DictConfig
+
 from alpha_seed.workers.streaming_service.streaming_utils import DataPack, pack_to_dataproto
 
 
 @dataclass
 class TaskContext:
-    config: dict
+    config: DictConfig
     tokenizer: object
     global_step: int
+    server_host: str
     server_port: int
 
 

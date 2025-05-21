@@ -1,5 +1,7 @@
 import torch
 from openai import AsyncOpenAI
+
+from alpha_seed.workers.streaming_service.streaming_utils import is_ipv6
 from verl import DataProto
 import asyncio
 import os
@@ -17,12 +19,14 @@ DataProtoItem(batch=TensorDict(
     is_shared=False), non_tensor_batch= ... '''
 
 
-async def chat_completions(content, meta_info, config, port: int):
+async def chat_completions(content, meta_info, config, host, port: int):
+    if is_ipv6(host):
+        host = f'[{host}]'
     try:
         timeout = aiohttp.ClientTimeout(total=9600)
         session = aiohttp.ClientSession(timeout=timeout)
         generation_kwargs = meta_info['generation_kwargs']
-        async with session.post(url=f"http://0.0.0.0:{port}/chat/completions",
+        async with session.post(url=f"http://{host}:{port}/chat/completions",
                                 headers={"Authorization": "Bearer token-abc123"},
                                 json={
                                     "model": "rollout",
@@ -44,7 +48,7 @@ async def chat_completions(content, meta_info, config, port: int):
         await session.close()
 
 
-async def _internal_call(item, config, port: int):
+async def _internal_call(item, config, host, port: int):
     completion = None
     try:
         item.batch = item.batch.reshape(-1)
@@ -57,7 +61,7 @@ async def _internal_call(item, config, port: int):
         meta_info['uid'] = item.non_tensor_batch['uid'][0]
         meta_info['reward_model'] = item.non_tensor_batch['reward_model'][0]
 
-        completion = await chat_completions(data, meta_info, config, port)
+        completion = await chat_completions(data, meta_info, config, host, port)
     except asyncio.CancelledError:
         # Handle task cancellation (e.g., cleanup)
         print("Request was cancelled!!!!!!!!!!!!!!!!!!!!!!!!!!!")
@@ -72,9 +76,10 @@ async def process_single_batch(item, context):
     os.environ["no_proxy"] = ""
     tokenizer = context.tokenizer
     config = context.config.actor_rollout_ref.rollout
+    host = context.server_host
     port = context.server_port
 
-    completion = await _internal_call(item, config, port)
+    completion = await _internal_call(item, config, host, port)
 
     from alpha_seed.workers.agents import DataPack, pack_to_dataproto
     data_pack = DataPack.create_from_completion_dict(completion['choices'][0]['message'])

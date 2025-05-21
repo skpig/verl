@@ -144,6 +144,7 @@ actor_rollout_ref:
     gpu_memory_utilization: 0.7
     schedule_strategy: default # [default,fifo]
     mode: "batch" # [batch, server]
+    weights_communicator: "nccl" # [nccl, ucx], elastic模式下只能用ucx
     plugin: &plugin_config
       enable: False
       names: []
@@ -386,19 +387,46 @@ trainer:
   per_query_max_length: False
   per_query_max_length_init: ${data.max_response_length}
 
+  elastic:
+    enable: false
+    stable_pool_name: worker
+
 rollout_server:
   handler: "math/aiohttp" # ["math/aiohttp"]
   handler_kwargs: {}
 
 streaming_rollout:
   n_gpus_per_node: 0
-  nnodes: 0
+  nnodes: 0  # elastic模式下这个表示1个dp group所要的node，非elastic模式下，这个表示整个静态的standalone rollout总共要的nodes，里面包含所有的dp groups
   warmup_step: 0
   force_eos: False # only works for batch mode
+  elastic:
+    enable: false
+    stable_pool_name: worker
+    elastic_pool_name: elasticworker
+    min_replicas: 1  # 最少的副本数，最小值会放在稳定资源池上跑，超过最小值的部分会放到弹性资源池上跑
+    max_replicas: 100
+    scale_up_threshold: 0.85  # 超过x%的时间都在gen的话，则触发
+    scale_up_wait: 1  # period，连续超过x个周期保持触发，则真正触发扩容
+    scale_down_threshold: 0.7
+    scale_down_wait: 2  # period
 
 streaming_validator:
   n_gpus_per_node: 0
   nnodes: 0
+  elastic:
+    enable: false
+    stable_pool_name: worker
+
+elastic:
+  enable: false
+  pools:
+    - name: elasticworker # merlin trial弹性伸缩池的role
+      gpu_type: L20  # 从ray resource里读不到的时候会从这里读，暂时影响不大
+      n_gpu_per_node: 16  # 从ray resource里读不到的时候会从这里读
+      hard_min: 1 # 缩容时可缩到的最小值
+      hard_max: 200  # 扩容时可缩到的物理最大值，一般是一个不太会达到的很大的值，暂时写一个数字避免扩爆
+      buffer_size: 1  # extra idle buffer nodes
 
 convert_ckpt_to_omnistore_task:
   enable: False

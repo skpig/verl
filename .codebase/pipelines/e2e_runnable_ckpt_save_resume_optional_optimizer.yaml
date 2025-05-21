@@ -3,8 +3,8 @@ trigger:
   change
 jobs:
   e2e_runnable_lion_optimizer_ckpt_tests:
-    # Merlin - data.aml.verl:v175
-    image: hub.byted.org/reckon/data.reckon.mlx.image_5940:e2ec141539bafdc9109d4f1c9cfc42a8
+    # Merlin - data.aml.verl:v189
+    image: hub.byted.org/reckon/data.reckon.mlx.image_5940:2f550abbef6349f1fd520d7dbd4fcc1e
     if: ${{ !contains(Event.Change.Title, "WIP") }}
     runs-on:
       cluster: gpu-h20

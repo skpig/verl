@@ -14,7 +14,9 @@
 """
 The main entry point to run the PPO algorithm
 """
-from typing import Union
+
+import copy
+from typing import Union, List
 import json
 from contextlib import nullcontext
 import warnings
@@ -31,6 +33,7 @@ from single_controller.base.decorator import register, Dispatch
 from verl import DataProto
 from alpha_seed.utils.functional import update_model_config, get_text_config
 from verl.utils.model import print_model_size
+from verl.single_controller.base.decorator import Execute
 from alpha_seed.workers.fsdp.offload import (offload_fsdp_optimizer, load_fsdp_optimizer, offload_fsdp_model_to_cpu,
                                              load_fsdp_model_to_gpu)
 from alpha_seed.workers.megatron.offload import (offload_megatron_model_to_cpu, load_megatron_model_to_gpu,
@@ -62,6 +65,8 @@ from codetiming import Timer
 from datetime import timedelta
 
 from .checkpoint import CheckpointManagerWrapper
+from ..streaming_service.streaming_utils import get_free_port_for_nccl_primitive
+from ..xperf_rollout.session import LoadMetric
 
 # mariana dependency
 try:
@@ -111,10 +116,12 @@ class AsyncActorRolloutRefWorker(Worker):
         self.actor_strategy = config.actor.strategy
         self.ref_strategy = config.ref.strategy
         self.local_path = None
+        self.hybrid_rollout_addresses = None
         # actor model
         if self.actor_strategy in ('fsdp', 'vescale-fsdp2'):
             actor_fsdp_size = config.actor.fsdp_size
             actor_sp_size = config.actor.ulysses_sequence_parallel_size
+
             actor_tp_size = config.actor.tp_size
             actor_meshes = create_mesh(fsdp_size=actor_fsdp_size,
                                        tp_size=actor_tp_size,
@@ -547,13 +554,14 @@ class AsyncActorRolloutRefWorker(Worker):
         log_gpu_memory_usage('Before AsyncXPerfGPTRollout init')
 
         # actually, we just need hf_config in order to build rollout
-        rollout = AsyncXPerfGPTRollout(config=self.config.rollout)
+        rollout = AsyncXPerfGPTRollout(config=self.config.rollout, role=self.role)
         rollout.initialize(local_path=self.local_path,
                            is_standalone=self._is_standalone_rollout or self._is_standalone_validator)
         rollout.setup_rollout()
         log_gpu_memory_usage('After AsyncXPerfGPTRollout init')
 
         # Note that in standalone case, model is None.
+        weights_communicator = self.config.rollout.weights_communicator
         if self.actor_strategy in ('fsdp', 'vescale-fsdp2'):
             sharding_manager = FSDPXPerfGPTShardingManager(module=self.actor_module_fsdp,
                                                            model_config=self.actor_model_config,
@@ -562,7 +570,8 @@ class AsyncActorRolloutRefWorker(Worker):
                                                            standalone=self._is_standalone_rollout or
                                                            self._is_standalone_validator,
                                                            only_bind_once=self.role == "rollout",
-                                                           backend='fsdp')
+                                                           backend='fsdp',
+                                                           weights_communicator=weights_communicator)
         elif self.actor_strategy == 'megatron':
             sharding_manager = MegatronXPerfGPTShardingManager(module=self.actor_module_mariana,
                                                                model_config=self.actor_model_config,
@@ -657,9 +666,16 @@ class AsyncActorRolloutRefWorker(Worker):
             cleanup_local_tmp_folder_safetensors_files(self.actor_model_config._name_or_path)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    def setup_standalone_worker_comm(self, hybrid_master_address, standalone_master_address, port, role):
-        self.sharding_manager.weights_communicater.setup_standalone_worker_comm(hybrid_master_address,
-                                                                                standalone_master_address, port, role)
+    def setup_as_server(self, ifname=None):
+        return self.sharding_manager.weights_communicator.setup_as_server(ifname)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
+    def setup_as_client(self, role, source_addresses, all_rollout_addresses):
+        # source_addresses: length等于自己的world size，根据自己的rank一一对应一个address即可
+        # all_rollout_addresses: length等于hybrid rollout的world size
+        self.hybrid_rollout_addresses = all_rollout_addresses
+        source_address = source_addresses[self.rank]
+        self.sharding_manager.weights_communicator.setup_as_client(role, source_address)
 
     def _normalize_config(self):
         config = self.config
@@ -830,16 +846,30 @@ class AsyncActorRolloutRefWorker(Worker):
         log_gpu_memory_usage(f'Before update_standalone_worker {role=}')
         assert self._is_rollout or self._is_standalone_rollout or self._is_standalone_validator
         if not self.sharding_manager.standalone and self.config.actor.train_memory_offload:
+            # 把hybrid rollout的参数从cpu->cuda
             self.to("cuda", model=True, optimizer=False)
+        # sharding_manager.__enter__ 会把 FSDP 的weights格式转换到megatron的格式
+        # 然后才做下面的收发，发送之后就不用在standalone rollout里转
 
         # TODO(zhangchi.usc1992): we have a redundant weight binding here for standalone validator
         # Try to remove it by introduing an argument
         with self.sharding_manager:
-            self.sharding_manager.weights_communicater.update_standalone_worker(role)
+            # hybrid rollout send
+            # standalone rollout recv
+            # 总共收发 standalone world_size 次
+            self.sharding_manager.weights_communicator.update_standalone_worker(role)
         if not self.sharding_manager.standalone and self.config.actor.train_memory_offload:
+            # 再把hybrid rollout的参数卸载回cpu
             self.to("cpu", model=True, optimizer=False)
 
         log_gpu_memory_usage(f'After update_standalone_worker {role=}')
+
+    @register(execute_mode=Execute.RANK_ZERO, blocking=True)
+    def update_standalone_worker_end(self):
+        # this function should only be invoked by standalone worker
+        assert self._is_rollout or self._is_standalone_rollout or self._is_standalone_validator
+        # 通知所有actor server退出weights transfer
+        self.sharding_manager.weights_communicator.update_standalone_worker_end(self.hybrid_rollout_addresses)
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def update_actor(self, data: DataProto):
@@ -1236,17 +1266,34 @@ class AsyncActorRolloutRefWorker(Worker):
         torch.cuda.empty_cache()
         self.__init__(config, role)
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    def add_inflight_query(self, query: Query):
-        return self.rollout.add_inflight_query(query)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
+    def add_inflight_queries(self, queries: List[Query]):
+        ret = []
+        for q in queries:
+            qid = self.rollout.add_inflight_query(q)
+            ret.append(qid)
+        return ret
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def get_inflight_query(self, query_id):
         return await self.rollout.get_inflight_query(query_id)
 
+    # 只在dp_size=1的情况下调用，所以这里rank0执行即可，DP_COMPUTE与此参数暂不兼容
+    @register(execute_mode=Execute.RANK_ZERO, blocking=True)
+    def get_all_queries(self, query_type: str):
+        return self.rollout.get_all_queries(query_type)
+
+    @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=True)
+    def get_load_metrics(self) -> LoadMetric:
+        return self.rollout.get_load_metrics()
+
+    @register(execute_mode=Execute.RANK_ZERO)
+    def get_master_free_port(self) -> int:
+        return get_free_port_for_nccl_primitive()
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def setup_standalone_worker_comm(self, hybrid_master_address, standalone_master_address, port, role):
-        self.sharding_manager.weights_communicater.setup_standalone_worker_comm(hybrid_master_address,
+        self.sharding_manager.weights_communicator.setup_standalone_worker_comm(hybrid_master_address,
                                                                                 standalone_master_address, port, role)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
@@ -1254,12 +1301,14 @@ class AsyncActorRolloutRefWorker(Worker):
         if self.config.rollout.mode == "batch":
             return
         if sleep:
+            # 让engine停下来
             with self.rollout.inference_engine.update_weights_lock:
                 self.rollout.stop_event.set()
-            while self.rollout.inference_engine.status != "idle":
-                # status == "idle" means all tp ranks have exited the running loop
-                import time
-                time.sleep(0.01)
+            # 让engine等待下一次weights loaded
+            self.rollout.weights_loaded.clear()
+            # 等待engine完全退出gen loop
+            self.rollout.gen_loop_exited.wait()
+            # offload weights
             self.sharding_manager.__exit__(None, None, None)
             return
         assert (self.rollout.inference_engine.status == "idle")
@@ -1268,6 +1317,8 @@ class AsyncActorRolloutRefWorker(Worker):
         self.sharding_manager.__enter__()
         with self.rollout.inference_engine.update_weights_lock:
             self.rollout.stop_event.clear()
+            # 通知engine weights loaded
+            self.rollout.weights_loaded.set()
 
 
 def summerize_data(data: Union[dict, tuple, list], name: str = 'summary', level: int = 0, show_value=False) -> str:

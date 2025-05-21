@@ -16,10 +16,13 @@ Note that we don't combine the main with ray_trainer as ray_trainer is used by o
 """
 
 from alpha_seed.logging import refine_log
+from alpha_seed.workers.streaming_service.cluster_hpa import ArnoldTrialResourceManager
+from alpha_seed.workers.streaming_service.streaming_rollout import RemoteAsyncXPerfGPTRollout
 
 refine_log()
 
 import time
+from types import MappingProxyType, SimpleNamespace
 import warnings
 import contextlib
 import json
@@ -47,15 +50,17 @@ try:
 except ImportError:
     MegavisionMetricsCtx = None
 
+from alpha_seed.utils.server_client import is_local_ray_instance, validate_client_config, KVStore, ServerHealthCheck, TaskRunner, \
+    ClientTaskRunner, check_all_workers_alive, recreate_actor
 # rule-based reward score
 from alpha_seed.utils.reward_score.extra_reward import add_length_reward, punish_format_return_positions
 from alpha_seed.utils.reward_score import verifier_service, oj_utils, response_post_proc, _select_rm_score_fn
 from alpha_seed.utils.duplicate import para_dup
 from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRefWorker
-from alpha_seed.workers.streaming_service.streaming_rollout import RemoteAsyncXPerfGPTRollout
 from alpha_seed.workers.actors.critic_worker import CriticWorker
 from alpha_seed.utils.alarm.lark_util import send_message_to_employee
 from alpha_seed.utils.server_client import validate_client_config, KVStore, ServerHealthCheck, TaskRunner, ClientTaskRunner, check_all_workers_alive, recreate_actor
+from alpha_seed.workers.streaming_service.rollout_request_manager import RequestManager
 
 user_email = os.getenv('ARNOLD_LARK_RECEIVER', '')
 task_url = os.getenv('ARNOLD_ORIGIN_PLATFORM_URL', '')
@@ -355,6 +360,7 @@ class RewardManager():
         all_dup_punish_scores = []
 
         all_final_scores_to_lens = defaultdict(list)
+        static_conf = make_static_omegaconf(self.config)
         for res in tqdm(as_completed(rm_res_future_list), total=len(data), desc="get_rm_score"):
             output_dict = res.result()
             prompt_str = output_dict["prompt_str"]
@@ -410,7 +416,7 @@ class RewardManager():
                 thinking_len = valid_response_length if thinking_len == 0 else thinking_len
                 length_reward, overlong_reward = add_length_reward(thinking_len,
                                                                    score,
-                                                                   self.config,
+                                                                   static_conf,
                                                                    current_mean_len=mean_len_per_prompt[idx])
                 score = score + length_reward + overlong_reward
                 len_scores[idx, valid_response_length - 1] = score
@@ -442,7 +448,7 @@ class RewardManager():
             if reward_style not in already_print_data_sources:
                 already_print_data_sources[reward_style] = 0
 
-            if already_print_data_sources[reward_style] < self.config.trainer.num_cases_to_wandb:
+            if already_print_data_sources[reward_style] < static_conf.trainer.num_cases_to_wandb:
                 already_print_data_sources[reward_style] += 1
                 if reward_style == "code-sandbox":
                     ground_truth = ''  # 对于OJ问题，ground_truth会比较大，扛不住
@@ -631,6 +637,36 @@ def main(config):
             init_ray(config)
             check_arnold_resources(config=config)
 
+    # server 模式下，gen的架构均为RequestManager+Proxy+ReplicatedWorker，所以这里把RequestManager启动起来
+    if config.actor_rollout_ref.rollout.mode == "server":
+        rms = []  # retain request managers to avoid being gc
+
+        def make_request_manager(instance_name: str):
+            if is_local_ray_instance():
+                remote_cls = ray.remote(RequestManager)
+            else:
+                # 非local模式下，让RequestManager只跑在head node上
+                remote_cls = ray.remote(resources={"head": 1})(RequestManager)
+            # note(lixiang): concurrency必须超过global batch size才行，不然会卡住更新不了请求，导致死锁
+            request_manager = remote_cls.options(name=f'RequestManager/{instance_name}',
+                                                 max_concurrency=102400).remote()
+            ray.wait([request_manager.ready.remote()])
+            rms.append(request_manager)
+
+        make_request_manager('hybrid_rollout')
+        make_request_manager('standalone_rollout')
+        make_request_manager('validation')
+        make_request_manager('hybrid_validation')
+
+    # elastic resource pool managers
+    # FIXME(lixiang): arnold 扩缩容api不能并发调用，这里先假设只有1个弹性池，之后再改
+    if config.elastic.enable:
+        elastic_res_managers = []
+        for elastic_pool in config.elastic.pools:
+            name = elastic_pool.name
+            mgr = ArnoldTrialResourceManager(name, elastic_pool)
+            elastic_res_managers.append(mgr)
+
     if config.server_client.role == "server":
         main_task(config=config)
     else:
@@ -638,7 +674,7 @@ def main(config):
             # Use a detached runner to prevent client scripts to run simultaneously
             runner = recreate_actor(ClientTaskRunner, name=ClientTaskRunner.name)
         else:
-            runner = TaskRunner.remote()
+            runner = TaskRunner.options(name=TaskRunner.name).remote()
         ray.get(runner.main.remote(main_task, config=config))
 
 
@@ -674,9 +710,15 @@ def check_arnold_resources(config):
         # maybe not on arnold environment? skip the check
         return
 
-    total_required_gpus = config.trainer.nnodes * config.trainer.n_gpus_per_node + \
-                          config.streaming_rollout.nnodes * config.streaming_rollout.n_gpus_per_node + \
-                          config.streaming_validator.nnodes * config.streaming_validator.n_gpus_per_node
+    traner_resources = config.trainer.nnodes * config.trainer.n_gpus_per_node
+    r = config.streaming_rollout
+    if r.elastic.enable:
+        # compute minimum requets
+        rollout_resources = r.nnodes * r.n_gpus_per_node * r.elastic.min_replicas
+    else:
+        rollout_resources = r.nnodes * r.n_gpus_per_node
+    validator_resources = config.streaming_validator.nnodes * config.streaming_validator.n_gpus_per_node
+    total_required_gpus = traner_resources + rollout_resources + validator_resources
 
     assert total_required_gpus <= total_gpus, f'Require {total_required_gpus} GPUs, but only have {total_gpus} GPUs'
 
@@ -718,6 +760,7 @@ def init_ray(config: DictConfig):
                 extra_runtine_env = yaml.safe_load(fin)
                 runtime_env.update(extra_runtine_env)
 
+        print(runtime_env)
         ray.init(namespace="alphaseed", runtime_env=runtime_env, address=address)
 
 
@@ -800,6 +843,27 @@ def validate_config(config):
     config.critic.mariana = config.mariana
 
 
+class StaticOmegaconfNamespace(SimpleNamespace):
+
+    def get(self, key, default=None):
+        return getattr(self, key, default)
+
+    def __getitem__(self, key):
+        return getattr(self, key)
+
+
+def dict_to_namespace(d):
+    if isinstance(d, dict):
+        return StaticOmegaconfNamespace(**{k: dict_to_namespace(v) for k, v in d.items()})
+    return d
+
+
+def make_static_omegaconf(conf):
+    from omegaconf import OmegaConf
+    static_conf = OmegaConf.to_container(conf, resolve=True)
+    return dict_to_namespace(static_conf)
+
+
 def config_to_trainer_kwargs(config):
     from verl.utils.fs import copy_local_path_from_hdfs
     from transformers import AutoTokenizer, AutoProcessor
@@ -821,6 +885,8 @@ def config_to_trainer_kwargs(config):
     if config.data.get('chat_template', None) == 'raw':
         raw_template = """{% for message in messages %}{{ message['content'] }}{% endfor %}"""
         tokenizer.chat_template = raw_template
+        if tokenizer.bos_token is None:
+            tokenizer.bos_token = ""
 
     if config.data.image_key:
         processor = AutoProcessor.from_pretrained(local_path)
@@ -844,14 +910,18 @@ def config_to_trainer_kwargs(config):
         Role.Validator: standalone_rollout_cls,
     }
 
+    is_local_ray = is_local_ray_instance()
+
     # in server client, the pool id should follow the format of f"{RoleNameInMerlin}_pool"
     global_pool_id = 'hybrid_pool'
     standalone_pool_id = 'rollout_pool'
     validation_pool_id = 'validator_pool'
     resource_pool_spec = {
-        global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
-        standalone_pool_id: [config.streaming_rollout.n_gpus_per_node] * config.streaming_rollout.nnodes,
-        validation_pool_id: [config.streaming_validator.n_gpus_per_node] * config.streaming_validator.nnodes,
+        global_pool_id: ([config.trainer.n_gpus_per_node] * config.trainer.nnodes,
+                         '' if is_local_ray else config.trainer.elastic.stable_pool_name),
+        standalone_pool_id: ([config.streaming_rollout.n_gpus_per_node] * config.streaming_rollout.nnodes, ''),
+        validation_pool_id: ([config.streaming_validator.n_gpus_per_node] * config.streaming_validator.nnodes,
+                             '' if is_local_ray else config.streaming_validator.elastic.stable_pool_name),
     }
     mapping = {
         Role.ActorRolloutRef: global_pool_id,

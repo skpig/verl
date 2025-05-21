@@ -123,3 +123,7 @@ def recreate_actor(actor_cls, name, *args, **kwargs):
         actor_cls = ray.remote(actor_cls)
     actor = actor_cls.options(name=name, *args, **kwargs).remote()
     return actor
+
+
+def is_local_ray_instance():
+    return 'node:__internal_head__' in ray.cluster_resources()

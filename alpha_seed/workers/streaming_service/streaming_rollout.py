@@ -14,12 +14,17 @@
 """
 Create a XPerfGPT Rollout
 """
+import itertools
+import uuid
 
+from distlib.locators import Locator
+from pydantic import UUID4
 from transformers import PreTrainedTokenizer
 from verl import DataProto
 import copy
 from contextlib import contextmanager, nullcontext
 
+import numpy as np
 from torch import nn
 import tempfile
 import json
@@ -28,11 +33,13 @@ import threading
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 import uvicorn
-from typing import AsyncGenerator
+from typing import AsyncGenerator, List
 import asyncio
 import xperf_gpt
-from alpha_seed.workers.xperf_rollout.session import InferenceSession, StepProfiler
-from alpha_seed.workers.xperf_rollout.component.query import Query
+from verl.single_controller.base.decorator import Execute
+
+from alpha_seed.workers.xperf_rollout.session import InferenceSession, StepProfiler, LoadMetric
+from alpha_seed.workers.xperf_rollout.component.query import Query, AsyncQuery
 from single_controller.base.worker import WorkerHelper
 from single_controller.base import Worker
 
@@ -54,6 +61,8 @@ from alpha_seed.workers.xperf_rollout.utils import get_xperf_gpt_config
 from alpha_seed.workers.xperf_rollout.utils.custom_xperf_convert_helper import XCustomInferenceModuleAdapter
 from alpha_seed.workers.streaming_service.streaming_utils import is_multihost_model, DataPack, pack_to_dataproto, get_gpus_per_node
 from alpha_seed.workers.xperf_rollout.utils.layout_convert_helper import offload_to_device
+from alpha_seed.workers.xperf_rollout.utils.pooled_ucx_weights_communicator import UCXWeightsCommunicator
+from alpha_seed.workers.xperf_rollout.utils.nccl_weights_communicator import NCCLWeightsCommunicator
 from alpha_seed.workers.streaming_service.xperf_model_prophet import XperfModelProphet
 from alpha_seed.workers.xperf_rollout.utils.logits_manipulate import logits_manipulate_fn_core, logits_manipulate_fn_eta, logits_manipulate_fn_minp, logits_manipulate_fn_clip
 from alpha_seed.utils.observility import get_profiler_context_wrapped, profile_step
@@ -109,6 +118,9 @@ class AsyncXPerfGPTRollout(object):
     def __init__(self, config, role: str = 'rollout'):
         self.config = config
         self.role = role
+        self.weights_loaded = threading.Event()  # 表示weights是否已经加载完毕，hybrid里回load/offload交替
+        # 表示engine是否在gen loop里，hybrid模式如果weights offloaded，不应该在gen loop里，可以用这个event来判断状态
+        self.gen_loop_exited = threading.Event()
 
     def initialize(self,
                    local_path=None,
@@ -313,23 +325,28 @@ class AsyncXPerfGPTRollout(object):
             offload_to_device(self.inference_engine.engine.module, "meta")
         torch.cuda.empty_cache()
 
-    def add_inflight_query(self, query):
+    def add_inflight_query(self, query: Query) -> str:
+        aq = AsyncQuery(query)
         # inference_engine is running on a different threads
         with self.inference_engine.update_weights_lock:
-            self.inference_engine.pending.append(query)
-        return query.id
+            self.inference_engine.pending.append(aq)
+        return aq.id
 
-    async def get_inflight_query(self, query_id):
+    async def get_inflight_query(self, query_id: str) -> Query:
         with self.inference_engine.update_weights_lock:
-            query = self.inference_engine.pending.query_pool.pop(query_id)
-        await query.wait_until_done()
+            aq = self.inference_engine.pending.query_pool.pop(query_id)
+        await aq.wait_until_done()
         _ = self.inference_engine.finished.pop(query_id, None)
-        query._event = None
-        query._loop = None
-        query.input_embedding = None
-        if query._exception is not None:
-            raise query._exception
-        return query
+        aq.query.input_embedding = None
+        if aq.exception is not None:
+            raise aq.exception
+        return aq.query
+
+    def get_all_queries(self, query_type: str) -> List[Query]:
+        return self.inference_engine.get_all_queries(query_type=query_type, retain_finished=False)
+
+    def get_load_metrics(self) -> LoadMetric:
+        return self.inference_engine.get_load_metrics()
 
     def get_master_addr_port(self):
         return self.master_addr, self.master_port
@@ -362,9 +379,10 @@ class AsyncXPerfGPTRollout(object):
         self.stop_event = threading.Event()
         if self.config.mode == "server" or self.role == "rollout_server":
             self.stop_event.set()
-        self.process_thread = threading.Thread(target=self.async_generate if self.config.mode == "server" or
-                                               self.role == "rollout_server" else self.generate,
-                                               args=())
+        # rollout_server 等于 standalone rollout + elastic模式
+        use_async_gen = self.config.mode == "server" or self.role == "rollout_server"
+        self.process_thread = threading.Thread(target=self.async_generate if use_async_gen else self.generate,
+                                               name="streaming-rollout-background-generate")
         self.process_thread.start()
 
     def set_rollout_callback_function(self, eos_callback_fn):
@@ -442,11 +460,13 @@ class AsyncXPerfGPTRollout(object):
             with logging_set_level(self.config.get('logging_level', 'WARN')), self.profiler_context as p:
                 try:
                     self.reset_status()
+                    self.gen_loop_exited.clear()
                     self.inference_engine.execute(query_pool,
                                                   complete_ratio=complete_ratio,
                                                   stop_event=self.stop_event if self.is_standalone else None,
                                                   prompt_meta_info=prompt_meta_info)
                     profile_step(p, None)
+                    self.gen_loop_exited.set()
                 except Exception as e:
                     self._dump_context()
                     raise (e)
@@ -509,7 +529,6 @@ class AsyncXPerfGPTRollout(object):
 
     @torch.no_grad()
     def generate_sequences(self, prompts: DataProto, is_async=False):
-
         complete_ratio = prompts.meta_info.get('complete_ratio', 1)
         prompt_ids = prompts.batch['input_ids']  # (bs, prompt_length)
         batch_size = prompt_ids.shape[0]
@@ -548,16 +567,16 @@ class AsyncXPerfGPTRollout(object):
     def async_generate(self):
         torch.cuda.set_device(int(os.getenv('LOCAL_RANK', '0')))
         while True:
-            import time
-            time.sleep(1)
-            if self.stop_event.is_set():
-                continue
-
+            # 这里先等rollout的weights确定load好了再进入engine的循环，避免在hybrid engine里提前进入engine循环
+            # 触发到_should_terminate里的tensor all reduce导致和actor model初始化互相死锁
+            self.weights_loaded.wait()
             with logging_set_level(self.config.get('logging_level', 'WARN')), self.profiler_context as p:
                 try:
                     self.reset_status()
+                    self.gen_loop_exited.clear()
                     self.inference_engine.async_execute(self.stop_event)
                     profile_step(p, None)
+                    self.gen_loop_exited.set()
                 except Exception as e:
                     self._dump_context()
                     raise (e)
@@ -581,28 +600,78 @@ class RemoteAsyncXPerfGPTRollout(Worker):
             torch.distributed.init_process_group(backend="nccl", timeout=timeout)
         self.config = config
         self.rollout_actor = AsyncXPerfGPTRollout(config=self.config.rollout, role=role)
+        self._weights_loaded = threading.Event()
+        self._hybrid_rollout_addrs = None
+
+    def _stop_engine(self):
+        if self.rollout_actor.stop_event.is_set():
+            return
+
+        with self.rollout_actor.inference_engine.update_weights_lock:
+            self.rollout_actor.stop_event.set()
+
+        # wait until completely stopped
+        self.rollout_actor.gen_loop_exited.wait()
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def ready(self):
+        # worker是否ready可以接受请求(model compute相关)
+        # 子类继承这个方法自定义就绪判断，例如需要额外初始化model的
+        return self._weights_loaded.is_set()
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def will_be_destroyed(self):
+        self._stop_engine()
+        self.rollout_actor.reset_status()
+        self.rollout_actor.inference_engine.empty_cache()
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
+    def add_inflight_queries(self, queries: List[Query]):
+        ret = []
+        for q in queries:
+            qid = self.rollout_actor.add_inflight_query(q)
+            ret.append(qid)
+        return ret
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    def add_inflight_query(self, query: Query):
-        return self.rollout_actor.add_inflight_query(query)
-
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    async def get_inflight_query(self, query_id):
+    async def get_inflight_query(self, query_id) -> Query:
         return await self.rollout_actor.get_inflight_query(query_id)
+
+    # 只在dp_size=1的情况下调用，所以这里rank0执行即可
+    @register(execute_mode=Execute.RANK_ZERO, blocking=True)
+    def get_all_queries(self, query_type: str):
+        return self.rollout_actor.get_all_queries(query_type)
+
+    @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=True)
+    def get_load_metrics(self) -> LoadMetric:
+        return self.rollout_actor.get_load_metrics()
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def init_model(self, *args, **kwargs):
         self.rollout_actor.initialize(self.config.model.path, True)
         self.rollout_actor.setup_rollout()
-        from alpha_seed.workers.xperf_rollout.utils.weights_communicater import WeightsCommunicater
-        self.weights_communicater = WeightsCommunicater(inference_engine=self.rollout_actor.inference_engine,
-                                                        standalone=self.rollout_actor.is_standalone,
-                                                        device_mesh=self.rollout_actor.device_mesh)
+        weights_communicator = self.config.rollout.weights_communicator
+        CommunicatorCls = UCXWeightsCommunicator if weights_communicator == "ucx" else NCCLWeightsCommunicator
+        self.weights_communicator = CommunicatorCls(inference_engine=self.rollout_actor.inference_engine,
+                                                    standalone=self.rollout_actor.is_standalone,
+                                                    device_mesh=self.rollout_actor.device_mesh)
         # build device mesh
         self.master_address = os.getenv('MASTER_ADDR', 'localhost')
         self.master_port = os.getenv('MASTER_PORT', '12345')
 
         print(f'Master address: {self.master_address}, Master port: {self.master_port}')
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def setup_as_client(self, role, source_addresses, hybrid_rollout_addrs: List[str]):
+        self._hybrid_rollout_addrs = hybrid_rollout_addrs
+        # connect to weight source after model initialized
+        source_address = source_addresses[self.rank]
+        self.weights_communicator.setup_as_client(role, source_address)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def setup_standalone_worker_comm(self, hybrid_master_address, standalone_master_address, port, role):
+        self.weights_communicator.setup_standalone_worker_comm(hybrid_master_address, standalone_master_address, port,
+                                                               role)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def set_eos_callback_fn(self, eos_callback_fn):
@@ -614,32 +683,38 @@ class RemoteAsyncXPerfGPTRollout(Worker):
         out = DataProto.from_dict(tensors={'mock': torch.tensor([[0]])}, meta_info={key: self.master_address})
         return out
 
+    # caller 自己去wait这个non-blocking
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    def setup_standalone_worker_comm(self, hybrid_master_address, standalone_master_address, port, role):
-        self.weights_communicater.setup_standalone_worker_comm(hybrid_master_address, standalone_master_address, port,
-                                                               role)
+    def stop_server_before_weights_update_non_blocking(self):
+        self._stop_engine()
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
     def stop_server_before_weights_update(self):
-        if self.rollout_actor.stop_event.is_set():
-            return
-
-        with self.rollout_actor.inference_engine.update_weights_lock:
-            self.rollout_actor.stop_event.set()
-            while self.rollout_actor.inference_engine.status != "idle":
-                # status == "idle" means all tp ranks have exited the running loop
-                import time
-                time.sleep(0.01)
+        self._stop_engine()
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def update_standalone_worker(self, role):
         offload_to_device(self.rollout_actor.inference_engine.engine.module, "cuda")
+        self.weights_communicator.wait_for_setup_completed()
         with self.rollout_actor.inference_engine.update_weights_lock:
-            self.weights_communicater.update_standalone_worker(role)
+            self.weights_communicator.update_standalone_worker(role)
+        self._weights_loaded.set()
+        self.rollout_actor.weights_loaded.set()
+
+    # group 内任意一个rank发送结束信号即可
+    @register(execute_mode=Execute.RANK_ZERO)
+    def update_standalone_worker_end(self):
+        self.weights_communicator.update_standalone_worker_end(self._hybrid_rollout_addrs)
+
+    # caller 自己去wait这个non-blocking
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def restart_server_after_weights_update_non_blocking(self):
+        with self.rollout_actor.inference_engine.update_weights_lock:
+            self.rollout_actor.reset_status()
+            self.rollout_actor.stop_event.clear()
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
     def restart_server_after_weights_update(self):
-        assert self.rollout_actor.inference_engine.status == "idle"
         with self.rollout_actor.inference_engine.update_weights_lock:
             self.rollout_actor.reset_status()
             self.rollout_actor.stop_event.clear()

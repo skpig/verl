@@ -1,8 +1,14 @@
+import os
+import random
+import socket
+
 import ray
 import torch
 import numpy as np
 import torch.nn.functional as F
 from typing import *
+
+from verl import DataProto
 
 
 def rmpad(item):
@@ -21,6 +27,12 @@ def pad(item, max_standalone_len, tokenizer):
 
 
 def process_output(input_batch, output_batch, tokenizer, ready_batch, pending_batch, config, standalone=False):
+    # output_batch = hybrid_rollout.forward(input_batch)
+    # if is_finished[i]:
+    #     ready_batch.append(output_batch[i])
+    # else:
+    #     pending_batch.append(output_batch[i])
+
     is_finished = output_batch.pop(batch_keys=['is_finished']).batch['is_finished']
     finished_num = is_finished.sum().int().item()
     # TODO: issue in comparing non_tensor_batches
@@ -42,6 +54,10 @@ def process_output(input_batch, output_batch, tokenizer, ready_batch, pending_ba
             need_eos = is_finished == 0
             is_finished = torch.ones_like(is_finished)
 
+        force_eos = config.streaming_rollout.force_eos
+        max_response_length = config.data.max_response_length
+        max_prompt_length = config.data.max_prompt_length
+
         # rearrange...
         #   prompts layout: [00111111] left-padding only, shape [bs, max_prompt_length]
         #   input_ids layout: [00111111 11111111100] prompts's left-padding + response's right-padding, shape [bs, max_prompt_length + max_response_length]
@@ -50,7 +66,7 @@ def process_output(input_batch, output_batch, tokenizer, ready_batch, pending_ba
                 left_pad_len = (item.batch['prompts'] != tokenizer.pad_token_id).int().argmax(dim=1)
                 start_idx = torch.nonzero(item.batch['attention_mask'].flatten())[0]
                 real_len = item.batch['attention_mask'].sum(-1)
-                total_len = config.data.max_prompt_length + max_new_tokens
+                total_len = max_prompt_length + max_new_tokens
                 right_pad_len = total_len - left_pad_len - real_len
                 item.batch['attention_mask'] = F.pad(item.batch['attention_mask'][:, start_idx:start_idx + real_len],
                                                      (left_pad_len, right_pad_len),
@@ -59,12 +75,12 @@ def process_output(input_batch, output_batch, tokenizer, ready_batch, pending_ba
                                                 (left_pad_len, right_pad_len),
                                                 value=tokenizer.pad_token_id)
                 item.batch['responses'] = item.batch['input_ids'][:, item.batch['prompts'].shape[1]:]
-                if config.streaming_rollout.force_eos and need_eos[i]:
+                if force_eos and need_eos[i]:
                     item.batch['input_ids'][:, -1 if left_pad_len + real_len >= total_len else left_pad_len +
                                             real_len] = tokenizer.eos_token_id
                     gen_len = item.batch['attention_mask'][:, item.batch['prompts'].shape[1]:].sum(-1)
-                    item.batch['responses'][:, -1 if gen_len >=
-                                            config.data.max_response_length else gen_len] = tokenizer.eos_token_id
+                    item.batch['responses'][:,
+                                            -1 if gen_len >= max_response_length else gen_len] = tokenizer.eos_token_id
                     item.batch['attention_mask'][:, -1 if item.batch['prompts'].shape[1] +
                                                  gen_len >= total_len else item.batch['prompts'].shape[1] + gen_len] = 1
                 ready_batch.append(item)
@@ -197,7 +213,7 @@ class DataPack:
         return data_pack
 
 
-def pack_to_dataproto(prompts, tokenizer, data_pack: DataPack, config):
+def pack_to_dataproto(prompts, tokenizer, data_pack: DataPack, config) -> DataProto:
     max_new_tokens = prompts.meta_info.get('generation_kwargs').get('max_new_tokens', config.response_length)
     prompts.batch = prompts.batch.cpu()
     prompt_ids = prompts.batch['input_ids']  # (bs, prompt_length)
@@ -272,3 +288,102 @@ def pack_to_dataproto(prompts, tokenizer, data_pack: DataPack, config):
     if data_pack.resume_states is not None:
         out.non_tensor_batch['resume_states'] = np.array(data_pack.resume_states, dtype=object)
     return out
+
+
+def get_local_ip():
+    ip_list = []
+
+    # IPv4
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            # 设置套接字选项，避免实际连接
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            # 随便广播一个地址
+            s.connect(("255.255.255.255", 0))
+            ip_list.append(s.getsockname()[0])
+    except:
+        pass
+
+    # IPv6
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as s:
+            # 设置套接字选项，避免实际连接
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            # google public DNS
+            s.connect(("2001:4860:4860::8888", 53))
+            ip_list.append(s.getsockname()[0])
+    except:
+        pass
+
+    # 解析主机名获取 IP
+    try:
+        hostname = socket.gethostname()
+        addrinfos = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_DGRAM)
+        for addrinfo in addrinfos:
+            ip = addrinfo[4][0]
+            if ip not in ip_list:
+                ip_list.append(ip)
+    except:
+        pass
+
+    # 返回第一个可用的非回环地址，优先 IPv4
+    for ip in ip_list:
+        if not (ip.startswith("127.") or ip in ["::1", "::", "0.0.0.0"]):
+            return ip
+
+    return None
+
+
+def get_node_ip():
+
+    def get_node_ip_by_sdk():
+        if os.getenv("WG_BACKEND", None) == "ray":
+            import ray
+            return ray._private.services.get_node_ip_address()
+        elif os.getenv("WG_BACKEND", None) == "torch_rpc":
+            from verl_ext.single_controller.torchrpc.k8s_client import get_ip_addr
+            return get_ip_addr()
+        return None
+
+    host_ipv4 = os.getenv("MY_HOST_IP", None)
+    host_ipv6 = os.getenv("MY_HOST_IPV6", None)
+    host_ip_by_env = host_ipv4 or host_ipv6
+    host_ip_by_if = get_local_ip()
+    host_ip_by_sdk = get_node_ip_by_sdk()
+
+    host_ip = host_ip_by_env or host_ip_by_if or host_ip_by_sdk
+    return host_ip
+
+
+def get_free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(('', 0))
+        return sock.getsockname()[1]
+
+
+# 给于torch.classes.XGPT.NCCLPrimitive()专用的找端口方法
+def get_free_port_for_nccl_primitive():
+    ports = []
+    count = 10
+    while count > 0:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
+            # 绑定到一个随机的可用端口
+            s.bind(('::', 0))
+            # 获取绑定的端口号
+            port = s.getsockname()[1]
+            with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s2:
+                try:
+                    # 由于torch.classes.XGPT.NCCLPrimitive()里自动会给传进去的端口+1，
+                    # 所以还要测试+1后的端口是否空闲，才算真的空闲端口
+                    s2.bind(('::', port + 1))
+                    port2 = s2.getsockname()[1]
+                    ports.append(port2)
+                    count -= 1
+                except OSError:
+                    continue
+            ports.append(port)
+    return random.choice(ports)
+
+
+def is_ipv6(ip):
+    return ':' in ip

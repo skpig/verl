@@ -103,7 +103,7 @@ def create_mesh(fsdp_size: int, tp_size: int, sp_size: int, tp_outside: bool = F
     """
     world_size = dist.get_world_size()
     fsdp_size = world_size if fsdp_size <= 0 else fsdp_size
-    assert world_size % (tp_size * sp_size) == 0
+    assert world_size % (tp_size * sp_size) == 0, f'{world_size=} {tp_size=} {sp_size=}'
     # train mesh
     remain_size = world_size // tp_size
     if fsdp_size > remain_size:
@@ -131,7 +131,7 @@ def create_mesh(fsdp_size: int, tp_size: int, sp_size: int, tp_outside: bool = F
                                                               mesh_dim_names=("dp", "fsdp", "tp"))
         fsdp_mesh = train_mesh["dp", "fsdp"]
         tp_mesh = train_mesh["tp"]
-    assert fsdp_mesh.size() == fsdp_size * dp_size
+    assert fsdp_mesh.size() == fsdp_size * dp_size, f'{fsdp_size=} {dp_size=}'
     assert tp_mesh.size() == tp_size
     # sp mesh
     gather_size = tp_size * sp_size

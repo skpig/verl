@@ -31,7 +31,8 @@ from verl.utils.torch_functional import broadcast_dict_tensor, allgather_dict_te
 from verl.utils.debug import log_gpu_memory_usage
 
 from alpha_seed.workers.xperf_rollout.session import InferenceSession
-from alpha_seed.workers.xperf_rollout.utils.weights_communicater import WeightsCommunicater
+from alpha_seed.workers.xperf_rollout.utils.pooled_ucx_weights_communicator import UCXWeightsCommunicator
+from alpha_seed.workers.xperf_rollout.utils.nccl_weights_communicator import NCCLWeightsCommunicator
 
 import torch
 import torch.distributed
@@ -56,12 +57,14 @@ class ActorXPerfGPTShardingManager(BaseShardingManager):
                  device_mesh: DeviceMesh,
                  standalone=False,
                  only_bind_once=False,
-                 backend='fsdp'):
+                 backend='fsdp',
+                 weights_communicator="nccl"):
         super().__init__()
         self.module = module
         self.inference_engine = inference_engine
         self.device_mesh = device_mesh
         self.model_config = model_config
+        self.weights_communicator = weights_communicator
 
         # here standalone means standalone validator or standalone validator
         self.standalone = standalone
@@ -85,9 +88,10 @@ class ActorXPerfGPTShardingManager(BaseShardingManager):
         # True for generation only scenarios, we don't need to update weights, only call bind_fn for once
         self.only_bind_once = only_bind_once
         self._bind_fn_called = False
-        self.weights_communicater = WeightsCommunicater(inference_engine=self.inference_engine,
-                                                        standalone=self.standalone,
-                                                        device_mesh=self.device_mesh)
+        CommunicatorCls = UCXWeightsCommunicator if self.weights_communicator == "ucx" else NCCLWeightsCommunicator
+        self.weights_communicator = CommunicatorCls(inference_engine=self.inference_engine,
+                                                    standalone=self.standalone,
+                                                    device_mesh=self.device_mesh)
 
     def release_param_and_cache(self):
         """Release the GPU memory occupied by xperf parameter and cache"""

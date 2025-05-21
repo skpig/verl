@@ -1,15 +1,23 @@
 import os
+import threading
+
 import torch
 from unittest.mock import patch
+
+from alpha_seed.workers.xperf_rollout.utils.base_weights_communicator import WeightsCommunicator
 from verl.utils.debug import log_gpu_memory_usage
 
 
-class WeightsCommunicater:
+class NCCLWeightsCommunicator(WeightsCommunicator):
 
     def __init__(self, inference_engine, standalone=False, device_mesh=None):
         self.inference_engine = inference_engine
         self.standalone = standalone
         self.device_mesh = device_mesh
+        self._setup_completed = threading.Event()
+
+    def wait_for_setup_completed(self):
+        self._setup_completed.wait()
 
     def setup_standalone_worker_comm(self, hybrid_master_address, standalone_master_address, port, role):
         assert role in ["standalone_rollout", "standalone_validator", "standalone_rollout_server"]
@@ -47,6 +55,7 @@ class WeightsCommunicater:
             comm_info["nccl_layer"].init(f"standalone_{int(port)}", comm_info["world_size"], comm_info["rank"], "tcp",
                                          0)
         setattr(self, f"{role}_comm_info", comm_info)
+        self._setup_completed.set()
 
     def update_standalone_worker(self, role):
 

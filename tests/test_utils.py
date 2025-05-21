@@ -3,6 +3,8 @@ import os
 import subprocess
 from pathlib import Path
 from omegaconf import OmegaConf
+
+from alpha_seed.workers.streaming_service.rollout_request_manager import RequestManager
 from verl.utils.tracking import Tracking
 from verl.utils.fs import copy_local_path_from_hdfs
 from verl.single_controller.ray import RayResourcePool, RayClassWithInitArgs, RayWorkerGroup
@@ -114,18 +116,18 @@ def create_hybrid_wg(config):
     return _create_rollout_wg_common(config.actor_rollout_ref,
                                      ngpus=config.trainer.n_gpus_per_node,
                                      role='rollout',
-                                     name='hybrid_rollout',
+                                     name='actor_rollout_ref',
                                      is_server=False)
 
 
 def create_streaming_rollout_wg(config):
-    if config.streaming_rollout.nnodes == 0:
+    if config.streaming_rollout.nnodes == 0 or config.streaming_rollout.elastic.enable:
         return None
     is_server = config.actor_rollout_ref.rollout.mode == 'server'
     return _create_rollout_wg_common(config.actor_rollout_ref,
                                      ngpus=config.streaming_rollout.n_gpus_per_node,
                                      role='standalone_rollout',
-                                     name='streaming_rollout',
+                                     name='standalone_rollout',
                                      is_server=is_server)
 
 
@@ -136,7 +138,7 @@ def create_streaming_validator_wg(config):
     return _create_rollout_wg_common(config.actor_rollout_ref,
                                      ngpus=config.streaming_validator.n_gpus_per_node,
                                      role='standalone_validator',
-                                     name='streaming_validator',
+                                     name='standalone_validator',
                                      is_server=is_server)
 
 
@@ -145,7 +147,25 @@ def create_rollout_pool(config):
     return rollout_pool
 
 
+# store the global request manager objects to avoid being gc
+request_managers = []
+
+
+def create_request_manager(instance_name: str):
+    remote_cls = ray.remote(RequestManager)
+    request_manager = remote_cls.options(name=f'RequestManager/{instance_name}', max_concurrency=102400).remote()
+    ray.wait([request_manager.ready.remote()])
+    request_managers.append(request_manager)
+    return request_manager
+
+
 def create_rollout_manager(config):
+    if config.actor_rollout_ref.rollout.mode == "server":
+        create_request_manager('hybrid_rollout')
+        create_request_manager('standalone_rollout')
+        create_request_manager('validation')
+        create_request_manager('hybrid_validation')
+
     logger = get_logger(config)
     tokenizer = get_tokenizer(config)
 
@@ -153,8 +173,7 @@ def create_rollout_manager(config):
     streaming_rollout_wg = create_streaming_rollout_wg(config)
     streaming_validator_wg = create_streaming_validator_wg(config)
     rollout_pool = create_rollout_pool(config)
-    port_bias = PytestXdistEnv().worker_id * 1000 + 8000
-    rollout_manager = RolloutManager(config, logger=logger, tokenizer=tokenizer, port_bias=port_bias)
+    rollout_manager = RolloutManager(config, logger=logger, tokenizer=tokenizer)
 
     rollout_manager.initialize(hybrid_wg,
                                rollout_pool=rollout_pool,

@@ -14,6 +14,7 @@
 """
 Create a XPerfGPT Rollout
 """
+from typing import Tuple
 
 import ray
 import uuid
@@ -29,7 +30,8 @@ from alpha_seed.workers.streaming_service.streaming_rollout import RemoteAsyncXP
 from alpha_seed.workers.streaming_service.protocol import (ChatCompletionRequest, ChatCompletion,
                                                            ChatCompletionMessageRollout, Choice, CompletionUsage,
                                                            ErrorResponse)
-from alpha_seed.workers.xperf_rollout.component.query import AsyncQuery
+from alpha_seed.workers.streaming_service.streaming_utils import get_node_ip, get_free_port
+from alpha_seed.workers.xperf_rollout.component.query import AsyncQuery, Query
 
 
 class OpenAIProxy(ABC):
@@ -51,16 +53,16 @@ class OpenAIProxy(ABC):
                 return JSONResponse(content=response.dict(), status_code=response.code)
             return JSONResponse(content=response.dict())
 
-    def create_query(self, request: ChatCompletionRequest) -> AsyncQuery:
+    def create_query(self, request: ChatCompletionRequest) -> Query:
         prompt = request.messages['prompt']
         if isinstance(prompt, str):
             input_ids = self.tokenizer.encode(prompt)
         else:
             input_ids = prompt
-        request_id = str(uuid.uuid4())
-        return AsyncQuery.from_request(input_ids, request_id, request.to_sampling_params(), request.meta_info)
+        request_id = uuid.uuid4().hex
+        return Query.from_request(input_ids, request_id, request.to_sampling_params(), request.meta_info)
 
-    def create_response(self, query: AsyncQuery) -> JSONResponse:
+    def create_response(self, query: Query) -> JSONResponse:
         message = ChatCompletionMessageRollout(
             role="assistant",
             raw_output_ids=query.global_new_token_ids,
@@ -81,7 +83,7 @@ class OpenAIProxy(ABC):
                                 prompt_tokens=query.input_len,
                                 total_tokens=query.input_len + query.new_token_len)
 
-        response = ChatCompletion(id=str(query.id),
+        response = ChatCompletion(id=query.id,
                                   choices=choices,
                                   created=int(time.time()),
                                   model="rollout",
@@ -98,119 +100,44 @@ class OpenAIProxy(ABC):
 
 class AsyncXPerfGPTRolloutServer(OpenAIProxy):
 
-    def __init__(self,
-                 config,
-                 tokenizer=None,
-                 model_hf_config=None,
-                 actor_cls=RemoteAsyncXPerfGPTRollout,
-                 port: int = 8000):
+    def __init__(self, config, tokenizer=None, request_manager_name='standalone_rollout'):
         super().__init__()
         self.config = config
         self.tokenizer = tokenizer
-        self.model_hf_config = model_hf_config
-        self.actor_cls = actor_cls
-        self.port = port
-        self.tp_size = self.config.actor_rollout_ref.rollout.tensor_model_parallel_size
-        self.dp_size = self.config.actor_rollout_ref.rollout.get("attention_data_parallel_size", 1)
-        self.mp_size = self.tp_size * self.dp_size
-
+        self.server = None
         self.server_task = None
-        self.workers = []
-        self.inflight_query_num = 0
+        self.host = None
+        self.port = None
+        self.request_manager = ray.get_actor(f'RequestManager/{request_manager_name}')
 
     async def create_chat_completion(self, request: ChatCompletionRequest, raw_request: Request):
+        """
+        此方法要等到这个请求生成完才返回
+        """
         try:
-            query = self.create_query(request)
+            query: Query = self.create_query(request)
         except Exception as e:
             logging.exception("Error in [create_query]")
             return self.create_error_response(str(e))
 
-        import random
-        replica_index = random.randint(0, self.replica_num - 1)
-        # load balance by random choice
-        start_rank = replica_index * self.mp_size
+        # submit query to request pool
+        query_id = ray.get(self.request_manager.put_new_query.remote(query))
 
-        # use sync method. note that ray actor async method is an out-of-order execution
+        # await prompt generation finished
+        finished_query = await self.request_manager.wait_until_finished.remote(query_id)
         try:
-            remote_list = []
-            # dispatch to one instance
-            for rank_offset in range(self.mp_size):
-                rank = start_rank + rank_offset
-                remote_call = getattr(self.workers[rank], self.fused_worker_execute_fn_name)
-                remote_call = remote_call.remote(f"{self.sub_cls_name}_fwmn_add_inflight_query", query)
-                remote_list.append(remote_call)
-            query_idx = ray.get(remote_list)[0]
-        except Exception as e:
-            logging.exception("Error in [add_inflight_query]")
-            return self.create_error_response(str(e))
-
-        # async call, cannot be blocked
-        try:
-            remote_list = []
-            # dispatch to one instance
-            for rank_offset in range(self.mp_size):
-                rank = start_rank + rank_offset
-                remote_call = getattr(self.workers[rank], "_async" + self.fused_worker_execute_fn_name)
-                remote_call = remote_call.remote(f"{self.sub_cls_name}_fwmn_get_inflight_query", query_idx)
-                remote_list.append(remote_call)
-            await asyncio.gather(*remote_list, return_exceptions=True)
-            query = ray.get(remote_list[0])
-        except Exception as e:
-            logging.exception("Error in [get_inflight_query]")
-            return self.create_error_response(str(e))
-
-        try:
-            response = self.create_response(query)
+            response = self.create_response(finished_query)
         except Exception as e:
             logging.exception("Error in [create_response]")
             return self.create_error_response(str(e))
         return response
 
-    def setup_actors(self):
-        WorkerActor = ray.remote(num_cpus=1, num_gpus=1)(self.actor_cls)
-        master_actor = WorkerActor.remote(self.config, self.tokenizer, self.model_hf_config, False, 0, self.world_size,
-                                          None, None)
-        self.workers.append(master_actor)
-        master_addr, master_port = ray.get(master_actor.get_master_addr_port.remote())
-        logging.info("[setup_actors] workerActor initiating {} with cls {}".format(WorkerActor, self.actor_cls))
-
-        for rank in range(1, self.world_size):
-            worker = WorkerActor.remote(self.config, self.tokenizer, self.model_hf_config, False, rank, self.world_size,
-                                        master_addr, master_port)
-            self.workers.append(worker)
-        logging.info("[setup_actors] init workerActor {}".format(len(self.workers)))
-
-        remote_list = []
-        for worker in self.workers:
-            remote_list.append(worker.setup_distributed.remote())
-        for worker in self.workers:
-            remote_list.append(worker.setup_rollout.remote())
-        ray.get(remote_list)
-
-    def reset_inflight_query_num(self):
-        self.inflight_query_num = 0
-
-    def get_inflight_query_num(self):
-        return self.inflight_query_num
-
-    def attach_actors(self, worker_group):
-        if worker_group is None:
-            return
-        self.worker_group = worker_group
-        self.workers = worker_group._workers
-        self.sub_cls_name = worker_group.sub_cls_name
-        self.fused_worker_execute_fn_name = worker_group.fused_worker_execute_fn_name
-        self.world_size = worker_group.world_size
-        self.replica_num = self.world_size // self.mp_size
-        logging.info("[attach_actors] attach workerActor {}".format(len(self.workers)))
-
-    async def start_server(self, host="0.0.0.0"):
-        # get a free port and addr
-        # from single_controller.base.worker import WorkerHelper
-        # worker_helper = WorkerHelper()
-        # free_port_addr = list(worker_helper.get_availale_master_addr_port())
+    async def start_server(self) -> Tuple[str, int]:
+        self.host = get_node_ip()
+        self.port = get_free_port()
+        assert self.host is not None, "cannot find non-loopback ip address in this environment, please check manually"
         config = uvicorn.Config(self.app,
-                                host=host,
+                                host=self.host,
                                 port=self.port,
                                 loop="asyncio",
                                 timeout_keep_alive=300,
@@ -219,6 +146,7 @@ class AsyncXPerfGPTRolloutServer(OpenAIProxy):
         logging.getLogger("uvicorn").propagate = False
         self.server = uvicorn.Server(config)
         self.server_task = asyncio.create_task(self.server.serve())
+        return self.host, self.port
 
     async def stop_server(self):
         """Gracefully shutdown the server"""

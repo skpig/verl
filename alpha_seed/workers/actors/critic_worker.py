@@ -409,7 +409,7 @@ class CriticWorker(Worker):
             elif device == 'cpu':
                 offload_megatron_model_to_cpu(models=self.critic_module)
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def init_model(self, remove_safetensors_after_init=False, from_scratch=True):
         if self._model_initialized:
             return

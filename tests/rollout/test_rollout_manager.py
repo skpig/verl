@@ -68,6 +68,7 @@ def get_common_config():
             "rollout": {
                 "tensor_model_parallel_size": 2,
                 "mode": "batch",
+                "weights_communicator": "nccl",
                 "complete_ratio": 1.0,
                 "rollout_pool": {
                     "warmup_step": 0,
@@ -117,16 +118,29 @@ def mock_save_dataproto(data: DataProto, prefix: str = ''):
 
 @pytest.mark.parametrize("complete_ratio", [1.0, 0.0, 0.5])
 @pytest.mark.parametrize("is_server", [True])
+@pytest.mark.parametrize("weights_communicator", ["nccl", "ucx"])
+@pytest.mark.parametrize("elastic", [True, False])
 @pytest.mark.parametrize("gpu_allocator", [4], indirect=True)
-def test_train_generate(monkeypatch, gpu_allocator, ray_fixture, complete_ratio, is_server):
+def test_train_generate(monkeypatch, gpu_allocator, ray_fixture, complete_ratio, is_server, weights_communicator,
+                        elastic):
     if is_server and (0.0 < complete_ratio < 1.0):
         pytest.skip("skip is_server and 0<complete_ratio<1")
+    if elastic:
+        pytest.skip("temporarily disabled due to underlying ray state API conflict with multiple clusters")
+    if elastic and weights_communicator == "nccl":
+        pytest.skip("skip elastic and weights_communicator=nccl")
+    if elastic and complete_ratio > 0.0:
+        pytest.skip("skip elastic and complete_ratio > 0.0")
 
     set_common_envs(monkeypatch)
     config = get_common_config()
     has_standalone = complete_ratio < 1.0
     config.actor_rollout_ref.rollout.mode = 'server' if is_server else 'batch'
+    config.actor_rollout_ref.rollout.weights_communicator = weights_communicator
     config.actor_rollout_ref.rollout.complete_ratio = complete_ratio
+    config.streaming_rollout.elastic.enable = elastic
+    config.streaming_rollout.elastic.min_replicas = 1
+    config.streaming_rollout.elastic.max_replicas = 1  # 资源有限，这个UT里先不扩
     config.streaming_rollout.nnodes = 1 if has_standalone else 0
     config.streaming_validator.nnodes = 0
 
@@ -135,7 +149,7 @@ def test_train_generate(monkeypatch, gpu_allocator, ray_fixture, complete_ratio,
     rollout_manager = create_rollout_manager(config)
 
     input_batch = copy.deepcopy(batch)
-
+    warmup_elapsed = 0
     try:
         for i in range(3):
             start = time.time()
@@ -163,22 +177,31 @@ def test_train_generate(monkeypatch, gpu_allocator, ray_fixture, complete_ratio,
 
 @pytest.mark.parametrize("is_standalone", [True, False])
 @pytest.mark.parametrize("is_server", [True, False])
+@pytest.mark.parametrize("weights_communicator", ["nccl", "ucx"])
 @pytest.mark.parametrize("gpu_allocator", [4], indirect=True)
-def test_val_generate(monkeypatch, gpu_allocator, ray_fixture, is_standalone, is_server):
+def test_val_generate(monkeypatch, gpu_allocator, ray_fixture, is_standalone, is_server, weights_communicator):
+    if not is_standalone and weights_communicator == "ucx":
+        pytest.skip("skip weights_communicator=ucx and hybrid engine mode")
+
     set_common_envs(monkeypatch)
     config = get_common_config()
     config.actor_rollout_ref.rollout.mode = 'server' if is_server else 'batch'
+    config.actor_rollout_ref.rollout.weights_communicator = weights_communicator
     config.streaming_rollout.nnodes = 0
     config.streaming_validator.nnodes = 1 if is_standalone else 0
 
     tokenizer = get_tokenizer(config)
     batch = get_dataproto(config, tokenizer)
     rollout_manager = create_rollout_manager(config)
-    batch = rollout_manager.val_generate(batch, is_async=is_standalone)
-    out_text = decode_output(batch, tokenizer)
-    print(out_text)
-    rollout_manager.stop_servers()
-    _check_score(out_text, batch)
+    try:
+        batch = rollout_manager.val_generate(batch, is_async=is_standalone)
+        out_text = decode_output(batch, tokenizer)
+        print(out_text)
+        _check_score(out_text, batch)
+    except:
+        raise
+    finally:
+        rollout_manager.stop_servers()
 
 
 @pytest.mark.parametrize("is_server", [True, False])

@@ -8,14 +8,16 @@ Handles end-to-end inference process including:
 - Token generation with various decoding strategies
 - Multi-GPU distributed inference
 """
+from dataclasses import dataclass
 
+from torch.distributed import get_rank
 from xperf_gpt.inference import init_inference
 from alpha_seed.workers.xperf_rollout.component.cache_manager import CacheManager
 from alpha_seed.workers.xperf_rollout.component.infer_scheduler import InferScheduler
 from alpha_seed.workers.xperf_rollout.component.sampling_manager import Sampler
 from alpha_seed.workers.xperf_rollout.utils.custom_xperf_convert_helper import XCustomInferenceModuleAdapter
 from xperf_gpt.multi_models.visual.eva_vit import EVA_VIT_CONFIGS
-from alpha_seed.workers.xperf_rollout.component.query import Query, InflightQueue, batch_sync_tp_queries
+from alpha_seed.workers.xperf_rollout.component.query import Query, AsyncQuery, InflightQueue, batch_sync_tp_queries
 from alpha_seed.utils.observility import get_profiler_context_wrapped
 from xperf_gpt.utils import (logging_rank, logging_rank_only)
 from typing import List, Dict
@@ -27,6 +29,7 @@ import copy
 import logging
 import pickle
 import dill
+import time
 from threading import Lock
 from transformers import AutoTokenizer
 from xperf_gpt.multi_models.visual.inferencer import VITInferencer
@@ -35,6 +38,16 @@ import numpy as np
 # Constants
 BLOCK_SIZE_ALIGNMENT = 256
 DEFAULT_LOGGING_LEVEL = logging.INFO
+
+
+@dataclass
+class LoadMetric:
+    ts: float  # 采样时间，单位s
+    num_pending: int  # 还从来没开始跑
+    num_waiting: int  # 跑过但因为内存不够被换出
+    num_prefilling: int  # 正在跑prefill
+    num_decoding: int  # 正在跑decode
+    kv_cache_util: float  # kv cache util range 0~1
 
 
 class StepProfiler:
@@ -224,7 +237,7 @@ class InferenceSession:
         self.running: List[Query] = []
         self.paused: List[Query] = []
 
-        self.finished = {}
+        self.all_accepted_queries: Dict[str, Query] = {}
         self.unfinished_off_policy_steps_set = GetMaxSet()
         self.stop_sequence_tokens: List[List[int]] = []
         self.common_prefix = ""
@@ -236,6 +249,7 @@ class InferenceSession:
         self.eos_callback_fn = None
         self.stop_signal_tensor = torch.tensor([0.0]).float().cuda()
         self.update_weights_lock = Lock()
+        self._accepted_queries_mutex = Lock()
         self.tp_group = None
         self.plugin_config = plugin_config
 
@@ -489,7 +503,7 @@ class InferenceSession:
         elif isinstance(code_book, list) and isinstance(code_book[0], int):
             return code_book
 
-    def prepare_context_inputs(self, input_ids_list, logits_masks, prompt_meta_info: List[Dict] = None):
+    def prepare_context_inputs(self, input_ids_list, logits_masks, prompt_meta_info: List[Dict]):
         code_books = [None for _ in range(len(input_ids_list))]
         off_policy_steps = [0 for _ in range(len(input_ids_list))]
         plugin_configs = [None for _ in range(len(input_ids_list))]
@@ -548,7 +562,8 @@ class InferenceSession:
                 if resume_state is not None:
                     query.set_resume_state(dill.loads(resume_state))
 
-                self.finished[query.id] = query
+                with self._accepted_queries_mutex:
+                    self.all_accepted_queries[query.id] = query
                 self.unfinished_off_policy_steps_set.add_one(query.off_policy_steps)
         logging_rank(logging.info, "[prepare_context_inputs] total queries: {}".format(idx + 1))
 
@@ -596,10 +611,12 @@ class InferenceSession:
         self.pending = InflightQueue()
         self.waiting = []
         self.running = []
-        self.finished = {}
+        self.all_accepted_queries = {}
 
     def get_inorder_responses(self):
-        ordered_query = list({k: v for k, v in sorted(self.finished.items(), key=lambda item: item[1].idx)}.values())
+        ordered_query = list({
+            k: v for k, v in sorted(self.all_accepted_queries.items(), key=lambda item: item[1].idx)
+        }.values())
         if self.num_return_sequences > 1:
             responses = []
             for i, query in enumerate(ordered_query):
@@ -610,6 +627,46 @@ class InferenceSession:
             return responses
         else:
             return ordered_query
+
+    def get_all_queries(self, query_type: str, retain_finished: bool = True) -> List[Query]:
+        """
+        在async streaming模式下，读取所有query的状态和生成结果(包括中间结果)，并把完成的剔除掉
+        注意：跟get_inorder_responses互斥，两者不可同时调用，用这个方法后，其他地方都不能再调用get_inorder_responses
+        :param query_type: 区分一下validation/hybrid_rollout/standalone_rollout等，避免一个engine实例同时gen多个来源的时候，
+                           来源侧不知道怎么取回之前add过来的。
+        :param retain_finished: 取走后，如果已经finished，就不会再留在engine里
+        """
+        ret = []
+        with self._accepted_queries_mutex:
+            for q in self.all_accepted_queries.values():
+                qt = q.meta_info.get('query_type')
+                if qt == query_type:
+                    ret.append(q.clone())
+
+            if not retain_finished:
+                for q in ret:
+                    if q.is_finished:
+                        self.all_accepted_queries.pop(q.id)
+        return ret
+
+    def get_load_metrics(self) -> LoadMetric:
+        num_prefill = 0
+        num_decode = 0
+        for q in self.running:
+            if q.is_finished:
+                continue
+            if q.is_context_computing:
+                num_prefill += 1
+            else:
+                num_decode += 1
+        return LoadMetric(
+            ts=time.time(),
+            num_pending=len(self.pending),
+            num_waiting=len(self.waiting),
+            num_prefilling=num_prefill,
+            num_decoding=num_decode,
+            kv_cache_util=self.cache_manager.get_kv_cache_utils(),
+        )
 
     def _finish_query(self, query):
         if self.eos_callback_fn:
@@ -866,10 +923,11 @@ class InferenceSession:
                 torch.distributed.all_reduce(self.stop_signal_tensor, group=self.tp_group)
 
             if self.stop_signal_tensor.item() == self.engine.module.tp_size:
+                self.stop_signal_tensor.zero_()
                 return True
         return False
 
-    def _fetch_from_pending_queries(self):
+    def _fetch_from_pending_queries(self) -> List[Query]:
         num_ready_query_local_tensor = torch.tensor([len(self.pending)], dtype=torch.float32, device="cuda")
         num_ready = len(self.pending)
         if self.engine.module.tp_size > 1:
@@ -879,12 +937,14 @@ class InferenceSession:
             num_ready = num_ready_query_local_tensor.int().item()
         if num_ready == 0:
             return self.waiting
-        new_joins = self.pending.get_earliest(num_ready)
-        for query in new_joins:
-            self.finished[query.id] = query
-            self.unfinished_off_policy_steps_set.add_one(query.off_policy_steps)
+        new_joins: List[AsyncQuery] = self.pending.get_earliest(num_ready)
+        new_queries = [aq.query for aq in new_joins]
+        with self._accepted_queries_mutex:
+            for q in new_queries:
+                self.all_accepted_queries[q.id] = q
+                self.unfinished_off_policy_steps_set.add_one(q.off_policy_steps)
         self.pending.truncate(num_ready)
-        return self.waiting + new_joins
+        return self.waiting + new_queries
 
     def execute(self,
                 prompts,
@@ -918,7 +978,7 @@ class InferenceSession:
         self.finished_num = 0
         if self.step_profiler is not None:
             self.step_profiler.reset_exec()
-        while (not self._should_terminate(prompts, complete_ratio, stop_event)):
+        while not self._should_terminate(prompts, complete_ratio, stop_event):
             self._try_resume_paused_queries()
             self.running, self.waiting = self._select_running_queries()
             if len(self.running) == 0:
@@ -989,6 +1049,7 @@ class InferenceSession:
                     query.reset_compute()
                     self.waiting.append(query)
                 self.running = []
+                update_weight_event_is_set = update_weight_event.is_set()  # noqa: for py-spy
                 time.sleep(0.01)
                 return True
             return False
@@ -996,7 +1057,7 @@ class InferenceSession:
         def _idle():
             return (len(self.waiting) == 0 and len(self.running) == 0)
 
-        while (True):
+        while True:
             try:
                 self.status = "running"
                 if (_check_stop_event()):
@@ -1066,14 +1127,14 @@ class InferenceSession:
     def _meet_eos_condition(self, query, next_token):
         finished_sequences = False
         if next_token in self.eos_token_id:
-            self.finished[query.id].output_prompt = self.tokenizer.batch_decode([query.new_token_ids[:-1]
-                                                                                ]) if self.decode_output else ""
+            self.all_accepted_queries[query.id].output_prompt = self.tokenizer.batch_decode([query.new_token_ids[:-1]]) \
+                if self.decode_output else ""
             finished_sequences = True
         elif self._exceed_length_condition(query,
                                            tokens_threshold=self.num_pred_tokens +
                                            1 if self.enable_ngrams_decoding else 0):
-            self.finished[query.id].output_prompt = self.tokenizer.batch_decode([query.new_token_ids
-                                                                                ]) if self.decode_output else ""
+            self.all_accepted_queries[query.id].output_prompt = self.tokenizer.batch_decode([query.new_token_ids]) \
+                if self.decode_output else ""
             finished_sequences = True
         elif self.stop_sequence_tokens and next_token in [tokens[-1] for tokens in self.stop_sequence_tokens]:
             for stop_sequences in self.stop_sequence_tokens:
@@ -1082,8 +1143,8 @@ class InferenceSession:
                     continue
                 finished_sequences |= (query.new_token_ids[-seq_len:] == stop_sequences)
             if finished_sequences:
-                self.finished[query.id].output_prompt = self.tokenizer.batch_decode([query.new_token_ids
-                                                                                    ]) if self.decode_output else ""
+                self.all_accepted_queries[query.id].output_prompt = self.tokenizer.batch_decode([query.new_token_ids]) \
+                    if self.decode_output else ""
 
         return finished_sequences
 
@@ -1102,8 +1163,8 @@ class InferenceSession:
             assert (accepted_len.shape[0] == len(index_in_running_batch))
             accepted_len = accepted_len.cpu().tolist()
         if log_probs is not None:
-            assert (log_probs.shape[0] == len(index_in_running_batch)), "log_probs shape mismatch, {} vs {}".format(
-                log_probs.shape[0], len(index_in_running_batch))
+            assert (log_probs.shape[0] == len(index_in_running_batch)), (
+                f"log_probs shape mismatch, {log_probs.shape[0]} vs {len(index_in_running_batch)}")
             log_probs = log_probs.cpu().tolist()
         if probs_gt_threshold_num is not None:
             assert (probs_gt_threshold_num.shape[0] == len(index_in_running_batch))
@@ -1119,7 +1180,7 @@ class InferenceSession:
                 continue
             i = running_index_to_i[idx]
             # decoding
-            if (query._is_to_decoding_compute()):
+            if query.is_to_decoding_compute():
                 # Each query might have multile next tokens when spec/ngrams is enabled
                 query_next_tokens = next_tokens[i]
                 if isinstance(query_next_tokens, int):
@@ -1129,6 +1190,8 @@ class InferenceSession:
                 paused_triggered = False
                 for token_idx in range(query_next_tokens_len):
                     next_token = query_next_tokens[token_idx]
+                    if len(query.new_token_ids) == 0:
+                        query.first_token_time = time.time() * 1000
                     query.add_token(
                         token_id=next_token,
                         accepted_len=accepted_len[i] if accepted_len is not None else 0,
