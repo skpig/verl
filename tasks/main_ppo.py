@@ -60,7 +60,7 @@ from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRe
 from alpha_seed.workers.actors.critic_worker import CriticWorker
 from alpha_seed.utils.alarm.lark_util import send_message_to_employee
 from alpha_seed.utils.server_client import validate_client_config, KVStore, ServerHealthCheck, TaskRunner, ClientTaskRunner, check_all_workers_alive, recreate_actor
-from alpha_seed.workers.streaming_service.rollout_request_manager import RequestManager
+from alpha_seed.workers.streaming_service.rollout_request_manager import RequestManager, RequestManagerRegisterCenter
 
 user_email = os.getenv('ARNOLD_LARK_RECEIVER', '')
 task_url = os.getenv('ARNOLD_ORIGIN_PLATFORM_URL', '')
@@ -636,6 +636,14 @@ def main(config):
         else:
             init_ray(config)
             check_arnold_resources(config=config)
+
+    # RequestManager register center
+    if is_local_ray_instance():
+        remote_cls = ray.remote(RequestManagerRegisterCenter)
+    else:
+        remote_cls = ray.remote(resources={"head": 1})(RequestManagerRegisterCenter)
+    rmrc = remote_cls.options(name='RequestManagerRegisterCenter').remote()
+    ray.get(rmrc.ready.remote())
 
     # server 模式下，gen的架构均为RequestManager+Proxy+ReplicatedWorker，所以这里把RequestManager启动起来
     if config.actor_rollout_ref.rollout.mode == "server":

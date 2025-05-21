@@ -22,6 +22,8 @@ from ray import ObjectRef
 from alpha_seed.logging import refine_log
 from alpha_seed.utils.server_client import is_local_ray_instance
 from alpha_seed.workers.streaming_service.auto_scaling import HorizontalAutoScaling, ScalePolicyConfig
+from alpha_seed.workers.streaming_service.rollout_query_timeline import RolloutQueryTimeline
+from alpha_seed.workers.streaming_service.rollout_request_manager import get_all_request_manager_actors
 from alpha_seed.workers.streaming_service.streaming_rollout import RemoteAsyncXPerfGPTRollout
 
 refine_log()
@@ -651,12 +653,10 @@ class RayPPOTrainer(object):
         if config.trainer.default_hdfs_dir and config.trainer.save_cases_to_hdfs:
             self.save_batch_dir = os.path.join(config.trainer.default_hdfs_dir, "batch_data")
 
+        self._rollout_query_tl = RolloutQueryTimeline(self.config.streaming_rollout.query_trace)
         self.request_managers = []
         if self.config.actor_rollout_ref.rollout.mode == "server":
-            self.request_managers.append(ray.get_actor('RequestManager/hybrid_rollout'))
-            self.request_managers.append(ray.get_actor('RequestManager/standalone_rollout'))
-            self.request_managers.append(ray.get_actor('RequestManager/validation'))
-            self.request_managers.append(ray.get_actor('RequestManager/hybrid_validation'))
+            self.request_managers = get_all_request_manager_actors()
 
         safely_do(lambda: report_job_config(config), rank=0)()
 
@@ -904,7 +904,7 @@ class RayPPOTrainer(object):
             self.critic_wg = self.all_wg['critic']
             # 因为actor和critic是跑在同一个ray actor里，但他们的model各自调用init(也包括其他需要全局同步的nccl调用)，
             # init时需要全局同步初始化，这里如果并发会出现不知道谁先走到nccl 同步调用，如果有的rank先跑了actor，有的先跑了critic，
-            # 而nccl又不兼容python async，就会互相等
+            # 而nccl又不兼容python async，不会yield，就会互相等
             # 因此这里必须先等actor初始化完了再跑critic 初始化
             ray.get(actor_rollout_init_fut)
             init_futures.append(('critic_wg_init_model',
@@ -1980,19 +1980,6 @@ class RayPPOTrainer(object):
                     wandb.finish()
                     return
 
-                self._do_trace_profile(self.global_step)
-
-    def _do_trace_profile(self, global_step):
-        # tracing and timeline objects
-        if global_step == 10:
-            # export at TaskRunner process
-            spans: List[dict] = Tracer.merge_all()
-            for req_mgr in self.request_managers:
-                request_spans = ray.get(req_mgr.dump_request_trace.remote())
-                spans.extend(request_spans)
-            save_path = export_chrome_trace('trace.json.gz', spans)
-            os.system(f'mlx asset upload {save_path}')
-
     def do_ndtimeline_action(self, *args, **kwargs):
         """Call a function on each actor.
         Args:
@@ -2025,11 +2012,14 @@ class RayPPOTrainer(object):
     def global_step(self, step: int):
         if self._global_step == step:
             return
-        if ndtimeline.use_cuda_timer() and self._global_step + 1 == step:
-            for fut in self._timeline_futures:
-                ray.get(fut)
-            futs = self.do_ndtimeline_action("flush_set_upload", global_step=step, ts=int(time.time()))
-            self._timeline_futures = futs
+        if self._global_step + 1 == step:
+            if ndtimeline.use_cuda_timer():
+                for fut in self._timeline_futures:
+                    ray.get(fut)
+                futs = self.do_ndtimeline_action("flush_set_upload", global_step=step, ts=int(time.time()))
+                self._timeline_futures = futs
+            if self.config.streaming_rollout.query_trace.enable:
+                self._rollout_query_tl.step(step)
         for req_mgr in self.request_managers:
             ray.get(req_mgr.set_global_step.remote(self.global_step))
         self._global_step = step

@@ -410,6 +410,11 @@ streaming_rollout:
     scale_up_wait: 1  # period，连续超过x个周期保持触发，则真正触发扩容
     scale_down_threshold: 0.7
     scale_down_wait: 2  # period
+  query_trace:
+    enable: True
+    from_step: 0
+    to_step: 10
+    upload_to_mlx: True
 
 streaming_validator:
   n_gpus_per_node: 0

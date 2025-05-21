@@ -4,7 +4,7 @@ import subprocess
 from pathlib import Path
 from omegaconf import OmegaConf
 
-from alpha_seed.workers.streaming_service.rollout_request_manager import RequestManager
+from alpha_seed.workers.streaming_service.rollout_request_manager import RequestManager, RequestManagerRegisterCenter
 from verl.utils.tracking import Tracking
 from verl.utils.fs import copy_local_path_from_hdfs
 from verl.single_controller.ray import RayResourcePool, RayClassWithInitArgs, RayWorkerGroup
@@ -160,6 +160,10 @@ def create_request_manager(instance_name: str):
 
 
 def create_rollout_manager(config):
+    rmrc_cls = ray.remote(RequestManagerRegisterCenter)
+    rmrc = rmrc_cls.options(name="RequestManagerRegisterCenter").remote()
+    ray.get(rmrc.ready.remote())
+
     if config.actor_rollout_ref.rollout.mode == "server":
         create_request_manager('hybrid_rollout')
         create_request_manager('standalone_rollout')

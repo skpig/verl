@@ -182,6 +182,22 @@ class RequestPool:
         return ret
 
 
+class RequestManagerRegisterCenter:
+
+    def __init__(self):
+        self.names = set()
+
+    def ready(self):
+        return True
+
+    def register(self, name: str):
+        assert name not in self.names, f"duplicate request manager name: {name}"
+        self.names.add(name)
+
+    def get_all_names(self) -> List[str]:
+        return list(self.names)
+
+
 # this will be run on ray remote
 class RequestManager:
 
@@ -193,6 +209,11 @@ class RequestManager:
         self._pending_events_to_flows = []
         self.actor_name = ray.get_runtime_context().get_actor_name()
         self._rm_name = self.actor_name.removeprefix('RequestManager/')
+        try:
+            rmrc = ray.get_actor('RequestManagerRegisterCenter')
+            ray.get(rmrc.register.remote(self.actor_name))
+        except ValueError:
+            raise RuntimeError("please initialize RequestManagerRegisterCenter first before creating RequestManager")
 
     def ready(self):
         print(f'RequestManager ready, {self.actor_name=}')
@@ -385,3 +406,12 @@ class RequestManager:
             self.tracer.trace(CounterEvent('metric', 'RequestManager', now, {"global step": gs}))
             self.tracer.trace(CounterEvent('metric', 'RequestManager', now, {"busy%": last_busy_ratio}))
         return ratio
+
+
+def get_all_request_manager_actors() -> List[RequestManager]:
+    rmrc = ray.get_actor('RequestManagerRegisterCenter')
+    names = ray.get(rmrc.get_all_names.remote())
+    rms = []
+    for n in names:
+        rms.append(ray.get_actor(n))
+    return rms
