@@ -9,9 +9,9 @@ RUN_ID=$1
 
 # Model settings
 ROLLOUT_N=16
-OVERLONG_BUFFER_LEN=1024
+OVERLONG_BUFFER_LEN=512
 MAX_PROMPT_LEN=$((1024 * 1))
-MAX_RESPONSE_LEN=$((1024 * 3 + OVERLONG_BUFFER_LEN))
+MAX_RESPONSE_LEN=$((1024 * 3))
 BATCH_SIZE=512
 MINI_BSZ=64
 
@@ -23,8 +23,8 @@ OFFLOAD=False
 FORWARD_BSZ=16
 BACKWARD_BSZ=8
 TOTAL_EPOCHS=1
-FORWARD_MAX_TOKEN_LEN=$((18 * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN)))
-BACKWARD_MAX_TOKEN_LEN=$((3 * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN)))
+FORWARD_MAX_TOKEN_LEN=$((24 * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN))) # 14 for 40GB
+BACKWARD_MAX_TOKEN_LEN=$((8 * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN))) # 4 for 40GB
 
 PROJ_NAME="TinyMATH"
 MODEL_NAME=$(basename $BASE_MODEL)
@@ -72,6 +72,7 @@ CMD="python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
     actor_rollout_ref.rollout.n=$ROLLOUT_N \
     algorithm.use_kl_in_reward=True \
+    reward_model.launch_reward_fn_async=True \
     reward_model.overlong_buffer.enable=True \
     reward_model.overlong_buffer.len=$OVERLONG_BUFFER_LEN \
     trainer.critic_warmup=0 \

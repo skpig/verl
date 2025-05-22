@@ -210,7 +210,7 @@ class CustomRewardManager:
                 ground_truth_lst,
                 data_source_lst,
                 extra_info=extra_info_lst,
-                num_processes=40,
+                num_processes=20,
             )
         except Exception as e:
             traceback.print_exc()

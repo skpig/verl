@@ -639,9 +639,9 @@ class RayPPOTrainer:
             
             # Below is token level tensor
             # TODO: mask is maybe needed
-            'advantage': batch.batch['advantages'].cpu().numpy().astype(np.float16), # float16, (bsz,response_length); LOG since it is the gradient coefficient
-            'token_level_rewards': batch.batch['token_level_rewards'].cpu().numpy().astype(np.float16), # float16, (bsz,response_length); LOG since it is the reward given by reward model with kl penalty, before transfomation to advantage
-            'old_log_probs': batch.batch['old_log_probs'].cpu().numpy().astype(np.float16), # float16, (bsz,response_length)
+            'advantage': batch.batch['advantages'].cpu().numpy().astype(np.float16).tolist(), # float16, (bsz,response_length); LOG since it is the gradient coefficient
+            'token_level_rewards': batch.batch['token_level_rewards'].cpu().numpy().astype(np.float16).tolist(), # float16, (bsz,response_length); LOG since it is the reward given by reward model with kl penalty, before transfomation to advantage
+            'old_log_probs': batch.batch['old_log_probs'].cpu().numpy().astype(np.float16).tolist(), # float16, (bsz,response_length)
             # 'log_probs': TODO:
             # 'clip_frac': TODO:
         })
