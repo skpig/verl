@@ -1521,18 +1521,17 @@ class RayPPOTrainer(object):
 
                         batch = self._preprocess_batch_before_gen(batch, metrics, start_step)
                         # generate
+                        is_warmup_step = self.global_step < self.rollout_pool_warmup_step + start_step
                         with Timer(name='generate', logger=None) as timer:
                             save_path = f"{self.config.trainer.default_hdfs_dir}/checkpoints/global_step_{self.global_step - 1}/"
                             save_dataproto_fn = partial(save_dataproto, path=save_path)
-                            is_warmup_step = (self.global_step - start_step < 1)
                             batch = self.rollout_manager.train_generate(batch,
                                                                         step=self.global_step,
                                                                         save_dataproto_fn=save_dataproto_fn,
                                                                         is_warmup_step=is_warmup_step,
                                                                         metrics=metrics)
                         metrics['timing/generate'] = timer.last
-                        if batch is None or len(
-                                batch) == 0 or self.global_step < self.rollout_pool_warmup_step + start_step:
+                        if batch is None or len(batch) == 0 or is_warmup_step:
                             self.logger.log(data=metrics, step=self.global_step)
                             self.global_step += 1
                             continue

@@ -184,7 +184,7 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.actor.profile.filename=actor.tp${xperf_tp_size}.fsdp${fsdp_size} \
     trainer.total_steps=${NUM_STEPS} \
     +actor_rollout_ref.rollout.complete_ratio=0.0 \
-    actor_rollout_ref.rollout.rollout_pool.warmup_step=0 \
+    actor_rollout_ref.rollout.rollout_pool.warmup_step=1 \
     actor_rollout_ref.rollout.mode=server \
     actor_rollout_ref.rollout.weights_communicator=ucx \
     streaming_rollout.nnodes=1 \
