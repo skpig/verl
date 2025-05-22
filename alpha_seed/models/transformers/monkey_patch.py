@@ -129,9 +129,10 @@ def apply_monkey_patch_to_vlm(config):
     text_type = get_text_model_type(config)
     _PATCH_NAME_TO_FUNC[text_type](config)
     from seed_models.models.seed_vl.modeling_seed_vl import SeedVLForConditionalGeneration
-    from .modeling_vlm import get_dummy_image_features, get_sp_input_embeds
+    from .modeling_vlm import get_dummy_image_features, get_sp_input_embeds, vlm_model_forward
     SeedVLForConditionalGeneration.get_image_features = get_dummy_image_features
     SeedVLForConditionalGeneration.get_input_embeds = get_sp_input_embeds
+    SeedVLForConditionalGeneration.forward = vlm_model_forward
 
 
 _PATCH_NAME_TO_FUNC = {

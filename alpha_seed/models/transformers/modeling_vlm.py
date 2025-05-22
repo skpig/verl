@@ -1,10 +1,10 @@
 import numpy as np
 import torch
 from seed_models.models.seed_vl.modeling_seed_vl import SeedVLForConditionalGeneration
-from typing import Tuple
 from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
 from dist_attn.ulysses.ops import slice_input_tensor
-from typing import Tuple
+from typing import Optional, Tuple, Union, List
+from transformers.modeling_outputs import MoeCausalLMOutputWithPast
 
 
 def get_dummy_image_features(self, pixel_values, image_grid_hw=None):
@@ -83,3 +83,57 @@ def get_sp_input_embeds(
         if sp_size > 1:
             inputs_embeds = slice_input_tensor(inputs_embeds, dim=1, padding=False)
         return input_ids, inputs_embeds
+
+
+def vlm_model_forward(
+    self,
+    input_ids: torch.LongTensor = None,
+    pixel_values: torch.Tensor = None,
+    image_grid_hw: Optional[torch.LongTensor] = None,
+    attention_mask: Optional[torch.Tensor] = None,
+    position_ids: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.IntTensor] = None,
+    past_key_values: Optional[List[torch.FloatTensor]] = None,
+    inputs_embeds: Optional[torch.FloatTensor] = None,
+    image_mask: Optional[torch.Tensor] = None,
+    labels: Optional[torch.LongTensor] = None,
+    use_cache: Optional[bool] = None,
+    output_attentions: Optional[bool] = None,
+    output_hidden_states: Optional[bool] = None,
+    output_router_logits: Optional[bool] = None,
+    output_aux_losses: Optional[bool] = None,
+    return_dict: Optional[bool] = None,
+    fuse_lm_head_ce_loss: Optional[bool] = None,
+    temperature: Optional[float] = None,
+    **kwargs,
+) -> Union[Tuple, MoeCausalLMOutputWithPast]:
+    output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+    output_router_logits = (output_router_logits
+                            if output_router_logits is not None else self.config.output_router_logits)
+    output_aux_losses = output_aux_losses if output_aux_losses is not None else self.config.output_aux_losses
+
+    output_hidden_states = (output_hidden_states
+                            if output_hidden_states is not None else self.config.output_hidden_states)
+    return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+    input_ids, inputs_embeds = self.get_input_embeds(input_ids, pixel_values, image_grid_hw, inputs_embeds, image_mask)
+
+    # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
+    return self.language_model(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        position_ids=position_ids,
+        cu_seqlens=cu_seqlens,
+        past_key_values=past_key_values,
+        inputs_embeds=inputs_embeds,
+        use_cache=use_cache,
+        output_attentions=output_attentions,
+        output_hidden_states=output_hidden_states,
+        output_router_logits=output_router_logits,
+        output_aux_losses=output_aux_losses,
+        return_dict=return_dict,
+        fuse_lm_head_ce_loss=fuse_lm_head_ce_loss,
+        temperature=temperature,
+        labels=labels,
+        compute_entropy=kwargs.get('compute_entropy', False),
+    )

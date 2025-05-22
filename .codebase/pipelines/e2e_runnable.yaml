@@ -49,11 +49,24 @@ jobs:
           - pip3 install pylatexenc
           - pip3 install pydantic==1.10.15
       
-      - name: hybrid engine tests
+      - name: vlm hybrid engine tests
         commands:
           - export NCCL_SHM_DISABLE=1
           - export MY_HOST_IPV6=$HOST_IP
           - torchrun --nnodes=1 --nproc-per-node=8 --standalone tests/hybrid_engine/test_xperf_vlm_fsdp.py
+
+      - name: vlm sync grpo
+        commands:
+          - cd -
+          - export NUM_STEPS=2
+          - export N_GPUS_PER_NODE=8
+          - export NCCL_SHM_DISABLE=1
+          - export ALPHASEED_USE_NDTIMELINE=1
+          - wandb offline
+          - ray stop --force
+          - ray start --num-cpus=100 --head
+          - bash tasks_scripts/ci/run_vlm_m8_2b5.sh
+          - ray stop --force
 
       - name: math v1 ppo async and grpo
         commands:

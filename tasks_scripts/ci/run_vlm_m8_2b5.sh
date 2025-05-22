@@ -1,10 +1,15 @@
 set -x
+ray stop --force
+NUM_STEPS="${NUM_STEPS:-240}"
+
+N_GPUS_PER_NODE="${N_GPUS_PER_NODE:-8}"
+echo $NUM_STEPS
 
 # ckpt和路径
 SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/ssd_lq/user/caisonghua_new/checkpoints/m8_2b5_32k_seedvit_400m_baseline_openthought_8k_simplified_sys
 
 TRAIN_FILE=hdfs://haruna/home/byte_data_seed/hl_lq/iccv/user/xiaoboqin/data/rlhf/math/mmathcot_v4_hard_w_sys_for_rl.parquet
-TEST_FILE=hdfs://haruna/home/byte_data_seed/hl_lq/iccv/user/lingyue/data/rl/eval_alphaseed_mathvision_fix_v2_dot.parquet
+TEST_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/caisonghua/eval_mathvision_mini.parquet
 default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/caisonghua/test/vlm_grpo
 
 
@@ -12,14 +17,13 @@ default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/caisonghua/test/vl
 max_prompt_length=8192
 max_response_length=1024
 # batch size && 训练epoch
-train_batch_size=16
-ppo_mini_batch_size=1024
-train_batch_size=16
-ppo_mini_batch_size=16
+
+train_batch_size=8
+ppo_mini_batch_size=8
 val_batch_size=8
 total_epochs=200
-test_freq=100
-save_freq=100
+test_freq=-1
+save_freq=-1
 # 算法相关的参数
 actor_lr=2e-6
 critic_lr=2e-6
@@ -113,8 +117,8 @@ python3 tasks/main_ppo.py \
     trainer.logger=['console','tracking'] \
     trainer.project_name=${project_name} \
     trainer.experiment_name=${experiment_name} \
-    trainer.n_gpus_per_node=8 \
-    trainer.nnodes=$ARNOLD_WORKER_NUM \
+    trainer.n_gpus_per_node=${N_GPUS_PER_NODE} \
+    trainer.nnodes=1 \
     trainer.default_hdfs_dir=${default_hdfs_dir} \
     trainer.save_freq=${save_freq} \
     trainer.test_freq=${test_freq} \
@@ -148,4 +152,6 @@ python3 tasks/main_ppo.py \
     critic.profile.filename=actor.tp${xperf_tp_size}.fsdp${fsdp_size} \
     actor_rollout_ref.actor.profile.enable=False \
     actor_rollout_ref.actor.profile.upload_to_mlx=False \
-    actor_rollout_ref.actor.profile.filename=actor.tp${xperf_tp_size}.fsdp${fsdp_size}
+    actor_rollout_ref.actor.profile.filename=actor.tp${xperf_tp_size}.fsdp${fsdp_size} \
+    trainer.total_steps=${NUM_STEPS} \
+    trainer.save_cases_to_hdfs=False
