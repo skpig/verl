@@ -129,7 +129,7 @@ def compute_reward(data: DataProto, reward_fn):
     return reward_tensor, reward_extra_infos_dict
 
 
-@ray.remote(num_cpus=20)
+@ray.remote(num_cpus=10)
 def compute_reward_async(data: DataProto, config, tokenizer):
     """
     Load the reward manager and compute the reward for a batch of data.

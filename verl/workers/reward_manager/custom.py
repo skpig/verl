@@ -14,7 +14,8 @@
 import asyncio
 import traceback
 from collections import defaultdict
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed, TimeoutError
+import multiprocessing as mp
 from functools import partial
 from typing import Callable, Optional
 import warnings
@@ -87,6 +88,14 @@ async def parallel_compute_score_async(
 # 定义同步版本的计算函数
 import concurrent.futures
 
+def _make_default(reason: str):
+    return {
+        "score": 0,
+        "acc": 0,
+        "format": 0,
+        "pred": reason,
+        "#steps": -1,
+    }
 
 def parallel_compute_score_sync(
     evaluation_func, completions, references, tasks, extra_info=None, num_processes=40
@@ -109,41 +118,54 @@ def parallel_compute_score_sync(
     #             }
     #         scores.append(result)
     #     return scores
+    DEFAULT_TIMEOUT=20
+    POOL_SHUTDOWN_TIMEOUT = 10      # 关闭进程池的额外等待
 
+    # 1) 用 spawn / forkserver，把 Ray 的 socket/锁隔离出去
+    ctx = mp.get_context("spawn")
 
-    with concurrent.futures.ProcessPoolExecutor(max_workers=num_processes) as executor:
-        futures = []
-        for completion, reference, task, task_extra_info in zip(completions, references, tasks, extra_info):
-            future = executor.submit(evaluation_func, task, completion, reference, task_extra_info)
-            futures.append(future)
-        
-        for future in tqdm(futures):
-            try:
-                result = future.result(timeout=30)  # 设置超时时间为 100 秒
-                scores.append(result)
-            except SyntaxWarning as w:
-                traceback.print_exc()
-                print(f"捕获到 SyntaxWarning: {w}")
-                scores.append({
-                    "score": 0,
-                    "acc": 0,
-                    "format": 0,
-                    "pred": "SyntaxWarning",
-                    "#steps": -1,
-                })
-            except Exception as e:
-                traceback.print_exc()
-                print(f"计算出错: {e}")
-                scores.append({
-                    "score": 0,
-                    "acc": 0,
-                    "format": 0,
-                    "pred": "Error",
-                    "#steps": -1,
-                })
+    scores   = [None] * len(tasks)   # 预分配，保持顺序
+    futures  = {}
+
+    with ProcessPoolExecutor(
+            max_workers=num_processes,
+            mp_context=ctx
+        ) as executor:
+
+        # 2) 提交任务
+        for idx, (c, r, t, ei) in enumerate(zip(completions, references, tasks, extra_info)):
+            fut = executor.submit(evaluation_func, t, c, r, ei)
+            futures[fut] = idx
+
+        # 3) 轮询已完成 future，不卡在单个 result()
+        try:
+            for fut in tqdm(as_completed(futures, timeout=DEFAULT_TIMEOUT * len(futures))):
+                idx = futures[fut]
+                try:
+                    scores[idx] = fut.result(timeout=0)      # 已完成，无需再给 timeout
+                except SyntaxWarning as w:
+                    traceback.print_exc()
+                    scores[idx] = _make_default("SyntaxWarning")
+                except TimeoutError:                         # as_completed 全局 timeout 才会抛
+                    fut.cancel()
+                    scores[idx] = _make_default("Timeout")
+                except Exception as e:
+                    traceback.print_exc()
+                    scores[idx] = _make_default("Error")
+        except TimeoutError:
+            print("TimeoutError: 进程池中有任务超时，正在取消...")
+            for fut in futures:
+                if not fut.done():
+                    fut.cancel()
+                    idx = futures[fut]
+                    scores[idx] = _make_default("Timeout")
+                else:
+                    assert scores[futures[fut]] is not None, f"Future {fut} should have been completed"
+
+    # 4) 彻底收尾，防止 zombie（Python 3.9+ 支持 cancel_futures）
+    executor.shutdown(cancel_futures=True)
 
     return scores
-
 
 class CustomRewardManager:
     """
@@ -210,7 +232,7 @@ class CustomRewardManager:
                 ground_truth_lst,
                 data_source_lst,
                 extra_info=extra_info_lst,
-                num_processes=20,
+                num_processes=10,
             )
         except Exception as e:
             traceback.print_exc()

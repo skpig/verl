@@ -259,9 +259,9 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
     valid_returns = torch.masked_select(returns, response_mask)
 
     # rollout metrics about reward
-    format = batch.non_tensor_batch['format']
-    AnsMatch = format & 1
-    StepOrd = (format >> 1) & 1
+    format_score = batch.non_tensor_batch['format']
+    AnsMatch = format_score & 1
+    StepOrd = (format_score >> 1) & 1
     num_steps = batch.non_tensor_batch['#steps']
 
     if use_critic:

@@ -18,6 +18,7 @@ FSDP PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
 
+import time
 import json
 import os
 import uuid
@@ -262,15 +263,23 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
     return data
 
 
+def _time_stamp():
+    timestamp = time.time()
+    local_time = time.localtime(timestamp)
+    formatted_time = time.strftime("%Y-%m-%d %H:%M:%S", local_time)
+    print(f"Current time: {formatted_time}")
+
 @contextmanager
 def _timer(name: str, timing_raw: Dict[str, float]):
     with Timer(name=name, logger=None) as timer:
         print("Start timing of : ", name)
+        _time_stamp()
         yield
     if name not in timing_raw:
         timing_raw[name] = 0
     timing_raw[name] += timer.last
     print("Duration of {}: {:.2f} seconds".format(name, timer.last))
+    _time_stamp()
 
 
 class RayPPOTrainer:
