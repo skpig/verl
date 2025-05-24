@@ -1192,8 +1192,9 @@ class RayPPOTrainer(object):
         if not is_self_load:
             safely_do(lambda: report_trial_ckpts_load(checkpoint_infos=checkpoint_infos), rank=0)()
 
-            # load dataloader
-        self.train_dataloader = self.dataloader_mgr._load_dataloader(remote_global_step_folder)
+        # load dataloader
+        self.train_dataloader = self.dataloader_mgr._load_dataloader(remote_global_step_folder,
+                                                                     self.config.trainer.donot_resume_data)
 
         # load replay buffer
         if self.config.algorithm.get('replay', False):

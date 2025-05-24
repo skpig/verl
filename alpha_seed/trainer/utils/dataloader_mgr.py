@@ -1,5 +1,6 @@
+from typing import List
 import torch, os
-from omegaconf import OmegaConf, open_dict
+from omegaconf import OmegaConf, open_dict, ListConfig
 from alpha_seed.utils.dataset.rl_dataset import RLHFDataset
 from verl.utils.fs import copy_local_path_from_hdfs
 
@@ -121,11 +122,25 @@ class DataLoaderMgr:
         if self.config.trainer.total_steps is not None:
             self.total_training_steps = self.config.trainer.total_steps
 
-    def _load_dataloader(self, remote_global_step_folder):
+    def _load_dataloader(self, remote_global_step_folder, donot_resume_data):
         # load dataloader
         dataloader_remote_path = os.path.join(remote_global_step_folder, 'data.pt')
         dataloader_local_path = copy_local_path_from_hdfs(dataloader_remote_path)
         train_dataloader = torch.load(dataloader_local_path)
+
+        if donot_resume_data:
+            resume_dataset_name = train_dataloader.dataset.parquet_files  # cached name like ['/home/tiger/.cache/verl/rlhf/b0e4ef4425c3409d3c7a19350c3a3e43/train_with_ref_ans.parquet']
+            if not isinstance(
+                    self.config.data.train_files, (List, ListConfig)
+            ):  # user provided name like ['hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/train_with_ref_ans.parquet']
+                train_files = [self.config.data.train_files]
+
+            resume_dataset_set = set([s.split('/')[-1] for s in resume_dataset_name])
+            train_files_set = set([s.split('/')[-1] for s in train_files])
+            if resume_dataset_set != train_files_set:
+                print('the resume dataset is different from the train dataset, will not resume data')
+                return self.train_dataloader
+
         if isinstance(self.train_dataloader.dataset, RLHFDataset):
             train_dataloader.dataset.resume_dataset_state()
         try:
