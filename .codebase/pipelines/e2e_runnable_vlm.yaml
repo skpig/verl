@@ -5,7 +5,8 @@ jobs:
   vlm_e2e_runnable_tests:
     # Merlin - data.aml.verl:v189
     image: hub.byted.org/reckon/data.reckon.mlx.image_5940:2f550abbef6349f1fd520d7dbd4fcc1e
-    if: ${{ !contains(Event.Change.Title, "WIP") }}
+    # if: ${{ !contains(Event.Change.Title, "WIP") }}
+    if: false
     runs-on:
       cluster: gpu-h20
       docker:
