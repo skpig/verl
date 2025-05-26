@@ -544,6 +544,7 @@ class ActorRolloutRefWorker(Worker):
             print("Init Rollout Finished!")
 
         if self._is_ref:
+            print("Init Reference Policy Begin...")
             self.ref_module_fsdp = self._build_model_optimizer(
                 model_path=self.config.model.path,
                 fsdp_config=self.config.ref.fsdp_config,
@@ -560,8 +561,10 @@ class ActorRolloutRefWorker(Worker):
                 self.config.ref.use_remove_padding = use_remove_padding
                 self.config.ref.use_fused_kernels = use_fused_kernels
             self.ref_policy = DataParallelPPOActor(config=self.config.ref, actor_module=self.ref_module_fsdp)
+            print("Init Reference Policy Finished!")
 
         if self._is_actor:
+            print("Init CKPT Manager Begin...")
             self.flops_counter = FlopsCounter(self.actor_model_config)
             self.checkpoint_manager = FSDPCheckpointManager(
                 model=self.actor_module_fsdp,
@@ -570,6 +573,7 @@ class ActorRolloutRefWorker(Worker):
                 processing_class=self.processor if self.processor is not None else self.tokenizer,
                 checkpoint_contents=self.config.actor.checkpoint.contents,
             )
+            print("Init CKPT Manager Finished!")
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def update_actor(self, data: DataProto):
@@ -639,6 +643,8 @@ class ActorRolloutRefWorker(Worker):
 
                 if isinstance(self.rollout, AsyncSGLangRollout) and hasattr(self.rollout, "_tool_schemas") and len(self.rollout._tool_schemas) > 0:
                     output = self.rollout.generate_sequences_with_tools(prompts=prompts)
+                elif isinstance(self.rollout, AsyncSGLangRollout) and hasattr(self.rollout.config, "mcts") and self.rollout.config.mcts.enable and prompts.meta_info.get("validate", False) == False:
+                    output = self.rollout.generate_sequences_with_mcts(prompts=prompts)
                 else:
                     output = self.rollout.generate_sequences(prompts=prompts)
             else:

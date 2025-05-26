@@ -54,6 +54,7 @@ from verl.workers.rollout.schemas import (
     Message,
 )
 from verl.workers.rollout.sglang_rollout.sglang_rollout import _post_process_outputs, _pre_process_inputs
+from verl.workers.rollout.mcts import MCTS, MCTSNode
 
 if TYPE_CHECKING:
     from torch import nn
@@ -242,6 +243,8 @@ class AsyncSGLangRollout(BaseRollout):
                 # log_requests=True,
                 # log_requests_level=2,
                 # max_running_requests=1,
+                schedule_policy="lpm",
+                # skip_tokenizer_init=True if config.mcts.enable else False,
             )
         else:
             self._engine = None
@@ -266,6 +269,10 @@ class AsyncSGLangRollout(BaseRollout):
 
         self.tokenizer = tokenizer
         self.pad_token_id = tokenizer.pad_token_id
+
+        if self.config.mcts.enable:
+            assert not self.config.multi_turn.enable, "MCTS and multi-turn cannot be used together"
+            # self.stop_words = ["</think>", "</answer>"]
 
     @contextmanager
     def update_sampling_params(self, **kwargs):
@@ -567,9 +574,221 @@ class AsyncSGLangRollout(BaseRollout):
 
         return _req
 
+    async def _async_one_mcts(self, req: MCTS, **kwargs) -> MCTS:
+        assert self._tp_rank == 0, "only the master process can call this function"
+        _req = deepcopy(req)
+        finish_reason_type = None
+        output = None
+
+        current_turns = 0
+        while current_turns < self.config.n // self.config.mcts.max_branch:
+            # Select
+            _req.select_next_step()
+            assert len(_req.current_nodes) > 0, "No nodes to select from"
+
+            # Rollout
+            input_ids = _req.create_prompt() 
+            # kwargs["stop"] = self.stop_words
+            kwargs["n"] = self.config.mcts.max_branch
+            # users can customize different sampling_params at different run
+            with self.update_sampling_params(**kwargs):
+                outputs = await self._engine.async_generate(
+                    input_ids=input_ids,
+                    sampling_params=self.sampling_params,
+                    return_logprob=True,
+                ) # List[Dict[str, Any]]
+
+            # finish_reason_type = FinishReasonTypeEnum.from_str(output["meta_info"]["finish_reason"]["type"])
+            # current_turns += 1
+            # if finish_reason_type == FinishReasonTypeEnum.LENGTH:
+            #     raise NotImplementedError("MCTS does not support LENGTH finish reason")
+            #     break
+            
+            # Backpropagation
+            _req.generate_next_step(outputs)
+
+            if _req.data_id == 0:
+                _req.draw_tree()
+ 
+        if current_turns >= self.config.multi_turn.max_turns:
+            finish_reason_type = FinishReasonTypeEnum.STOP
+
+        # # Calculate the reward for each tool
+        # async def calc_reward_and_release_fn(name: str, tool: BaseTool):
+        #     reward = await tool.calc_reward(_req.request_id, **_req.tools_kwargs[name].get("calc_reward_kwargs", {}))
+        #     await tool.release(_req.request_id, **_req.tools_kwargs[name].get("release_kwargs", {}))
+        #     return name, reward
+
+        # tool_reward_tasks = []
+        # for name in _req.tools_kwargs.keys():
+        #     tool = self._tool_map[name]
+        #     tool_reward_tasks.append(calc_reward_and_release_fn(name, tool))
+        # tool_reward_scores = await asyncio.gather(*tool_reward_tasks)
+        # tool_reward_scores = dict(tool_reward_scores)
+        # _req.finalize(self.tokenizer, tool_reward_scores, finish_reason_type)
+
+        return _req
+
+
+    @GPUMemoryLogger(role="sglang async mcts rollout", logger=logger)
+    @torch.no_grad()
+    def generate_sequences_with_mcts(self, prompts: DataProto, **kwargs) -> DataProto:
+        do_sample = prompts.meta_info.get("do_sample", True)
+        is_validate = prompts.meta_info.get("validate", False)
+        tgt_device = prompts.batch["input_ids"].device
+        assert not is_validate, "validate is not supported in async rollout with mcts"
+        assert do_sample, "do_sample is required in async rollout with mcts"
+
+        """Temporary workaround for SGLang Engine to skip tokenizer init"""
+        self._engine.skip_tokenizer_init = True  # skip tokenizer init in SGLang Engine
+        self._engine.server_args.skip_tokenizer_init = True  # skip tokenizer init in SGLang Engine
+
+        breakpoint()
+
+        if self._tp_rank == 0:
+            # each query only generate one MCTS tree
+            # _input_ids = _pre_process_inputs(self.pad_token_id, prompts.batch["input_ids"][data_idx])
+            # _attention_mask = _pre_process_inputs(0, prompts.batch["attention_mask"][data_idx])
+            # _position_ids = compute_position_id_with_mask(torch.tensor(_attention_mask)).tolist()
+            req_list = [
+                # AsyncRolloutRequest(
+                #     request_id=i,
+                #     input_ids=prompts.batch["input_ids"][i].tolist(),
+                #     attention_mask=prompts.batch["attention_mask"][i].tolist(),
+                #     position_ids=prompts.batch["position_ids"][i].tolist(),
+                #     loss_mask=prompts.batch["loss_mask"][i].tolist(),
+                #     prompt_ids=prompts.batch["input_ids"][i].tolist(),
+                #     prompt_attention_mask=prompts.batch["attention_mask"][i].tolist(),
+                #     prompt_position_ids=prompts.batch["position_ids"][i].tolist(),
+                #     prompt_loss_mask=prompts.batch["loss_mask"][i].tolist(),
+                #     messages=[{"role": "user", "content": prompts.meta_info.get("prompt", "")}],
+                # )
+                MCTS(
+                    data_id=i,
+                    query_ids=_pre_process_inputs(self.pad_token_id, prompts.batch["input_ids"][i]),
+                    split_sequence=self.tokenizer.encode("<think>", add_special_tokens=False),
+                    max_depth=self.config.mcts.max_depth,
+                    tokenizer=self.tokenizer,
+                    c_puct=self.config.mcts.c_puct,
+                    ground_truth=prompts.non_tensor_batch["reward_model"][i]['ground_truth'],
+                )
+                for i in range(prompts.batch.batch_size[0])
+            ]
+            loop = asyncio.get_event_loop()
+            output_req_list = loop.run_until_complete(
+                asyncio.gather(
+                    *[self._async_one_mcts(req, **kwargs) for req in req_list],
+                )
+            )
+            sorted_output_req_list = sorted(output_req_list, key=lambda x: x.data_id)
+        else:
+            sorted_output_req_list = None
+
+        [sorted_output_req_list] = broadcast_pyobj(
+            data=[sorted_output_req_list],
+            rank=self._tp_rank,
+            dist_group=self._device_mesh_cpu["tp"].get_group(),
+            src=self._device_mesh_cpu["tp"].mesh[0].item(),
+            force_cpu_device=False,
+        )
+
+        # Construct the batch data
+        prompt_ids, response_ids = [], []
+        prompt_attention_mask, response_attention_mask = [], []
+        prompt_position_ids, response_position_ids = [], []
+        prompt_loss_mask, response_loss_mask = [], []
+        messages = []
+        reward_scores = []
+        for req in sorted_output_req_list:
+            assert req.state == AsyncRolloutRequestStateEnum.COMPLETED, f"Request {req.request_id} is not completed"
+            assert len(req.input_ids) == len(req.attention_mask) == len(req.position_ids) == len(req.loss_mask), f"""Request {req.request_id} has different length of 
+                {len(req.input_ids)=}, {len(req.attention_mask)=}, {len(req.position_ids)=}, {len(req.loss_mask)=}"""
+            error_message_lines = [
+                f"""Request {req.request_id} has input_ids length {len(req.input_ids)}
+                    greater than max_model_len {self.config.max_model_len}""",
+                f"Decoded input_ids: {self.tokenizer.decode(req.input_ids)}",
+                f"Decoded prompt_ids: {self.tokenizer.decode(req.prompt_ids)}",
+                f"Decoded response_ids: {self.tokenizer.decode(req.response_ids)}",
+                f"Messages: {req.messages}",
+                f"Max model length: {req.max_model_len}",
+            ]
+            error_message = "\n".join(error_message_lines)
+            assert len(req.input_ids) <= self.config.max_model_len, error_message
+
+            prompt_ids.append(torch.tensor(req.prompt_ids, dtype=torch.int, device=tgt_device))
+            response_ids.append(torch.tensor(req.response_ids, dtype=torch.int, device=tgt_device))
+            if len(req.response_ids) > self.config.response_length:
+                print(
+                    f"""{req.request_id=} has response_ids length {len(req.response_ids)} 
+                    greater than max_response_len {self.config.response_length},\n{req=}"""
+                )
+            prompt_attention_mask.append(torch.tensor(req.prompt_attention_mask, dtype=torch.int, device=tgt_device))
+            response_attention_mask.append(torch.tensor(req.response_attention_mask, dtype=torch.int, device=tgt_device))
+            prompt_position_ids.append(torch.tensor(req.prompt_position_ids, dtype=torch.int, device=tgt_device))
+            response_position_ids.append(torch.tensor(req.response_position_ids, dtype=torch.int, device=tgt_device))
+            prompt_loss_mask.append(torch.tensor(req.prompt_loss_mask, dtype=torch.int, device=tgt_device))
+            response_loss_mask.append(torch.tensor(req.response_loss_mask, dtype=torch.int, device=tgt_device))
+            messages.append({"messages": req.messages})
+            reward_scores.append(req.reward_scores)
+
+        prompt_ids = pad_sequence(prompt_ids, batch_first=True, padding_value=self.pad_token_id, padding_side="left")
+        if prompt_ids.shape[1] < self.config.prompt_length:
+            prompt_ids = pad_sequence_to_length(prompt_ids, self.config.prompt_length, self.pad_token_id, left_pad=True)
+        response_ids = pad_sequence(response_ids, batch_first=True, padding_value=self.pad_token_id)
+        if response_ids.shape[1] < self.config.response_length:
+            response_ids = pad_sequence_to_length(response_ids, self.config.response_length, self.pad_token_id)
+        prompt_attention_mask = pad_sequence(prompt_attention_mask, batch_first=True, padding_value=0, padding_side="left")
+        if prompt_attention_mask.shape[1] < self.config.prompt_length:
+            prompt_attention_mask = pad_sequence_to_length(prompt_attention_mask, self.config.prompt_length, 0, left_pad=True)
+        response_attention_mask = pad_sequence(response_attention_mask, batch_first=True, padding_value=0)
+        if response_attention_mask.shape[1] < self.config.response_length:
+            response_attention_mask = pad_sequence_to_length(response_attention_mask, self.config.response_length, 0)
+        prompt_position_ids = pad_sequence(prompt_position_ids, batch_first=True, padding_value=0, padding_side="left")
+        if prompt_position_ids.shape[1] < self.config.prompt_length:
+            prompt_position_ids = pad_sequence_to_length(prompt_position_ids, self.config.prompt_length, 0, left_pad=True)
+        response_length = response_ids.size(1)
+        delta_position_id = torch.arange(1, response_length + 1, device=response_ids.device)
+        delta_position_id = delta_position_id.unsqueeze(0).repeat(len(sorted_output_req_list), 1)
+        response_position_ids = prompt_position_ids[:, -1:] + delta_position_id
+        prompt_loss_mask = pad_sequence(prompt_loss_mask, batch_first=True, padding_value=0, padding_side="left")
+        if prompt_loss_mask.shape[1] < self.config.prompt_length:
+            prompt_loss_mask = pad_sequence_to_length(prompt_loss_mask, self.config.prompt_length, 0, left_pad=True)
+        response_loss_mask = pad_sequence(response_loss_mask, batch_first=True, padding_value=0)
+        if response_loss_mask.shape[1] < self.config.response_length:
+            response_loss_mask = pad_sequence_to_length(response_loss_mask, self.config.response_length, 0)
+
+        input_ids = torch.cat((prompt_ids, response_ids), dim=-1)
+        attention_mask = torch.cat((prompt_attention_mask, response_attention_mask), dim=-1)
+        position_ids = torch.cat((prompt_position_ids, response_position_ids), dim=-1)
+        loss_mask = torch.cat((prompt_loss_mask, response_loss_mask), dim=-1)
+
+        # Construct the batch data
+        batch = TensorDict(
+            {
+                "prompts": prompt_ids,
+                "responses": response_ids,
+                "input_ids": input_ids,  # here input_ids become the whole sentences
+                "attention_mask": attention_mask,
+                "position_ids": position_ids,
+                "loss_mask": loss_mask,
+            },
+            batch_size=len(sorted_output_req_list),
+        )
+
+        # free cache engine
+        if self.config.free_cache_engine and self._engine is not None and self._tp_rank == 0:
+            self._engine.tokenizer_manager.flush_cache()
+
+        # reset engine skip_tokenizer_init
+        self._engine.skip_tokenizer_init = False
+        self._engine.server_args.skip_tokenizer_init = False  # reset skip tokenizer init in SGLang Engine
+
+        return DataProto(batch=batch, non_tensor_batch={"messages": np.array(messages), "reward_scores": np.array(reward_scores)})
+
     @GPUMemoryLogger(role="sglang async rollout", logger=logger)
     @torch.no_grad()
     def generate_sequences_with_tools(self, prompts: DataProto, **kwargs) -> DataProto:
+        # breakpoint()
         # Async rollout with tools support
         do_sample = prompts.meta_info.get("do_sample", True)
         is_validate = prompts.meta_info.get("validate", False)

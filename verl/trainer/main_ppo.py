@@ -73,6 +73,8 @@ def run_ppo(config) -> None:
                 "env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_LOGGING_LEVEL": "WARN", 'CUDA_VISIBLE_DEVICES': os.environ.get("CUDA_VISIBLE_DEVICES", "0")}
             },
             num_cpus=config.ray_init.num_cpus,
+            _temp_dir="/dev/shm/tmp",
+            object_spilling_directory="/dev/shm/spill",
         )
 
     runner = TaskRunner.remote()
