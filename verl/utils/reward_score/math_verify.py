@@ -19,6 +19,7 @@ try:
     from math_verify import parse
     from math_verify.errors import TimeoutException
     from math_verify.metric import math_metric
+    from math_verify.utils import timeout
     from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
 except ImportError:
     print("To use Math-Verify, please install it first by running `pip install math-verify`.")
@@ -93,7 +94,8 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None) -> b
     timeout_score = 0.0
 
 
-    verify_func = math_metric(
+    math_metric_with_timeout = timeout(10)(math_metric)
+    verify_func = math_metric_with_timeout(
         gold_extraction_target=(LatexExtractionConfig(), ExprExtractionConfig()),
         pred_extraction_target=(ExprExtractionConfig(), LatexExtractionConfig()),
     )

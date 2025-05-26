@@ -240,13 +240,6 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
             - response_length/mean, max, min, clip_ratio: Statistics about response lengths
             - prompt_length/mean, max, min, clip_ratio: Statistics about prompt lengths
     """
-    # kl penalty
-    attention_mask = batch.batch["attention_mask"]
-    response_mask = attention_mask[:, -response_length:]
-    kld = core_algos.kl_penalty(batch.batch["old_log_probs"], batch.batch["ref_log_prob"], kl_penalty='kl')  # (batch_size, response_length)
-    kld = kld * response_mask.float()  # (batch_size, response_length)
-    current_kl = masked_mean(kld, mask=response_mask, axis=-1)  # average within each sequence
-    current_kl = torch.mean(current_kl, dim=0).item() # average across the batch
 
 
     sequence_score = batch.batch["token_level_scores"].sum(-1)
@@ -275,6 +268,14 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
     StepOrd = (format_score >> 1) & 1
     num_steps = batch.non_tensor_batch['#steps']
 
+    # kl penalty
+    attention_mask = batch.batch["attention_mask"]
+    response_mask = attention_mask[:, - batch.batch["responses"].size(1):]
+    kld = core_algos.kl_penalty(batch.batch["old_log_probs"], batch.batch["ref_log_prob"], kl_penalty='kl')  # (batch_size, response_length)
+    kld = kld * response_mask.float()  # (batch_size, response_length)
+    current_kl = masked_mean(kld, mask=response_mask, axis=-1)  # average within each sequence
+    current_kl = torch.mean(current_kl, dim=0) # average across the batch
+
     if use_critic:
         values = batch.batch["values"]
         valid_values = torch.masked_select(values, response_mask)
@@ -283,7 +284,7 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
 
     metrics = {
         # kl penalty
-        "actor/kl_metric": current_kl.detach().item(),
+        "actor/kl_metric": current_kl.item(),
         # score
         "critic/score/mean": torch.mean(sequence_score).detach().item(),
         "critic/score/max": torch.max(sequence_score).detach().item(),

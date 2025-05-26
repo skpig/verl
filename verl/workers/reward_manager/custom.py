@@ -25,6 +25,7 @@ import torch
 from sympy import fu, ground_roots
 from transformers import PreTrainedTokenizer
 from tqdm import tqdm
+import signal
 
 from verl import DataProto
 from verl.utils.reward_score import _default_compute_score
@@ -99,19 +100,31 @@ def _make_default(reason: str):
         "#steps": -1,
     }
 
+class TimeoutException(Exception):
+    pass
+
+def timeout_handler(signum, frame):
+    raise TimeoutException("函数执行超时")
+
 def parallel_compute_score_sync(
     evaluation_func, completions, references, tasks, extra_info=None, num_processes=40, timeout=10
 ):
     """
-    在 Ray task 内部用 ray.util.multiprocessing.Pool 并发评估。
+    在单进程环境中评估，并为每个评估函数添加超时限制。
     """
     scores = []
     
     # Process each item sequentially
     for completion, reference, task, task_extra_info in tqdm(zip(completions, references, tasks, extra_info if extra_info is not None else [None] * len(completions)), total=len(completions), desc="Computing scores"):
         try:
+            # 执行评估函数
             result = evaluation_func(task, completion, reference, task_extra_info)
+            # 取消超时
+            signal.alarm(0)
             scores.append(result)
+        except TimeoutException as e:
+            print(f"评估超时: {e}")
+            scores.append(_make_default("Timeout"))
         except Exception as e:
             traceback.print_exc()
             print(f"Computation error: {e}")
