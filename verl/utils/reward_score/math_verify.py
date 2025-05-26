@@ -111,6 +111,7 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None) -> b
             traceback.print_exc(file=f)
             f.write('\n')
     except TimeoutException:
+        print("Timeout detected, returning 0 score from math_verify.")
         ret_score = timeout_score
 
     format_correctness, num_steps = verify_format(model_output)

@@ -15,12 +15,14 @@ import asyncio
 import traceback
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed, TimeoutError
+from ray.util.multiprocessing import Pool
+from multiprocessing import TimeoutError as MPTimeoutError
 import multiprocessing as mp
 from functools import partial
 from typing import Callable, Optional
 import warnings
 import torch
-from sympy import ground_roots
+from sympy import fu, ground_roots
 from transformers import PreTrainedTokenizer
 from tqdm import tqdm
 
@@ -98,73 +100,23 @@ def _make_default(reason: str):
     }
 
 def parallel_compute_score_sync(
-    evaluation_func, completions, references, tasks, extra_info=None, num_processes=40
+    evaluation_func, completions, references, tasks, extra_info=None, num_processes=40, timeout=10
 ):
+    """
+    在 Ray task 内部用 ray.util.multiprocessing.Pool 并发评估。
+    """
     scores = []
-    # with warnings.catch_warnings():
-    #     warnings.simplefilter("error", SyntaxWarning)
-    #     for completion, reference, task, task_extra_info in zip(completions, references, tasks, extra_info):
-    #         """Single"""
-    #         try:
-    #             result = evaluation_func(task, completion, reference, task_extra_info)
-    #         except Exception as e:
-    #             print(f"==== Error processing completion ====\n {completion}\n==== Error: {e} ====")
-    #             traceback.print_exc()
-    #             result = {
-    #                 "score": 0,
-    #                 "acc": 0,
-    #                 "format": 0,
-    #                 "pred": "Error",
-    #             }
-    #         scores.append(result)
-    #     return scores
-    DEFAULT_TIMEOUT=20
-    POOL_SHUTDOWN_TIMEOUT = 10      # 关闭进程池的额外等待
-
-    # 1) 用 spawn / forkserver，把 Ray 的 socket/锁隔离出去
-    ctx = mp.get_context("spawn")
-
-    scores   = [None] * len(tasks)   # 预分配，保持顺序
-    futures  = {}
-
-    with ProcessPoolExecutor(
-            max_workers=num_processes,
-            mp_context=ctx
-        ) as executor:
-
-        # 2) 提交任务
-        for idx, (c, r, t, ei) in enumerate(zip(completions, references, tasks, extra_info)):
-            fut = executor.submit(evaluation_func, t, c, r, ei)
-            futures[fut] = idx
-
-        # 3) 轮询已完成 future，不卡在单个 result()
+    
+    # Process each item sequentially
+    for completion, reference, task, task_extra_info in tqdm(zip(completions, references, tasks, extra_info if extra_info is not None else [None] * len(completions)), total=len(completions), desc="Computing scores"):
         try:
-            for fut in tqdm(as_completed(futures, timeout=DEFAULT_TIMEOUT * len(futures))):
-                idx = futures[fut]
-                try:
-                    scores[idx] = fut.result(timeout=0)      # 已完成，无需再给 timeout
-                except SyntaxWarning as w:
-                    traceback.print_exc()
-                    scores[idx] = _make_default("SyntaxWarning")
-                except TimeoutError:                         # as_completed 全局 timeout 才会抛
-                    fut.cancel()
-                    scores[idx] = _make_default("Timeout")
-                except Exception as e:
-                    traceback.print_exc()
-                    scores[idx] = _make_default("Error")
-        except TimeoutError:
-            print("TimeoutError: 进程池中有任务超时，正在取消...")
-            for fut in futures:
-                if not fut.done():
-                    fut.cancel()
-                    idx = futures[fut]
-                    scores[idx] = _make_default("Timeout")
-                else:
-                    assert scores[futures[fut]] is not None, f"Future {fut} should have been completed"
-
-    # 4) 彻底收尾，防止 zombie（Python 3.9+ 支持 cancel_futures）
-    executor.shutdown(cancel_futures=True)
-
+            result = evaluation_func(task, completion, reference, task_extra_info)
+            scores.append(result)
+        except Exception as e:
+            traceback.print_exc()
+            print(f"Computation error: {e}")
+            scores.append(_make_default("Error"))
+            
     return scores
 
 class CustomRewardManager:
