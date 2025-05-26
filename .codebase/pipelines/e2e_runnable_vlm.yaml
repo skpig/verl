@@ -2,7 +2,7 @@ name: unit tests
 trigger:
   change
 jobs:
-  e2e_runnable_tests:
+  vlm_e2e_runnable_tests:
     # Merlin - data.aml.verl:v189
     image: hub.byted.org/reckon/data.reckon.mlx.image_5940:2f550abbef6349f1fd520d7dbd4fcc1e
     if: ${{ !contains(Event.Change.Title, "WIP") }}
@@ -49,7 +49,16 @@ jobs:
           - pip3 install pylatexenc
           - pip3 install pydantic==1.10.15
       
-      - name: math v1 ppo async and grpo
+      - name: vlm hybrid engine tests
+        commands:
+          - export NCCL_SHM_DISABLE=1
+          - wandb offline
+          - ray stop --force
+          - ray start --num-cpus=100 --head
+          - pytest -v tests/hybrid_engine/test_vlm.py
+          - ray stop --force
+
+      - name: vlm sync grpo
         commands:
           - cd -
           - export NUM_STEPS=2
@@ -59,7 +68,5 @@ jobs:
           - wandb offline
           - ray stop --force
           - ray start --num-cpus=100 --head
-          - bash tasks_scripts/ci/run_p6d_0b5_math_v1_grpo_kl0.sh
-          - bash tasks_scripts/ci/run_m8_100m_math_v1_grpo.sh
-          - bash tasks_scripts/ci/run_p6d_0b5_math_v1_grpo.sh
+          - bash tasks_scripts/ci/run_vlm_m8_2b5.sh
           - ray stop --force

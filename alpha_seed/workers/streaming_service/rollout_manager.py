@@ -241,7 +241,7 @@ class RolloutManager:
                                             ground_truth=ground_truth,
                                             reward_style=reward_style)
 
-        if self.config.trainer.use_remote_sandbox:
+        if len(remote_reward_style) > 0:
             self.hybrid_wg.set_eos_callback_fn(sandbox_callback_fn)
             if self.train_standalone_wg is not None:
                 self.train_standalone_wg.set_eos_callback_fn(sandbox_callback_fn)
@@ -347,7 +347,8 @@ class RolloutManager:
             batch.batch["responses"] = batch.batch["input_ids"][:, self.config.data.max_prompt_length:]
             batch.pop(batch_keys=['is_finished'])
 
-        batch.meta_info["generation_kwargs"] = self.config.actor_rollout_ref.rollout.train_generate_kwargs
+        batch.meta_info["generation_kwargs"] = OmegaConf.to_container(
+            self.config.actor_rollout_ref.rollout.train_generate_kwargs, resolve=True)
         batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
         if 'pixel_values' in batch.non_tensor_batch:
             batch.meta_info['global_img_token_num'] = [
@@ -541,8 +542,8 @@ class RolloutManager:
             standalone_gen_batch = standalone_batch.pop(batch_keys=gen_batch.batch.keys())
 
             standalone_gen_batch.non_tensor_batch = standalone_batch.non_tensor_batch
-            standalone_gen_batch.meta_info["generation_kwargs"] = (
-                self.config.actor_rollout_ref.rollout.train_generate_kwargs)
+            standalone_gen_batch.meta_info["generation_kwargs"] = OmegaConf.to_container(
+                self.config.actor_rollout_ref.rollout.train_generate_kwargs, resolve=True)
             self.train_standalone_wg.generate_sequences_put(standalone_gen_batch)
             pprint(f"start standalone rollout, input batches {len(standalone_gen_batch)}.")
         metrics["rollout/standalone_input_batch"] = len(standalone_batch)
@@ -741,6 +742,16 @@ class RolloutManager:
 
         gen_batch = batch.pop(batch_keys=gen_batch_required_keys)
         gen_batch.non_tensor_batch = batch.non_tensor_batch
+        # pack fields into extra_data (for tool calling...)
+        if (key := "extra_data") not in gen_batch.non_tensor_batch:
+            gen_batch.non_tensor_batch[key] = np.array([{} for _ in range(len(gen_batch))])
+        if (key := 'agent_env') in gen_batch.non_tensor_batch:
+            for i in range(len(gen_batch)):
+                agent_env = gen_batch.non_tensor_batch[key][i]
+                if isinstance(agent_env, np.ndarray):
+                    agent_env = agent_env.tolist()
+                gen_batch.non_tensor_batch['extra_data'][i].update({'agent_env': agent_env})
+
         sample_kwargs = (self.config.actor_rollout_ref.rollout.train_generate_kwargs
                          if is_train else self.config.actor_rollout_ref.rollout.val_generate_kwargs)
         sample_kwargs_dict = OmegaConf.to_container(sample_kwargs, resolve=True)

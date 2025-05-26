@@ -8,6 +8,8 @@ import torch
 from threading import Lock
 import asyncio
 import copy
+import base64
+import dill
 from .query_plugin import QueryPlugin, batch_sync_tp_plugin_queries
 
 
@@ -72,7 +74,6 @@ class Query:
         self.input_len = len(input_ids)
         self.is_context_computing = True
         self.new_token_ids = []
-        self.global_new_token_ids = []
         self.new_token_log_probs = []
         self.probs_gt_threshold_num = []
         self.probs_lt_threshold_sum = []
@@ -128,15 +129,14 @@ class Query:
 
     def set_finished(self, is_partial=False, exception=None):
         self.is_finished = not is_partial
-        self.global_new_token_ids.extend(self.new_token_ids)
         self.finished_time = time.time() * 1000
         self._exception = exception
+        self.detach()
 
     def reset_compute(self):
         self.kv_slot_ids = []
         self.is_context_computing = True
         self.input_ids.extend(self.new_token_ids)
-        self.global_new_token_ids.extend(self.new_token_ids)
         self.new_token_ids = []
         self.input_embedding = None
         self.context_shift = 0
@@ -164,13 +164,6 @@ class Query:
         if self.plugin_query:
             self.plugin_query.record_model_token(token_id)
 
-    def set_plugin_query(self, plugin_config, tokenizer, env_strs, tp_group):
-        self.plugin_query = QueryPlugin(query=self,
-                                        config=plugin_config,
-                                        tokenizer=tokenizer,
-                                        env_strs=env_strs,
-                                        tp_group=tp_group)
-
     def meet_pause_condition(self) -> bool:
         if self.plugin_query:
             return self.plugin_query.meet_pause_condition()
@@ -193,12 +186,6 @@ class Query:
             return
         if self.plugin_query:
             self.plugin_query.set_resume_state(state['plugin_query'])
-
-    @property
-    def env_state_bytes(self) -> bytes:
-        if self.plugin_query:
-            return self.plugin_query.env_state_bytes
-        return None
 
     @property
     def model_output_mask(self) -> List[bool]:
@@ -241,6 +228,39 @@ class Query:
         query.max_length = sampling_kwargs.get("max_length", 1024)
         query.meta_info = meta_info or {}
         return query
+
+    @property
+    def extra_data(self) -> Dict[str, str]:
+        extra_data = copy.copy(self.meta_info.get('extra_data', {}))
+        if self.plugin_query is not None:
+            extra_data['env_states'] = self.plugin_query.env_state_b64
+        resume_state = self.get_resume_state()
+        if resume_state is not None:
+            extra_data['resume_state'] = base64.b64encode(dill.dumps(resume_state)).decode('utf-8')
+        return extra_data
+
+    def attach_session(self, session):
+        """Attach session, initialize session-dependant fields"""
+        generation_kwargs = self.meta_info['generation_kwargs']
+        plugin_config = generation_kwargs.get('plugin_config', None)
+        plugin_enabled = plugin_config and plugin_config.get('enable', False)
+
+        if plugin_enabled:
+            self.plugin_query = QueryPlugin(plugin_config)
+            self.plugin_query.attach_session(session=session, query=self)
+
+        extra_data = self.meta_info.get('extra_data', {})
+        resume_state = extra_data.get('resume_state', None)
+        if resume_state is not None:
+            assert isinstance(resume_state, str), f"resume_state should be a b64 string, got {type(resume_state)}"
+            resume_state_bytes = base64.b64decode(resume_state)
+            self.set_resume_state(dill.loads(resume_state_bytes))
+
+    def detach(self):
+        """Detach session-dependant fields"""
+        if self.plugin_query:
+            self.plugin_query = copy.copy(self.plugin_query)
+            self.plugin_query.detach()
 
 
 class AsyncQuery:

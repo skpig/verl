@@ -62,9 +62,18 @@ def get_query(config, prompt) -> Query:
 
     env_kwargs = {"env_type": "basic", "env_args": {"round_ndigits": 3}}
     env_str = f"example_env@{json.dumps(env_kwargs)}"
+    config = OmegaConf.to_container(config, resolve=True)
+    query.meta_info = {'generation_kwargs': {'plugin_config': config}, 'extra_data': {'agent_env': [env_str],}}
 
-    config = OmegaConf.to_container(config)
-    query.set_plugin_query(config, tokenizer=tokenizer, env_strs=[env_str], tp_group=get_tp_group())
+    from dataclasses import dataclass
+
+    @dataclass
+    class MockInferenceSession:
+        tokenizer: None
+        tp_group: None
+
+    sess = MockInferenceSession(tokenizer=tokenizer, tp_group=get_tp_group())
+    query.attach_session(sess)
     return query
 
 

@@ -35,7 +35,7 @@ jobs:
         name: setup dependency
         commands:
           - cd /opt/tiger
-          - git clone -b 20250103 git@code.byted.org:seed/seed_models.git
+          - git clone -b v1.3.0 --single-branch git@code.byted.org:seed/seed_models.git
           - cd seed_models
           - pip3 install -e . --user
           - cd /opt/tiger
@@ -51,15 +51,18 @@ jobs:
           - pip3 install pytest-xdist
       - name: agents
         commands:
+          - export NCCL_SHM_DISABLE=1
           - cd -
+          - pytest -n 4 -v tests/agents/test_example_env.py tests/agents/test_example_plugin.py tests/agents/test_query_plugin.py tests/agents/test_plugin_manager.py
           - ray stop --force
           - ray start --num-cpus=100 --head
-          - pytest tests/agents -v
+          - pytest -n 4 -v tests/agents/test_e2e_gen.py
           - ray stop --force
       - name: rollout
         commands:
+          - export NCCL_SHM_DISABLE=1
           - cd -
           - ray stop --force
           - ray start --num-cpus=100 --head
-          - pytest -n 4 tests/rollout -v
+          - pytest -n 4 -v tests/rollout/test_rollout_manager.py
           - ray stop --force

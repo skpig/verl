@@ -12,6 +12,8 @@ from alpha_seed.workers.agents.plugins.plugin_manager import (
 )
 from enum import Enum
 import pickle
+import dill
+import base64
 
 
 class TokenRole(Enum):
@@ -118,33 +120,56 @@ class WrappedFuture:
         self._result = result
 
 
+class DetachedEnv:
+
+    def __init__(self, state_dict: Dict):
+        self._state_dict = state_dict
+
+    def state_dict(self):
+        return self._state_dict
+
+
+@dataclass
 class QueryPlugin:
 
-    def __init__(
-        self,
-        query,
-        config: Dict,
-        tokenizer: AutoTokenizer,
-        env_strs: List[str],
-        tp_group: Union[None, dist.ProcessGroup],
-    ):
-        from alpha_seed.workers.xperf_rollout.component.query import Query
-
-        self._query: Query = query
-        assert isinstance(query, Query)
-
+    def __init__(self, config: Dict):
         self.config: Dict = config
         assert self.config["enable"]
-        self.tokenizer: AutoTokenizer = tokenizer
-        self.plugin_manager: PluginManager = get_plugin_manager(config, tokenizer=tokenizer)
-        self.plugin_match_state = self.plugin_manager.get_match_state()
         self.call_round: int = 0
-        self.envs: List[BaseEnv] = create_agent_envs_from_str(env_strs, tokenizer=tokenizer)
-        self.env_states: List[EnvStates] = [EnvStates() for _ in range(len(self.envs))]
         self.plugin_metrics: Dict[str, Union[List, int]] = dict()
-        self.tp_group: dist.ProcessGroup = tp_group
         self.output_ranges: List[TokenRange] = []
+        self.plugin_match_state = None
+        self.envs: List[BaseEnv] = []
+        self.env_states: List[EnvStates] = []
         self.futures: List[WrappedFuture] = []
+
+    def attach_session(self, session, query):
+        from alpha_seed.workers.xperf_rollout.component.query import Query
+        extra_data = query.meta_info.get('extra_data', {})
+        env_strs = extra_data.get('agent_env', [])
+
+        self._query: Query = query
+        self.tokenizer = session.tokenizer
+        self.tp_group = session.tp_group
+        self.plugin_manager: PluginManager = get_plugin_manager(self.config, tokenizer=self.tokenizer)
+        self.plugin_match_state = self.plugin_manager.get_match_state()
+        self.envs = create_agent_envs_from_str(env_strs)
+        self.env_states = [EnvStates() for _ in range(len(self.envs))]
+
+    def detach(self):
+        self._query = None
+        self.tokenizer = None
+        self.tp_group = None
+        self.plugin_manager = None
+        detached_futures = []
+        for fut in self.futures:
+            new_fut = WrappedFuture(inner_future=None)
+            # NOTE: set result None if fut is pending
+            result = fut.result() if fut.done() else None
+            new_fut.set_result(result)
+            detached_futures.append(new_fut)
+        self.futures = detached_futures
+        self.envs = [DetachedEnv(state_dict=env.state_dict()) for env in self.envs]
 
     @property
     def pause_condition(self) -> str:
@@ -229,13 +254,16 @@ class QueryPlugin:
         results = [fut.result() for fut in self.futures]
         self.futures.clear()
         self.call_round += 1
+        results_str_list = []
         # format results to str
-        for plugin_resps, metrics in results:
-            results_str = '\n'.join([resp.output for resp in plugin_resps.values()])
+        for i in range(len(results)):
+            if results[i] is None:
+                continue
+            plugin_resps, metrics = results[i]
+            results_str_list.append('\n'.join([resp.output for resp in plugin_resps.values()]))
             self._update_plugin_metrics(metrics)
 
-        results_str = "\n".join(
-            [resp.output for plugin_results, plugin_metrics in results for resp in plugin_results.values()])
+        results_str = "\n".join(results_str_list)
         if self.result_apply_chat_template:
             # chat_template = "{% for message in messages %}{% set role = message['role'] %}{{  '\n' + role + '\n' + message['content'] | trim + eos_token }}{% endfor %}{% if add_generation_prompt %}{{ 'assistant\n'}}{% endif %}"
             chat = [{"role": "user", "content": results_str}]
@@ -263,8 +291,8 @@ class QueryPlugin:
         self.env_states = new_env_states
 
     @property
-    def env_state_bytes(self) -> bytes:
-        return pickle.dumps(self.env_states)
+    def env_state_b64(self) -> str:
+        return base64.b64encode(dill.dumps(self.env_states)).decode('utf-8')
 
     @property
     def model_output_mask(self) -> List[bool]:
@@ -298,15 +326,16 @@ class QueryPlugin:
         state = dict()
         state["call_round"] = self.call_round
         state["plugin_match_state"] = self.plugin_match_state
-        state["envs"] = self.envs
+        state["env_state_dicts"] = [env.state_dict() for env in self.envs]
         state["env_states"] = self.env_states
-        state["futures"] = self.futures
+        state['futures'] = self.futures
         return state
 
     def set_resume_state(self, state: Dict):
         self.call_round = state["call_round"]
         self.plugin_match_state = state["plugin_match_state"]
-        self.envs = state["envs"]
+        for env, state_dict in zip(self.envs, state['env_state_dicts']):
+            env.load_state_dict(state_dict)
         self.env_states = state["env_states"]
         self.futures = state["futures"]
 

@@ -299,9 +299,11 @@ class RewardManager():
                 score_fn_inputs["code_sandbox_psm"] = self.config.trainer.code_sandbox_psm
             if reward_style == "verifier_service":
                 score_fn_inputs["verifier_service_psm"] = self.config.trainer.verifier_service_psm
-            env_state_bytes = data_item.non_tensor_batch.get('env_states', None)
-            if env_state_bytes is not None:
-                score_fn_inputs['env_state_bytes'] = env_state_bytes
+            extra_data = data_item.non_tensor_batch.get('extra_data', None)
+            if isinstance(extra_data, dict) and ((env_state_bytes := extra_data.get('env_states', None)) is not None):
+                import base64
+                score_fn_inputs['env_state_bytes'] = base64.b64decode(env_state_bytes) if isinstance(
+                    env_state_bytes, str) else env_state_bytes
 
             if self.config.data.image_key is not None and format_reward != 0:
                 score = 0

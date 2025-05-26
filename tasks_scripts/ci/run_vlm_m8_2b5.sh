@@ -1,5 +1,4 @@
 set -x
-ray stop --force
 NUM_STEPS="${NUM_STEPS:-240}"
 
 N_GPUS_PER_NODE="${N_GPUS_PER_NODE:-8}"

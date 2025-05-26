@@ -58,8 +58,12 @@ async def _internal_call(item, config, host, port: int):
         prompt_ids = input_ids[0, -valid_input_len:].tolist()
         data = {"prompt": prompt_ids}
         meta_info = copy.copy(item.meta_info)
+        # required for eos callback
         meta_info['uid'] = item.non_tensor_batch['uid'][0]
         meta_info['reward_model'] = item.non_tensor_batch['reward_model'][0]
+        # required for tool calling
+        if (key := 'extra_data') in item.non_tensor_batch:
+            meta_info[key] = item.non_tensor_batch[key][0]
 
         completion = await chat_completions(data, meta_info, config, host, port)
     except asyncio.CancelledError:

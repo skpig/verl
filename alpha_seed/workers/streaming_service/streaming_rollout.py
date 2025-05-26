@@ -97,15 +97,6 @@ def remove_nccl_files():
         p.unlink(missing_ok=True)
 
 
-def omegaconf_config_to_py_obj(config):
-    if isinstance(config, omegaconf.DictConfig):
-        return {k: omegaconf_config_to_py_obj(v) for k, v in config.items()}
-    elif isinstance(config, omegaconf.ListConfig):
-        return [omegaconf_config_to_py_obj(item) for item in config]
-    else:
-        return config
-
-
 class AsyncXPerfGPTRollout(object):
     """
     This class creates a training framework agnostic XPerfGPTRollout.
@@ -236,8 +227,7 @@ class AsyncXPerfGPTRollout(object):
                                           enable_cuda_graph=enable_cuda_graph,
                                           standalone=self.is_standalone,
                                           schedule_strategy=self.config.schedule_strategy,
-                                          step_profiler=step_profiler,
-                                          plugin_config=self.config.plugin)
+                                          step_profiler=step_profiler)
         inference_sess.max_off_policy_steps = self.config.get('max_off_policy_steps', 5)
         with tempfile.NamedTemporaryFile(mode='w', suffix=".json") as f:
             print(f"load xperf config ... {text_cfg}")
@@ -454,8 +444,6 @@ class AsyncXPerfGPTRollout(object):
         while True:
             (query_pool, complete_ratio, generation_kwargs, prompt_meta_info) = self.input_queue.get(block=True)
             original_query_pool = copy.deepcopy(query_pool)
-            # convert omegaconf config to py obj to prevent performance issue
-            generation_kwargs = omegaconf_config_to_py_obj(generation_kwargs)
             self.inference_engine.set_generator_strategy(**generation_kwargs)
             with logging_set_level(self.config.get('logging_level', 'WARN')), self.profiler_context as p:
                 try:
@@ -478,9 +466,8 @@ class AsyncXPerfGPTRollout(object):
             is_finished = []
             off_policy_steps = []
             model_output_masks = []
-            env_states = []
             query_metrics = []
-            resume_states = []
+            extra_data = []
             for prompt, v in zip(original_query_pool, self.inference_engine.get_inorder_responses()):
                 response_output_ids = (v.input_ids + v.new_token_ids)[len(prompt):]
                 response_outputs.append(response_output_ids)
@@ -490,9 +477,8 @@ class AsyncXPerfGPTRollout(object):
                 is_finished.append(v.is_finished)
                 off_policy_steps.append([-1] * len(v.new_token_log_probs))
                 model_output_masks.append(v.model_output_mask)
-                env_states.append(v.env_state_bytes)
                 query_metrics.append(v.metrics)
-                resume_states.append(dill.dumps(v.get_resume_state()))
+                extra_data.append(v.extra_data)
 
             metrics = {}
             if hasattr(self.inference_engine.infer_scheduler,
@@ -515,8 +501,7 @@ class AsyncXPerfGPTRollout(object):
                                  response_model_output_mask=model_output_masks,
                                  this_turn_off_policy_steps=off_policy_steps,
                                  is_finished=is_finished,
-                                 env_states=env_states,
-                                 resume_states=resume_states,
+                                 extra_data=extra_data,
                                  metrics=metrics)
             self.output_queue.put(data_pack)
 
@@ -536,17 +521,18 @@ class AsyncXPerfGPTRollout(object):
         off_turn_off_policy_steps = prompts.batch["off_policy_steps"]
         first_non_one_indices = (prompt_ids != self.tokenizer.pad_token_id).int().argmax(dim=1)
         rmv_padding_prompt_ids = [row[index:].tolist() for row, index in zip(prompt_ids, first_non_one_indices)]
+        generation_kwargs = prompts.meta_info['generation_kwargs']
 
         # (zhangchi.usc1992) note, here we pass all the non_tensor_batch and meta_info to the inference engine as prompt_meta_info.
         prompt_meta_info = [{
-            "off_policy_steps": max(off_policy_step)
+            "off_policy_steps": max(off_policy_step),
+            "generation_kwargs": generation_kwargs,
         } for off_policy_step in off_turn_off_policy_steps.tolist()]
         for key, value in prompts.non_tensor_batch.items():
             for i in range(batch_size):
                 prompt_meta_info[i][key] = value[i]
 
-        self.input_queue.put(
-            (rmv_padding_prompt_ids, complete_ratio, prompts.meta_info['generation_kwargs'], prompt_meta_info))
+        self.input_queue.put((rmv_padding_prompt_ids, complete_ratio, generation_kwargs, prompt_meta_info))
 
         if is_async:
             yield

@@ -5,6 +5,7 @@ from alpha_seed.workers.agents.envs import create_agent_envs_from_str
 import torch
 import torch.distributed as dist
 from functools import partial
+from tests.test_utils import get_config, PytestXdistEnv
 
 
 def get_plugin_config(override_config=None):
@@ -17,15 +18,6 @@ def get_plugin_config(override_config=None):
     return config
 
 
-def get_config(override_config=None):
-    default_conf_path = (Path(__file__).parent.parent.parent / "tasks/config/ppo_trainer.yaml")
-    default_conf = OmegaConf.load(default_conf_path)
-    if override_config is None:
-        return default_conf
-    config = OmegaConf.merge(default_conf, override_config)
-    return config
-
-
 def get_basic_example_env():
     kwargs = {'env_type': 'basic', 'env_args': {'round_ndigits': 2}}
     env = create_agent_envs_from_str(f'example_env@{json.dumps(kwargs)}')[0]
@@ -33,11 +25,12 @@ def get_basic_example_env():
 
 
 def setup_dist(rank, world_size, backend='nccl'):
+    xdist_env = PytestXdistEnv()
     device = torch.device(f'cuda:{rank}')
     torch.cuda.set_device(device)
     dist.init_process_group(
         backend=backend,
-        init_method=f"tcp://localhost:12135",
+        init_method=f"tcp://localhost:{12135 + xdist_env.worker_id}",
         rank=rank,
         world_size=world_size,
         device_id=device,

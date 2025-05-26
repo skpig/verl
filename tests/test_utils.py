@@ -65,10 +65,12 @@ def gpu_allocator(request, monkeypatch):
     yield
 
 
+@pytest.fixture(scope='function')
 def set_common_envs(monkeypatch):
     monkeypatch.setenv('TOKENIZERS_PARALLELISM', "false")
     monkeypatch.setenv("NCCL_DEBUG", "WARN")
     monkeypatch.setenv("XPERF_DUMP_NAN", "0")
+    monkeypatch.setenv("RAY_prestart_worker_first_driver", "0")
 
 
 def get_config(override_config=None):

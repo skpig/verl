@@ -185,8 +185,7 @@ class DataPack:
     response_model_output_mask: list
     is_finished: list
     metrics: dict
-    env_states: Optional[list] = None
-    resume_states: Optional[list] = None
+    extra_data: Optional[list] = None
 
     @classmethod
     def create_from_completion(cls, message):
@@ -194,9 +193,10 @@ class DataPack:
                              response_log_probs=[message.response_log_probs],
                              response_probs_gt_threshold_num=[message.response_probs_gt_threshold_num],
                              response_probs_lt_threshold_sum=[message.response_probs_lt_threshold_sum],
-                             response_model_output_mask=[[True] * len(message.raw_output_ids)],
+                             response_model_output_mask=[message.model_output_mask],
                              this_turn_off_policy_steps=[[-1 for _ in range(len(message.raw_output_ids))]],
                              is_finished=[message.is_finished],
+                             extra_data=[message.extra_data],
                              metrics=message.metrics)
         return data_pack
 
@@ -206,9 +206,10 @@ class DataPack:
                              response_log_probs=[message['response_log_probs']],
                              response_probs_gt_threshold_num=[message['response_probs_gt_threshold_num']],
                              response_probs_lt_threshold_sum=[message['response_probs_lt_threshold_sum']],
-                             response_model_output_mask=[[True] * len(message['raw_output_ids'])],
+                             response_model_output_mask=[message['model_output_mask']],
                              this_turn_off_policy_steps=[[-1 for _ in range(len(message['raw_output_ids']))]],
                              is_finished=[message['is_finished']],
+                             extra_data=[message['extra_data']],
                              metrics=message['metrics'])
         return data_pack
 
@@ -283,10 +284,7 @@ def pack_to_dataproto(prompts, tokenizer, data_pack: DataPack, config) -> DataPr
     out.meta_info["xperf_metrics"] = data_pack.metrics
     out.meta_info["generation_kwargs"] = prompts.meta_info['generation_kwargs']
     out.non_tensor_batch = prompts.non_tensor_batch
-    if data_pack.env_states is not None:
-        out.non_tensor_batch['env_states'] = np.array(data_pack.env_states, dtype=object)
-    if data_pack.resume_states is not None:
-        out.non_tensor_batch['resume_states'] = np.array(data_pack.resume_states, dtype=object)
+    out.non_tensor_batch['extra_data'] = np.array(data_pack.extra_data, dtype=object)
     return out
 
 

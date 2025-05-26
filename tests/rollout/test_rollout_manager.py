@@ -121,7 +121,7 @@ def mock_save_dataproto(data: DataProto, prefix: str = ''):
 @pytest.mark.parametrize("weights_communicator", ["nccl", "ucx"])
 @pytest.mark.parametrize("elastic", [True, False])
 @pytest.mark.parametrize("gpu_allocator", [4], indirect=True)
-def test_train_generate(monkeypatch, gpu_allocator, ray_fixture, complete_ratio, is_server, weights_communicator,
+def test_train_generate(set_common_envs, gpu_allocator, ray_fixture, complete_ratio, is_server, weights_communicator,
                         elastic):
     if is_server and (0.0 < complete_ratio < 1.0):
         pytest.skip("skip is_server and 0<complete_ratio<1")
@@ -132,7 +132,6 @@ def test_train_generate(monkeypatch, gpu_allocator, ray_fixture, complete_ratio,
     if elastic and complete_ratio > 0.0:
         pytest.skip("skip elastic and complete_ratio > 0.0")
 
-    set_common_envs(monkeypatch)
     config = get_common_config()
     has_standalone = complete_ratio < 1.0
     config.actor_rollout_ref.rollout.mode = 'server' if is_server else 'batch'
@@ -179,11 +178,10 @@ def test_train_generate(monkeypatch, gpu_allocator, ray_fixture, complete_ratio,
 @pytest.mark.parametrize("is_server", [True, False])
 @pytest.mark.parametrize("weights_communicator", ["nccl", "ucx"])
 @pytest.mark.parametrize("gpu_allocator", [4], indirect=True)
-def test_val_generate(monkeypatch, gpu_allocator, ray_fixture, is_standalone, is_server, weights_communicator):
+def test_val_generate(set_common_envs, gpu_allocator, ray_fixture, is_standalone, is_server, weights_communicator):
     if not is_standalone and weights_communicator == "ucx":
         pytest.skip("skip weights_communicator=ucx and hybrid engine mode")
 
-    set_common_envs(monkeypatch)
     config = get_common_config()
     config.actor_rollout_ref.rollout.mode = 'server' if is_server else 'batch'
     config.actor_rollout_ref.rollout.weights_communicator = weights_communicator
@@ -208,8 +206,7 @@ def test_val_generate(monkeypatch, gpu_allocator, ray_fixture, is_standalone, is
 @pytest.mark.parametrize("train_standalone", [True, False])
 @pytest.mark.parametrize("val_standalone", [True, False])
 @pytest.mark.parametrize("gpu_allocator", [4], indirect=True)
-def test_streaming_train_val(monkeypatch, gpu_allocator, ray_fixture, is_server, train_standalone, val_standalone):
-    set_common_envs(monkeypatch)
+def test_streaming_train_val(set_common_envs, gpu_allocator, ray_fixture, is_server, train_standalone, val_standalone):
     config = get_common_config()
     config.actor_rollout_ref.rollout.mode = 'server' if is_server else 'batch'
     config.actor_rollout_ref.rollout.complete_ratio = 0.0 if train_standalone else 1.0

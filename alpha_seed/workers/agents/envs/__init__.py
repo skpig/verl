@@ -25,6 +25,12 @@ class BaseEnv(ABC):
     def metrics(self) -> Dict:
         return {}
 
+    def state_dict(self) -> Dict:
+        return {}
+
+    def load_state_dict(self, state_dict: Dict):
+        pass
+
 
 def create_agent_envs_from_str(env_strs: Union[None, List[str], str], **kwargs) -> List[BaseEnv]:
     if env_strs is None:

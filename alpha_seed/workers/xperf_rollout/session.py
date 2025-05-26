@@ -29,6 +29,7 @@ import copy
 import logging
 import pickle
 import dill
+import base64
 import time
 from threading import Lock
 from transformers import AutoTokenizer
@@ -156,7 +157,6 @@ class InferenceSession:
         standalone=False,
         schedule_strategy="default", # ['default','fifo']
         step_profiler: StepProfiler = None,
-        plugin_config=None,
         enable_mtp_decoding=False,
     ):
         """Initialize inference session with hardware/performance parameters"""
@@ -251,7 +251,6 @@ class InferenceSession:
         self.update_weights_lock = Lock()
         self._accepted_queries_mutex = Lock()
         self.tp_group = None
-        self.plugin_config = plugin_config
 
     def _validate_paged_attention_config(self):
         """Validate paged attention configuration constraints"""
@@ -419,8 +418,6 @@ class InferenceSession:
         for key, value in kwargs.items():
             if key == "stop_sequence_tokens":
                 self.__dict__[key] = value
-            elif key == "plugin_config":
-                self.__dict__[key] = value
             elif value is None:
                 continue
             elif key not in self.__dict__.keys():
@@ -506,9 +503,6 @@ class InferenceSession:
     def prepare_context_inputs(self, input_ids_list, logits_masks, prompt_meta_info: List[Dict]):
         code_books = [None for _ in range(len(input_ids_list))]
         off_policy_steps = [0 for _ in range(len(input_ids_list))]
-        plugin_configs = [None for _ in range(len(input_ids_list))]
-        agent_env_strs = [None for _ in range(len(input_ids_list))]
-        resume_states = [None for _ in range(len(input_ids_list))]
 
         if prompt_meta_info is not None:
             assert (len(input_ids_list) == len(prompt_meta_info)
@@ -521,9 +515,6 @@ class InferenceSession:
             temperature = [meta_info.get("temperature", None) for meta_info in prompt_meta_info]
             max_new_tokens = [meta_info.get("max_new_tokens", self.max_new_tokens) for meta_info in prompt_meta_info]
             max_length = [meta_info.get("max_length", self.max_length) for meta_info in prompt_meta_info]
-            plugin_configs = [meta_info.get("plugin", self.plugin_config) for meta_info in prompt_meta_info]
-            agent_env_strs = [meta_info.get("agent_env", None) for meta_info in prompt_meta_info]
-            resume_states = [meta_info.get("resume_states", None) for meta_info in prompt_meta_info]
         for idx, input_ids in enumerate(input_ids_list):
             code_book = self._prepare_codebooks(input_ids, code_book=code_books[idx])
             prompt = ""
@@ -552,16 +543,7 @@ class InferenceSession:
                 query.temperature = temperature[idx] if prompt_meta_info is not None else None
                 query.max_new_tokens = max_new_tokens[idx] if prompt_meta_info is not None else self.max_new_tokens
                 query.max_length = max_length[idx] if prompt_meta_info is not None else self.max_length
-                plugin_enabled = plugin_configs[idx].get('enable', False)
-                if plugin_enabled:
-                    query.set_plugin_query(plugin_configs[idx],
-                                           tokenizer=self.tokenizer,
-                                           env_strs=agent_env_strs[idx],
-                                           tp_group=self.tp_group)
-                resume_state = resume_states[idx]
-                if resume_state is not None:
-                    query.set_resume_state(dill.loads(resume_state))
-
+                query.attach_session(session=self)
                 with self._accepted_queries_mutex:
                     self.all_accepted_queries[query.id] = query
                 self.unfinished_off_policy_steps_set.add_one(query.off_policy_steps)
@@ -641,7 +623,9 @@ class InferenceSession:
             for q in self.all_accepted_queries.values():
                 qt = q.meta_info.get('query_type')
                 if qt == query_type:
-                    ret.append(q.clone())
+                    ret_q = q.clone()
+                    ret_q.detach()
+                    ret.append(ret_q)
 
             if not retain_finished:
                 for q in ret:
@@ -689,8 +673,8 @@ class InferenceSession:
             else:
                 threshold = self.num_pred_tokens + 1 if self.enable_ngrams_decoding else 0
                 if self._exceed_length_condition(query, tokens_threshold=threshold):
-                    self.finished[query.id].output_prompt = self.tokenizer.batch_decode([query.new_token_ids
-                                                                                        ]) if self.decode_output else ""
+                    self.all_accepted_queries[query.id].output_prompt = self.tokenizer.batch_decode(
+                        [query.new_token_ids]) if self.decode_output else ""
                     self._finish_query(query)
                 else:
                     self.waiting.append(query)
@@ -941,6 +925,7 @@ class InferenceSession:
         new_queries = [aq.query for aq in new_joins]
         with self._accepted_queries_mutex:
             for q in new_queries:
+                q.attach_session(session=self)
                 self.all_accepted_queries[q.id] = q
                 self.unfinished_off_policy_steps_set.add_one(q.off_policy_steps)
         self.pending.truncate(num_ready)
