@@ -78,7 +78,7 @@ class InferScheduler():
         self.graph_total_length_placeholder = {}
         self.graph_kv_cache_index_placeholder = {}
         self.output_placeholder = {}
-        if not self.enable_cuda_graph or self.engine.module.wte_weight.is_meta:
+        if not self.enable_cuda_graph or self.engine.module.wte_weight.is_meta or self.engine.is_xperf_triton:
             return
         for bs in [1, 2, 4]:
             self.graph_decode_input_ids_placeholder[bs] = torch.zeros(bs, 1).cuda().int()

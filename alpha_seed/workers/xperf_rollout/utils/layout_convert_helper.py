@@ -28,7 +28,8 @@ from alpha_seed.workers.xperf_rollout.utils.custom_xperf_convert_helper import X
 
 
 def init_meta(tp_model):
-    if isinstance(tp_model, XCustomInferenceModuleAdapter):
+    from alpha_seed.workers.xperf_rollout.utils.xperf_gpt_triton_helper import XPerfTritonInferenceModule
+    if isinstance(tp_model, (XCustomInferenceModuleAdapter, XPerfTritonInferenceModule)):
         param_list = tp_model.get_param_list(skip_meta=False)
     else:
         param_list = [tp_model.layernorm_weight, tp_model.wte_weight, tp_model.lm_head_weight] + \
@@ -43,7 +44,8 @@ def init_meta(tp_model):
 
 
 def offload_param_to_device(tp_model, device):
-    if isinstance(tp_model, XCustomInferenceModuleAdapter):
+    from alpha_seed.workers.xperf_rollout.utils.xperf_gpt_triton_helper import XPerfTritonInferenceModule
+    if isinstance(tp_model, (XCustomInferenceModuleAdapter, XPerfTritonInferenceModule)):
         param_list = tp_model.get_param_list(skip_meta=True)
     else:
         param_list = [tp_model.layernorm_weight, tp_model.wte_weight, tp_model.lm_head_weight] + \
@@ -59,8 +61,12 @@ def offload_param_to_device(tp_model, device):
 
 
 def free_kv_cache(tp_model):
+    from alpha_seed.workers.xperf_rollout.utils.xperf_gpt_triton_helper import XPerfTritonInferenceModule
     if isinstance(tp_model, XCustomInferenceModuleAdapter):
         # NOTE: free kv cache not supported yet
+        return
+    elif isinstance(tp_model, XPerfTritonInferenceModule):
+        tp_model.free_kv_cache()
         return
     for i in range(tp_model.num_layers):
         tp_model.layers_impl[i].free_kv_cache()
@@ -73,7 +79,8 @@ def offload_to_device(tp_model, device="cpu"):
 
 
 def load_to_cuda(tp_model):
-    if isinstance(tp_model, XCustomInferenceModuleAdapter):
+    from alpha_seed.workers.xperf_rollout.utils.xperf_gpt_triton_helper import XPerfTritonInferenceModule
+    if isinstance(tp_model, (XCustomInferenceModuleAdapter, XPerfTritonInferenceModule)):
         param_list = tp_model.get_param_list(skip_meta=True)
     else:
         if hasattr(tp_model, 'layers_weight'):

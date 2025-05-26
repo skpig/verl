@@ -183,10 +183,19 @@ actor_rollout_ref:
       enable: False
       backbone: null
       preset: null
+    xperf_triton:
+      enable: False
+      use_paged_attn: False
+      max_batch_size: 32
+      max_ctx_batch_size: 8
+      num_slots: 32
+    enable_cuda_graph: False
+    enable_paged_attention: False
   rollout_server_args: ${rollout_server}
   streaming_rollout_args: ${streaming_rollout}
   streaming_validator_args: ${streaming_validator}
   use_cuda_timer: False # doesn't take effect; only for backward-compatibility
+  
 
 critic:
   remove_o_bias: False

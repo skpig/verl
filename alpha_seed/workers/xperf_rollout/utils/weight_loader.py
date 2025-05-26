@@ -46,10 +46,16 @@ from alpha_seed.workers.xperf_rollout.utils.fp8_convert_helper import (
 def get_xperf_gpt_weight_bind_fn(model_config: PretrainedConfig,
                                  quant_mode: str = "NO_QUANT",
                                  backend='fsdp',
-                                 is_custom_xperf: bool = False):
+                                 is_custom_xperf: bool = False,
+                                 is_xperf_triton: bool = False):
     if is_custom_xperf:
         from alpha_seed.workers.xperf_rollout.utils.custom_xperf_convert_helper import _reshard_state_dict_to_xperf_custom
         return partial(_reshard_state_dict_to_xperf_custom, model_config=model_config, backend=backend)
+    if is_xperf_triton:
+        assert model_config.model_type == 'seed_m8', "Only support seed_m8 for xperf_triton"
+
+        from alpha_seed.workers.xperf_rollout.utils.xperf_gpt_triton_helper import _reshard_fsdp_state_dict_to_xperf_triton_m8
+        return partial(_reshard_fsdp_state_dict_to_xperf_triton_m8, model_config=model_config, backend=backend)
     if backend == 'fsdp':
         if quant_mode == "WFP8":
             if model_config.model_type == 'seed_p6':

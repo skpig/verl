@@ -71,6 +71,7 @@ class ActorXPerfGPTShardingManager(BaseShardingManager):
         self.bind_fn = get_xperf_gpt_weight_bind_fn(model_config,
                                                     self.inference_engine.engine.module.quant_mode,
                                                     is_custom_xperf=self.inference_engine.is_xperf_custom,
+                                                    is_xperf_triton=self.inference_engine.is_xperf_triton,
                                                     backend=backend)
 
         # Note that torch_random_states may be different on each dp rank
@@ -132,7 +133,12 @@ class ActorXPerfGPTShardingManager(BaseShardingManager):
             # print("setting random states...", self.gen_random_states)
             torch.cuda.set_rng_state(self.gen_random_states)
 
+        if self.inference_engine.is_xperf_triton:
+            self.inference_engine.engine.module.enter()
+
     def __exit__(self, exc_type, exc_value, traceback):
+        if self.inference_engine.is_xperf_triton:
+            self.inference_engine.engine.module.exit()
         # restore random states
         if self.device_mesh is not None:
             self.gen_random_states = torch.cuda.get_rng_state()

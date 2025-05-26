@@ -216,6 +216,13 @@ class AsyncXPerfGPTRollout(object):
                                temperature=self.config.train_generate_kwargs.temperature,
                                logits_manipulate_fn=logits_manipulate_fn)
         step_profiler = StepProfiler(self.config.profile)
+        if self.config.xperf_triton.enable:
+            max_batch_size = self.config.xperf_triton.max_batch_size
+            max_ctx_batch_size = self.config.xperf_triton.max_ctx_batch_size
+            num_slots = max_batch_size
+            if self.config.xperf_triton.use_paged_attn:
+                num_slots = self.config.xperf_triton.num_slots
+
         inference_sess = InferenceSession(num_slots=num_slots,
                                           max_batch_size=max_batch_size,
                                           max_length=self.config.prompt_length + self.config.response_length,
@@ -286,6 +293,7 @@ class AsyncXPerfGPTRollout(object):
                             if self.config.xperf_custom.enable:
                                 xperf_custom_kwargs['xperf_custom_backbone'] = self.config.xperf_custom.backbone
                                 xperf_custom_kwargs['xperf_custom_preset'] = self.config.xperf_custom.preset
+
                             inference_sess.init_inference_engine(f.name,
                                                                  generate_kwargs,
                                                                  rank0_split=False,
@@ -295,7 +303,9 @@ class AsyncXPerfGPTRollout(object):
                                                                  tokenizer_path=self.tokenizer.name_or_path,
                                                                  multi_host_tp=multi_host_tp,
                                                                  use_xperf_custom=self.config.xperf_custom.enable,
+                                                                 use_xperf_triton=self.config.xperf_triton.enable,
                                                                  vit_config=vision_cfg,
+                                                                 xperf_triton_cfg=self.config.xperf_triton,
                                                                  **xperf_custom_kwargs)
                     if dist.is_initialized() and tp_size > 1:
                         dist.barrier()

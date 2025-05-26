@@ -306,6 +306,7 @@ class InferenceSession:
                               session_config_path,
                               generation_config,
                               use_xperf_custom=False,
+                              use_xperf_triton=False,
                               vit_config=None,
                               **kwargs):
         """Initialize model engine and associated components
@@ -355,6 +356,9 @@ class InferenceSession:
             use_mtp=self.enable_mtp_decoding,
             **generation_config)
         init_inference_kwargs.update(kwargs)  # overridable by kwargs
+
+        self.is_xperf_custom = use_xperf_custom
+        self.is_xperf_triton = use_xperf_triton
         if use_xperf_custom:
             assert not self.enable_paged_attn, f"xperf custom for paged attention not supported yet."
             import xperf_gpt_custom
@@ -365,10 +369,16 @@ class InferenceSession:
             setattr(engine, "module", module)
             setattr(engine.config, "model_config", {"hidden_size": engine.config.hidden_size})
             self.engine = engine
-            self.is_xperf_custom = True
+        elif use_xperf_triton:
+            from alpha_seed.workers.xperf_rollout.utils.xperf_gpt_triton_helper import init_inference_triton
+            xperf_triton_cfg = kwargs.pop('xperf_triton_cfg')
+            init_inference_kwargs["eos_token_id"] = self.eos_token_id
+            init_inference_kwargs['enable_cuda_graph'] = self.enable_cuda_graph
+            init_inference_kwargs['use_paged_attn'] = xperf_triton_cfg.use_paged_attn
+            self.engine = init_inference_triton(**init_inference_kwargs)
+            self.enable_cuda_graph = False
         else:
             self.engine = init_inference(None, **init_inference_kwargs)
-            self.is_xperf_custom = False
         self.sampler = Sampler(generation_config=generation_config)
         self.num_return_sequences = self.engine.module.num_return_sequences
 
@@ -953,7 +963,7 @@ class InferenceSession:
         torch.manual_seed(int(os.getenv('XPERF_RANDOM_SEED', '0')))
         input_ids_list = self.truncate_prompts(prompts, logits_masks is not None)
         self.find_longest_common_prefix(input_ids_list, logits_masks)
-        if not self.is_xperf_custom:
+        if not self.is_xperf_custom and not self.is_xperf_triton:
             self.build_prefix_kv_cache()
             logging_rank(
                 logging.info, "find common prefix which contains {} tokens, reuse this kv cache!".format(
