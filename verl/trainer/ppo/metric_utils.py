@@ -31,8 +31,10 @@ from nltk.metrics.distance import edit_distance
 from nltk.translate.bleu_score import SmoothingFunction, sentence_bleu
 from traitlets import default
 
+from verl.trainer.ppo import core_algos
 from verl import DataProto
 from verl.utils.import_utils import deprecated
+from verl.utils.torch_functional import masked_mean
 
 @deprecated("verl.utils.metric.reduce_metrics")
 def reduce_metrics(metrics: Dict[str, List[Any]]) -> Dict[str, Any]:
@@ -238,6 +240,15 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
             - response_length/mean, max, min, clip_ratio: Statistics about response lengths
             - prompt_length/mean, max, min, clip_ratio: Statistics about prompt lengths
     """
+    # kl penalty
+    attention_mask = batch.batch["attention_mask"]
+    response_mask = attention_mask[:, -response_length:]
+    kld = core_algos.kl_penalty(batch.batch["old_log_probs"], batch.batch["ref_log_prob"], kl_penalty='kl')  # (batch_size, response_length)
+    kld = kld * response_mask.float()  # (batch_size, response_length)
+    current_kl = masked_mean(kld, mask=response_mask, axis=-1)  # average within each sequence
+    current_kl = torch.mean(current_kl, dim=0).item() # average across the batch
+
+
     sequence_score = batch.batch["token_level_scores"].sum(-1)
     sequence_reward = batch.batch["token_level_rewards"].sum(-1)
 
@@ -271,6 +282,8 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
         return_var = torch.var(valid_returns)
 
     metrics = {
+        # kl penalty
+        "actor/kl_metric": current_kl.detach().item(),
         # score
         "critic/score/mean": torch.mean(sequence_score).detach().item(),
         "critic/score/max": torch.max(sequence_score).detach().item(),
