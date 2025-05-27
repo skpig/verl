@@ -188,6 +188,7 @@ class CriticWorker(Worker):
             offload_threshold=config.get('act_offload_threshold', 1024 * 1024),
             offload_upbound=config.act_offload_upbound,
             buffer_size=config.act_offload_buff_size,
+            pin_memory=config.get("act_offload_pin_memory", False),
         )
 
         if hasattr(critic_module, "vision_encoder"):

@@ -316,7 +316,8 @@ class AsyncActorRolloutRefWorker(Worker):
         act_offload_kwargs = dict(
             offload_threshold=self.config.get('act_offload_threshold', 1024 * 1024),
             offload_upbound=self.config.get('act_offload_upbound', None),
-            buffer_size=self.config.get('act_offload_buff_size', 40),
+            buffer_size=self.config.get('act_offload_buff_size', 64),
+            pin_memory=self.config.get('act_offload_pin_memory', False),
         )
         if hasattr(actor_module, "vision_encoder"):
             block_cls = actor_module.language_model._no_split_modules + actor_module.vision_encoder._no_split_modules

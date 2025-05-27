@@ -29,8 +29,9 @@ class ActOffload(torch.autograd.graph.saved_tensors_hooks):
                  offload_size=(0, None),
                  dtype: torch.dtype = torch.bfloat16,
                  offload_last_layer: bool = False,
-                 buffer_size_gb: int = 40,
-                 dynamic_buffer_resize: bool = True):
+                 buffer_size_gb: int = 64,
+                 dynamic_buffer_resize: bool = True,
+                 pin_memory: bool = False):
         """
         Activation offload hooks
 
@@ -57,10 +58,11 @@ class ActOffload(torch.autograd.graph.saved_tensors_hooks):
         self.offload_stream = torch.cuda.Stream()
         # init cpu buffer
         self.buffer_ofst = 0
+        self.pin_memory = pin_memory
         self.cpu_buffer = torch.empty(buffer_size_gb * 1024 * 1024 * 1024 // dtype.itemsize,
                                       dtype=dtype,
                                       device=torch.device("cpu"),
-                                      pin_memory=True)
+                                      pin_memory=self.pin_memory)
         if torch.distributed.get_rank() == 0:
             print(f"allocating pinned cpu buffer for activation offload: {buffer_size_gb} GB")
         self.total_offload_numel = 0
@@ -101,7 +103,7 @@ class ActOffload(torch.autograd.graph.saved_tensors_hooks):
             x_cpu = self.cpu_buffer[self.buffer_ofst:self.buffer_ofst + numel].view(x.size())
             self.buffer_ofst += numel
         else:
-            x_cpu = torch.empty(x.data.size(), device=cpu_device, dtype=x.data.dtype, pin_memory=True)
+            x_cpu = torch.empty(x.data.size(), device=cpu_device, dtype=x.data.dtype, pin_memory=self.pin_memory)
         self.total_offload_numel += numel
         return x_cpu
 
@@ -144,10 +146,19 @@ class ActOffload(torch.autograd.graph.saved_tensors_hooks):
 
     def __enter__(self):
         assert len(self.current_layer) == 0, "current offloading cache is not empty"
-        # if self.buffer_ofst > 0:
-        #     warnings.warn(f"some activations are offloaded ({self.buffer_ofst}) to cpu but not brought back to gpu in previous backward.")
-        self.buffer_ofst = 0
+        if self.dynamic_buffer_resize:
+            if self.total_offload_numel > self.cpu_buffer.size(0):
+                size_gb = math.ceil(self.total_offload_numel * self.cpu_buffer.dtype.itemsize / (1024**3))
+                log_msg = f"[rank: {torch.distributed.get_rank()}]: resize offload cpu buffer to {size_gb:.2f} GB"
+                print(log_msg)
+                numel = int(size_gb) * (1024**3) // self.cpu_buffer.dtype.itemsize
+                self.cpu_buffer.untyped_storage().resize_(0)
+                self.cpu_buffer = torch.empty(numel,
+                                              dtype=self.cpu_buffer.dtype,
+                                              device=torch.device("cpu"),
+                                              pin_memory=self.pin_memory)
         self.total_offload_numel = 0
+        self.buffer_ofst = 0
         super().__enter__()
 
     def __exit__(self, *args: object):
@@ -158,13 +169,6 @@ class ActOffload(torch.autograd.graph.saved_tensors_hooks):
             self.current_layer = []
         else:
             self.layer_offload()
-        if self.dynamic_buffer_resize:
-            if self.total_offload_numel > self.cpu_buffer.size(0):
-                size_gb = math.ceil(self.total_offload_numel * self.cpu_buffer.dtype.itemsize / (1024**3))
-                log_msg = f"[rank: {torch.distributed.get_rank()}]: resize offload cpu buffer to {size_gb:.2f} GB"
-                logger.info(log_msg)
-                numel = int(size_gb) * (1024**3) // self.cpu_buffer.dtype.itemsize
-                self.cpu_buffer.resize_(numel)
 
     def mark_not_offload(self, obj):
         if isinstance(obj, Iterable):
@@ -207,11 +211,13 @@ def get_offload_context(enable,
                         offload_threshold=1 * 1024 * 1024,
                         offload_upbound=None,
                         offload_last_layer=False,
-                        buffer_size: int = 40):
+                        buffer_size: int = 64,
+                        pin_memory: bool = False):
     if enable:
         context = ActOffload(offload_size=(offload_threshold, offload_upbound),
                              offload_last_layer=offload_last_layer,
-                             buffer_size_gb=buffer_size)
+                             buffer_size_gb=buffer_size,
+                             pin_memory=pin_memory)
         register_act_offload_hook(module, act_offload_supported_layer_classes, context)
         return context
     else:

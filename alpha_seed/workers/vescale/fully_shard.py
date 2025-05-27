@@ -138,7 +138,7 @@ def fully_shard(model: PreTrainedModel,
         if act_offload_kwargs is None:
             act_offload_kwargs = {}
         apply_activation_offload(model,
-                                 buffer_size_gb=act_offload_kwargs.get('buffer_size', 40),
+                                 buffer_size_gb=act_offload_kwargs.get('buffer_size', 64),
                                  buffer_dtype=mp_config["param_dtype"])
 
     return model, metrics_context
