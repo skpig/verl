@@ -54,7 +54,7 @@ class MCTSNode():
         }
         if self.parent is not None:
             assert self.parent.state['prefix_ids'] + self.parent.state['resp_ids'] == prefix_ids
-        self.is_terminal = False
+        self.is_terminal = is_terminal
 
 
 

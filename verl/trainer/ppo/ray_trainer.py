@@ -1052,7 +1052,7 @@ class RayPPOTrainer:
                 # breakpoint()
 
                 # pop those keys for generation
-                batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
+                batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids", "index"]
                 non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
                 if "reward_model" in batch.non_tensor_batch:
                     non_tensor_batch_keys_to_pop.append("reward_model")

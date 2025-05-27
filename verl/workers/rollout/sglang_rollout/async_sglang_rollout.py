@@ -239,10 +239,12 @@ class AsyncSGLangRollout(BaseRollout):
                 # NOTE(Chenyang): if you want to debug the SGLang engine output
                 # please set the following parameters
                 # Otherwise, it will make the engine run too slow
-                # log_level="INFO",
+                log_level="INFO",
                 # log_requests=True,
-                # log_requests_level=2,
-                # max_running_requests=1,
+                # log_requests_level=0,
+                enable_cache_report=True,
+                enable_metrics=True,
+                decode_log_interval=100,
                 schedule_policy="lpm",
                 # skip_tokenizer_init=True if config.mcts.enable else False,
             )
@@ -574,7 +576,7 @@ class AsyncSGLangRollout(BaseRollout):
 
         return _req
 
-    async def _async_one_mcts(self, req: MCTS, **kwargs) -> MCTS:
+    async def _async_one_mcts(self, req: MCTS, log_ids, **kwargs) -> MCTS:
         assert self._tp_rank == 0, "only the master process can call this function"
         _req = deepcopy(req)
         finish_reason_type = None
@@ -583,7 +585,9 @@ class AsyncSGLangRollout(BaseRollout):
         current_turns = 0
         while current_turns < self.config.n // self.config.mcts.max_branch:
             # Select
-            _req.select_next_step()
+            # if no nodes to select, break
+            if (cur_node := _req.select_next_step()) is None:
+                break
             assert len(_req.current_nodes) > 0, "No nodes to select from"
 
             # Rollout
@@ -607,7 +611,7 @@ class AsyncSGLangRollout(BaseRollout):
             # Backpropagation
             _req.generate_next_step(outputs)
 
-            if _req.data_id == 0:
+            if _req.data_id in log_ids:
                 _req.draw_tree()
  
         if current_turns >= self.config.multi_turn.max_turns:
@@ -639,34 +643,20 @@ class AsyncSGLangRollout(BaseRollout):
         assert not is_validate, "validate is not supported in async rollout with mcts"
         assert do_sample, "do_sample is required in async rollout with mcts"
 
-        """Temporary workaround for SGLang Engine to skip tokenizer init"""
-        self._engine.skip_tokenizer_init = True  # skip tokenizer init in SGLang Engine
-        self._engine.server_args.skip_tokenizer_init = True  # skip tokenizer init in SGLang Engine
-
-        breakpoint()
+    
+        # breakpoint()
 
         if self._tp_rank == 0:
+            # """Temporary workaround for SGLang Engine to skip tokenizer init"""
+            # self._engine.skip_tokenizer_init = True  # skip tokenizer init in SGLang Engine
+            # self._engine.server_args.skip_tokenizer_init = True  # skip tokenizer init in SGLang Engine
+
             # each query only generate one MCTS tree
-            # _input_ids = _pre_process_inputs(self.pad_token_id, prompts.batch["input_ids"][data_idx])
-            # _attention_mask = _pre_process_inputs(0, prompts.batch["attention_mask"][data_idx])
-            # _position_ids = compute_position_id_with_mask(torch.tensor(_attention_mask)).tolist()
             req_list = [
-                # AsyncRolloutRequest(
-                #     request_id=i,
-                #     input_ids=prompts.batch["input_ids"][i].tolist(),
-                #     attention_mask=prompts.batch["attention_mask"][i].tolist(),
-                #     position_ids=prompts.batch["position_ids"][i].tolist(),
-                #     loss_mask=prompts.batch["loss_mask"][i].tolist(),
-                #     prompt_ids=prompts.batch["input_ids"][i].tolist(),
-                #     prompt_attention_mask=prompts.batch["attention_mask"][i].tolist(),
-                #     prompt_position_ids=prompts.batch["position_ids"][i].tolist(),
-                #     prompt_loss_mask=prompts.batch["loss_mask"][i].tolist(),
-                #     messages=[{"role": "user", "content": prompts.meta_info.get("prompt", "")}],
-                # )
                 MCTS(
-                    data_id=i,
+                    data_id=prompts[i].batch["index"].item(),
                     query_ids=_pre_process_inputs(self.pad_token_id, prompts.batch["input_ids"][i]),
-                    split_sequence=self.tokenizer.encode("<think>", add_special_tokens=False),
+                    split_sequence=[self.tokenizer.convert_tokens_to_ids(['<', 'think']),self.tokenizer.convert_tokens_to_ids(['<th', 'ink'])],
                     max_depth=self.config.mcts.max_depth,
                     tokenizer=self.tokenizer,
                     c_puct=self.config.mcts.c_puct,
@@ -677,10 +667,15 @@ class AsyncSGLangRollout(BaseRollout):
             loop = asyncio.get_event_loop()
             output_req_list = loop.run_until_complete(
                 asyncio.gather(
-                    *[self._async_one_mcts(req, **kwargs) for req in req_list],
+                    *[self._async_one_mcts(req, log_ids=prompts.batch['index'].tolist()[:10],**kwargs) for req in req_list],
                 )
             )
             sorted_output_req_list = sorted(output_req_list, key=lambda x: x.data_id)
+
+            # # reset engine skip_tokenizer_init
+            # self._engine.skip_tokenizer_init = False
+            # self._engine.server_args.skip_tokenizer_init = False  # reset skip tokenizer init in SGLang Engine
+
         else:
             sorted_output_req_list = None
 
@@ -778,10 +773,6 @@ class AsyncSGLangRollout(BaseRollout):
         # free cache engine
         if self.config.free_cache_engine and self._engine is not None and self._tp_rank == 0:
             self._engine.tokenizer_manager.flush_cache()
-
-        # reset engine skip_tokenizer_init
-        self._engine.skip_tokenizer_init = False
-        self._engine.server_args.skip_tokenizer_init = False  # reset skip tokenizer init in SGLang Engine
 
         return DataProto(batch=batch, non_tensor_batch={"messages": np.array(messages), "reward_scores": np.array(reward_scores)})
 

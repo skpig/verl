@@ -3,7 +3,8 @@
 # Adapted from https://github.com/MARIO-Math-Reasoning/Super_MARIO
 
 from __future__ import annotations
-
+import os
+import traceback
 import torch
 import random
 import re
@@ -49,7 +50,7 @@ def kmp_search(text, pattern):
         if text[i] == pattern[j]:
             j += 1
         if j == len(pattern):
-            result.append(i - j + 1 + len(pattern))
+            result.append(i - j + 1)
             j = table[j - 1]
 
     return result
@@ -148,14 +149,14 @@ class MCTS:
     # TODO: 每一个output都是一个完整的rollout, create_child需要调用多次
     def expand_and_simulate_node(self, output_object: List[Dict[str, Any]], node: Type[MCTSNode]) -> None:
 
-        for idx, output in enumerate(output_object.outputs):
+        for idx, output in enumerate(output_object):
             if "text" not in output or not output['text']:
                 output_text = self.tokenizer.decode(output['output_ids'], skip_special_tokens=True)
                 output_ids = output['output_ids']
             else:
                 output_text = output['text']
                 output_ids = [i[1] for i in  output['meta_info']['output_token_logprobs']]
-            score = self.compute_score(output_text, self.ground_truth)['score']
+            score = self.compute_score(data_source=None, solution_str=output_text, ground_truth=self.ground_truth)['score']
             self.recursive_create_child(
                 node=node,
                 step_completion_ids=output_ids,
@@ -177,7 +178,9 @@ class MCTS:
         rollout_score: int,
     ) -> None:
         # 1. split the step_completion with self.split_sequence
-        split_indices = kmp_search(step_completion_ids, self.split_sequence)
+        split_indices = kmp_search(step_completion_ids, self.split_sequence[0])
+        split_indices += kmp_search(step_completion_ids, self.split_sequence[1])
+        split_indices = sorted(set(split_indices))  # 去重并排序
 
         start_index = 0 # since `## Reasoning step 1:` is in prompt, we can directly use set initial start_index as 0
         parent = node
@@ -188,7 +191,7 @@ class MCTS:
                 prefix_ids=cur_prefix,
                 resp_ids=step_completion_ids[start_index:index],
                 is_terminal=index == len(step_completion_ids), # only the last step is terminal / leaf
-                resp_logprob=step_logprobs[start_index:index].sum() if step_logprobs is not None else None,
+                resp_logprob=sum(step_logprobs[start_index:index]) if step_logprobs is not None else None,
                 parent=parent,
                 tag=f"{parent.tag}.{len(parent.children) + 1}",
             )
@@ -287,12 +290,19 @@ class MCTS:
         node = self.root
         # selection loop 
         # continue until we reach an unexpanded node
-        while node.has_children() and node.is_expand:
+        self.current_nodes.append(node)
+        # the last node is an unexpanded node or None
+        while node is not None and node.is_expand:
             node = self._select_child(node)
             self.current_nodes.append(node)
-        self.current_nodes.append(node) # add the leaf node
         valid_current_nodes = [node for node in self.current_nodes if not self.is_terminated_node(node)] # remove terminal nodes and nodes with depth > max_depth
+
+        # if no valid nodes, stop the search
+        if len(valid_current_nodes) == 0:
+            return None
+
         self.current_nodes = valid_current_nodes[-1:] # only keep the last valid leaf for expansion
+        return self.current_nodes[0]
 
 
 
@@ -329,7 +339,7 @@ class MCTS:
         return states
 
     def is_terminated_node(self, node: MCTSNode) -> bool: #TODO: is called
-        return node.is_terminal or node.depth > self.max_depth
+        return node is None or node.is_terminal or node.depth > self.max_depth
 
     # Check if any node in the current_nodes can be expanded
     def should_generate_next(self) -> bool: #TODO: is called 
@@ -385,11 +395,14 @@ class MCTS:
         from networkx.drawing.nx_pydot import graphviz_layout
 
         # matplotlib.rcParams["text.usetex"] = True
+        # plt.rcParams['axes.formatter.use_mathtext'] = False
+        plt.rcParams['text.parse_math'] = False
 
         G = nx.DiGraph()
 
         def add_nodes_edges(current_node):
             text = self.tokenizer.decode(current_node.state["resp_ids"]).replace(":"," ")
+            # print(text)
             node_label = f'{text}\nQ={current_node._value_sum}\nN={current_node._visit_count}'
             G.add_node(id(current_node), label=node_label)
             if current_node.parent:
@@ -412,5 +425,14 @@ class MCTS:
                 arrowsize=15,    # 调整箭头大小
                 width=1.5)       # 调整边的宽度
         plt.title('MCTS Tree')
-        plt.savefig(f'outputs/{self.data_id}/{self.search_turn}.png', dpi=600, bbox_inches='tight')
+        try:
+            os.makedirs(f'outputs/{self.data_id}', exist_ok=True)
+            plt.savefig(f'outputs/{self.data_id}/{self.search_turn}.png', dpi=600, bbox_inches='tight')
+            plt.savefig(f'outputs/{self.data_id}/{self.search_turn}.pdf', dpi=600, bbox_inches='tight')
+        except Exception as e:
+            print(f"Error saving figure: {e}")
+            traceback.print_exc()
+            with open(f'outputs/{self.data_id}/{self.search_turn}.txt', 'w') as f:
+                f.write(f"Error saving figure: {e}\n")
+                f.write(traceback.format_exc())
         plt.close()

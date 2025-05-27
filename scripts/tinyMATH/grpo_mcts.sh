@@ -1,6 +1,6 @@
 # BASE_MODEL=${MY_MODEL_DIR}Qwen/Qwen2.5-3B
 # TEMPLATE_TYPE=base # or chat
-BASE_MODEL=${MY_MODEL_DIR}Qwen/Qwen2.5-0.5B-Instruct
+BASE_MODEL=${MY_MODEL_DIR}Qwen/Qwen2.5-1.5B-Instruct
 TEMPLATE_TYPE=chat # or chat
 TRAIN_FILE="${MY_DATA_DIR}Eurus-2-RL-Data/train.parquet"
 TEST_FILES="['${MY_DATA_DIR}Eurus-2-RL-Data/test.parquet', '${MY_DATA_DIR}MATH-500/test.parquet', '${MY_DATA_DIR}aimo-validation-amc/test.parquet']"
@@ -8,15 +8,15 @@ TEST_FILES="['${MY_DATA_DIR}Eurus-2-RL-Data/test.parquet', '${MY_DATA_DIR}MATH-5
 RUN_ID=$1
 
 # Model settings
-ROLLOUT_N=32
+ROLLOUT_N=64 # 16 * 4 = 64
 OVERLONG_BUFFER_LEN=1024
 MAX_PROMPT_LEN=$((1024 * 1))
 MAX_RESPONSE_LEN=$((1024 * 3 + OVERLONG_BUFFER_LEN))
-BATCH_SIZE=4
+BATCH_SIZE=128 # 512 / 4 = 128
 MINI_BSZ=64
 # MCTS settings
 MCTS_DEPTH=4
-MCTS_BRANCH=4
+MCTS_BRANCH=8
 
 # Performance tuning
 N_GPUS=1
@@ -26,8 +26,8 @@ OFFLOAD=True
 FORWARD_BSZ=16
 BACKWARD_BSZ=8
 TOTAL_EPOCHS=1
-FORWARD_MAX_TOKEN_LEN=$((24 * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN))) # 12 for 40GB
-BACKWARD_MAX_TOKEN_LEN=$((8 * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN)))  # 4 for 40GB
+FORWARD_MAX_TOKEN_LEN=$((2 * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN))) # 12 for 40GB
+BACKWARD_MAX_TOKEN_LEN=$((1 * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN)))  # 4 for 40GB
 
 PROJ_NAME="TinyMATH"
 MODEL_NAME=$(basename $BASE_MODEL)
@@ -42,6 +42,7 @@ python3 examples/data_preprocess/custom.py \
 # export VLLM_ATTENTION_BACKEND=XFORMERS
 # export CUDA_LAUNCH_BLOCKING=1
 export HYDRA_FULL_ERROR=1
+export CUDA_LAUNCH_BLOCKING=1
 
 # 定义要执行的命令
 CMD="python3 -m verl.trainer.main_ppo \
@@ -79,7 +80,7 @@ CMD="python3 -m verl.trainer.main_ppo \
     +actor_rollout_ref.rollout.mcts.max_depth=$MCTS_DEPTH \
     +actor_rollout_ref.rollout.mcts.max_branch=$MCTS_BRANCH \
     +actor_rollout_ref.rollout.mcts.c_puct=2 \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.4 \
     actor_rollout_ref.rollout.n=$ROLLOUT_N \
     algorithm.use_kl_in_reward=False \
     reward_model.launch_reward_fn_async=True \
