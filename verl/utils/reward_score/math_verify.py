@@ -94,8 +94,7 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None) -> b
     timeout_score = 0.0
 
 
-    math_metric_with_timeout = timeout(10)(math_metric)
-    verify_func = math_metric_with_timeout(
+    verify_func = math_metric(
         gold_extraction_target=(LatexExtractionConfig(), ExprExtractionConfig()),
         pred_extraction_target=(ExprExtractionConfig(), LatexExtractionConfig()),
     )
@@ -104,7 +103,8 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None) -> b
     # Wrap the ground truth in \boxed{} format for verification
     ground_truth_boxed = "\\boxed{" + ground_truth + "}"
     try:
-        ret_score, (extracted_gold, extracted_model_output) = verify_func([ground_truth_boxed], [model_output])
+        verify_func_w_timeout = timeout(20)(verify_func)
+        ret_score, (extracted_gold, extracted_model_output) = verify_func_w_timeout([ground_truth_boxed], [model_output])
     except Exception:
         ret_score = 0.
         os.makedirs('.cache/reward_error', exist_ok=True)
