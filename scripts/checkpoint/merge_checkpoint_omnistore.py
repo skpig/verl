@@ -4,6 +4,8 @@ Example usage: python3 scripts/checkpoint/merge_checkpoint_omnistore.py
 """
 
 import argparse
+import inspect
+from functools import partial
 import os
 import tempfile
 import threading
@@ -112,7 +114,11 @@ if __name__ == '__main__':
 
         print('Step3: merge omnistore ckpt to get state_dict')
         time_begin = time.time()
-        state_dict = omnistore_ckpt_to_pytorch_ckpt(
+        omnistore_merge_func = omnistore_ckpt_to_pytorch_ckpt
+        if inspect.signature(omnistore_ckpt_to_pytorch_ckpt).parameters.get("cast_bf16") is not None:
+            # omnistore version 1.0.6rc3 or higher
+            omnistore_merge_func = partial(omnistore_ckpt_to_pytorch_ckpt, cast_bf16=True)
+        state_dict = omnistore_merge_func(
             args.load_dir,
             local_tmp_dir,
             'fsdp',
