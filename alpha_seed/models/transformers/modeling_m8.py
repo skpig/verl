@@ -91,7 +91,11 @@ def flash_attn2_rmpad_forward(
         # from seed_models.utils.modeling_flash_attention_utils import GPUFlashAttentionKwargs
         # assert isinstance(flash_attn_kwargs, GPUFlashAttentionKwargs)
         # this leads to raise TypeError('TypedDict does not support instance and class checks')
-        max_seqlen = flash_attn_kwargs['max_seqlen_q']
+        if 'max_seqlen_q' not in flash_attn_kwargs:
+            # this means that the sequence is just a single seq
+            max_seqlen = hidden_states.size(1)
+        else:
+            max_seqlen = flash_attn_kwargs['max_seqlen_q']
 
     assert max_seqlen is not None
     assert self.q_proj.bias is None and self.k_proj.bias is None and \
