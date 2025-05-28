@@ -198,6 +198,33 @@ class RequestManagerRegisterCenter:
         return list(self.names)
 
 
+class ProgressBar:
+
+    def __init__(self, name, log_interval=0.1):
+        self.name = name
+        self.total_finished = 0
+        self.log_interval = log_interval
+        self._next_log_at = log_interval
+
+    def update(self, size: int, remaining_size: int, finished_size: int, engine_id: str):
+        self.total_finished += finished_size
+        total = remaining_size + self.total_finished
+        if total <= 0 or finished_size <= 0:
+            return
+
+        progress = self.total_finished / total
+        if progress > self._next_log_at:
+            print(f"will update {size}/{remaining_size} queries from engine({engine_id}) "
+                  f"to {self.name}, finished={finished_size}, progress={progress*100:.2f}%")
+            self._next_log_at += self.log_interval
+            if self._next_log_at > 1:
+                self._next_log_at = 1
+
+    def reset(self):
+        self.total_finished = 0
+        self._next_log_at = self.log_interval
+
+
 # this will be run on ray remote
 class RequestManager:
 
@@ -209,6 +236,7 @@ class RequestManager:
         self._pending_events_to_flows = []
         self.actor_name = ray.get_runtime_context().get_actor_name()
         self._rm_name = self.actor_name.removeprefix('RequestManager/')
+        self._progress_bar = ProgressBar(self.actor_name)
         try:
             rmrc = ray.get_actor('RequestManagerRegisterCenter')
             ray.get(rmrc.register.remote(self.actor_name))
@@ -240,9 +268,7 @@ class RequestManager:
 
     def update_intermediate_queries(self, queries: List[Query], engine_id: str):
         finished = len(list(None for q in queries if q.is_finished))
-        if finished > 0:
-            print(f"will update {len(queries)}/{len(self.req_pool)} queries from engine({engine_id}) "
-                  f"to {self.actor_name}, {finished=}")
+        self._progress_bar.update(len(queries), len(self.req_pool), finished, engine_id)
         # 从engine取出的结果，更新到request pool里
         reqs = [
             Request(
@@ -268,6 +294,7 @@ class RequestManager:
 
     def set_global_step(self, global_step: int):
         self._step = global_step
+        self._progress_bar.reset()
         self.ordered_tracer.reorder_flush()
         # reorder后，重新确定了tid，这时再计算flows
         for events in self._pending_events_to_flows:
