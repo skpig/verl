@@ -348,7 +348,7 @@ def compute_policy_loss(old_log_prob,
     elif loss_average_method == 'token':
         pg_loss = verl_F.masked_mean(pg_loss, pg_loss_mask)
     else:
-        pg_loss = (pg_losse * pg_loss_mask).sum()
+        pg_loss = (pg_loss * pg_loss_mask).sum()
 
     if upgo_loss_weight > 0.0:
         rho = torch.minimum(ratio, torch.ones_like(ratio)).detach()
