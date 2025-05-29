@@ -426,6 +426,8 @@ streaming_rollout:
     from_step: 0
     to_step: 10
     upload_to_mlx: True
+  proxy:
+    poll_internal_seconds: 2.
 
 streaming_validator:
   n_gpus_per_node: 0
