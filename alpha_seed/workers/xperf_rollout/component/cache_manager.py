@@ -73,15 +73,29 @@ class CacheManager:
     def get_available_slot_num(self):
         return len(self.available_slot_table)
 
-    def update_queries(self, running_queries: List[Query], waiting_queries: List[Query]):
+    def update_queries(self, running_queries: List[Query], waiting_queries: List[Query], paused_queries: List[Query]):
         if self.schedule_strategy == 'default':
-            return self._update_queries_default(running_queries, waiting_queries)
+            return self._update_queries_default(running_queries, waiting_queries, paused_queries)
         elif self.schedule_strategy == 'fifo':
-            return self._update_queries_fifo(running_queries, waiting_queries)
+            return self._update_queries_fifo(running_queries, waiting_queries, paused_queries)
         else:
             raise NotImplementedError(f"unsupported schedule_strategy: {self.schedule_strategy}")
 
-    def _update_queries_default(self, running_queries: List[Query], waiting_queries: List[Query]):
+    def _release_one_paused_(self, paused: List[Query]) -> bool:
+        while len(paused) > 0 and not paused[-1].is_kv_cache_slot_allocated():
+            paused.pop(-1)
+        if len(paused) == 0:
+            return False
+        query = paused[-1]
+        assert query.is_kv_cache_slot_allocated()
+        self.page_swap_out_bs += 1
+        self.page_swap_out_token += len(query.input_ids) + len(query.new_token_ids)
+        self.release_query(query)
+        query.reset_compute()
+        return True
+
+    def _update_queries_default(self, running_queries: List[Query], waiting_queries: List[Query],
+                                paused_queries: List[Query]):
         phase0_running = []
         phase1_running = []
         waiting = []
@@ -90,28 +104,40 @@ class CacheManager:
         self.cur_bs_this_run = 0
         self.page_swap_out_bs = 0
         self.page_swap_out_token = 0
+        # paused queries with kv cache allocated
+        allocated_paused_queries = [query for query in paused_queries if query.is_kv_cache_slot_allocated()]
 
         # See if any query can be continued
         for idx, query in enumerate(running_queries):
             self.moving_avg_len = int(self.moving_avg_len * (idx + 1) // (idx + 2) +
                                       (len(query.input_ids) + len(query.new_token_ids)) // (idx + 2))
             status = self._update_query(query)
+            while status == UpdateQueryStatus.NEED_SWAP_OUT and self._release_one_paused_(allocated_paused_queries):
+                # if update failed with need_swap_out, release one paused query and retry
+                status = self._update_query(query)
+
             if status == UpdateQueryStatus.SUCCESS:
                 phase1_running.append(query)
                 self.cur_context_bs_this_run += int(query.is_context_computing)
                 self.cur_bs_this_run += 1
             else:
-                if status == UpdateQueryStatus.NEED_SWAP_OUT:
-                    self.page_swap_out_bs += 1
-                    self.page_swap_out_token += len(query.input_ids) + len(query.new_token_ids)
+                self.page_swap_out_bs += 1
+                self.page_swap_out_token += len(query.input_ids) + len(query.new_token_ids)
                 self.release_query(query)
                 query.reset_compute()
                 waiting.append(query)
 
         # See if any query from the waiting-list can be activated
         for query in waiting_queries:
-            if (self._update_query(query,
-                                   thresold=self.moving_avg_len // self.slot_block_size) == UpdateQueryStatus.SUCCESS):
+            threshold = self.moving_avg_len // self.slot_block_size
+            status = self._update_query(query, thresold=threshold)
+            while (status == UpdateQueryStatus.ALLOC_INSUFFICIENT_SLOT) and (
+                    self.cur_bs_this_run
+                    < len(allocated_paused_queries)) and self._release_one_paused_(allocated_paused_queries):
+                # If paused queries with kv cache is more than half, allow release them for waiting queries to run
+                status = self._update_query(query, thresold=threshold)
+
+            if status == UpdateQueryStatus.SUCCESS:
                 phase0_running.append(query)
                 self.cur_context_bs_this_run += int(query.is_context_computing)
                 self.cur_bs_this_run += 1
@@ -121,13 +147,16 @@ class CacheManager:
 
         return phase0_running + phase1_running, waiting
 
-    def _update_queries_fifo(self, running_queries: List[Query], waiting_queries: List[Query]):
+    def _update_queries_fifo(self, running_queries: List[Query], waiting_queries: List[Query],
+                             paused_queries: List[Query]):
 
         def sort_queue(lis: List[Query], reverse=False):
             return sorted(lis, key=lambda x: x.idx, reverse=reverse)
 
         phase1_running = sort_queue(running_queries)
         waiting = sort_queue(waiting_queries)
+
+        allocated_paused_queries = sort_queue([query for query in paused_queries if query.is_kv_cache_slot_allocated()])
 
         self.max_context_len_this_run = 0
         self.cur_context_bs_this_run = 0
@@ -145,8 +174,11 @@ class CacheManager:
             idx += 1
 
             status = self._update_query(query)
+            while status == UpdateQueryStatus.NEED_SWAP_OUT and self._release_one_paused_(allocated_paused_queries):
+                # if need swap_out, release one paused query and retry
+                status = self._update_query(query)
             while status == UpdateQueryStatus.NEED_SWAP_OUT and len(phase1_running) > cur_idx + 1:
-                # if need swap_out, swap out the latest running queries and retry
+                # if need swap_out, swap out the last running query and retry
                 to_swap_query = phase1_running.pop()
                 waiting.append(to_swap_query)
                 self.page_swap_out_bs += 1
@@ -173,8 +205,15 @@ class CacheManager:
         # See if any query from the waiting-list can be activated
         while len(waiting) > 0:
             query = waiting[-1]
-            if self._update_query(query,
-                                  thresold=self.moving_avg_len // self.slot_block_size) == UpdateQueryStatus.SUCCESS:
+            threshold = self.moving_avg_len // self.slot_block_size
+            status = self._update_query(query, thresold=threshold)
+            while (status == UpdateQueryStatus.ALLOC_INSUFFICIENT_SLOT) and (
+                    self.cur_bs_this_run
+                    < len(allocated_paused_queries)) and self._release_one_paused_(allocated_paused_queries):
+                # if paused queries with kv allocated is more than 50%, allow release them for waiting queries to run
+                status = self._update_query(query, thresold=threshold)
+
+            if status == UpdateQueryStatus.SUCCESS:
                 if not query.first_scheduled_time:
                     query.first_scheduled_time = time.time() * 1000
                 # move to running

@@ -687,12 +687,15 @@ class InferenceSession:
                         [query.new_token_ids]) if self.decode_output else ""
                     self._finish_query(query)
                 else:
-                    self.waiting.append(query)
+                    if query.is_kv_cache_slot_allocated():
+                        self.running.append(query)
+                    else:
+                        self.waiting.append(query)
         self.paused = new_paused
 
     # Preparing queries for next forward
     def _select_running_queries(self):
-        return self.cache_manager.update_queries(self.running, self.waiting)
+        return self.cache_manager.update_queries(self.running, self.waiting, self.paused)
 
     def _prepare_image_embeds(self, input_ids, pixel_values, image_grid_hw):
         assert pixel_values is not None
@@ -748,8 +751,9 @@ class InferenceSession:
             context_len = len(query.input_ids) - query.prefix_already_computed_len
             max_kv_index_len = max(max_kv_index_len, len(query.kv_slot_ids))
             if query.is_context_computing:
-                input_ids = torch.tensor(query.input_ids).cuda()
-                if query.input_embedding is None:
+
+                def _get_inp_embs(input_ids):
+                    input_ids = input_ids.cuda()
                     if query.meta_info.get('pixel_values') is not None:
                         input_embs = self._prepare_image_embeds(input_ids, query.meta_info['pixel_values'],
                                                                 query.meta_info['image_grid_hw'])
@@ -757,9 +761,17 @@ class InferenceSession:
                         input_embs = self.engine.get_input_embeddings(input_ids=input_ids)
                     if input_embs.ndim == 2:
                         input_embs = input_embs.unsqueeze(0)
-                    query.input_embedding = input_embs
+                    return input_embs
+
+                input_ids = torch.tensor(query.input_ids)
+                if query.input_embedding is None or query.input_embedding.shape[1] != len(input_ids):
+                    query.input_embedding = _get_inp_embs(input_ids)
                 else:
-                    assert query.input_embedding.shape[1] == len(input_ids)
+                    assert query.input_embedding.shape[1] <= len(input_ids)
+                    if (prev_len := query.input_embedding.shape[1]) < len(input_ids):
+                        new_input_ids = input_ids[prev_len:]
+                        new_inp_embs = _get_inp_embs(new_input_ids)
+                        query.input_embedding = torch.concat([query.input_embedding, new_inp_embs], dim=1)
 
                 current_context_shift = query.context_shift + query.prefix_already_computed_len
                 # start from context_shift pos
@@ -771,9 +783,9 @@ class InferenceSession:
                         logging.debug, 0,
                         "trigger context split {} -> {}:{}".format(context_len, current_context_shift,
                                                                    current_context_shift + context_len))
-                    query.context_shift += query_input_emb.shape[1]
                     context_len = query_input_emb.shape[1]
 
+                query.context_shift += query_input_emb.shape[1]
                 max_context_len = max(max_context_len, context_len)
                 phase0_index.append(index)
                 phase0_list.append(query_input_emb)
@@ -941,6 +953,14 @@ class InferenceSession:
         self.pending.truncate(num_ready)
         return self.waiting + new_queries
 
+    def _wait_all_paused_resume(self):
+        # wait all paused queries to resume. this is necessary for plugin call:
+        # paused queries may have pending plugin calls, which makes it impossible to be serialized
+        # and get_resume_state could fail.
+        while len(self.paused) > 0:
+            self._try_resume_paused_queries()
+            time.sleep(0.1)
+
     def execute(self,
                 prompts,
                 logits_masks: List[List[int]] = None,
@@ -1019,13 +1039,7 @@ class InferenceSession:
                 dec_tokens = decode_input.shape[0] if decode_input is not None else 0
                 self.step_profiler.record_step(ctx_tokens=ctx_tokens, dec_tokens=dec_tokens)
 
-        # wait all paused queries to resume. this is necessary for plugin call:
-        # paused queries may have pending plugin calls, which makes it impossible to be serialized
-        # and get_resume_state could fail.
-        while len(self.paused) > 0:
-            self._try_resume_paused_queries()
-            time.sleep(0.1)
-
+        self._wait_all_paused_resume()
         torch.cuda.synchronize()
         self.infer_scheduler.record("cur_steps", [self.current_steps])
 
@@ -1113,6 +1127,7 @@ class InferenceSession:
                     query.set_finished(exception=e)
                 logging.error(f"Error handling request: {str(e)}")
                 raise (e)
+        self._wait_all_paused_resume()
         self.status = "idle"
 
     def _exceed_length_condition(self, query, tokens_threshold):
@@ -1195,8 +1210,6 @@ class InferenceSession:
                         probs_lt_threshold_sum=probs_lt_threshold_sum[i] if probs_lt_threshold_sum is not None else 0,
                     )
                     if query.meet_pause_condition():
-                        self.cache_manager.release_query(query)
-                        query.reset_compute()
                         new_paused.append(query)
                         paused_triggered = True
                         break

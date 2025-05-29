@@ -116,16 +116,22 @@ class Query:
         # already in decode stage
         if not self.is_context_computing:
             return True
-        # called after context stage, no context_shift means it doesn't need context-split
-        if self.is_context_computing and self.context_shift == 0:
-            return True
-        # for query which needs context-split, all input_ids finished context computing
+        assert (self.context_shift + self.prefix_already_computed_len) <= len(self.input_ids)
+        # all input_ids finished context computing
         if self.is_context_computing and (self.context_shift + self.prefix_already_computed_len) == len(self.input_ids):
             return True
         return False
 
     def is_kv_cache_slot_allocated(self):
         return len(self.kv_slot_ids) > 0
+
+    def to_context_phase(self):
+        self.input_ids.extend(self.new_token_ids)
+        self.new_token_ids = []
+        if not self.is_context_computing:
+            self.is_context_computing = True
+            # all context except the last decoded token has finished context compute
+            self.context_shift = max(0, len(self.input_ids) - 1)
 
     def set_finished(self, is_partial=False, exception=None):
         self.is_finished = not is_partial
@@ -135,9 +141,7 @@ class Query:
 
     def reset_compute(self):
         self.kv_slot_ids = []
-        self.is_context_computing = True
-        self.input_ids.extend(self.new_token_ids)
-        self.new_token_ids = []
+        self.to_context_phase()
         self.input_embedding = None
         self.context_shift = 0
         self.prefix_already_computed_len = 0

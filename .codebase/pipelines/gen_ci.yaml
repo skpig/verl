@@ -62,6 +62,7 @@ jobs:
         commands:
           - export NCCL_SHM_DISABLE=1
           - cd -
+          - pytest -n 4 -v tests/rollout/test_cache_manager.py
           - ray stop --force
           - ray start --num-cpus=100 --head
           - pytest -n 4 -v tests/rollout/test_rollout_manager.py

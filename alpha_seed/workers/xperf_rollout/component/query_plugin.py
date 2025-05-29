@@ -274,8 +274,7 @@ class QueryPlugin:
                                            add_special_tokens=False).input_ids.tolist()[0]
         token_len = len(plugin_tokens_ids)
         query = self._query
-        assert (len(query.new_token_ids) == 0), "all new_token_ids should be moved after input_ids"
-        assert (query.is_context_computing), "paused query required to be in context computing phase"
+        query.to_context_phase()
         cur_idx = len(query.input_ids) - query.original_input_len
         query.input_ids.extend(plugin_tokens_ids)
         query.accepted_len.extend([-1] * token_len)
