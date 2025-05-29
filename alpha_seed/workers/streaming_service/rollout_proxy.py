@@ -98,28 +98,6 @@ class FixedReplicatedRayWorkerGroupAdapter(ReplicatedRayWorkerGroup):
         return self.wgs
 
 
-class DispatchProgressBar:
-
-    def __init__(self, name, log_interval_seconds=5.):
-        self.name = name
-        self.acc_dispatched = 0
-        self.log_interval_seconds = log_interval_seconds
-        self._next_log_at = time.time() + log_interval_seconds
-
-    def update(self, dispatched: int, pending_size: int, load, engine_id: str):
-        self.acc_dispatched += dispatched
-        total = self.acc_dispatched + pending_size
-        if total <= 0:
-            return
-        if time.time() > self._next_log_at:
-            print(
-                f"dispatch {self.acc_dispatched}/{total} (remain={pending_size}) queries from({self.name}) "
-                f"to wg({engine_id}, pending={load.num_pending}, P={load.num_prefilling}/D={load.num_decoding}, kv={load.kv_cache_util:.2f})"
-            )
-            self._next_log_at += self.log_interval_seconds
-            self.acc_dispatched = 0
-
-
 class RolloutWorkerGroupProxy(_MetricSourceImpl):
     """
     负责代理底下N个replicas的请求分发、负载平衡
@@ -127,7 +105,7 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
     """
 
     def __init__(self, replicas: Union[ReplicatedRayWorkerGroup, ScalingRayWorkerGroup], actor_addresses: List[str],
-                 request_manager_name: str, poll_interval: float):
+                 request_manager_name: str):
         self.request_manager: RequestManager = ray.get_actor(f'RequestManager/{request_manager_name}')  # noqa
         super().__init__(self.request_manager)
         self.replicas = replicas
@@ -136,8 +114,6 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
         self._update_worker_start_ts = 0
         self._update_worker_finished_ts = 0
         self._request_manager_name = request_manager_name
-        self.poll_interval = poll_interval
-        self._progress_bar = DispatchProgressBar(self._request_manager_name)
 
         self.replicas.set_dead_callback(self._worker_group_dead_callback)
         self._loop_should_stop = threading.Event()
@@ -180,11 +156,11 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
         num_ready_replicas = len(self.replicas.ready_worker_group_ids)
         max_concurrency = 512
 
-        sleep_interval = self.poll_interval
+        poll_interval = 1
         while True:
             if self._loop_should_stop.is_set():
                 break
-            time.sleep(sleep_interval)
+            time.sleep(poll_interval)
 
             # 纪录负载指标
             loads = {}
@@ -219,7 +195,10 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
                                 # query的分类，区分一下是hybrid_rollout/standalone_rollout/validation，避免共用engine时不知道怎么update回去对应的来源
                                 q.meta_info['query_type'] = self._request_manager_name
                             wg.add_inflight_queries(queries)
-                            self._progress_bar.update(len(queries), pending_size, load, engine_id)
+                            print(
+                                f"dispatch {len(queries)}/{pending_size} queries from({self._request_manager_name}) "
+                                f"to wg({engine_id}, pending={load.num_pending}, P={load.num_prefilling}/D={load.num_decoding}, kv={load.kv_cache_util:.2f})"
+                            )
 
                     loads[engine_id] = load
 
@@ -237,7 +216,6 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
             num_ready_replicas = len(self.replicas.ready_worker_group_ids)  # noqa: for py-spy
 
             loop_cost = time.time() - t0  # noqa: for py-spy
-            sleep_interval = max(0., self.poll_interval - loop_cost)
             self._trace_load_metrics(loads)
 
     def update_standalone_worker(self, role) -> List[ObjectRef]:

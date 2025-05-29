@@ -54,6 +54,7 @@ from alpha_seed.utils.select_strategy.bon_strategy import *
 from alpha_seed.utils.select_strategy.league_training_strategy import *
 from alpha_seed.utils.validator.validation_manager import *
 from alpha_seed.workers.streaming_service.streaming_utils import pad, process_output
+from alpha_seed.workers.streaming_service.rollout_proxy import RolloutWorkerGroupProxy
 from alpha_seed.workers.actors.checkpoint import CkptGlobalUploader
 from alpha_seed.workers.actors.rollout_pool import RolloutPool
 from alpha_seed.workers.ppo_actor import make_mini_step_dataloader

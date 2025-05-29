@@ -14,7 +14,6 @@
 """
 Create a XPerfGPT Rollout
 """
-import traceback
 from typing import Tuple
 
 import ray
@@ -139,37 +138,20 @@ class AsyncXPerfGPTRolloutServer(OpenAIProxy):
         return response
 
     async def start_server(self) -> Tuple[str, int]:
-        last_e = None
-        last_tb = None
         self.host = get_node_ip()
+        self.port = get_free_port()
         assert self.host is not None, "cannot find non-loopback ip address in this environment, please check manually"
-
-        # 各种连接创建的很多，可能在获取端口后的一瞬间就被占了，这里重试几次尽量让server启动成功
-        max_retries = 5
-        for i in range(max_retries):
-            try:
-                self.port = get_free_port()
-                config = uvicorn.Config(self.app,
-                                        host=self.host,
-                                        port=self.port,
-                                        loop="asyncio",
-                                        timeout_keep_alive=300,
-                                        backlog=16384)
-                logging.getLogger("uvicorn.access").disabled = True
-                logging.getLogger("uvicorn").propagate = False
-                self.server = uvicorn.Server(config)
-                self.server.should_exit = True  # 加了这个后，.serve()调用只负责初始化，不阻塞loop
-                await self.server.serve()  # 如果端口被占用，这里会抛出，重新获取一个
-                self.server_task = asyncio.create_task(self.server.main_loop())
-                return self.host, self.port
-            except (OSError, SystemExit) as e:
-                import traceback
-                last_e = e
-                last_tb = traceback.format_exc()
-                continue
-
-        print(last_tb)
-        raise last_e
+        config = uvicorn.Config(self.app,
+                                host=self.host,
+                                port=self.port,
+                                loop="asyncio",
+                                timeout_keep_alive=300,
+                                backlog=16384)
+        logging.getLogger("uvicorn.access").disabled = True
+        logging.getLogger("uvicorn").propagate = False
+        self.server = uvicorn.Server(config)
+        self.server_task = asyncio.create_task(self.server.serve())
+        return self.host, self.port
 
     async def stop_server(self):
         """Gracefully shutdown the server"""

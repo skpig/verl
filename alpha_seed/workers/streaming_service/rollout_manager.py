@@ -775,19 +775,18 @@ class RolloutManager:
             return server
 
         gen_tp_size = self.config.actor_rollout_ref.rollout.tensor_model_parallel_size
-        poll_interval = self.config.streaming_rollout.proxy.poll_internal_seconds
 
         # train
         # create replicated worker group and rollout proxy
         self.hybrid_wg_proxy = RolloutWorkerGroupProxy(
             FixedReplicatedRayWorkerGroupAdapter(self.hybrid_wg, gen_tp_size, 'actor_rollout_ref'), [],
-            'hybrid_rollout', poll_interval)
+            'hybrid_rollout')
         self.hybrid_rollout_server = await listen('hybrid_rollout')
 
         if self.train_standalone_wg is not None:
             self.train_standalone_wg_proxy = RolloutWorkerGroupProxy(
                 FixedReplicatedRayWorkerGroupAdapter(self.train_standalone_wg, gen_tp_size, 'standalone_rollout'), [],
-                'standalone_rollout', poll_interval)
+                'standalone_rollout')
             self.standalone_rollout_server = await listen('standalone_rollout')
 
         if self._rollout_elastic_enabled:
@@ -800,14 +799,14 @@ class RolloutManager:
         # validation on hybrid engine
         self.hybrid_val_wg_proxy = RolloutWorkerGroupProxy(
             FixedReplicatedRayWorkerGroupAdapter(self.hybrid_wg, gen_tp_size, 'actor_rollout_ref'), [],
-            'hybrid_validation', poll_interval)
+            'hybrid_validation')
         self.hybrid_validation_rollout_server = await listen('hybrid_validation')
 
         # standalone validation
         if self.val_standalone_wg is not None:
             self.val_wg_proxy = RolloutWorkerGroupProxy(
                 FixedReplicatedRayWorkerGroupAdapter(self.val_standalone_wg, gen_tp_size, 'standalone_validator'), [],
-                'validation', poll_interval)
+                'validation')
             self.validation_rollout_server = await listen('validation')
 
         self.rollout_server_started.set()
@@ -817,7 +816,6 @@ class RolloutManager:
         await asyncio.Future()
 
     def _init_elastic_rollout(self):
-        poll_interval = self.config.streaming_rollout.proxy.poll_internal_seconds
         # 每个rollout_worker用1个gpu，每个gpu对应1个rank
         res_shape = [self.config.streaming_rollout.n_gpus_per_node] * self.config.streaming_rollout.nnodes
         tp_size = sum(res_shape)
@@ -888,7 +886,7 @@ class RolloutManager:
         # 两个副本组合并一起组成伸缩组
         replicas = ScalingRayWorkerGroup(min_guaranteed_replicas, best_effort_replicas)
         # 封装给worker group的接口代理
-        rollout_proxy = RolloutWorkerGroupProxy(replicas, hybrid_rollout_addrs, 'standalone_rollout', poll_interval)
+        rollout_proxy = RolloutWorkerGroupProxy(replicas, hybrid_rollout_addrs, 'standalone_rollout')
 
         # 拉起最小副本数
         model_init_futs = min_guaranteed_replicas.scale_up(self.config.streaming_rollout.elastic.min_replicas)

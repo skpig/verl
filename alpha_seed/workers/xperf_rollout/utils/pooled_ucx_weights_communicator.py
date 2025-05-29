@@ -232,9 +232,11 @@ class UCXWeightsCommunicator(WeightsCommunicator):
         if self.server_up:  # called on server, skipping
             self.server_finish_event.clear()
             self.enter_ready.set()  # notify client to read weights
+            print(f"server up, waiting for finish signal from any client")
             self.server_finish_event.wait()  # wait for all clients finish reading
             self.enter_ready.clear()  # clear for next turn
             self.inference_engine.current_steps = 0
+            print("server finished")
             return
 
         async def transfer_single_weight(tensor_key, buffer):
@@ -312,10 +314,12 @@ class UCXWeightsCommunicator(WeightsCommunicator):
         async def send_group_end_signal(addr: str):
             ep = await self.connection_pool.get_connection(addr)
             try:
+                print(f"ep({addr}) created to send group_end msg")
                 group_end_msg = "group_end"
                 await ep.send_obj(group_end_msg.encode("utf-8"))
                 # server需要配合回复一个消息，并在这里接收，不然server可能根本收不到上面发的数据，不知道为什么
                 ok = await ep.recv_obj()
+                print(f"ep({addr}) received group_end response from: {ok}")
             finally:
                 self.connection_pool.put_connection(ep)
 
@@ -329,3 +333,4 @@ class UCXWeightsCommunicator(WeightsCommunicator):
         t = threading.Thread(target=broadcast_group_end_signal_thread, daemon=True)
         t.start()
         t.join()
+        print("client finished")
