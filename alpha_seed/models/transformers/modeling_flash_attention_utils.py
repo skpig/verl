@@ -19,8 +19,15 @@ from typing import Optional, Tuple
 import torch
 import torch.nn.functional as F
 from transformers.utils import is_flash_attn_2_available, is_flash_attn_greater_or_equal
+import flash_attn
+from alpha_seed.models.transformers.modeling_flash_attention_lego import _flash_attn_varlen_forward, _flash_attn_varlen_backward
 
 if is_flash_attn_2_available():
+    if os.getenv("USE_FLASH_ATTENTION_LEGO", "1") == "1":
+        # inject lego forward/backward
+        flash_attn.flash_attn_interface._flash_attn_varlen_forward = _flash_attn_varlen_forward
+        flash_attn.flash_attn_interface._flash_attn_varlen_backward = _flash_attn_varlen_backward
+
     from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
     from flash_attn import flash_attn_func, flash_attn_varlen_func
     # we left a fallback option in case flash 3 has convergence issue
@@ -244,7 +251,6 @@ def _flash_attention_forward(
     else:
         # TODO: Remove the `query_length != 1` check once Flash Attention for RoCm is bumped to 2.1. For details, please see the comment in transformers.models.llama.modeling_llama.LlamaFlashAttention2.__init__.
         causal = is_causal and query_length != 1
-
     # 2d mask is passed through the layers
     attention_mask = attention_mask if (attention_mask is not None and 0 in attention_mask) else None
 
@@ -308,8 +314,7 @@ def _flash_attention_forward(
     # If position_ids is provided and check all examples do not contain only 1 sequence, If tensor in increasing
     # then we probably have one sequence, otherwise it is packed. Additionally check we are in pre-fill/training stage.
     # Use `flash_attn_varlen_func` to prevent cross-example attention and also allow padding free approach
-    elif varlen or (position_ids is not None and not (torch.diff(position_ids, dim=-1) >= 0).all() and
-                    query_length != 1):
+    elif position_ids is not None:
         batch_size = query_states.size(0)
         query_states, key_states, value_states, indices_q, cu_seq_lens, max_seq_lens = prepare_fa2_from_position_ids(
             query_states, key_states, value_states, position_ids, max_seqlen)
@@ -334,12 +339,27 @@ def _flash_attention_forward(
         attn_output = attn_output.view(batch_size, -1, attn_output.size(-2), attn_output.size(-1))
 
     else:
-        attn_output = flash_attn_func(query_states,
-                                      key_states,
-                                      value_states,
-                                      dropout_p=dropout,
-                                      softmax_scale=softmax_scale,
-                                      causal=causal,
-                                      **flash_kwargs)
+        batch_size = query_states.size(0)
+        cu_seqlens_q = cu_seqlens_k = torch.range(0, batch_size + 1, dtype=torch.int32,
+                                                  device=query_states.device) * max_seqlen
+        max_seqlen = query_states.size(1)
+        query_states = query_states.reshape(-1, query_states.shape[-2], query_states.shape[-1])
+        key_states = key_states.reshape(-1, key_states.shape[-2], key_states.shape[-1])
+        value_states = value_states.reshape(-1, value_states.shape[-2], value_states.shape[-1])
+        attn_output = flash_attn_varlen_func(
+            query_states,
+            key_states,
+            value_states,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=max_seqlen,
+            max_seqlen_k=max_seqlen,
+            dropout_p=dropout,
+            softmax_scale=softmax_scale,
+            causal=causal,
+            **flash_kwargs,
+        )
+
+        attn_output = attn_output.view(batch_size, -1, attn_output.size(-2), attn_output.size(-1))
 
     return attn_output
