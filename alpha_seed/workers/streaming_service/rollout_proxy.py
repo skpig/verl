@@ -175,16 +175,19 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
     def _dispatch_loop(self):
         print('start background dispatch loop')
 
-        # 初始concurrency 按照总量平分给每个ready replica
-        pending_size = ray.get(self.request_manager.get_pending_size.remote())
-        num_ready_replicas = len(self.replicas.ready_worker_group_ids)
-        max_concurrency = 512
-
         sleep_interval = self.poll_interval
         while True:
             if self._loop_should_stop.is_set():
                 break
             time.sleep(sleep_interval)
+
+            # 按照总量平分给每个ready replica，均匀分发
+            # 注意一开始可能还没有request进去request pool
+            # 也可能replicas还没ready
+            total, pending_size = ray.get(self.request_manager.get_size.remote())
+            num_ready_replicas = len(self.replicas.ready_worker_group_ids)
+            max_concurrency = total // max(1, num_ready_replicas)  # replicas可能还没ready
+            max_concurrency = min(max(max_concurrency, 1), 512)  # 限制在1-512范围内
 
             # 纪录负载指标
             loads = {}
@@ -204,12 +207,9 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
                     # 2. send new request to worker group (engine)
                     load: LoadMetric = wg.get_load_metrics()[0]  # noqa, dp_size always =1
                     gmem_insufficient = load.num_waiting > 0
-                    # 如果engine目前并发已经达到这里自适应的max_concurrency，但不等于engine负载已经满了，
-                    # 根据kv cache util自适应所以这里额外补发extra个请求，下一轮如果有扩容，会重新自动平衡
-                    extra = self._get_adaptive_extra_num(load.kv_cache_util)
 
                     # note(hongbin): 始终让engine处于一个固定满并发的状态即可，减少动态插入新的具体进行prefill打断decode的case
-                    short = max_concurrency - load.num_prefilling - load.num_decoding
+                    short = max_concurrency - load.num_prefilling - load.num_decoding - load.num_pending
                     # 如果gmem不够了就不发了
                     if short > 0 and not gmem_insufficient:
                         queries: List[Query] = ray.get(
@@ -232,9 +232,6 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
             # 1. request manager内自动管理staleness和每个query的gen速度，卡住的或者太慢的自动释放掉
             # proxy拉取stale清单，向engine发送release请求，减少浪费算力
             # 从engine将query update回request manager时，判断是否属于当前所assigned engine id
-
-            pending_size = ray.get(self.request_manager.get_pending_size.remote())  # noqa: for py-spy
-            num_ready_replicas = len(self.replicas.ready_worker_group_ids)  # noqa: for py-spy
 
             loop_cost = time.time() - t0  # noqa: for py-spy
             sleep_interval = max(0., self.poll_interval - loop_cost)

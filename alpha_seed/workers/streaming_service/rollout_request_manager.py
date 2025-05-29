@@ -304,6 +304,11 @@ class RequestManager:
     def get_pending_size(self):
         return self.req_pool.get_pending_size()
 
+    def get_size(self) -> Tuple[int, int]:
+        total = len(self.req_pool)
+        pending = self.req_pool.get_pending_size()
+        return total, pending
+
     def _make_trace_event(self, req: Request) -> List[Union[CompleteEvent, CoherentCompleteEvent]]:
         # [C][W][P][D](stale) --> [W][P][D]
         # [C]Query对象被创建出来的时刻，也就是从dataloader里取出来的时刻，每个batch应该几乎统一开始
