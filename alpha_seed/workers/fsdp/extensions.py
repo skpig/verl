@@ -294,6 +294,7 @@ class FlexDTensor(FSDPExtensions):
             if extension.tp_mesh is not None:
                 global_device_mesh = extension.tp_mesh._parent_mesh
                 assert global_device_mesh.ndim in (2, 3)
+                new_optim_state_dict = {"state": {}, "param_groups": optim_state_dict["param_groups"]}
                 for fqn in sorted(optim_state_dict["state"].keys()):
                     fqn_state = {}
                     for key, val in optim_state_dict["state"][fqn].items():
@@ -322,10 +323,12 @@ class FlexDTensor(FSDPExtensions):
                                 stride=val.stride(),
                             )
                         fqn_state[key] = val
-                    optim_state_dict["state"][fqn] = fqn_state
+                    new_optim_state_dict["state"][fqn] = fqn_state
+            else:
+                new_optim_state_dict = optim_state_dict
 
             fsdp_pg = model.process_group
-            optim_state = orig_optim_state_dict_to_load(model, optim, optim_state_dict, is_named_optimizer,
+            optim_state = orig_optim_state_dict_to_load(model, optim, new_optim_state_dict, is_named_optimizer,
                                                         load_directly, fsdp_pg)
             return optim_state
 

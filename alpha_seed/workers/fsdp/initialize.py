@@ -336,7 +336,8 @@ def parallel_init_fsdp_fn(module: torch.nn.Module, shard_states: Dict[str, torch
                 shard_states[param_name] = 0
         loaded = shard_states[param_name]
         if isinstance(loaded, (torch.nn.Parameter, torch.Tensor)):
-            dist.broadcast(loaded.data.to(param.dtype), src=dist.get_rank())
+            loaded = loaded.to(dtype=param.dtype, device=device)
+            dist.broadcast(loaded, src=dist.get_rank())
             if hasattr(state, "_spec"):
                 copy_to_local(param, loaded.data, state._spec)
             else:
