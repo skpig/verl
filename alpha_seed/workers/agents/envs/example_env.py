@@ -89,11 +89,12 @@ class StatefulExampleEnv(BaseEnv):
     def __init__(self, **kwargs):
         self._lock = asyncio.Lock()
         self.sum = 0
+        self._val = None
 
     def action_supported(self, action: str) -> bool:
         try:
             func_name, _ = parse_func_call_kwargs(action)
-            return func_name in ['Add_']
+            return func_name in ['Add_', 'Set_', 'Get']
         except:
             pass
         return False
@@ -103,12 +104,26 @@ class StatefulExampleEnv(BaseEnv):
         if func_name == "Add_":
             val = kwargs['val']
             async with self._lock:
-                # need a lock to wrap non-atomic update operation
+                # This example demonstrate when it is necessary to use an asyncio.Lock.
+                # - The lock is not necessary in most cases because asyncio is single-threaded.
+                # - The lock should be used in a minimum scope to prevent the tasks' execution being serialized.
+
+                # A lock is required for the following case:
+                # a stateful value is read and cached in local variable
+                # -> await something (which yields control to the event loop, the value maybe updated by another coroutine)
+                # -> the value is updated based on the cached value.
                 prev_sum = self.sum
-                await asyncio.sleep(0.1 / (round(val) + 1))
+                await asyncio.sleep(0.1 / (round(val) + 1))  # prev_sum becomes stale
                 new_sum = prev_sum + val
                 self.sum = new_sum
                 return f'prev_sum:{prev_sum} + val:{val} = new_sum:{new_sum}'
+        elif func_name == "Set_":
+            val = kwargs['val']
+            await asyncio.sleep(0.1)  # mock overhead
+            self._val = val
+            return f"set value={val}"
+        elif func_name == 'Get':
+            return f"get value={self._val}"
         else:
             raise NotImplementedError(f"unexpected func_name={func_name}")
 

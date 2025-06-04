@@ -14,6 +14,7 @@ from enum import Enum
 import pickle
 import dill
 import base64
+import concurrent.futures
 
 
 class TokenRole(Enum):
@@ -99,7 +100,7 @@ class EnvStates:
 class WrappedFuture:
     """Requires batch_sync_tp_plugin_queries to manually set result"""
 
-    def __init__(self, inner_future: Union[asyncio.Future, None]):
+    def __init__(self, inner_future: Union[concurrent.futures.Future, None]):
         self.inner_future = inner_future
         self._done = False
         self._result = None
@@ -192,6 +193,10 @@ class QueryPlugin:
         return float(self.config["timeout"])
 
     @property
+    def is_exec_sequential(self) -> bool:
+        return self.config['execution_mode'] == 'sequential'
+
+    @property
     def true_call(self) -> bool:
         """For current rank, actually trigger plugin call, or wait for rank 0 results"""
         return (self.tp_group is None) or (self.tp_group.rank() == 0)
@@ -214,9 +219,13 @@ class QueryPlugin:
                                                                                      state=self.plugin_match_state)
         if len(call_str_dict) > 0:
             if self.true_call:
+                dep_fut = None if (len(self.futures) == 0 or
+                                   not self.is_exec_sequential) else self.futures[-1].inner_future
+
                 inner_fut = self.plugin_manager.async_call(call_str_dict=call_str_dict,
                                                            envs=self.envs,
-                                                           timeout=self.timeout)
+                                                           timeout=self.timeout,
+                                                           deps=None if dep_fut is None else [dep_fut])
             else:
                 inner_fut = None
             self.futures.append(WrappedFuture(inner_future=inner_fut))

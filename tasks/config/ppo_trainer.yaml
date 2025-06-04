@@ -153,6 +153,7 @@ actor_rollout_ref:
       max_round: null
       edit_history: null  # [null]
       timeout: 300
+      execution_mode: sequential # ['concurrent', 'sequential'], how to exec multiple plugin calls
     train_generate_kwargs: &train_gen_config
       top_k: -1 # 0 for hf rollout, -1 for vllm rollout
       top_p: 1.0

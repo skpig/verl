@@ -2,6 +2,7 @@ import json
 import omegaconf
 import asyncio
 from alpha_seed.workers.agents.plugins.plugin_manager import PluginManager, PluginResponse
+from alpha_seed.workers.agents.envs import create_agent_envs_from_str
 from utils import get_plugin_config, get_basic_example_env
 
 
@@ -72,3 +73,26 @@ def test_call_from_async():
 
     resp = result['example_plugin']
     assert resp.status == PluginResponse.Status.SUCCESS and resp.output == "<result>12.33</result>"
+
+
+def test_ordered_execution():
+    """Test task can wait for another task to be done"""
+    config = get_plugin_config(override_config=omegaconf.OmegaConf.create({
+        "enable": True,
+        "names": ['example_plugin']
+    }))
+    mgr = PluginManager(config)
+
+    kwargs = {'env_type': 'stateful', 'env_args': {}}
+    env = create_agent_envs_from_str(f'example_env@{json.dumps(kwargs)}')[0]
+    match_state = mgr.get_match_state()
+
+    call_str_dict, match_state = mgr.add_token_match(f"<plugin>Set_(val=1)</plugin>", match_state)
+    fut0 = mgr.async_call(call_str_dict, envs=[env])
+
+    call_str_dict, match_state = mgr.add_token_match(f"<plugin>Get()</plugin>", match_state)
+    fut1 = mgr.async_call(call_str_dict, envs=[env], deps=[fut0])
+    res0, _ = fut0.result()
+    res1, _ = fut1.result()
+    assert res0['example_plugin'].output == '<result>set value=1</result>'
+    assert res1['example_plugin'].output == '<result>get value=1</result>'

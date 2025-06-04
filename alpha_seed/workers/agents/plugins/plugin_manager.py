@@ -12,6 +12,7 @@ from alpha_seed.workers.agents.envs import BaseEnv
 from omegaconf import OmegaConf
 from transformers import AutoTokenizer
 import json
+import concurrent.futures
 
 
 class AsyncTimer:
@@ -70,15 +71,21 @@ class PluginManager:
     def plugins(self) -> Dict[str, BasePlugin]:
         return self._plugins
 
-    async def __call__(self,
-                       call_str_dict: Dict[str, str],
-                       envs: List[BaseEnv],
-                       timeout: Union[float, None] = None) -> Tuple[Dict[str, PluginResponse], Dict]:
+    async def __call__(
+        self,
+        call_str_dict: Dict[str, str],
+        envs: List[BaseEnv],
+        timeout: Union[float, None] = None,
+        deps: List[asyncio.Future] = None,
+    ) -> Tuple[Dict[str, PluginResponse], Dict]:
         results_dict = dict()
         tasks = []
         timers = []
         names = []
         metrics = dict()
+
+        if deps is not None:
+            await asyncio.gather(*deps, return_exceptions=True)
 
         for name, call_str in call_str_dict.items():
             plugin = self._plugins[name]
@@ -114,9 +121,12 @@ class PluginManager:
         call_str_dict: Dict[str, str],
         envs: List[BaseEnv],
         timeout: Union[float, None] = None,
-    ) -> asyncio.Future[Dict[str, PluginResponse], Dict]:
+        deps: List[concurrent.futures.Future] = None,
+    ) -> concurrent.futures.Future[Dict[str, PluginResponse], Dict]:
 
-        future = asyncio.run_coroutine_threadsafe(self.__call__(call_str_dict, envs=envs, timeout=timeout), self._loop)
+        aio_deps = None if deps is None else [asyncio.wrap_future(fut, loop=self._loop) for fut in deps]
+        future = asyncio.run_coroutine_threadsafe(
+            self.__call__(call_str_dict, envs=envs, timeout=timeout, deps=aio_deps), self._loop)
         return future
 
 
