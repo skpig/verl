@@ -1594,13 +1594,14 @@ class RayPPOTrainer(object):
                             merge_metrics(rollout_pool_metrics, batch_metrics_before_fill)
 
                             # fill rollout out pool with grad
-                            fill_size, pool_size = ray.get(
-                                self.rollout_pool.fill_rollout_pool_dynamic_sampling.remote(batch))
+                            fill_size, pool_size = RolloutPool.dynamic_call(self.rollout_pool,
+                                                                            "fill_rollout_pool_dynamic_sampling", batch)
                             return_batch_size = self.config.data.actor_training_batch_size * self.num_bon
                             rollout_counter += 1
-                            if ray.get(self.rollout_pool.get_dynamic_sampling_pool_size.remote()) < return_batch_size:
+                            if RolloutPool.dynamic_call(self.rollout_pool,
+                                                        "get_dynamic_sampling_pool_size") < return_batch_size:
                                 print(
-                                    f'[RolloutPool] pool_with_grad_size: {ray.get(self.rollout_pool.get_dynamic_sampling_pool_size.remote())}'
+                                    f'[RolloutPool] pool_with_grad_size: {RolloutPool.dynamic_call(self.rollout_pool, "get_dynamic_sampling_pool_size")}'
                                 )
                                 metrics[f'rollout_pool/fill_size_{rollout_counter}'] = fill_size
                                 metrics[f'rollout_pool/pool_size_{rollout_counter}'] = pool_size
@@ -1608,7 +1609,8 @@ class RayPPOTrainer(object):
                                     assert False, 'Do not make sense. Check Your DATA!!!'
                                 continue
                             else:
-                                train_batch = ray.get(self.rollout_pool.get_train_batch_grad.remote(return_batch_size))
+                                train_batch = RolloutPool.dynamic_call(self.rollout_pool, "get_train_batch_grad",
+                                                                       return_batch_size)
                                 batch = DataProto.concat(train_batch)
                                 batch.meta_info[
                                     'generation_kwargs'] = self.config.actor_rollout_ref.rollout.train_generate_kwargs
@@ -1624,13 +1626,12 @@ class RayPPOTrainer(object):
                                     if '/acc_' in key and type(rollout_pool_metrics[key]) in [float, int]:
                                         rollout_pool_metrics[key] /= rollout_counter
                                 print(
-                                    f'[RolloutPool] BeginTraining pool_with_grad_size: {ray.get(self.rollout_pool.get_dynamic_sampling_pool_size.remote())}'
+                                    f'[RolloutPool] BeginTraining pool_with_grad_size: {RolloutPool.dynamic_call(self.rollout_pool, "get_dynamic_sampling_pool_size")}'
                                 )
                             if self.config.algorithm.dynamic_sampling.sync:
-                                ray.get(self.rollout_pool.pool_with_grad_clear.remote())
-                                print(
-                                    f'[RolloutPool] AfterClear pool_with_grad_size: {ray.get(self.rollout_pool.get_dynamic_sampling_pool_size.remote())}'
-                                )
+                                pool_with_grad_size = RolloutPool.dynamic_call(self.rollout_pool,
+                                                                               "pool_with_grad_clear")
+                                print(f'[RolloutPool] AfterClear pool_with_grad_size: {pool_with_grad_size}')
                             rollout_pool_metrics['rollout_pool/fill_counter'] = rollout_counter
                             metrics.update(rollout_pool_metrics)
                             rollout_pool_metrics = {}

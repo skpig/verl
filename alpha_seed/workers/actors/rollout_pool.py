@@ -41,8 +41,9 @@ class VanillaReplayBufferClient():
 class RolloutPool:
     name = "rollout_pool"
 
-    def __init__(self, config):
+    def __init__(self, config, mode):
         self.config = config
+        self.mode = mode
         self.num_bon = self.config.actor_rollout_ref.rollout.get("num_bon", 1)
         self.fn_map = {"default": self.get_train_batch_default}
         self.strategy = self.config.actor_rollout_ref.rollout.get("strategy", "default")
@@ -174,10 +175,22 @@ class RolloutPool:
         return return_batch
 
     @staticmethod
-    def get_or_create_actor(config):
+    def get_or_create_actor(config, mode="local"):
+        # TODO: support distributed-ray mode
+        if mode == "local":
+            return RolloutPool(config, mode)
         rollout_pool = None
         try:
             rollout_pool = ray.get_actor(name=RolloutPool.name)
         except Exception as e:
-            rollout_pool = ray.remote(RolloutPool).options(name=RolloutPool.name).remote(config)
+            rollout_pool = ray.remote(RolloutPool).options(name=RolloutPool.name).remote(config, mode)
         return rollout_pool
+
+    @staticmethod
+    def dynamic_call(obj, method_name, *args, **kwargs):
+        if obj.mode == "ray":
+            method_ref = getattr(obj, method_name).remote(*args, **kwargs)
+            return ray.get(method_ref)
+        else:
+            method = getattr(obj, method_name)
+            return method(*args, **kwargs)

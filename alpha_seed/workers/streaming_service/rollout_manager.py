@@ -10,6 +10,7 @@ import pandas as pd
 import uuid
 import time
 import threading
+from alpha_seed.workers.actors.rollout_pool import RolloutPool
 from contextlib import suppress, contextmanager, nullcontext
 from codetiming import Timer
 from omegaconf import OmegaConf, DictConfig
@@ -329,16 +330,16 @@ class RolloutManager:
         pprint(
             f"train step #{step} gen complete {finished_num}, incomplete {incomplete_num}, pending {len(self.pending_batch)}"
         )
-        ray.get(self.rollout_pool.fill_rollout_pool.remote(ready_batch))
+        RolloutPool.dynamic_call(self.rollout_pool, "fill_rollout_pool", ready_batch)
+
         if is_warmup_step:
             print(f"warmup gen step #{step}, elapsed: {time.time() - step_start}")
             return None
-
         num_bon = self.config.actor_rollout_ref.rollout.get("num_bon", 1)
         # get the training batch
         return_batch_size = (self.config.data.train_batch_size *
                              self.config.trainer.league_training_config.buffer_size * num_bon)
-        train_batch = ray.get(self.rollout_pool.get_train_batch.remote(return_batch_size))
+        train_batch = RolloutPool.dynamic_call(self.rollout_pool, "get_train_batch", return_batch_size)
         batch = DataProto.concat(train_batch)
 
         if self._use_server:
