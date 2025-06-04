@@ -57,7 +57,7 @@ def get_custom_reward_fn(config):
     return wrapped_fn
 
 
-def load_reward_manager(config, tokenizer, num_examine, **reward_kwargs):
+def load_reward_manager(config, tokenizer, num_examine, is_valid=False, **reward_kwargs):
     reward_manager_name = config.reward_model.get("reward_manager", "naive")
     if reward_manager_name == "naive":
         from verl.workers.reward_manager import NaiveRewardManager
@@ -87,7 +87,7 @@ def load_reward_manager(config, tokenizer, num_examine, **reward_kwargs):
         raise NotImplementedError
 
     from verl.utils.reward_score.math_verify import compute_score
-    final_compute_score = compute_score
+    final_compute_score = partial(compute_score, is_valid=is_valid)
 
     if compute_score is None:
         sandbox_config = config.reward_model.get("sandbox_fusion")

@@ -119,8 +119,6 @@ def parallel_compute_score_sync(
         try:
             # 执行评估函数
             result = evaluation_func(task, completion, reference, task_extra_info)
-            # 取消超时
-            signal.alarm(0)
             scores.append(result)
         except TimeoutException as e:
             print(f"评估超时: {e}")

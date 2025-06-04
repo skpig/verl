@@ -267,19 +267,18 @@ def _time_stamp():
     timestamp = time.time()
     local_time = time.localtime(timestamp)
     formatted_time = time.strftime("%Y-%m-%d %H:%M:%S", local_time)
-    print(f"Current time: {formatted_time}")
+    # print(f"Current time: {formatted_time}")
+    return formatted_time
 
 @contextmanager
 def _timer(name: str, timing_raw: Dict[str, float]):
     with Timer(name=name, logger=None) as timer:
-        print("Start timing of : ", name)
-        _time_stamp()
+        print("Start timing of : ", name, _time_stamp())
         yield
     if name not in timing_raw:
         timing_raw[name] = 0
     timing_raw[name] += timer.last
-    print("Duration of {}: {:.2f} seconds".format(name, timer.last))
-    _time_stamp()
+    print("Duration of {}: {:.2f} seconds".format(name, timer.last), _time_stamp())
 
 
 class RayPPOTrainer:
@@ -475,6 +474,7 @@ class RayPPOTrainer:
         if val_dataset is None:
             val_dataset = create_rl_dataset(self.config.data.val_files, self.config.data, self.tokenizer, self.processor)
         self.train_dataset, self.val_dataset = train_dataset, val_dataset
+        print("[create_dataloader] Train dataset size: {}, Val dataset size: {}".format(len(self.train_dataset), len(self.val_dataset)))
 
         if train_sampler is None:
             train_sampler = create_rl_sampler(self.config.data, self.train_dataset)

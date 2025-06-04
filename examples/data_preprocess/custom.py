@@ -18,6 +18,11 @@ Preprocess the MATH-lighteval dataset to parquet format
 import argparse
 import os
 
+from math_verify import parse
+from math_verify.errors import TimeoutException
+from math_verify.metric import math_metric
+from math_verify.utils import timeout
+from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
 import datasets
 from numpy import argsort
 
@@ -26,7 +31,12 @@ from verl.utils.reward_score.math import last_boxed_only_string, remove_boxed
 
 
 def extract_solution(solution_str):
-    return remove_boxed(last_boxed_only_string(solution_str))
+    ground_truth_boxed = "\\boxed{" + solution_str + "}"
+    gold_extraction_target=(LatexExtractionConfig(),)
+    extracted_golds = parse(ground_truth_boxed, gold_extraction_target)
+    return False if len(extracted_golds) == 0 else True
+
+    
 
 def format_question_to_prompt(question):
     system_prompt = """
@@ -72,13 +82,16 @@ def process_numinamath_dataset():
     dataset = datasets.load_dataset(data_source, trust_remote_code=True)
 
     train_dataset = dataset["train"]
-    test_dataset = dataset["validation"].shuffle(42).select(range(100)) # only select the first 100 samples for testing
+    test_dataset = dataset["validation"]
 
+    gold_extraction_target=(LatexExtractionConfig(),)
     def filter_fn(example):
+        extracted_golds = parse(str(example['reward_model']['ground_truth']), gold_extraction_target, parsing_timeout=5)
         # 过滤掉code data
-        return example['ability'] == "math"
+        return example['ability'] == "math" and len(extracted_golds) > 0
     train_dataset = train_dataset.filter(filter_fn)
     test_dataset = test_dataset.filter(filter_fn)
+    test_dataset = test_dataset.shuffle(42).select(range(100)) # only select the first 100 samples for testing
 
     # 为每个数据项添加一个表示唯一ID的行
     def make_map_fn(split):
@@ -99,6 +112,9 @@ def process_numinamath_dataset():
 
     train_dataset.to_parquet(train_path)
     test_dataset.to_parquet(test_path)
+
+    print("Size of NuminaMath train dataset:", len(train_dataset))
+    print("Size of NuminaMath test dataset:", len(test_dataset))
 
     
 
@@ -140,6 +156,7 @@ def process_math500_dataset():
     test_dataset = test_dataset.map(function=make_map_fn("test"), with_indices=True)
 
     test_dataset.to_parquet(test_path)
+    print("Size of MATH-500 test dataset:", len(test_dataset))
 
 
 def process_amc_dataset():
@@ -176,6 +193,7 @@ def process_amc_dataset():
     test_dataset = test_dataset.map(function=make_map_fn("test"), with_indices=True)
 
     test_dataset.to_parquet(test_path)
+    print("Size of AMC-12 test dataset:", len(test_dataset))
 
 
 if __name__ == "__main__":
