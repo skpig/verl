@@ -19,6 +19,7 @@ try:
     from math_verify import parse
     from math_verify.errors import TimeoutException
     from math_verify.metric import math_metric
+    from math_verify.utils import timeout
     from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
 except ImportError:
     print("To use Math-Verify, please install it first by running `pip install math-verify`.")
@@ -102,7 +103,8 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None) -> b
     # Wrap the ground truth in \boxed{} format for verification
     ground_truth_boxed = "\\boxed{" + ground_truth + "}"
     try:
-        ret_score, (extracted_gold, extracted_model_output) = verify_func([ground_truth_boxed], [model_output])
+        verify_func_w_timeout = timeout(20)(verify_func)
+        ret_score, (extracted_gold, extracted_model_output) = verify_func_w_timeout([ground_truth_boxed], [model_output])
     except Exception:
         ret_score = 0.
         os.makedirs('.cache/reward_error', exist_ok=True)
@@ -111,6 +113,7 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None) -> b
             traceback.print_exc(file=f)
             f.write('\n')
     except TimeoutException:
+        print("Timeout detected, returning 0 score from math_verify.")
         ret_score = timeout_score
 
     format_correctness, num_steps = verify_format(model_output)

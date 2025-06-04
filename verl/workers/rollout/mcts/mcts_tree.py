@@ -82,7 +82,6 @@ class MCTS:
         self.data_id = data_id
         self.root = MCTSNode(prefix_ids=[],
                             resp_ids=query_ids,
-                            is_expand=True,
                             is_terminal=False,
                             resp_logprob=0,
                             parent=None,
@@ -291,7 +290,7 @@ class MCTS:
         # selection loop 
         # continue until we reach an unexpanded node
         self.current_nodes.append(node)
-        # the last node is an unexpanded node or None
+        # the last node is an unexpanded node or None, which is the child of an expanded node
         while node is not None and node.is_expand:
             node = self._select_child(node)
             self.current_nodes.append(node)
@@ -403,7 +402,7 @@ class MCTS:
         def add_nodes_edges(current_node):
             text = self.tokenizer.decode(current_node.state["resp_ids"]).replace(":"," ")
             # print(text)
-            node_label = f'{text}\nQ={current_node._value_sum}\nN={current_node._visit_count}'
+            node_label = f'{text}\n\nQ={current_node._value_sum};N={current_node._visit_count};PUCT={current_node.puct(self.c_puct):.2f};prob={current_node.state["resp_prob"]:.2f}'
             G.add_node(id(current_node), label=node_label)
             if current_node.parent:
                 G.add_edge(id(current_node.parent), id(current_node))
@@ -412,7 +411,8 @@ class MCTS:
 
         add_nodes_edges(node)
 
-        pos = graphviz_layout(G, prog='dot')
+        # pos = graphviz_layout(G, prog='dot')
+        pos = nx.nx_agraph.pygraphviz_layout(G, prog='dot')
         labels = nx.get_node_attributes(G, 'label')
 
         plt.figure(figsize=(30, 20))  # 增大图像尺寸

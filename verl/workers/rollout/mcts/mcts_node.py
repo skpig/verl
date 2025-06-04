@@ -42,7 +42,6 @@ class MCTSNode():
                  resp_logprob: float = None,
                  parent: Optional[MCTSNode] = None,
                  tag: str = "0",
-                 is_expand: bool = False, # NOTE: since we merge `expand` and `simulate`, only the first child is expanded. The others are expanded once their father are selected during selection stage.
     ):
         self.parent = parent
         self.tag = tag
@@ -64,7 +63,7 @@ class MCTSNode():
         self._value_sum = 0
         self.input_ids_start_id = len(prefix_ids)
         self.input_ids_end_id = len(prefix_ids) + len(resp_ids)
-        self.is_expand = not is_expand
+        self.is_expand = False # NOTE: since we merge `expand` and `simulate`, only the first child is expanded. The others are expanded once their father are selected during selection stage.
 
 
         # self.reward = None

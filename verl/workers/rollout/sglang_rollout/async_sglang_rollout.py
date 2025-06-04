@@ -20,6 +20,7 @@ import os
 from contextlib import contextmanager
 from copy import deepcopy
 from json import JSONDecodeError
+import time
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -583,7 +584,7 @@ class AsyncSGLangRollout(BaseRollout):
         output = None
 
         current_turns = 0
-        while current_turns < self.config.n // self.config.mcts.max_branch:
+        while current_turns < (self.config.n // self.config.mcts.max_branch):
             # Select
             # if no nodes to select, break
             if (cur_node := _req.select_next_step()) is None:
@@ -650,6 +651,7 @@ class AsyncSGLangRollout(BaseRollout):
             # """Temporary workaround for SGLang Engine to skip tokenizer init"""
             # self._engine.skip_tokenizer_init = True  # skip tokenizer init in SGLang Engine
             # self._engine.server_args.skip_tokenizer_init = True  # skip tokenizer init in SGLang Engine
+            start_time = time.time()
 
             # each query only generate one MCTS tree
             req_list = [
@@ -667,11 +669,13 @@ class AsyncSGLangRollout(BaseRollout):
             loop = asyncio.get_event_loop()
             output_req_list = loop.run_until_complete(
                 asyncio.gather(
-                    *[self._async_one_mcts(req, log_ids=prompts.batch['index'].tolist()[:10],**kwargs) for req in req_list],
+                    *[self._async_one_mcts(req, log_ids=prompts.batch['index'].tolist()[:20],**kwargs) for req in req_list],
                 )
             )
             sorted_output_req_list = sorted(output_req_list, key=lambda x: x.data_id)
 
+            end_time = time.time()
+            logger.info(f"Async MCTS rollout took {end_time - start_time:.2f} seconds for {len(sorted_output_req_list)} requests")
             # # reset engine skip_tokenizer_init
             # self._engine.skip_tokenizer_init = False
             # self._engine.server_args.skip_tokenizer_init = False  # reset skip tokenizer init in SGLang Engine

@@ -1,6 +1,6 @@
 # BASE_MODEL=${MY_MODEL_DIR}Qwen/Qwen2.5-3B
 # TEMPLATE_TYPE=base # or chat
-BASE_MODEL=${MY_MODEL_DIR}Qwen/Qwen2.5-1.5B-Instruct
+BASE_MODEL=${MY_MODEL_DIR}Qwen/Qwen2.5-3B-Instruct
 TEMPLATE_TYPE=chat # or chat
 TRAIN_FILE="${MY_DATA_DIR}Eurus-2-RL-Data/train.parquet"
 TEST_FILES="['${MY_DATA_DIR}Eurus-2-RL-Data/test.parquet', '${MY_DATA_DIR}MATH-500/test.parquet', '${MY_DATA_DIR}aimo-validation-amc/test.parquet']"
@@ -12,7 +12,7 @@ ROLLOUT_N=64 # 16 * 4 = 64
 OVERLONG_BUFFER_LEN=1024
 MAX_PROMPT_LEN=$((1024 * 1))
 MAX_RESPONSE_LEN=$((1024 * 3 + OVERLONG_BUFFER_LEN))
-BATCH_SIZE=128 # 512 / 4 = 128
+BATCH_SIZE=64 # 512 / 4 = 128
 MINI_BSZ=64
 # MCTS settings
 MCTS_DEPTH=4
@@ -87,7 +87,7 @@ CMD="python3 -m verl.trainer.main_ppo \
     reward_model.overlong_buffer.enable=True \
     reward_model.overlong_buffer.len=$OVERLONG_BUFFER_LEN \
     trainer.critic_warmup=0 \
-    trainer.logger=['console','wandb'] \
+    trainer.logger=['console'] \
     trainer.val_before_train=False \
     trainer.n_gpus_per_node=$N_GPUS \
     trainer.nnodes=1 \
