@@ -250,10 +250,26 @@ def compute_score_for_statistics(data_source, solution_str, ground_truth, extra_
 
 def compute_score(data_source, solution_str, ground_truth, extra_info=None, is_valid=False) -> bool:
 
-    format_correctness, num_steps = verify_format(solution_str)
+    try:
+        verify_format_w_timeout = timeout(2)(verify_format)
+        format_correctness, num_steps = verify_format_w_timeout(solution_str)
+    except TimeoutException:
+        print("Timeout detected in format verification, returning 0 score.")
+        os.makedirs('/home/huangbz/verl/.cache/reward_error', exist_ok=True)
+        with open(f'/home/huangbz/verl/.cache/reward_error/format_error_{os.getpid()}.log', 'w') as f:
+            f.write(f"Timeout detected in format verification\n==Solution==\n{solution_str}\n==Ground==\n{ground_truth}\n====\n")
+            traceback.print_exc(file=f)
+            f.write('\n')
+        format_correctness, num_steps = 0, 0
+    except Exception:
+        print("Error detected in format verification, returning 0 score.")
+        os.makedirs('/home/huangbz/verl/.cache/reward_error', exist_ok=True)
+        with open(f'/home/huangbz/verl/.cache/reward_error/format_error_{os.getpid()}.log', 'w') as f:
+            f.write(f"Error detected in format verification\n==Solution==\n{solution_str}\n==Ground==\n{ground_truth}\n====\n")
+            traceback.print_exc(file=f)
+            f.write('\n')
+        format_correctness, num_steps = 0, 0
 
-    # Wrap the ground truth in \boxed{} format for verification
-    ground_truth = "\\boxed{" + ground_truth + "}"
     try:
         # verify1(solution_str, ground_truth_boxed)
         # verify2(solution_str, ground_truth_boxed)
@@ -265,21 +281,46 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None, is_v
         # print(f"Total time for verify3: {total_time3:.2f}s, pred_extract_num3: {pred_extract_num3}, gold_extract_num3: {gold_extract_num3}")
         # ret_score = 0
 
-        gold_extraction_target=(LatexExtractionConfig(),) if not is_valid else (LatexExtractionConfig(), ExprExtractionConfig()) # reduce computation time for training
+        # during training
+        if not is_valid:
+            extracted_predictions = extract_answer(solution_str) # only verify the answer part wrapped in <answer>...</answer>
+            gold_extraction_target=(ExprExtractionConfig(),)# reduce computation time for training, since DAPOmath only requires ExprExtractionConfig
+        # during validation
+        else:
+            # Wrap the ground truth in \boxed{} format for verification
+            ground_truth = "\\boxed{" + ground_truth + "}"
+            extracted_predictions = solution_str
+            gold_extraction_target = (LatexExtractionConfig(), ExprExtractionConfig()) 
         pred_extraction_target=(ExprExtractionConfig(), LatexExtractionConfig())
 
         # reduce computation time for training
-        if not is_valid:
-            extracted_predictions = extract_answer(solution_str)
+        with open(".cache/current_solution.log", 'w') as f:
+            f.write("====== Solution ======\n")
+            f.write(solution_str)
+            f.write("\n\n\n")
+            f.write("====== Ground Truth ======\n")
+            f.write(ground_truth)
 
+
+        print("====== Parse Golden ======")
         extracted_predictions = parse(extracted_predictions, pred_extraction_target, parsing_timeout=3)
+        print("====== Parse Solution ======")
         extracted_golds = parse(ground_truth, gold_extraction_target, parsing_timeout=3)
         
-        ret_score = verify(extracted_golds, extracted_predictions)
+        print(f"====== Verify {len(extracted_golds)} golds and {len(extracted_predictions)} predictions ======")
+        ret_score = verify(extracted_golds, extracted_predictions, timeout_seconds=3)
+
+        if len(extracted_predictions) == 0:
+            extracted_predictions = "N/A extraction"
+        elif len(extracted_predictions) == 1:
+            extracted_predictions = f"{extracted_predictions[0]}"
+        else:
+            extracted_predictions = extracted_predictions[1] if isinstance(extracted_predictions[1], str) else f"{extracted_predictions[0]}"
 
     except TimeoutException:
         print("Timeout detected, returning 0 score from math_verify.")
         ret_score = 0.
+        extracted_predictions = "Timeout extraction"
         os.makedirs('.cache/reward_error', exist_ok=True)
         with open(f'.cache/reward_error/grader_error_{os.getpid()}.log', 'a') as f:
             f.write(f"Timeout detected\n==Solution==\n{solution_str}\n==Ground==\n{ground_truth}\n====\n")
@@ -287,6 +328,7 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None, is_v
             f.write('\n')
     except Exception:
         ret_score = 0.
+        extracted_predictions = "Error extraction"
         traceback.print_exc()
         print("Error detected in math_verify, returning 0 score.")
         os.makedirs('.cache/reward_error', exist_ok=True)
@@ -296,17 +338,11 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None, is_v
             f.write('\n')
 
 
-    if len(extracted_predictions) == 0:
-        extracted_predictions = "N/A extraction"
-    elif len(extracted_predictions) == 1:
-        extracted_predictions = f"{extracted_predictions[0]}"
-    else:
-        extracted_predictions = extracted_predictions[1] if isinstance(extracted_predictions[1], str) else f"{extracted_predictions[0]}"
 
     return {
         "score": ret_score,
         "acc": 1 if ret_score > 0 else 0,
         "format": format_correctness,
-        "pred": extracted_predictions[-1] if len(extracted_predictions) > 0 else "None extraction",
+        "pred": extracted_predictions,
         "#steps": num_steps,
     }

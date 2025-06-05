@@ -2,8 +2,10 @@
 # TEMPLATE_TYPE=base # or chat
 BASE_MODEL=${MY_MODEL_DIR}Qwen/Qwen2.5-3B-Instruct
 TEMPLATE_TYPE=chat # or chat
-TRAIN_FILE="${MY_DATA_DIR}Eurus-2-RL-Data/train.parquet"
-TEST_FILES="['${MY_DATA_DIR}Eurus-2-RL-Data/test.parquet', '${MY_DATA_DIR}MATH-500/test.parquet', '${MY_DATA_DIR}aimo-validation-amc/test.parquet']"
+# TRAIN_FILE="${MY_DATA_DIR}Eurus-2-RL-Data/train.parquet"
+# TEST_FILES="['${MY_DATA_DIR}Eurus-2-RL-Data/test.parquet', '${MY_DATA_DIR}MATH-500/test.parquet', '${MY_DATA_DIR}aimo-validation-amc/test.parquet']"
+TRAIN_FILE="${MY_DATA_DIR}DAPO-Math-17k/train.parquet"
+TEST_FILES="['${MY_DATA_DIR}DAPO-Math-17k/test.parquet', '${MY_DATA_DIR}MATH-500/test.parquet', '${MY_DATA_DIR}aimo-validation-amc/test.parquet']"
 
 RUN_ID=$1
 
@@ -39,6 +41,7 @@ python3 examples/data_preprocess/custom.py \
 # export VLLM_ATTENTION_BACKEND=XFORMERS
 # export CUDA_LAUNCH_BLOCKING=1
 export HYDRA_FULL_ERROR=1
+export PYTHON_PATH="."
 
 # 定义要执行的命令
 CMD="python3 -m verl.trainer.main_ppo \

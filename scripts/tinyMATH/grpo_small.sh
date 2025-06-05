@@ -2,8 +2,10 @@
 # TEMPLATE_TYPE=base # or chat
 BASE_MODEL=${MY_MODEL_DIR}Qwen/Qwen2.5-1.5B-Instruct
 TEMPLATE_TYPE=chat # or chat
-TRAIN_FILE="${MY_DATA_DIR}Eurus-2-RL-Data/train.parquet"
-TEST_FILES="['${MY_DATA_DIR}Eurus-2-RL-Data/test.parquet', '${MY_DATA_DIR}MATH-500/test.parquet', '${MY_DATA_DIR}aimo-validation-amc/test.parquet']"
+# TRAIN_FILE="${MY_DATA_DIR}Eurus-2-RL-Data/train.parquet"
+# TEST_FILES="['${MY_DATA_DIR}Eurus-2-RL-Data/test.parquet', '${MY_DATA_DIR}MATH-500/test.parquet', '${MY_DATA_DIR}aimo-validation-amc/test.parquet']"
+TRAIN_FILE="${MY_DATA_DIR}DAPO-Math-17k/train.parquet"
+TEST_FILES="['${MY_DATA_DIR}DAPO-Math-17k/test.parquet', '${MY_DATA_DIR}MATH-500/test.parquet', '${MY_DATA_DIR}aimo-validation-amc/test.parquet']"
 
 RUN_ID=$1
 
@@ -23,8 +25,8 @@ OFFLOAD=True
 FORWARD_BSZ=16
 BACKWARD_BSZ=8
 TOTAL_EPOCHS=1
-FORWARD_MAX_TOKEN_LEN=$((36 * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN))) # 12 for 40GB
-BACKWARD_MAX_TOKEN_LEN=$((8 * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN)))  # 4 for 40GB
+FORWARD_MAX_TOKEN_LEN=$((12 * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN))) # 12 for 40GB
+BACKWARD_MAX_TOKEN_LEN=$((3 * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN)))  # 4 for 40GB
 
 PROJ_NAME="TinyMATH"
 MODEL_NAME=$(basename $BASE_MODEL)
@@ -39,6 +41,7 @@ python3 examples/data_preprocess/custom.py \
 # export VLLM_ATTENTION_BACKEND=XFORMERS
 # export CUDA_LAUNCH_BLOCKING=1
 export HYDRA_FULL_ERROR=1
+export PYTHONPATH="."
 
 # 定义要执行的命令
 CMD="python3 -m verl.trainer.main_ppo \

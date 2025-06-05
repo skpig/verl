@@ -86,7 +86,8 @@ def process_numinamath_dataset():
 
     gold_extraction_target=(LatexExtractionConfig(),)
     def filter_fn(example):
-        extracted_golds = parse(str(example['reward_model']['ground_truth']), gold_extraction_target, parsing_timeout=5)
+        golden_answer = '\\boxed{' + str(example['reward_model']['ground_truth']) + "}"
+        extracted_golds = parse(golden_answer, gold_extraction_target, parsing_timeout=5)
         # 过滤掉code data
         return example['ability'] == "math" and len(extracted_golds) > 0
     train_dataset = train_dataset.filter(filter_fn)
@@ -195,6 +196,66 @@ def process_amc_dataset():
     test_dataset.to_parquet(test_path)
     print("Size of AMC-12 test dataset:", len(test_dataset))
 
+def process_dapomath_dataset():
+    # 数据源为 dapomath/dapomath
+    data_source = "BytedTsinghua-SIA/DAPO-Math-17k"
+    local_dir = os.path.basename(data_source)
+    test_path = os.path.join(MY_DATA_DIR, local_dir, "test.parquet")
+    train_path = os.path.join(MY_DATA_DIR, local_dir, "train.parquet")
+    # 如果文件已存在且设置了恢复标志，则跳过处理
+    if RESUME and os.path.exists(test_path):
+        return
+    print(f"Loading the {data_source} dataset from huggingface...", flush=True)
+    dataset = datasets.load_dataset(data_source, trust_remote_code=True, split="train")
+
+    golden_extraction_target=(ExprExtractionConfig(),)
+    def filter_fn(example):
+        if not example['reward_model']['ground_truth']:
+            return False
+        try:
+            # Try to convert answer to a number
+            float(example['reward_model']['ground_truth'])
+            is_number = True
+        except (ValueError, TypeError):
+            is_number = False
+            print("Answer is not a number:", example['reward_model']['ground_truth'])
+        
+        # golden_answer = '\\boxed{' + str(example['reward_model']['ground_truth']) + "}"
+        golden_answer = example['reward_model']['ground_truth']
+        extracted_golds = parse(golden_answer, golden_extraction_target, parsing_timeout=5)
+        # 过滤掉code data
+        return example['ability'] == "MATH" and len(extracted_golds) > 0
+        return False
+    dataset = dataset.filter(filter_fn)
+
+    # 分割数据集为训练集和测试集
+    _ = dataset.train_test_split(test_size=100, seed=42)
+    train_dataset, test_dataset = _["train"], _["test"]
+
+
+    # 为每个数据项添加一个表示唯一ID的行
+    def make_map_fn(split):
+        def process_fn(example, idx):
+            question = example.pop("prompt")[-1]["content"]
+            prefix = "Solve the following math problem step by step. The last line of your response should be of the form Answer: $Answer (without quotes) where $Answer is the answer to the problem.\n\n"
+            suffix = "\n\nRemember to put your answer on its own line after \"Answer:\"."
+            question = question[len(prefix):-len(suffix)]  # reformat the original prompt by removing prefix and suffix
+            # 这里需要根据实际数据结构调整键名，假设数据结构与MATH-500类似
+            example['data_source'] = "dapomath"
+            example['prompt'] = format_question_to_prompt(question)
+            example['reward_model']['ground_truth'] = str(example['reward_model']['ground_truth'])
+            example['extra_info'] = {"split": split, "index": idx}
+            return example
+
+        return process_fn
+    train_dataset = train_dataset.map(function=make_map_fn("train"), with_indices=True)
+    test_dataset = test_dataset.map(function=make_map_fn("test"), with_indices=True)
+    # 保存数据集到 parquet 文件
+    test_dataset.to_parquet(test_path)
+    train_dataset.to_parquet(train_path)
+    print("Size of DAPO-Math train dataset:", len(train_dataset))
+    print("Size of DAPO-Math test dataset:", len(test_dataset))
+
 
 if __name__ == "__main__":
     argsort = argparse.ArgumentParser()
@@ -203,8 +264,9 @@ if __name__ == "__main__":
     MY_DATA_DIR = os.getenv("MY_DATA_DIR")
     
 
-    process_numinamath_dataset()
+    # process_numinamath_dataset()
     process_math500_dataset()
     process_amc_dataset()
+    process_dapomath_dataset()
 
     print("Done Preprocessing!")

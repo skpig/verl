@@ -116,17 +116,9 @@ def parallel_compute_score_sync(
     
     # Process each item sequentially
     for completion, reference, task, task_extra_info in tqdm(zip(completions, references, tasks, extra_info if extra_info is not None else [None] * len(completions)), total=len(completions), desc="Computing scores"):
-        try:
-            # 执行评估函数
-            result = evaluation_func(task, completion, reference, task_extra_info)
-            scores.append(result)
-        except TimeoutException as e:
-            print(f"评估超时: {e}")
-            scores.append(_make_default("Timeout"))
-        except Exception as e:
-            traceback.print_exc()
-            print(f"Computation error: {e}")
-            scores.append(_make_default("Error"))
+        # 执行评估函数
+        result = evaluation_func(task, completion, reference, task_extra_info)
+        scores.append(result)
             
     return scores
 
