@@ -30,9 +30,9 @@ class VanillaReplayBufferClient():
 
     def sample(self):
         keys = list(self.__pool.keys())
-        while keys:  # raises StopIteration on every next() if keys is empty
-            random_key = random.choice(keys)
-            yield random_key
+        random.shuffle(keys)
+        for key in keys:
+            yield key
 
     def delete(self, key: str):
         self.__pool.pop(key)
@@ -133,6 +133,8 @@ class RolloutPool:
         while not self.bon_ready_batch.empty() and len(return_batch) < return_batch_size:
             index = self.bon_ready_batch.get()
             ready_batch = self.pool.get(index)
+            if ready_batch is None:
+                continue
             if len(return_batch) + len(ready_batch) > return_batch_size:
                 self.bon_ready_batch.put(index)
                 break
@@ -154,7 +156,7 @@ class RolloutPool:
 
             ready_batch = self.pool.get(index)
             if len(return_batch) + len(ready_batch) > return_batch_size:
-                break
+                continue  # draw again to prevent return_batch being empty
             return_batch.extend(ready_batch)
 
         if len(return_batch) < return_batch_size and len(return_batch) > 0:
