@@ -19,6 +19,11 @@ echo 'export MY_DATA_DIR=/data/' >> ~/.bashrc
 # git fetch upstream
 # git pull upstream main
 
+# Install networx
+apt update
+sudo apt-get install graphviz graphviz-dev
+pip install networkx[default,extra]
+
 # Install uv
 python3 -m pip install uv
 
@@ -34,9 +39,6 @@ python3 -m uv pip install flash-attn --no-build-isolation --no-deps
 python3 -m uv pip install .
 python3 -m uv pip install -r ./requirements.txt
 
-# Install networx
-sudo apt-get install graphviz graphviz-dev
-pip install networkx[default,extra]
 
 # Define a timestamp function
 function now() {
