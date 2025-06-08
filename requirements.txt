@@ -26,3 +26,4 @@ nltk
 langdetect
 traitlets
 math-verify
+debugpy

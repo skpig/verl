@@ -624,13 +624,17 @@ class RayPPOTrainer:
 
         return results
 
-    def _maybe_log_train_generations(self, batch):
+    def _maybe_log_train_generations(self, batch: DataProto):
         """Log a table of validation samples to the configured logger (wandb or swanlab)"""
         import numpy as np
+        # only log a subset of the batch
+        batch = batch.slice(0, len(batch) // 10)
 
 
         """TODO: Add more statistics here"""
         LOG_FREQ = 5
+
+
 
         if self.global_steps % LOG_FREQ != 0:
             return
