@@ -23,6 +23,8 @@ from json import JSONDecodeError
 import time
 from typing import TYPE_CHECKING
 from uuid import uuid4
+import json
+from collections import Counter, defaultdict
 
 import numpy as np
 import torch
@@ -37,6 +39,7 @@ from sglang.srt.utils import broadcast_pyobj, get_ip, get_open_port
 from tensordict import TensorDict
 from torch.distributed.device_mesh import init_device_mesh
 from torch.nn.utils.rnn import pad_sequence
+from traitlets import default
 from transformers import PreTrainedTokenizer
 
 from verl import DataProto
@@ -183,19 +186,18 @@ class AsyncSGLangRollout(BaseRollout):
             mesh_shape=(world_size // tp_size, tp_size, 1),
             mesh_dim_names=["dp", "tp", "pp"],
         )
-
         device_mesh_cpu = init_device_mesh("cpu", **device_mesh_kwargs)
         # device_mesh_device = init_device_mesh("cuda", **device_mesh_kwargs)
 
         # get tp_rank of this process in this tp group
-        visible_devices = [None] * device_mesh_cpu.size(1)
+        visible_devices = [None] * device_mesh_cpu.size(1) # length of tp_size
 
         dist.all_gather_object(visible_devices, os.environ["CUDA_VISIBLE_DEVICES"], device_mesh_cpu.get_group("tp"))
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(visible_devices)
 
         # initialize the inference engine
         monkey_patch_torch_reductions()
-        nnodes = -(-tp_size // len(visible_devices))
+        nnodes = -(-tp_size // len(visible_devices)) # ceil(tp_size / len(visible_devices)) 也即tp group跨了几个node
         if nnodes > 1:
             ip = get_ip()
             port = get_open_port() if port is None else port
@@ -212,11 +214,11 @@ class AsyncSGLangRollout(BaseRollout):
 
         load_format = "dummy" if config.load_format.startswith("dummy") else config.load_format
         self._device_mesh_cpu = device_mesh_cpu
-        self._tp_rank = device_mesh_cpu["tp"].get_local_rank()
-        self._tp_size = device_mesh_cpu["tp"].size()
+        self._tp_rank = device_mesh_cpu["tp"].get_local_rank() # rank of this process in the tp group
+        self._tp_size = device_mesh_cpu["tp"].size() # size of the tp group
         tp_size_per_node = self._tp_size // nnodes
         node_rank = self._tp_rank // tp_size_per_node
-        first_rank_in_node = self._tp_rank % tp_size_per_node == 0
+        first_rank_in_node = self._tp_rank % tp_size_per_node == 0 # whether this rank is the first rank in one node
 
         if first_rank_in_node:
             rank = dist.get_rank()
@@ -245,8 +247,9 @@ class AsyncSGLangRollout(BaseRollout):
                 # log_requests_level=0,
                 enable_cache_report=True,
                 enable_metrics=True,
-                decode_log_interval=100,
+                decode_log_interval=100000,
                 schedule_policy="lpm",
+                schedule_conservativeness=0.1,
                 # skip_tokenizer_init=True if config.mcts.enable else False,
             )
         else:
@@ -584,14 +587,23 @@ class AsyncSGLangRollout(BaseRollout):
         output = None
 
         current_turns = 0
-        while current_turns < (self.config.n // self.config.mcts.max_branch):
+        
+        # print("Starting MCTS rollout for request ID: {}".format(_req.data_id))
+        while True:
             # Select
+            # print("Selecting next step for request ID: {}".format(_req.data_id))
+            # if max_turn is reached, break
+            if current_turns >= (self.config.n // self.config.mcts.max_branch):
+                break
             # if no nodes to select, break
             if (cur_node := _req.select_next_step()) is None:
                 break
+
+            
             assert len(_req.current_nodes) > 0, "No nodes to select from"
 
             # Rollout
+            # print("Rolling out next step for request ID: {}".format(_req.data_id))
             input_ids = _req.create_prompt() 
             # kwargs["stop"] = self.stop_words
             kwargs["n"] = self.config.mcts.max_branch
@@ -603,35 +615,18 @@ class AsyncSGLangRollout(BaseRollout):
                     return_logprob=True,
                 ) # List[Dict[str, Any]]
 
-            # finish_reason_type = FinishReasonTypeEnum.from_str(output["meta_info"]["finish_reason"]["type"])
-            # current_turns += 1
-            # if finish_reason_type == FinishReasonTypeEnum.LENGTH:
-            #     raise NotImplementedError("MCTS does not support LENGTH finish reason")
-            #     break
             
             # Backpropagation
+            # print("Backpropagating results for request ID: {}".format(_req.data_id))
             _req.generate_next_step(outputs)
 
+            # DEBUG:
             if _req.data_id in log_ids:
                 _req.draw_tree()
- 
-        if current_turns >= self.config.multi_turn.max_turns:
-            finish_reason_type = FinishReasonTypeEnum.STOP
-
-        # # Calculate the reward for each tool
-        # async def calc_reward_and_release_fn(name: str, tool: BaseTool):
-        #     reward = await tool.calc_reward(_req.request_id, **_req.tools_kwargs[name].get("calc_reward_kwargs", {}))
-        #     await tool.release(_req.request_id, **_req.tools_kwargs[name].get("release_kwargs", {}))
-        #     return name, reward
-
-        # tool_reward_tasks = []
-        # for name in _req.tools_kwargs.keys():
-        #     tool = self._tool_map[name]
-        #     tool_reward_tasks.append(calc_reward_and_release_fn(name, tool))
-        # tool_reward_scores = await asyncio.gather(*tool_reward_tasks)
-        # tool_reward_scores = dict(tool_reward_scores)
-        # _req.finalize(self.tokenizer, tool_reward_scores, finish_reason_type)
-
+            current_turns += 1
+        
+        print("Completed MCTS rollout for request ID: {}".format(req.data_id))
+        
         return _req
 
 
@@ -647,6 +642,7 @@ class AsyncSGLangRollout(BaseRollout):
     
         # breakpoint()
 
+        # print("Processing a total of {} requests".format(prompts.batch.batch_size[0]))
         if self._tp_rank == 0:
             # """Temporary workaround for SGLang Engine to skip tokenizer init"""
             # self._engine.skip_tokenizer_init = True  # skip tokenizer init in SGLang Engine
@@ -675,7 +671,8 @@ class AsyncSGLangRollout(BaseRollout):
             sorted_output_req_list = sorted(output_req_list, key=lambda x: x.data_id)
 
             end_time = time.time()
-            logger.info(f"Async MCTS rollout took {end_time - start_time:.2f} seconds for {len(sorted_output_req_list)} requests")
+            print(f"Async MCTS rollout took {end_time - start_time:.2f} seconds for requests")
+
             # # reset engine skip_tokenizer_init
             # self._engine.skip_tokenizer_init = False
             # self._engine.server_args.skip_tokenizer_init = False  # reset skip tokenizer init in SGLang Engine

@@ -3,6 +3,7 @@
 # Adapted from https://github.com/MARIO-Math-Reasoning/Super_MARIO
 
 from __future__ import annotations
+import uuid
 import os
 import traceback
 import torch
@@ -93,6 +94,7 @@ class MCTS:
         self.ground_truth = ground_truth
         self.compute_score = compute_score
         self.search_turn = 0
+        # self.terminate_tree = False  # 用于标记是否终止搜索树
 
 
          
@@ -149,13 +151,23 @@ class MCTS:
     def expand_and_simulate_node(self, output_object: List[Dict[str, Any]], node: Type[MCTSNode]) -> None:
 
         for idx, output in enumerate(output_object):
-            if "text" not in output or not output['text']:
+            if output.get('output_ids') is not None:  # vllm engine output
                 output_text = self.tokenizer.decode(output['output_ids'], skip_special_tokens=True)
                 output_ids = output['output_ids']
-            else:
+            elif output.get('text') is not None:  # vllm engine output
                 output_text = output['text']
                 output_ids = [i[1] for i in  output['meta_info']['output_token_logprobs']]
+            else:
+                random_filename = f".cache/sglang_rtn/{uuid.uuid4().hex}.tmp"
+                with open(random_filename, "w") as f:
+                    f.write(output)
+                continue
             score = self.compute_score(data_source=None, solution_str=output_text, ground_truth=self.ground_truth)['score']
+            # score = random.random() > 0.98 # DEBUG:
+            # if score == 1:
+            #     self.terminate_tree = True
+                
+
             self.recursive_create_child(
                 node=node,
                 step_completion_ids=output_ids,
@@ -181,7 +193,12 @@ class MCTS:
         split_indices += kmp_search(step_completion_ids, self.split_sequence[1])
         split_indices = sorted(set(split_indices))  # 去重并排序
 
-        start_index = 0 # since `## Reasoning step 1:` is in prompt, we can directly use set initial start_index as 0
+        if len(split_indices) == 0:
+            start_index = 0
+        else:
+            start_index = split_indices[0] # skip the content between [0, split_indices[0]) as it is mostly white space
+            split_indices = split_indices[1:]  # 去掉第一个分割点，因为它已经被包含在第一个子节点中
+
         parent = node
         cur_prefix = step_prefix_ids
         for index in split_indices + [len(step_completion_ids)]:
@@ -307,8 +324,8 @@ class MCTS:
 
     # 根据当前节点和模型输出，扩展当前节点，生成多个子节点
     def generate_next_step(self, outputs_lst: List[Dict[str, Any]]) -> None:
-        self.expand_and_simulate_node(outputs_lst, self.current_nodes[0])
         self.search_turn += 1
+        self.expand_and_simulate_node(outputs_lst, self.current_nodes[0])
         return
 
 
@@ -385,6 +402,55 @@ class MCTS:
             node = node.parent
         return "".join(reversed(trajectory))
     
+    def bound_string_to_limited_width(long_string: str, width: int = 100) -> str:
+        """
+        将长字符串截断为指定宽度的字符串，保留完整的单词。
+        如果字符串长度超过指定宽度，则从末尾开始换行"""
+        if len(long_string) <= width:
+            return long_string
+        
+        # Find all LaTeX equation blocks \(...\)
+        equations = []
+        equation_pattern = r'\\\([^)]*\\\)'
+        
+        # Replace equations with placeholders and store them
+        temp_string = long_string
+        for i, match in enumerate(re.finditer(equation_pattern, long_string)):
+            placeholder = f"__EQUATION_{i}__"
+            equations.append(match.group())
+            temp_string = temp_string.replace(match.group(), placeholder, 1)
+        
+        # Split into words, but treat equation placeholders as single units
+        words = temp_string.split()
+        lines = []
+        current_line = ""
+        
+        for word in words:
+            # Check if this word is an equation placeholder
+            if word.startswith("__EQUATION_") and word.endswith("__"):
+                # Restore the original equation
+                eq_index = int(word.split("_")[2])
+                actual_word = equations[eq_index]
+            else:
+                actual_word = word
+            
+            # If adding this word would exceed width, start a new line
+            if current_line and len(current_line) + len(actual_word) + 1 > width:
+                lines.append(current_line)
+                current_line = actual_word
+            else:
+                # Add word to current line
+                if current_line:
+                    current_line += " " + actual_word
+                else:
+                    current_line = actual_word
+        
+        # Add the last line if it exists
+        if current_line:
+            lines.append(current_line)
+        
+        return "\n".join(lines)
+    
     def draw_tree(self, node: MCTSNode=None) -> None:
         if node is None:
             node = self.root
@@ -401,8 +467,9 @@ class MCTS:
 
         def add_nodes_edges(current_node):
             text = self.tokenizer.decode(current_node.state["resp_ids"]).replace(":"," ")
+            
             # print(text)
-            node_label = f'{text}\n\nQ={current_node._value_sum};N={current_node._visit_count};PUCT={current_node.puct(self.c_puct):.2f};prob={current_node.state["resp_prob"]:.2f}'
+            node_label = f'{text}\n\nQ={current_node._value_sum};N={current_node._visit_count};PUCT={current_node.puct(self.c_puct):.2f};prob={current_node.state["resp_prob"]:.2e}'
             G.add_node(id(current_node), label=node_label)
             if current_node.parent:
                 G.add_edge(id(current_node.parent), id(current_node))
@@ -419,15 +486,15 @@ class MCTS:
         nx.draw(G, pos, labels=labels, with_labels=True, 
                 node_size=3000,  # 调整节点尺寸
                 node_color='lightblue', 
-                font_size=3,     # 缩小字体
-                alpha=0.9,       # 半透明效果
-                arrows=True,     # 显示箭头
-                arrowsize=15,    # 调整箭头大小
+                font_size=2,     # 缩小字体
+                alpha=0.7,       # 半透明效果
+                arrows=False,     # 显示箭头
+                arrowsize=5,    # 调整箭头大小
                 width=1.5)       # 调整边的宽度
         plt.title('MCTS Tree')
         try:
             os.makedirs(f'outputs/{self.data_id}', exist_ok=True)
-            plt.savefig(f'outputs/{self.data_id}/{self.search_turn}.png', dpi=600, bbox_inches='tight')
+            # plt.savefig(f'outputs/{self.data_id}/{self.search_turn}.png', dpi=600, bbox_inches='tight')
             plt.savefig(f'outputs/{self.data_id}/{self.search_turn}.pdf', dpi=600, bbox_inches='tight')
         except Exception as e:
             print(f"Error saving figure: {e}")

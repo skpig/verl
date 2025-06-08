@@ -2,8 +2,10 @@
 # TEMPLATE_TYPE=base # or chat
 BASE_MODEL=${MY_MODEL_DIR}Qwen/Qwen2.5-3B-Instruct
 TEMPLATE_TYPE=chat # or chat
-TRAIN_FILE="${MY_DATA_DIR}Eurus-2-RL-Data/train.parquet"
-TEST_FILES="['${MY_DATA_DIR}Eurus-2-RL-Data/test.parquet', '${MY_DATA_DIR}MATH-500/test.parquet', '${MY_DATA_DIR}aimo-validation-amc/test.parquet']"
+# TRAIN_FILE="${MY_DATA_DIR}Eurus-2-RL-Data/train.parquet"
+# TEST_FILES="['${MY_DATA_DIR}Eurus-2-RL-Data/test.parquet', '${MY_DATA_DIR}MATH-500/test.parquet', '${MY_DATA_DIR}aimo-validation-amc/test.parquet']"
+TRAIN_FILE="${MY_DATA_DIR}DAPO-Math-17k/train.parquet"
+TEST_FILES="['${MY_DATA_DIR}DAPO-Math-17k/test.parquet', '${MY_DATA_DIR}MATH-500/test.parquet', '${MY_DATA_DIR}aimo-validation-amc/test.parquet']"
 
 RUN_ID=$1
 
@@ -12,7 +14,7 @@ ROLLOUT_N=64 # 16 * 4 = 64
 OVERLONG_BUFFER_LEN=1024
 MAX_PROMPT_LEN=$((1024 * 1))
 MAX_RESPONSE_LEN=$((1024 * 3 + OVERLONG_BUFFER_LEN))
-BATCH_SIZE=64 # 512 / 4 = 128
+BATCH_SIZE=128 # 512 / 4 = 128
 MINI_BSZ=64
 # MCTS settings
 MCTS_DEPTH=4
@@ -42,7 +44,8 @@ python3 examples/data_preprocess/custom.py \
 # export VLLM_ATTENTION_BACKEND=XFORMERS
 # export CUDA_LAUNCH_BLOCKING=1
 export HYDRA_FULL_ERROR=1
-export CUDA_LAUNCH_BLOCKING=1
+export PYTHONPATH="."
+
 
 # 定义要执行的命令
 CMD="python3 -m verl.trainer.main_ppo \
