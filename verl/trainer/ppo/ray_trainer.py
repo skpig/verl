@@ -43,7 +43,10 @@ from tqdm import tqdm
 from traitlets import default
 
 import wandb
+from verl.trainer.ppo import reward
+from verl.utils.model import compute_position_id_with_mask
 from verl import DataProto
+import verl.utils.torch_functional as verl_F
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.base import Worker
 from verl.single_controller.ray import (RayClassWithInitArgs, RayResourcePool,
@@ -66,8 +69,9 @@ from verl.utils.metric import (
 )
 from verl.utils.seqlen_balancing import (get_seqlen_balanced_partitions,
                                          log_seqlen_unbalance)
-from verl.utils.torch_functional import masked_mean
+from verl.utils.torch_functional import masked_mean, pad_sequence_to_length
 from verl.utils.tracking import ValidationGenerationsLogger
+from verl.workers import rollout
 from verl.workers.rollout.async_server import AsyncLLMServerManager
 
 WorkerType = Type[Worker]
@@ -98,6 +102,7 @@ class AdvantageEstimator(str, Enum):
     REINFORCE_PLUS_PLUS_BASELINE = "reinforce_plus_plus_baseline"
     REMAX = "remax"
     RLOO = "rloo"
+    VINEPPO = "vineppo"  # Not implemented yet, but reserved for future use
 
 
 @dataclass
@@ -199,7 +204,7 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         data.batch["response_mask"] = compute_response_mask(data)
     # prepare response group
     # TODO: add other ways to estimate advantages
-    if adv_estimator == AdvantageEstimator.GAE:
+    if adv_estimator == AdvantageEstimator.GAE or adv_estimator == AdvantageEstimator.VINEPPO:
         advantages, returns = core_algos.compute_gae_advantage_return(
             token_level_rewards=data.batch["token_level_rewards"],
             values=data.batch["values"],
@@ -280,6 +285,40 @@ def _timer(name: str, timing_raw: Dict[str, float]):
     timing_raw[name] += timer.last
     print("Duration of {}: {:.2f} seconds".format(name, timer.last), _time_stamp())
 
+def build_kmp_table(pattern):
+    """构建部分匹配表（前缀函数）"""
+    n = len(pattern)
+    table = [0] * n
+    j = 0  # length of previous longest prefix suffix
+
+    for i in range(1, n):
+        while j > 0 and pattern[i] != pattern[j]:
+            j = table[j - 1]
+        if pattern[i] == pattern[j]:
+            j += 1
+            table[i] = j
+    return table
+
+def kmp_search(text: list[int], pattern: list[int]):
+    """KMP算法在list上搜索 pattern 出现在 text 中的位置"""
+    if not pattern:
+        return list(range(len(text) + 1))
+
+    table = build_kmp_table(pattern)
+    result = []
+
+    j = 0  # index for pattern
+    for i in range(len(text)):
+        while j > 0 and text[i] != pattern[j]:
+            j = table[j - 1]
+        if text[i] == pattern[j]:
+            j += 1
+        if j == len(pattern):
+            result.append(i - j + 1) # the start index of the match
+            j = table[j - 1]
+
+    return result
+
 
 class RayPPOTrainer:
     """
@@ -337,9 +376,11 @@ class RayPPOTrainer:
             AdvantageEstimator.REMAX,
             AdvantageEstimator.RLOO,
             AdvantageEstimator.REINFORCE_PLUS_PLUS_BASELINE,
+            AdvantageEstimator.VINEPPO,
         ]:
             self.use_critic = False
         else:
+            print(f"WARNING: Unsupported advantage estimator {self.config.algorithm.adv_estimator}, defaulting to GAE.")
             raise NotImplementedError
 
         self._validate_config()
@@ -347,9 +388,9 @@ class RayPPOTrainer:
 
         self.cache_file_path = os.path.join('/home/huangbz/verl/.cache', self.config.trainer.project_name, self.config.trainer.experiment_name, 'train_generations.parquet')
         self.global_metrics = {
-            "global_cumsum_total_dedup_num_prompt_tokens": 0,
-            "global_cumsum_total_dedup_num_response_tokens": 0,
-            "global_cumsum_total_dedup_num_tokens": 0,
+            "perf/global_cumsum_total_dedup_num_prompt_tokens": 0,
+            "perf/global_cumsum_total_dedup_num_response_tokens": 0,
+            "perf/global_cumsum_total_dedup_num_tokens": 0,
         }
         # self.artifact = 
 
@@ -951,8 +992,8 @@ class RayPPOTrainer:
         torch.save(dataloader_state_dict, dataloader_local_path)
 
         # save global metrics
-        with open(os.path.join(local_global_step_folder, "global_metrics.json"), "w") as f:
-            json.dump(self.global_metrics, f, indent=4)
+        global_metrics_path = os.path.join(local_global_step_folder, "global_metrics.npy")
+        np.save(global_metrics_path, self.global_metrics)
 
         # latest checkpointed iteration tracker (for atomic usage)
         local_latest_checkpointed_iteration = os.path.join(self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt")
@@ -1011,10 +1052,9 @@ class RayPPOTrainer:
             print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
         
         # load global metrics
-        global_metrics_path = os.path.join(global_step_folder, "global_metrics.json")
+        global_metrics_path = os.path.join(global_step_folder, "global_metrics.npy")
         if os.path.exists(global_metrics_path):
-            with open(global_metrics_path, "r") as f:
-                self.global_metrics = json.load(f)
+            self.global_metrics = np.load(global_metrics_path, allow_pickle=True).item()
 
     def _balance_batch(self, batch: DataProto, metrics, logging_prefix="global_seqlen"):
         """Reorder the data on single controller such that each dp rank gets similar total tokens"""
@@ -1028,6 +1068,113 @@ class RayPPOTrainer:
         batch.reorder(global_idx)
         global_balance_stats = log_seqlen_unbalance(seqlen_list=global_seqlen_lst, partitions=global_partition_lst, prefix=logging_prefix)
         metrics.update(global_balance_stats)
+    
+    def vineppo_value_estimation(self, batch: DataProto, batch_raw_prompt_ids, mc_estimate_n: int = 4, metrics: Dict = None) -> torch.Tensor:
+
+        # split each response into multiple steps
+        if getattr(self, 'delimiters', None) is not None:
+            delimiters = self.delimiters
+        else:
+            delimiters = [self.tokenizer.convert_tokens_to_ids(['<', 'think']), self.tokenizer.convert_tokens_to_ids(['<th', 'ink'])]
+        
+        
+        # create different query batches for each split
+        reqId_to_respId_seqRange_map = []
+        new_data_proto_dict = defaultdict(list)  # to store the new data proto
+        # the length of gen_batch is "train_batch_size * n_rollouts"
+        for i in range(len(batch)):
+            raw_prompt_ids = batch_raw_prompt_ids[i] if isinstance(batch_raw_prompt_ids[i], list) else batch_raw_prompt_ids[i].tolist()
+            prompt_ids = batch.batch["prompts"][i].tolist() # already left padded
+            responses_ids = batch.batch["responses"][i].tolist() # already right padded
+            assert prompt_ids + responses_ids == batch.batch["input_ids"][i].tolist(), "The input_ids should be the concatenation of prompt and response."
+            # # Find last occurrence of non-pad token
+            # last_non_pad_idx = next(i for i in range(len(responses_ids) - 1, -1, -1) 
+            #                     if responses_ids[i] != self.tokenizer.pad_token_id)
+            # # remove right padding of responses_ids
+            # responses_ids = responses_ids[:last_non_pad_idx + 1]
+
+            split_indices = [kmp_search(responses_ids, delimiters[i]) for i in range(len(delimiters))]  # list of lists, each sublist contains indices where the delimiter is found
+            split_indices = [idx for sublist in split_indices for idx in sublist]  # flatten the list
+            split_indices = sorted(set(split_indices))  # 去重并排序
+
+            num_duplicates = len(split_indices)
+            # skip if no split indices found
+            if num_duplicates == 0:
+                continue
+
+            assert split_indices[0] != 0, "The first split index should not be 0, as it indicates the start of the response."
+            assert split_indices[-1] != len(responses_ids) - 1, "The last split index should not be the last token of the response, as it indicates the end of the response."
+
+            split_indices_start = [0] + split_indices[:-1]  # start of each split, the first one is always 0
+            reqId_to_respId_seqRange_map.extend([(i, start, end) for start, end in zip(split_indices_start, split_indices)])
+        
+            new_data_proto_dict['raw_prompt_ids'].extend([raw_prompt_ids + responses_ids[:split_indices[i]] for i in range(num_duplicates)]) # all requests are not padded
+            for key in batch.non_tensor_batch:
+                new_data_proto_dict[key].extend([batch.non_tensor_batch[key][i]] * num_duplicates)  # repeat the non-tensor batch data
+
+
+        # breakpoint()
+        # create a new DataProto of length  "\sum_i #steps of item i"
+        new_data_proto_length = len(new_data_proto_dict['raw_prompt_ids'])
+        # non-tensor batch
+        for k, v in new_data_proto_dict.items():
+            new_data_proto_dict[k] = np.array(v, dtype=object)
+            assert len(v) == new_data_proto_length, f"Length of {k} in new_data_proto is {len(v)}, expected {new_data_proto_length}"
+        # tensor batch
+        input_ids = torch.tensor([[-1]] * new_data_proto_length)  # dummy input_ids since it is not used
+        attention_mask = torch.tensor([[-1]] * new_data_proto_length)  # dummy attention_mask since it is not used
+        position_ids = torch.tensor([[-1]] * new_data_proto_length)  # dummy position_ids since it is not used
+        new_data_proto_dict.update({
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "position_ids": position_ids,
+        })
+        new_data_proto = DataProto.from_single_dict(
+            data=new_data_proto_dict,
+            meta_info={
+                "sampling_params": {
+                    "n": mc_estimate_n,
+                }
+            },
+        )
+        # pad to be divisible by dp_size
+        new_data_proto, pad_size = pad_dataproto_to_divisor(new_data_proto, self.actor_rollout_wg.world_size)
+
+        # generate mc rollouts
+        vineppo_gen_batch = new_data_proto.pop(batch_keys=["input_ids", "attention_mask", "position_ids"], non_tensor_batch_keys=["raw_prompt_ids"], meta_info_keys=["sampling_params"])
+        vineppo_gen_batch_output = self.actor_rollout_wg.generate_sequences(vineppo_gen_batch)
+
+        new_data_proto = new_data_proto.repeat(repeat_times=mc_estimate_n, interleave=True)  # repeat the batch to align with responses
+        new_data_proto.union(vineppo_gen_batch_output) 
+
+        # unpad the batch to the original size
+        new_data_proto = unpad_dataproto(new_data_proto, pad_size=pad_size * mc_estimate_n)  
+
+        # update metrics
+        metrics['perf/total_dedup_num_response_tokens'] += compute_response_mask(new_data_proto).sum().item()
+
+        # calculate rewards
+        # DEBUG: potential bug since the reward_fn only read `responses` field, which is partial resposnes indeed
+        old_num_examine = self.reward_fn.num_examine
+        self.reward_fn.num_examine = 0
+        reward_list = self.reward_fn(new_data_proto, return_dict=True)["reward_extra_info"]['score']
+        self.reward_fn.num_examine = old_num_examine
+        assert len(reward_list) == len(new_data_proto), f"Reward list length {len(reward_list)} does not match batch size {len(new_data_proto)}"
+
+        # calculate the value
+        value_tensor = torch.zeros_like(batch.batch["responses"]) # value_tensor shape is the same as input_ids
+        rollout_idx = 0
+        for i, seq_start, seq_end in reqId_to_respId_seqRange_map:
+            mean_reward = sum(reward_list[rollout_idx:rollout_idx + mc_estimate_n]) / mc_estimate_n
+            value_tensor[i, seq_start:seq_end] = mean_reward
+
+            rollout_idx += mc_estimate_n
+        
+        # delete all unused DataProto
+        del vineppo_gen_batch, vineppo_gen_batch_output, new_data_proto
+
+        return value_tensor
+        
 
     def fit(self):
         """
@@ -1120,7 +1267,9 @@ class RayPPOTrainer:
                             batch.batch["reward_baselines"] = reward_baseline_tensor
 
                             del gen_baseline_batch, gen_baseline_output
+                    
 
+                    # breakpoint()
                     batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object)
                     # repeat to align with repeated responses in rollout
                     rollout_index_batch = torch.arange(self.config.actor_rollout_ref.rollout.n, device=batch.batch.device).repeat(len(batch)) # [0, 1, 2, ..., n, 0, 1, 2, ..., n, ...]
@@ -1130,9 +1279,19 @@ class RayPPOTrainer:
 
                     batch.batch['response_mask'] = compute_response_mask(batch)
                     metrics['perf/total_dedup_num_response_tokens'] += batch.batch['response_mask'].sum().item()
-                    metrics['perf/total_dedup_num_prompt_tokens'] += sum(len(i) for i in gen_batch.non_tensor_batch['total_num_prompt_tokens'])
+                    metrics['perf/total_dedup_num_prompt_tokens'] += sum(len(i) for i in gen_batch.non_tensor_batch['raw_prompt_ids'])
                     # compute_rollout_metrics(batch=batch, tokenizer=self.tokenizer)
                     rollout_metrics = compute_rollout_metrics.remote(batch=batch, tokenizer=self.tokenizer)
+
+
+                    if self.config.algorithm.adv_estimator == AdvantageEstimator.VINEPPO:
+                        with _timer("gen_vineppo", timing_raw):
+                            batch_copy = deepcopy(batch)  # avoid modifying the original batch
+                            raw_prompt_ids = gen_batch.non_tensor_batch['raw_prompt_ids'].repeat(self.config.actor_rollout_ref.rollout.n)
+                            assert len(raw_prompt_ids) == len(batch_copy), f"{len(raw_prompt_ids)=}, {len(batch_copy)=}, Not match, please check the batch generation logic."
+                            value_tensor = self.vineppo_value_estimation(batch_copy, batch_raw_prompt_ids=raw_prompt_ids, mc_estimate_n=self.config.algorithm.mc_rollout_n, metrics=metrics)
+                            batch.batch["values"] = value_tensor
+
 
                     # balance the number of valid tokens on each dp rank.
                     # Note that this breaks the order of data inside the batch.
@@ -1272,9 +1431,9 @@ class RayPPOTrainer:
                     metrics['perf/total_dedup_num_tokens'] = metrics['perf/total_dedup_num_response_tokens'] + metrics['perf/total_dedup_num_prompt_tokens']
 
                     # update global metrics
-                    self.global_metrics['global_cumsum_total_dedup_num_prompt_tokens'] += metrics['perf/total_dedup_num_prompt_tokens']
-                    self.global_metrics['global_cumsum_total_dedup_num_response_tokens'] += metrics['perf/total_dedup_num_response_tokens']
-                    self.global_metrics['global_cumsum_total_dedup_num_tokens'] += metrics['perf/total_dedup_num_tokens']
+                    self.global_metrics['perf/global_cumsum_total_dedup_num_prompt_tokens'] += metrics['perf/total_dedup_num_prompt_tokens']
+                    self.global_metrics['perf/global_cumsum_total_dedup_num_response_tokens'] += metrics['perf/total_dedup_num_response_tokens']
+                    self.global_metrics['perf/global_cumsum_total_dedup_num_tokens'] += metrics['perf/total_dedup_num_tokens']
 
                     metrics.update(self.global_metrics)
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))

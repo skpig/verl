@@ -27,6 +27,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from contextlib import contextmanager
@@ -234,6 +235,8 @@ class SGLangRollout(BaseRollout):
     @torch.no_grad()
     def generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
         # if self.config.free_cache_engine:
+        if kwargs is not None and len(kwargs) > 0:
+            print("Find extra kwargs in generate_sequences", json.dumps(kwargs, indent=2))
 
         idx = prompts.batch["input_ids"]  # (bs, prompt_length)
         # left-padded attention_mask

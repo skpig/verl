@@ -629,6 +629,7 @@ class ActorRolloutRefWorker(Worker):
             "pad_token_id": self.generation_config.pad_token_id if self.generation_config is not None else self.tokenizer.pad_token_id,
         }
         prompts.meta_info.update(meta_info)
+        sampling_params = prompts.meta_info.get("sampling_params", {})
         with self.rollout_sharding_manager:
             log_gpu_memory_usage("After entering rollout sharding manager", logger=logger)
 
@@ -642,7 +643,7 @@ class ActorRolloutRefWorker(Worker):
                 else:
                     output = self.rollout.generate_sequences(prompts=prompts)
             else:
-                output = self.rollout.generate_sequences(prompts=prompts)
+                output = self.rollout.generate_sequences(prompts=prompts, **sampling_params)
             log_gpu_memory_usage("After rollout generation", logger=logger)
 
             output = self.rollout_sharding_manager.postprocess_data(output)

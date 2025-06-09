@@ -27,3 +27,4 @@ langdetect
 traitlets
 math-verify
 debugpy
+pysocks
