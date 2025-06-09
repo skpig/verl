@@ -346,6 +346,11 @@ class RayPPOTrainer:
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
         self.cache_file_path = os.path.join('/home/huangbz/verl/.cache', self.config.trainer.project_name, self.config.trainer.experiment_name, 'train_generations.parquet')
+        self.global_metrics = {
+            "global_cumsum_total_dedup_num_prompt_tokens": 0,
+            "global_cumsum_total_dedup_num_response_tokens": 0,
+            "global_cumsum_total_dedup_num_tokens": 0,
+        }
         # self.artifact = 
 
 
@@ -945,6 +950,10 @@ class RayPPOTrainer:
         dataloader_state_dict = self.train_dataloader.state_dict()
         torch.save(dataloader_state_dict, dataloader_local_path)
 
+        # save global metrics
+        with open(os.path.join(local_global_step_folder, "global_metrics.json"), "w") as f:
+            json.dump(self.global_metrics, f, indent=4)
+
         # latest checkpointed iteration tracker (for atomic usage)
         local_latest_checkpointed_iteration = os.path.join(self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt")
         with open(local_latest_checkpointed_iteration, "w") as f:
@@ -1000,6 +1009,12 @@ class RayPPOTrainer:
             self.train_dataloader.load_state_dict(dataloader_state_dict)
         else:
             print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
+        
+        # load global metrics
+        global_metrics_path = os.path.join(global_step_folder, "global_metrics.json")
+        if os.path.exists(global_metrics_path):
+            with open(global_metrics_path, "r") as f:
+                self.global_metrics = json.load(f)
 
     def _balance_batch(self, batch: DataProto, metrics, logging_prefix="global_seqlen"):
         """Reorder the data on single controller such that each dp rank gets similar total tokens"""
@@ -1255,6 +1270,13 @@ class RayPPOTrainer:
                     n_gpus = self.resource_pool_manager.get_n_gpus()
                     metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
                     metrics['perf/total_dedup_num_tokens'] = metrics['perf/total_dedup_num_response_tokens'] + metrics['perf/total_dedup_num_prompt_tokens']
+
+                    # update global metrics
+                    self.global_metrics['global_cumsum_total_dedup_num_prompt_tokens'] += metrics['perf/total_dedup_num_prompt_tokens']
+                    self.global_metrics['global_cumsum_total_dedup_num_response_tokens'] += metrics['perf/total_dedup_num_response_tokens']
+                    self.global_metrics['global_cumsum_total_dedup_num_tokens'] += metrics['perf/total_dedup_num_tokens']
+
+                    metrics.update(self.global_metrics)
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
 
                 # TODO: make a canonical logger that supports various backend
