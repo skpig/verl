@@ -1059,7 +1059,7 @@ class RayPPOTrainer:
 
         for epoch in range(self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
-                metrics = {}
+                metrics = {"perf/total_dedup_num_response_tokens": 0, "perf/total_dedup_num_prompt_tokens": 0}
                 timing_raw = {}
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
                 # breakpoint()
@@ -1114,6 +1114,8 @@ class RayPPOTrainer:
                     batch.batch['rollout_index'] = rollout_index_batch
 
                     batch.batch['response_mask'] = compute_response_mask(batch)
+                    metrics['perf/total_dedup_num_response_tokens'] += batch.batch['response_mask'].sum().item()
+                    metrics['perf/total_dedup_num_prompt_tokens'] += sum(len(i) for i in gen_batch.non_tensor_batch['total_num_prompt_tokens'])
                     # compute_rollout_metrics(batch=batch, tokenizer=self.tokenizer)
                     rollout_metrics = compute_rollout_metrics.remote(batch=batch, tokenizer=self.tokenizer)
 
@@ -1252,6 +1254,7 @@ class RayPPOTrainer:
                     # TODO: implement actual tflpo and theoretical tflpo
                     n_gpus = self.resource_pool_manager.get_n_gpus()
                     metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
+                    metrics['perf/total_dedup_num_tokens'] = metrics['perf/total_dedup_num_response_tokens'] + metrics['perf/total_dedup_num_prompt_tokens']
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
 
                 # TODO: make a canonical logger that supports various backend
