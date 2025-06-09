@@ -1172,8 +1172,6 @@ class RayPPOTrainer(object):
         else:
             self.actor_rollout_wg.load_checkpoint(actor_remote_path, self.config.trainer.ckpt_version,
                                                   self.config.trainer.ckpt_enable_shm, 'actor')
-        self.actor_rollout_wg.load_checkpoint(actor_remote_path, self.config.trainer.ckpt_version,
-                                              self.config.trainer.ckpt_enable_shm, 'actor')
         checkpoint_infos[actor_remote_path] = {"tag": "actor", "step": global_step}
         # load critic
         if self.use_critic:
