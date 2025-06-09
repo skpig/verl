@@ -347,9 +347,9 @@ class RayPPOTrainer:
 
         self.cache_file_path = os.path.join('/home/huangbz/verl/.cache', self.config.trainer.project_name, self.config.trainer.experiment_name, 'train_generations.parquet')
         self.global_metrics = {
-            "global_cumsum_total_dedup_num_prompt_tokens": 0,
-            "global_cumsum_total_dedup_num_response_tokens": 0,
-            "global_cumsum_total_dedup_num_tokens": 0,
+            "perf/global_cumsum_total_dedup_num_prompt_tokens": 0,
+            "perf/global_cumsum_total_dedup_num_response_tokens": 0,
+            "perf/global_cumsum_total_dedup_num_tokens": 0,
         }
         # self.artifact = 
 
@@ -1272,9 +1272,9 @@ class RayPPOTrainer:
                     metrics['perf/total_dedup_num_tokens'] = metrics['perf/total_dedup_num_response_tokens'] + metrics['perf/total_dedup_num_prompt_tokens']
 
                     # update global metrics
-                    self.global_metrics['global_cumsum_total_dedup_num_prompt_tokens'] += metrics['perf/total_dedup_num_prompt_tokens']
-                    self.global_metrics['global_cumsum_total_dedup_num_response_tokens'] += metrics['perf/total_dedup_num_response_tokens']
-                    self.global_metrics['global_cumsum_total_dedup_num_tokens'] += metrics['perf/total_dedup_num_tokens']
+                    self.global_metrics['perf/global_cumsum_total_dedup_num_prompt_tokens'] += metrics['perf/total_dedup_num_prompt_tokens']
+                    self.global_metrics['perf/global_cumsum_total_dedup_num_response_tokens'] += metrics['perf/total_dedup_num_response_tokens']
+                    self.global_metrics['perf/global_cumsum_total_dedup_num_tokens'] += metrics['perf/total_dedup_num_tokens']
 
                     metrics.update(self.global_metrics)
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
