@@ -154,17 +154,17 @@ class CustomRewardManager:
         verify the batch and save as ``acc`` tensor
         """
         # valid_response_lst is a list of length N
-        valid_response_lst = []
-        for i in range(len(data)):
-            data_item = data[i]
+        # valid_response_lst = []
+        # for i in range(len(data)):
+        #     data_item = data[i]
 
-            prompt_ids = data_item.batch["prompts"]
-            prompt_length = prompt_ids.shape[-1]
-            response_ids = data_item.batch["responses"]
-            valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
-            valid_response_ids = response_ids[:valid_response_length]
-            valid_response_lst.append(valid_response_ids)
-        valid_response_lst = self.tokenizer.batch_decode(valid_response_lst, skip_special_tokens=True)
+        #     prompt_ids = data_item.batch["prompts"]
+        #     prompt_length = prompt_ids.shape[-1]
+        #     response_ids = data_item.batch["responses"]
+        #     valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
+        #     valid_response_ids = response_ids[:valid_response_length]
+        #     valid_response_lst.append(valid_response_ids)
+        valid_response_lst = self.tokenizer.batch_decode(data.batch['responses'], skip_special_tokens=True)
 
         # ground_truch_lst is a list of length N
         ground_truth_lst = [i["ground_truth"] for i in data.non_tensor_batch["reward_model"]]
@@ -224,12 +224,6 @@ class CustomRewardManager:
             valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
             valid_response_ids = response_ids[:valid_response_length]
 
-            # decode
-            prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
-            response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
-            eos_token = self.tokenizer.eos_token
-            if response_str.endswith(eos_token):
-                response_str = response_str[: -len(eos_token)]
 
             # get return
             result = rtn_lst[i]
@@ -264,6 +258,12 @@ class CustomRewardManager:
                 already_print_data_sources[data_source] = 0
 
             if already_print_data_sources[data_source] < self.num_examine:
+                # decode
+                prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
+                response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
+                eos_token = self.tokenizer.eos_token
+                if response_str.endswith(eos_token):
+                    response_str = response_str[: -len(eos_token)]
                 already_print_data_sources[data_source] += 1
                 print("=== [prompt] ===\n", prompt_str)
                 print("=== [response] ===\n", response_str)
