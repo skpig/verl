@@ -7,6 +7,28 @@ from typing import Optional, Tuple, Union, List
 from transformers.modeling_outputs import MoeCausalLMOutputWithPast
 
 
+def convert_tensor_to_numpy(tensor):
+    if tensor is None or isinstance(tensor, np.ndarray):
+        return tensor
+    if isinstance(tensor, list):
+        return [convert_tensor_to_numpy(t) for t in tensor]
+    if tensor.dtype == torch.bfloat16:
+        return tensor.view(torch.uint16).numpy()
+    return tensor.numpy()
+
+
+def convert_numpy_to_tensor(numpy_array, dtype=None):
+    if numpy_array is None or isinstance(numpy_array, torch.Tensor):
+        return numpy_array
+    if isinstance(numpy_array, list):
+        return [convert_numpy_to_tensor(t, dtype) for t in numpy_array]
+    if numpy_array.dtype == np.uint16:
+        return torch.from_numpy(numpy_array).view(torch.bfloat16)
+    if dtype is not None:
+        return torch.from_numpy(numpy_array.astype(dtype))
+    return torch.from_numpy(numpy_array)
+
+
 def get_dummy_image_features(self, pixel_values, image_grid_hw=None):
     is_dummy = pixel_values is None
     if pixel_values is None:
@@ -35,9 +57,11 @@ def get_image_inputs(non_tensor_batch):
         non_none_values = [_ for _ in non_tensor_batch[key] if _ is not None]
         if len(non_none_values) == 0:
             return {}
-        if isinstance(non_none_values[0], np.ndarray):
+        if any(isinstance(value, np.ndarray) for value in non_none_values):
             if key == 'image_grid_hw':
-                non_none_values = [torch.from_numpy(value.astype(int)) for value in non_none_values]
+                non_none_values = [convert_numpy_to_tensor(value, int) for value in non_none_values]
+            elif key == 'pixel_values':
+                non_none_values = [convert_numpy_to_tensor(value) for value in non_none_values]
             else:
                 raise RuntimeError(f'tensor is expected, got {non_none_values}')
         image_kwargs[key] = torch.cat(non_none_values).cuda()

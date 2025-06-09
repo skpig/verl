@@ -5,8 +5,7 @@ jobs:
   vlm_e2e_runnable_tests:
     # Merlin - data.aml.verl:v189
     image: hub.byted.org/reckon/data.reckon.mlx.image_5940:2f550abbef6349f1fd520d7dbd4fcc1e
-    # if: ${{ !contains(Event.Change.Title, "WIP") }}
-    if: false
+    if: ${{ !contains(Event.Change.Title, "WIP") }}
     runs-on:
       cluster: gpu-h20
       docker:
@@ -69,5 +68,5 @@ jobs:
           - wandb offline
           - ray stop --force
           - ray start --num-cpus=100 --head
-          - bash tasks_scripts/ci/run_vlm_m8_2b5.sh
+          - bash tasks_scripts/ci/run_vlm_680m.sh
           - ray stop --force

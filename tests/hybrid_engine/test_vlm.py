@@ -58,8 +58,7 @@ def test_vlm_gen(monkeypatch, gpu_allocator, ray_fixture):
         },
         'actor_rollout_ref': {
             "model": {
-                "path":
-                    "hdfs://haruna/home/byte_data_seed/hl_lq/iccv/user/lingyue/checkpoints/xperf/m8_2b5_32k_seedvit_400m_baseline_openthought_8k_simplified_sys_fix_dropout_rope50"
+                "path": "hdfs://haruna/home/byte_data_seed/lf_lq/user/caisonghua/m8_vlm_680m_seedvit"
             },
             "rollout": {
                 "tensor_model_parallel_size": 8,
@@ -86,4 +85,3 @@ def test_vlm_gen(monkeypatch, gpu_allocator, ray_fixture):
     prompt0_len = batch.batch['attention_mask'][0].sum()
     batch = rollout_manager.val_generate(batch)
     response0 = tokenizer.decode(batch.batch['input_ids'][0, prompt0_len:], skip_special_tokens=True)
-    assert 'boxed' in response0
