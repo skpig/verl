@@ -173,6 +173,10 @@ class Query:
             return self.plugin_query.meet_pause_condition()
         return False
 
+    def pause(self):
+        if self.plugin_query:
+            self.plugin_query.trigger_plugin_call()
+
     def try_resume_from_paused(self):
         if self.plugin_query:
             self.plugin_query.try_resume_from_paused()
@@ -236,11 +240,17 @@ class Query:
     @property
     def extra_data(self) -> Dict[str, str]:
         extra_data = copy.copy(self.meta_info.get('extra_data', {}))
-        if self.plugin_query is not None:
-            extra_data['env_states'] = self.plugin_query.env_state_b64
-        resume_state = self.get_resume_state()
-        if resume_state is not None:
-            extra_data['resume_state'] = base64.b64encode(dill.dumps(resume_state)).decode('utf-8')
+        extra_data.pop('env_states', None)
+        extra_data.pop('resume_state', None)
+        if self.is_finished:
+            if self.plugin_query is not None:
+                # get env_states only when finished
+                extra_data['env_states'] = self.plugin_query.env_state_b64
+        else:
+            # get resume_state only when unfinished
+            resume_state = self.get_resume_state()
+            if resume_state is not None:
+                extra_data['resume_state'] = base64.b64encode(dill.dumps(resume_state)).decode('utf-8')
         return extra_data
 
     def attach_session(self, session):

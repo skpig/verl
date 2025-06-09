@@ -169,10 +169,7 @@ def test_plugin_train_gen(set_common_envs, gpu_allocator, ray_fixture, mode):
                 env_state = dill.loads(env_state_bytes)
                 assert isinstance(env_state, list)
                 assert isinstance(env_state[0], EnvStates)
-                resume_state_b64 = extra_data_item['resume_state']
-                resume_state_bytes = base64.b64decode(resume_state_b64)
-                resume_state = dill.loads(resume_state_bytes)
-                assert isinstance(resume_state, dict)
+                assert 'resume_state' not in extra_data_item, f"finished items shouldn't contain resume_state"
     finally:
         rollout_manager.stop_servers()
 

@@ -175,14 +175,21 @@ class ActorXPerfGPTShardingManager(BaseShardingManager):
 
     def postprocess_data(self, data: DataProto) -> DataProto:
         # TODO: Current impl doesn't consider FSDP with torch micro-dp
-        # tp_group = self.tp_device_mesh.get_group()
-        # tp_src_rank = torch.distributed.get_global_rank(tp_group, group_rank=0)
         if self.device_mesh is not None:
+            tp_group = self.device_mesh['tp'].get_group()
             tp_size = self.device_mesh['tp'].size()
+            tp_src_rank = torch.distributed.get_global_rank(tp_group, group_rank=0)
             assert tp_size > 1
-            # broadcast_dict_tensor(data.batch,
-            #                       src=tp_src_rank,
-            #                       group=tp_group)
+
+            prev_device = data.batch.device
+            data.batch = data.batch.cuda(device=torch.cuda.current_device())
+            broadcast_dict_tensor(data.batch, src=tp_src_rank, group=tp_group)
+            data.batch = data.batch.to(prev_device)
+
+            to_broadcast = [data.non_tensor_batch, data.meta_info]
+            torch.distributed.broadcast_object_list(to_broadcast, src=tp_src_rank, group=tp_group)
+            data.non_tensor_batch, data.meta_info = to_broadcast
+
             dp_rank = torch.distributed.get_rank()
             # dp_size = torch.distributed.get_world_size()  # not consider torch micro-dp
             # TODO: shall we build a micro_dp group for vllm when integrating with vLLM?

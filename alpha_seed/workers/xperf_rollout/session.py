@@ -1211,6 +1211,7 @@ class InferenceSession:
                         probs_lt_threshold_sum=probs_lt_threshold_sum[i] if probs_lt_threshold_sum is not None else 0,
                     )
                     if query.meet_pause_condition():
+                        query.pause()
                         new_paused.append(query)
                         paused_triggered = True
                         break

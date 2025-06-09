@@ -45,6 +45,7 @@ def mock_model_response(query: Query, resp_tokens: List[int]):
     for token in resp_tokens:
         query.add_token(token)
         if query.meet_pause_condition():
+            query.pause()
             query.reset_compute()
             while query.meet_pause_condition():
                 batch_sync_tp_queries([query], tp_group=tp_group)

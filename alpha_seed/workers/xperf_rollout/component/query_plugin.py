@@ -141,7 +141,9 @@ class QueryPlugin:
         self.output_ranges: List[TokenRange] = []
         self.plugin_match_state = None
         self.envs: List[BaseEnv] = []
-        self.env_states: List[EnvStates] = []
+        self.env_states: List[EnvStates] = []  # only set when is_finished
+        self.all_env_finished: bool = False  # need to sync tp
+        self.pending_call_str_dict: List[Dict[str, str]] = []
         self.futures: List[WrappedFuture] = []
 
     def attach_session(self, session, query):
@@ -154,23 +156,26 @@ class QueryPlugin:
         self.tp_group = session.tp_group
         self.plugin_manager: PluginManager = get_plugin_manager(self.config, tokenizer=self.tokenizer)
         self.plugin_match_state = self.plugin_manager.get_match_state()
-        self.envs = create_agent_envs_from_str(env_strs)
-        self.env_states = [EnvStates() for _ in range(len(self.envs))]
+        if self.true_call:
+            self.envs = create_agent_envs_from_str(env_strs)
 
     def detach(self):
+        if self._query is None:
+            # already detached
+            return
+        is_finished = self._query.is_finished
         self._query = None
         self.tokenizer = None
         self.tp_group = None
         self.plugin_manager = None
-        detached_futures = []
-        for fut in self.futures:
-            new_fut = WrappedFuture(inner_future=None)
-            # NOTE: set result None if fut is pending
-            result = fut.result() if fut.done() else None
-            new_fut.set_result(result)
-            detached_futures.append(new_fut)
-        self.futures = detached_futures
-        self.envs = [DetachedEnv(state_dict=env.state_dict()) for env in self.envs]
+        self.futures.clear()
+        if is_finished:
+            self.env_states = [
+                EnvStates(finished=env.finished, reward=env.reward, metrics=env.metrics) for env in self.envs
+            ]
+            self.envs = []
+        else:
+            self.envs = [DetachedEnv(state_dict=env.state_dict()) for env in self.envs]
 
     @property
     def pause_condition(self) -> str:
@@ -218,21 +223,30 @@ class QueryPlugin:
         call_str_dict, self.plugin_match_state = self.plugin_manager.add_token_match(token_str,
                                                                                      state=self.plugin_match_state)
         if len(call_str_dict) > 0:
-            if self.true_call:
-                dep_fut = None if (len(self.futures) == 0 or
-                                   not self.is_exec_sequential) else self.futures[-1].inner_future
+            self.pending_call_str_dict.append(call_str_dict)
 
-                inner_fut = self.plugin_manager.async_call(call_str_dict=call_str_dict,
-                                                           envs=self.envs,
-                                                           timeout=self.timeout,
-                                                           deps=None if dep_fut is None else [dep_fut])
-            else:
-                inner_fut = None
-            self.futures.append(WrappedFuture(inner_future=inner_fut))
+    def trigger_plugin_call(self):
+        for call_str_dict in self.pending_call_str_dict:
+            if len(call_str_dict) > 0:
+                if self.true_call:
+                    dep_fut = None if (len(self.futures) == 0 or
+                                       not self.is_exec_sequential) else self.futures[-1].inner_future
+
+                    inner_fut = self.plugin_manager.async_call(call_str_dict=call_str_dict,
+                                                               envs=self.envs,
+                                                               timeout=self.timeout,
+                                                               deps=None if dep_fut is None else [dep_fut])
+                else:
+                    inner_fut = None
+                self.futures.append(WrappedFuture(inner_future=inner_fut))
+        self.pending_call_str_dict.clear()
 
     def meet_pause_condition(self) -> bool:
-        if len(self.futures) == 0:
-            return False
+        """Check if query need to be paused or is already paused"""
+        if len(self.pending_call_str_dict) == 0:
+            # check if already in paused condition (i.e. have pending tool calls)
+            return len(self.futures) > 0
+        # has pending call_str_dict but haven't triggered
         if self.pause_condition == "on_trigger":
             return True
         elif self.pause_condition == "on_eos":
@@ -276,9 +290,12 @@ class QueryPlugin:
         if self.result_apply_chat_template:
             # chat_template = "{% for message in messages %}{% set role = message['role'] %}{{  '\n' + role + '\n' + message['content'] | trim + eos_token }}{% endfor %}{% if add_generation_prompt %}{{ 'assistant\n'}}{% endif %}"
             chat = [{"role": "user", "content": results_str}]
-            has_new_round = not all([env_state.finished for env_state in self.env_states])
+            has_new_round = not self.all_env_finished
             results_str = self.tokenizer.apply_chat_template(chat, add_generation_prompt=has_new_round, tokenize=False)
 
+        if len(results_str) == 0:
+            # skip if empty result
+            return
         plugin_tokens_ids = self.tokenizer(results_str, padding=False, return_tensors="pt",
                                            add_special_tokens=False).input_ids.tolist()[0]
         token_len = len(plugin_tokens_ids)
@@ -293,10 +310,6 @@ class QueryPlugin:
         new_range = TokenRange(start=cur_idx, end=cur_idx + token_len - 1, role=TokenRole.Tool)
         _add_range_to_range_list(self.output_ranges, new_range)
         self.do_edit_history()
-
-    def set_env_states(self, new_env_states: List[EnvStates]):
-        assert len(self.env_states) == len(new_env_states)
-        self.env_states = new_env_states
 
     @property
     def env_state_b64(self) -> str:
@@ -330,22 +343,23 @@ class QueryPlugin:
 
     def get_resume_state(self) -> Dict:
         """states that should be consistent between on-policy and off-policy steps"""
-        assert self.all_plugin_call_done, "serialize while has pending plugin calls"
+        assert not self.meet_pause_condition(), "serialize while query is paused"
         state = dict()
         state["call_round"] = self.call_round
         state["plugin_match_state"] = self.plugin_match_state
         state["env_state_dicts"] = [env.state_dict() for env in self.envs]
-        state["env_states"] = self.env_states
-        state['futures'] = self.futures
+        state['pending_call_str_dict'] = self.pending_call_str_dict
         return state
 
     def set_resume_state(self, state: Dict):
         self.call_round = state["call_round"]
         self.plugin_match_state = state["plugin_match_state"]
-        for env, state_dict in zip(self.envs, state['env_state_dicts']):
-            env.load_state_dict(state_dict)
-        self.env_states = state["env_states"]
-        self.futures = state["futures"]
+        if self.true_call:
+            assert len(self.envs) == (env_state_len :=
+                                      len(state['env_state_dicts'])), f"{len(self.envs)} != {env_state_len}"
+            for env, state_dict in zip(self.envs, state['env_state_dicts']):
+                env.load_state_dict(state_dict)
+        self.pending_call_str_dict = state["pending_call_str_dict"]
 
 
 def batch_sync_tp_plugin_queries(queries: List[QueryPlugin], tp_group: dist.ProcessGroup):
@@ -361,13 +375,15 @@ def batch_sync_tp_plugin_queries(queries: List[QueryPlugin], tp_group: dist.Proc
             continue
         assert query.true_call == true_call
         if true_call:
-            if not all([fut.inner_future is not None and fut.inner_future.done() for fut in query.futures]):
+            if not all([fut.inner_future is None or fut.inner_future.done() for fut in query.futures]):
                 continue
-            plugin_results = [fut.inner_future.result() for fut in query.futures]
-            env_states = []
-            for env in query.envs:
-                env_states.append(EnvStates(finished=env.finished, reward=env.reward, metrics=env.metrics))
-            results.append((i, plugin_results, env_states))
+
+            def get_result(fut: WrappedFuture):
+                return fut.inner_future.result() if fut.inner_future is not None else fut.result()
+
+            all_env_finished = all([env.finished for env in query.envs])
+            plugin_results = [get_result(fut) for fut in query.futures]
+            results.append((i, plugin_results, all_env_finished))
 
     if tp_group is not None and tp_group.size() > 1:
         tp_src_rank = dist.get_global_rank(tp_group, group_rank=0)
@@ -375,8 +391,9 @@ def batch_sync_tp_plugin_queries(queries: List[QueryPlugin], tp_group: dist.Proc
         dist.broadcast_object_list(to_broadcast, src=tp_src_rank, group=tp_group)
         results = to_broadcast[0]
     # update synchronized results to query
-    for i, plugin_results, env_states in results:
+    for i, plugin_results, all_env_finished in results:
         query = queries[i]
-        query.set_env_states(env_states)
+        query.all_env_finished = all_env_finished
         for res, fut in zip(plugin_results, query.futures):
-            fut.set_result(res)
+            if not fut.done():
+                fut.set_result(res)
