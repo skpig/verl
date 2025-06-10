@@ -52,8 +52,12 @@ class TagMatcher:
         push into cached_tokens, and try to decode with other tokens later
         """
         self.decode_token_cache.append(token)
-        decoded = tokenizer.convert_tokens_to_string(self.decode_token_cache)
-        if decoded == self.replacement_char:
+        try:
+            decoded = tokenizer.convert_tokens_to_string(self.decode_token_cache)
+        except Exception as e:
+            print(f"[ERROR]: decode tokens failed [{self.decode_token_cache}]")
+            raise (e)
+        if decoded.endswith(self.replacement_char):
             return None
         else:
             self.decode_token_cache.clear()

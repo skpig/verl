@@ -30,6 +30,7 @@ def test_tag_matcher():
             end_tag='<｜tool▁call_end｜>',
             test_text='other text<｜tool▁call_begin｜><｜tool▁call_begin｜>tool▁calling<｜tool▁call_end｜>\n<｜tool▁call_end｜>',
             expect_results=['tool▁calling']),
+        TestData(start_tag='', end_tag='[EOS]', test_text='# 筛选[EOS]', expect_results=['# 筛选']),
     ]
 
     tokenizer = get_bbpe_tokenizer()
