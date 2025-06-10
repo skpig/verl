@@ -3,7 +3,7 @@ import omegaconf
 import asyncio
 from alpha_seed.workers.agents.plugins.plugin_manager import PluginManager, PluginResponse
 from alpha_seed.workers.agents.envs import create_agent_envs_from_str
-from utils import get_plugin_config, get_basic_example_env
+from utils import get_plugin_config, get_basic_example_env, get_bbpe_tokenizer
 
 
 def test_call_from_sync():
@@ -12,18 +12,22 @@ def test_call_from_sync():
         "enable": True,
         "names": ['example_plugin']
     }))
-    mgr = PluginManager(config)
+    tokenizer = get_bbpe_tokenizer()
+    mgr = PluginManager(config, tokenizer=tokenizer)
 
     env = get_basic_example_env()
     match_state = mgr.get_match_state()
-    call_str_dict, match_state = mgr.add_token_match(f"<plugin>Add(x=5.5, y=6.83)</plugin>", match_state)
-    fut0 = mgr.async_call(call_str_dict, envs=[env], timeout=1.0)
+    call_reqs = mgr.add_string_match(f"<plugin>Add(x=5.5, y=6.83)</plugin>", match_state)
+    assert len(call_reqs) == 1
+    fut0 = mgr.async_call(call_reqs[0], envs=[env], timeout=1.0)
 
-    call_str_dict, match_state = mgr.add_token_match(f"<plugin>Sleep(seconds=1.0)</plugin>", match_state)
-    fut1 = mgr.async_call(call_str_dict, envs=[env], timeout=2.0)
+    call_reqs = mgr.add_string_match(f"<plugin>Sleep(seconds=1.0)</plugin>", match_state)
+    assert len(call_reqs) == 1
+    fut1 = mgr.async_call(call_reqs[0], envs=[env], timeout=2.0)
 
-    call_str_dict, match_state = mgr.add_token_match(f"<plugin>Sleep(seconds=1.0)</plugin>", match_state)
-    fut2 = mgr.async_call(call_str_dict, envs=[env], timeout=0.5)
+    call_reqs = mgr.add_string_match(f"<plugin>Sleep(seconds=1.0)</plugin>", match_state)
+    assert len(call_reqs) == 1
+    fut2 = mgr.async_call(call_reqs[0], envs=[env], timeout=0.5)
 
     all_metrics = {}
 
@@ -34,20 +38,17 @@ def test_call_from_sync():
             else:
                 all_metrics[key] += val
 
-    result, metrics = fut0.result()
-    update_metrics(metrics)
-    resp = result['example_plugin']
-    assert resp.status == PluginResponse.Status.SUCCESS and resp.output == "<result>12.33</result>"
+    resp = fut0.result()
+    update_metrics(resp.metrics)
+    assert resp.plugin_resp.is_success() and resp.plugin_resp.output == "<result>12.33</result>"
 
-    result, metrics = fut1.result()
-    update_metrics(metrics)
-    resp = result['example_plugin']
-    assert resp.status == PluginResponse.Status.SUCCESS and resp.output == '<result>Slept for 1.0 seconds.</result>'
+    resp = fut1.result()
+    update_metrics(resp.metrics)
+    assert resp.plugin_resp.is_success() and resp.plugin_resp.output == '<result>Slept for 1.0 seconds.</result>'
 
-    result, metrics = fut2.result()
-    update_metrics(metrics)
-    resp = result['example_plugin']
-    assert resp.status == PluginResponse.Status.FAILED and resp.output == 'Plugin example_plugin call failed: [TimeoutError()]'
+    resp = fut2.result()
+    update_metrics(resp.metrics)
+    assert resp.plugin_resp.status == PluginResponse.Status.FAILED and resp.plugin_resp.output == 'Plugin example_plugin call failed: [TimeoutError()]'
 
     assert all_metrics['example_plugin_success'] == 2
     assert all_metrics['example_plugin_failed'] == 1
@@ -60,19 +61,19 @@ def test_call_from_async():
         "enable": True,
         "names": ['example_plugin']
     }))
-    mgr = PluginManager(config)
+    tokenizer = get_bbpe_tokenizer()
+    mgr = PluginManager(config, tokenizer=tokenizer)
 
     env = get_basic_example_env()
     match_state = mgr.get_match_state()
-    call_str_dict, match_state = mgr.add_token_match(f"<plugin>Add(x=5.5, y=6.83)</plugin>", match_state)
+    call_reqs = mgr.add_string_match(f"<plugin>Add(x=5.5, y=6.83)</plugin>", match_state)
+    assert len(call_reqs) == 1
 
     async def func():
-        return await mgr(call_str_dict, envs=[env], timeout=1.0)
+        return await mgr(call_reqs[0], envs=[env], timeout=1.0)
 
-    result, _ = asyncio.run(func())
-
-    resp = result['example_plugin']
-    assert resp.status == PluginResponse.Status.SUCCESS and resp.output == "<result>12.33</result>"
+    resp = asyncio.run(func()).plugin_resp
+    assert resp.is_success() and resp.output == "<result>12.33</result>"
 
 
 def test_ordered_execution():
@@ -81,18 +82,21 @@ def test_ordered_execution():
         "enable": True,
         "names": ['example_plugin']
     }))
-    mgr = PluginManager(config)
+    tokenizer = get_bbpe_tokenizer()
+    mgr = PluginManager(config, tokenizer=tokenizer)
 
     kwargs = {'env_type': 'stateful', 'env_args': {}}
     env = create_agent_envs_from_str(f'example_env@{json.dumps(kwargs)}')[0]
     match_state = mgr.get_match_state()
 
-    call_str_dict, match_state = mgr.add_token_match(f"<plugin>Set_(val=1)</plugin>", match_state)
-    fut0 = mgr.async_call(call_str_dict, envs=[env])
+    call_reqs = mgr.add_string_match(f"<plugin>Set_(val=1)</plugin>", match_state)
+    assert len(call_reqs) == 1
+    fut0 = mgr.async_call(call_reqs[0], envs=[env])
 
-    call_str_dict, match_state = mgr.add_token_match(f"<plugin>Get()</plugin>", match_state)
-    fut1 = mgr.async_call(call_str_dict, envs=[env], deps=[fut0])
-    res0, _ = fut0.result()
-    res1, _ = fut1.result()
-    assert res0['example_plugin'].output == '<result>set value=1</result>'
-    assert res1['example_plugin'].output == '<result>get value=1</result>'
+    call_reqs = mgr.add_string_match(f"<plugin>Get()</plugin>", match_state)
+    assert len(call_reqs) == 1
+    fut1 = mgr.async_call(call_reqs[0], envs=[env], deps=[fut0])
+    res0 = fut0.result().plugin_resp
+    res1 = fut1.result().plugin_resp
+    assert res0.is_success() and res0.output == '<result>set value=1</result>'
+    assert res1.is_success() and res1.output == '<result>get value=1</result>'

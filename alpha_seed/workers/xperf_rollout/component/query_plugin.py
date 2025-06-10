@@ -9,6 +9,8 @@ from alpha_seed.workers.agents.envs import BaseEnv, create_agent_envs_from_str
 from alpha_seed.workers.agents.plugins.plugin_manager import (
     PluginManager,
     get_plugin_manager,
+    PluginCallReq,
+    PluginCallResp,
 )
 from enum import Enum
 import pickle
@@ -143,7 +145,7 @@ class QueryPlugin:
         self.envs: List[BaseEnv] = []
         self.env_states: List[EnvStates] = []  # only set when is_finished
         self.all_env_finished: bool = False  # need to sync tp
-        self.pending_call_str_dict: List[Dict[str, str]] = []
+        self.pending_call_reqs: List[PluginCallReq] = []
         self.futures: List[WrappedFuture] = []
 
     def attach_session(self, session, query):
@@ -157,7 +159,7 @@ class QueryPlugin:
         self.plugin_manager: PluginManager = get_plugin_manager(self.config, tokenizer=self.tokenizer)
         self.plugin_match_state = self.plugin_manager.get_match_state()
         if self.true_call:
-            self.envs = create_agent_envs_from_str(env_strs)
+            self.envs = create_agent_envs_from_str(env_strs, tokenizer=self.tokenizer)
 
     def detach(self):
         if self._query is None:
@@ -219,31 +221,29 @@ class QueryPlugin:
         if (self.max_round is not None) and self.call_round >= self.max_round:
             # skip if reach max round
             return
-        token_str = self.tokenizer.decode(token_id)
-        call_str_dict, self.plugin_match_state = self.plugin_manager.add_token_match(token_str,
-                                                                                     state=self.plugin_match_state)
-        if len(call_str_dict) > 0:
-            self.pending_call_str_dict.append(call_str_dict)
+        token = self.tokenizer.convert_ids_to_tokens([token_id])[0]
+        call_reqs = self.plugin_manager.add_token_match(token, state=self.plugin_match_state)
+        if len(call_reqs) > 0:
+            self.pending_call_reqs.extend(call_reqs)
 
     def trigger_plugin_call(self):
-        for call_str_dict in self.pending_call_str_dict:
-            if len(call_str_dict) > 0:
-                if self.true_call:
-                    dep_fut = None if (len(self.futures) == 0 or
-                                       not self.is_exec_sequential) else self.futures[-1].inner_future
+        for call_req in self.pending_call_reqs:
+            if self.true_call:
+                dep_fut = None if (len(self.futures) == 0 or
+                                   not self.is_exec_sequential) else self.futures[-1].inner_future
 
-                    inner_fut = self.plugin_manager.async_call(call_str_dict=call_str_dict,
-                                                               envs=self.envs,
-                                                               timeout=self.timeout,
-                                                               deps=None if dep_fut is None else [dep_fut])
-                else:
-                    inner_fut = None
-                self.futures.append(WrappedFuture(inner_future=inner_fut))
-        self.pending_call_str_dict.clear()
+                inner_fut = self.plugin_manager.async_call(call_req=call_req,
+                                                           envs=self.envs,
+                                                           timeout=self.timeout,
+                                                           deps=None if dep_fut is None else [dep_fut])
+            else:
+                inner_fut = None
+            self.futures.append(WrappedFuture(inner_future=inner_fut))
+        self.pending_call_reqs.clear()
 
     def meet_pause_condition(self) -> bool:
         """Check if query need to be paused or is already paused"""
-        if len(self.pending_call_str_dict) == 0:
+        if len(self.pending_call_reqs) == 0:
             # check if already in paused condition (i.e. have pending tool calls)
             return len(self.futures) > 0
         # has pending call_str_dict but haven't triggered
@@ -274,17 +274,18 @@ class QueryPlugin:
         """
         if not self.all_plugin_call_done():
             return
-        results = [fut.result() for fut in self.futures]
+        resps: List[PluginCallResp] = [fut.result() for fut in self.futures]
         self.futures.clear()
         self.call_round += 1
         results_str_list = []
+
         # format results to str
-        for i in range(len(results)):
-            if results[i] is None:
+        for resp in resps:
+            if resp is None:
                 continue
-            plugin_resps, metrics = results[i]
-            results_str_list.append('\n'.join([resp.output for resp in plugin_resps.values()]))
-            self._update_plugin_metrics(metrics)
+            plugin_resp = resp.plugin_resp
+            results_str_list.append(plugin_resp.output)
+            self._update_plugin_metrics(resp.metrics)
 
         results_str = "\n".join(results_str_list)
         if self.result_apply_chat_template:
@@ -348,7 +349,7 @@ class QueryPlugin:
         state["call_round"] = self.call_round
         state["plugin_match_state"] = self.plugin_match_state
         state["env_state_dicts"] = [env.state_dict() for env in self.envs]
-        state['pending_call_str_dict'] = self.pending_call_str_dict
+        state['pending_call_reqs'] = self.pending_call_reqs
         return state
 
     def set_resume_state(self, state: Dict):
@@ -359,7 +360,7 @@ class QueryPlugin:
                                       len(state['env_state_dicts'])), f"{len(self.envs)} != {env_state_len}"
             for env, state_dict in zip(self.envs, state['env_state_dicts']):
                 env.load_state_dict(state_dict)
-        self.pending_call_str_dict = state["pending_call_str_dict"]
+        self.pending_call_reqs = state["pending_call_reqs"]
 
 
 def batch_sync_tp_plugin_queries(queries: List[QueryPlugin], tp_group: dist.ProcessGroup):

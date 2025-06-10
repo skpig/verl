@@ -48,3 +48,12 @@ def dist_worker(rank, world_size, target):
         target()
     finally:
         teardown_dist()
+
+
+def get_bbpe_tokenizer():
+    from verl.utils.fs import copy_local_path_from_hdfs
+    from transformers import AutoTokenizer
+    local_path = copy_local_path_from_hdfs(
+        "hdfs://haruna/home/byte_data_seed/hdd_hldy/user/binxingyan/bbpe155k-v6.4.3-ml.pret")
+    tokenizer = AutoTokenizer.from_pretrained(local_path)
+    return tokenizer

@@ -11,7 +11,8 @@ class ExamplePlugin(BasePlugin):
         super().__init__(call_begin_tag="<plugin>",
                          call_end_tag="</plugin>",
                          result_begin_tag="<result>",
-                         result_end_tag="</result>")
+                         result_end_tag="</result>",
+                         **kwargs)
 
     async def __call__(self, call_str: str, envs: List[BaseEnv]) -> PluginResponse:
         tasks = []

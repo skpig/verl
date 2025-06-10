@@ -12,7 +12,21 @@ from alpha_seed.workers.agents.envs import BaseEnv
 from omegaconf import OmegaConf
 from transformers import AutoTokenizer
 import json
+from dataclasses import dataclass
 import concurrent.futures
+
+
+@dataclass
+class PluginCallReq:
+    name: str
+    call_str: str
+
+
+@dataclass
+class PluginCallResp:
+    name: str
+    plugin_resp: PluginResponse
+    metrics: Dict[str, List]
 
 
 class AsyncTimer:
@@ -29,7 +43,7 @@ class AsyncTimer:
 
 class PluginManager:
 
-    def __init__(self, config: Dict, tokenizer=None):
+    def __init__(self, config: Dict, tokenizer: AutoTokenizer):
         self._plugins: Dict[str, BasePlugin] = dict()
 
         def run_event_loop(loop):
@@ -52,20 +66,27 @@ class PluginManager:
             ret[name] = plugin.get_match_state()
         return ret
 
-    def add_token_match(self, token: str, state: Dict = None) -> Tuple[Dict[str, str], Dict]:
-        """Extrace plugin call strings from text
-        Returns a dict, key is the name of plugins (only with non-empty calls are included),
-        value is matched call_str
-        """
+    def add_token_match(self, token: str, state: Dict = None) -> List[PluginCallReq]:
         if state is None:
             state = self.get_match_state()
-        ret = dict()
+        call_reqs = []
         for name, plugin in self._plugins.items():
-            matched, state[name] = plugin.add_token_match(token, state=state[name])
+            matched = plugin.add_token_match(token, state=state[name])
             if matched is not None:
-                ret[name] = matched
+                call_reqs.append(PluginCallReq(name=name, call_str=matched))
 
-        return ret, state
+        return call_reqs
+
+    def add_string_match(self, text: str, state: Dict = None) -> List[PluginCallReq]:
+        if state is None:
+            state = self.get_match_state()
+        call_reqs = []
+        for name, plugin in self._plugins.items():
+            all_matched = plugin.add_string_match(text, state=state[name])
+            if len(all_matched) > 0:
+                for matched in all_matched:
+                    call_reqs.append(PluginCallReq(name=name, call_str=matched))
+        return call_reqs
 
     @property
     def plugins(self) -> Dict[str, BasePlugin]:
@@ -73,60 +94,40 @@ class PluginManager:
 
     async def __call__(
         self,
-        call_str_dict: Dict[str, str],
+        call_req: PluginCallReq,
         envs: List[BaseEnv],
         timeout: Union[float, None] = None,
         deps: List[asyncio.Future] = None,
-    ) -> Tuple[Dict[str, PluginResponse], Dict]:
-        results_dict = dict()
-        tasks = []
-        timers = []
-        names = []
-        metrics = dict()
-
+    ) -> PluginCallResp:
         if deps is not None:
             await asyncio.gather(*deps, return_exceptions=True)
 
-        for name, call_str in call_str_dict.items():
-            plugin = self._plugins[name]
-            task = asyncio.wait_for(asyncio.create_task(plugin(call_str, envs=envs)), timeout=timeout)
-            timer = AsyncTimer()
-            tasks.append(timer(task))
-            timers.append(timer)
-            names.append(name)
+        name = call_req.name
+        plugin = self._plugins[name]
+        task = asyncio.wait_for(asyncio.create_task(plugin(call_req.call_str, envs=envs)), timeout=timeout)
+        timer = AsyncTimer()
+        metrics = dict()
+        try:
+            plugin_resp = await task
+            metrics[f"{name}_elapsed"] = [timer.time]
+            metrics[f"{name}_success"] = 1
+        except Exception as e:
+            metrics[f"{name}_failed"] = 1
+            plugin_resp = PluginResponse.failed(output=f"Plugin {name} call failed: [{repr(e)}]")
 
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        for name, timer, res in zip(names, timers, results):
-            if (key := f"{name}_elapsed") not in metrics:
-                metrics[key] = []
-
-            if isinstance(res, Exception):
-                if (key := f"{name}_failed") not in metrics:
-                    metrics[key] = 0
-                metrics[key] += 1
-                msg = f"Plugin {name} call failed: [{repr(res)}]"
-                response = PluginResponse(status=PluginResponse.Status.FAILED, output=msg)
-            else:
-                metrics[key].append(timer.time)
-                if (key := f"{name}_success") not in metrics:
-                    metrics[key] = 0
-                metrics[key] += 1
-                response = res
-            results_dict[name] = response
-        return results_dict, metrics
+        return PluginCallResp(name, plugin_resp=plugin_resp, metrics=metrics)
 
     def async_call(
         self,
-        call_str_dict: Dict[str, str],
+        call_req: PluginCallReq,
         envs: List[BaseEnv],
         timeout: Union[float, None] = None,
         deps: List[concurrent.futures.Future] = None,
-    ) -> concurrent.futures.Future[Dict[str, PluginResponse], Dict]:
+    ) -> concurrent.futures.Future[List[PluginCallResp]]:
 
         aio_deps = None if deps is None else [asyncio.wrap_future(fut, loop=self._loop) for fut in deps]
-        future = asyncio.run_coroutine_threadsafe(
-            self.__call__(call_str_dict, envs=envs, timeout=timeout, deps=aio_deps), self._loop)
+        future = asyncio.run_coroutine_threadsafe(self.__call__(call_req, envs=envs, timeout=timeout, deps=aio_deps),
+                                                  self._loop)
         return future
 
 
