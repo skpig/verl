@@ -14,7 +14,7 @@ import numpy as np
 import torch
 import torch.distributed
 
-from verl import DataProto
+from mono_rl import DataProto
 
 from megatron.core import parallel_state as mpu
 

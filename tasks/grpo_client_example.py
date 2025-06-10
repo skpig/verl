@@ -8,13 +8,13 @@ import wandb
 from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRefWorker
 from alpha_seed import core_algos
 from alpha_seed.utils.reward_score import math_v1
-from verl import DataProto
+from mono_rl import DataProto
 from verl.utils.py_functional import append_to_dict
 import verl.utils.torch_functional as verl_F
 from alpha_seed.utils.dataset.rl_dataset import RLHFDataset, collate_fn
 from torch.utils.data import DataLoader
-from single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
-from single_controller.ray.base import create_colocated_worker_cls
+from mono_rl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
+from mono_rl.single_controller.ray import create_colocated_worker_cls
 
 
 def init_client():

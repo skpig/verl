@@ -37,7 +37,7 @@ from collections import defaultdict
 import os
 
 import ray
-from verl import DataProto
+from mono_rl import DataProto
 from verl.utils.tracking import Tracking
 from verl.utils.fs import copy_local_path_from_hdfs
 import torch
@@ -890,7 +890,7 @@ def config_to_trainer_kwargs(config):
     # instantiate tokenizer
     tokenizer = AutoTokenizer.from_pretrained(local_path)
     if config.data.get('chat_template', None) == 'seed':
-        from verl.utils.seed import CHAT_TEMPLATE
+        from mono_rl.utils.seed import CHAT_TEMPLATE
         tokenizer.chat_template = CHAT_TEMPLATE
     if config.data.get('chat_template', None) == 'raw':
         raw_template = """{% for message in messages %}{{ message['content'] }}{% endfor %}"""
@@ -905,7 +905,7 @@ def config_to_trainer_kwargs(config):
     # define worker classes
     if config.actor_rollout_ref.actor.strategy in ['fsdp', 'vescale-fsdp2', 'megatron']:
         assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
-        from single_controller.ray import RayWorkerGroup
+        from mono_rl.single_controller.ray import RayWorkerGroup
         ray_worker_group_cls = RayWorkerGroup
     else:
         raise NotImplementedError

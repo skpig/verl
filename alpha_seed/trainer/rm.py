@@ -41,7 +41,7 @@ from tensordict import TensorDict
 import verl.utils.torch_functional as verl_F
 from verl.utils.fs import copy_local_path_from_hdfs
 from verl.utils.tracking import Tracking
-from verl import DataProto
+from mono_rl import DataProto
 from verl.utils.seqlen_balancing import rearrange_micro_batches
 from verl.utils.model import compute_position_id_with_mask
 from verl.utils.fsdp_utils import get_fsdp_wrap_policy
@@ -57,8 +57,8 @@ from alpha_seed.utils.dataset.rm_dataset import RMDataset
 from alpha_seed.utils.dataset.rl_dataset import collate_fn
 from alpha_seed.workers.hybrid_engine.fsdp_gather import DataGatherManager, ulysses_pad_and_slice_inputs, gather_outpus_and_unpad
 
-from single_controller.base.worker import Worker
-from single_controller.base.decorator import register, Dispatch
+from mono_rl.single_controller import Worker
+from mono_rl.single_controller import register, Dispatch
 
 from flash_attn.bert_padding import unpad_input, pad_input
 from flash_attn.bert_padding import index_first_axis, rearrange
@@ -121,7 +121,7 @@ class RMTrainer(object):
                                                        trust_remote_code=self.config.model.trust_remote_code)
 
         if self.config.data.chat_template is None:
-            from verl.utils.seed import CHAT_TEMPLATE
+            from mono_rl.utils.seed import CHAT_TEMPLATE
             self.tokenizer.chat_template = CHAT_TEMPLATE
 
         # normalize dp size

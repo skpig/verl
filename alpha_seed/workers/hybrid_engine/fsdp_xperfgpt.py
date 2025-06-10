@@ -39,7 +39,7 @@ import torch.distributed
 
 from torch.distributed._tensor import DTensor
 
-from verl import DataProto
+from mono_rl import DataProto
 
 from alpha_seed.workers.xperf_rollout.utils.layout_convert_helper import offload_to_device, load_to_cuda
 from alpha_seed.workers.xperf_rollout.utils.weight_loader import get_xperf_gpt_weight_bind_fn

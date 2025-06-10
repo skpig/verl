@@ -7,7 +7,7 @@ import os
 os.environ['NCCL_DEBUG'] = 'WARN'
 
 from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRefWorker
-from single_controller.ray import RayResourcePool, RayClassWithInitArgs, RayWorkerGroup
+from mono_rl.single_controller.ray import RayResourcePool, RayClassWithInitArgs, RayWorkerGroup
 
 from omegaconf import OmegaConf
 
@@ -57,7 +57,7 @@ if __name__ == '__main__':
     wg = RayWorkerGroup(resource_pool=resource_pool, ray_cls_with_init=ray_cls_with_init)
     ray.get(wg.init_model())
 
-    from verl import DataProto
+    from mono_rl import DataProto
 
     prompt = "Natalia sold clips to 48 of her friends in April, and then she sold half as many clips in May. How many clips did Natalia sell altogether in April and May?"
 

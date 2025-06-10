@@ -25,9 +25,9 @@ import torch
 import torch.distributed
 
 import verl.utils.torch_functional as verl_F
-from single_controller.base import Worker
-from single_controller.base.decorator import register, Dispatch
-from verl import DataProto
+from mono_rl.single_controller import Worker
+from mono_rl.single_controller import register, Dispatch
+from mono_rl import DataProto
 from verl.utils.model import compute_position_id_with_mask
 from verl.utils.fs import copy_local_path_from_hdfs
 from verl.utils.fsdp_utils import get_fsdp_wrap_policy
@@ -404,12 +404,10 @@ class RewardModelWorker(Worker):
             rm_data = self.gather_manager.preprocess_data(rm_data)
 
             if self.config.use_dynamic_bsz:
-                micro_batches, num_micro_batches, _ = rearrange_micro_batches(batch=rm_data.batch,
-                                                                              max_token_len=self.config.max_token_len)
+                micro_batches, _ = rearrange_micro_batches(batch=rm_data.batch, max_token_len=self.config.max_token_len)
             else:
                 # split batch into micro_batches
                 micro_batches = rm_data.batch.split(self.config.micro_batch_size)
-                num_micro_batches = len(micro_batches)
 
             output = []
             total_reflection_nums = []

@@ -2,7 +2,7 @@ import torch
 from openai import AsyncOpenAI
 
 from alpha_seed.workers.streaming_service.streaming_utils import is_ipv6
-from verl import DataProto
+from mono_rl import DataProto
 import asyncio
 import os
 import aiohttp

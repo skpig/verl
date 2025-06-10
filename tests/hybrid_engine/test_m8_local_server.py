@@ -1,7 +1,7 @@
 import os
 from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRefWorker
 from alpha_seed.utils.server_client import KVStore
-from single_controller.ray import RayResourcePool, RayClassWithInitArgs, RayWorkerGroup
+from mono_rl.single_controller.ray import RayResourcePool, RayClassWithInitArgs, RayWorkerGroup
 from omegaconf import OmegaConf
 import ray
 import ipdb

@@ -1,6 +1,6 @@
 set -x
 
-ray stop --force
+# ray stop --force
 
 NUM_STEPS="${NUM_STEPS:-2000}"
 echo $NUM_STEPS

@@ -35,7 +35,7 @@ from tensordict import TensorDict
 from transformers import AutoTokenizer, AutoConfig
 from megatron.core import parallel_state as mpu
 
-from verl import DataProto
+from mono_rl import DataProto
 
 from alpha_seed.models.mariana.checkpoint_utils import load_partial_pretrain
 from alpha_seed.models.mariana.config_utils import convert_hf_config_to_mariana, update_megatron_config

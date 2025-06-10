@@ -21,9 +21,9 @@ from alpha_seed.workers.streaming_service.auto_scaling import HorizontalAutoScal
 from alpha_seed.workers.streaming_service.rollout_proxy import FixedReplicatedRayWorkerGroupAdapter, \
     RolloutWorkerGroupProxy
 from alpha_seed.workers.streaming_service.streaming_rollout import RemoteAsyncXPerfGPTRollout
-from verl import DataProto
-from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, RayResourcePool
-from verl.single_controller.ray.replicated_worker_group import ReplicatedRayWorkerGroup, ScalingRayWorkerGroup
+from mono_rl import DataProto
+from mono_rl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, RayResourcePool
+from mono_rl.single_controller.ray.replicated_worker_group import ReplicatedRayWorkerGroup, ScalingRayWorkerGroup
 from verl.utils.tracking import Tracking
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from transformers import AutoTokenizer

@@ -1,7 +1,7 @@
 import os
 from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRefWorker
 from alpha_seed.utils.server_client import KVStore
-from single_controller.ray import RayResourcePool, RayClassWithInitArgs, RayWorkerGroup
+from mono_rl.single_controller.ray import RayResourcePool, RayClassWithInitArgs, RayWorkerGroup
 from omegaconf import OmegaConf
 import ray
 import ipdb
@@ -43,7 +43,7 @@ kv_store = ray.remote(KVStore).options(name=KVStore.name, lifetime="detached").r
 kv_store.set_key_val.remote("worker_names", wg.worker_names)
 
 import torch
-from verl import DataProto
+from mono_rl import DataProto
 from verl.utils.fs import copy_local_path_from_hdfs
 from transformers import AutoTokenizer
 

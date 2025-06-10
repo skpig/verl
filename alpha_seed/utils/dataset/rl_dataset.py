@@ -294,7 +294,7 @@ if __name__ == '__main__':
 
     local_path = "p6_400m_moe_4T_sft_v27_bs128_lr4e-4_master_dyn_epoch4_hf"
     tokenizer = AutoTokenizer.from_pretrained(local_path)
-    from verl.utils.seed import CHAT_TEMPLATE
+    from mono_rl.utils.seed import CHAT_TEMPLATE
     tokenizer.chat_template = CHAT_TEMPLATE
 
     dataset = RLHFDataset(parquet_files='combine_math7k_aime800_mathv2_repeat10.parquet',
@@ -310,7 +310,7 @@ if __name__ == '__main__':
 
     a = next(iter(dataloader))
 
-    from verl import DataProto
+    from mono_rl import DataProto
 
     tensors = {}
     non_tensors = {}

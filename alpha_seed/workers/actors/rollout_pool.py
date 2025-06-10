@@ -55,13 +55,13 @@ class RolloutPool:
             self.pool = VanillaReplayBufferClient()
         elif self.replay_buffer_type == "persistable":
             # requires verl verion >= 1.0.0.366
-            from verl.utils.replay_buffer.persistable_replay_buffer_client import PersistableReplayBufferClient
+            from mono_rl.utils.replay_buffer.persistable_replay_buffer_client import PersistableReplayBufferClient
             replay_buffer_name = self.config.actor_rollout_ref.rollout.get("replay_buffer_name", "replay_buffer")
             assert len(replay_buffer_name) != 0
             cache_size_limit_in_mb = self.config.actor_rollout_ref.rollout.get("replay_buffer_in_memory_cache_limit_mb",
                                                                                1024)
             hdfs_path = self.config.actor_rollout_ref.rollout.get("replay_buffer_hdfs_path", None)
-            from verl.utils.replay_buffer.samplers.uniform_key_sampler import UniformKeySampler
+            from mono_rl.utils.replay_buffer.samplers.uniform_key_sampler import UniformKeySampler
             self.samplers = [UniformKeySampler()]  # uniform sampling
             self.pool = PersistableReplayBufferClient(replay_buffer_name, cache_size_limit_in_mb, hdfs_path,
                                                       self.samplers)

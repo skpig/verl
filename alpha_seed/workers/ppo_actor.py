@@ -30,8 +30,8 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from flash_attn.bert_padding import unpad_input, pad_input
 from flash_attn.ops.triton.cross_entropy import cross_entropy_loss
 
-from verl import DataProto
-from verl.trainer.ppo.actor import BasePPOActor
+from mono_rl import DataProto
+from verl.workers.actor import BasePPOActor
 from verl.utils.py_functional import append_to_dict
 from verl.utils.torch_functional import logprobs_from_logits, log_probs_from_logits_response_rmpad, get_unpad_data
 import verl.utils.torch_functional as verl_F
@@ -58,7 +58,7 @@ import ray
 __all__ = ['DataParallelPPOActor']
 
 try:
-    from verl.utils.debug import MemoryProfiler
+    from mono_rl.utils.debug import MemoryProfiler
 except:
     print('Cannot find profile utilities. Please use latest verl master')
     raise
@@ -317,7 +317,7 @@ class DataParallelPPOActor(BasePPOActor):
 
         with self.profiler_context as p, metrics_exec_context:
             if self.config.use_dynamic_bsz:
-                micro_batches, _, _ = rearrange_micro_batches(batch=batch, max_token_len=self.config.ppo_max_token_len)
+                micro_batches, _ = rearrange_micro_batches(batch=batch, max_token_len=self.config.ppo_max_token_len)
             else:
                 # split batch into micro_batches
                 micro_batches = batch.split(self.config.ppo_micro_batch_size)

@@ -8,7 +8,7 @@ import numpy as np
 import torch.nn.functional as F
 from typing import *
 
-from verl import DataProto
+from mono_rl import DataProto
 
 
 def rmpad(item):
@@ -278,7 +278,7 @@ def pack_to_dataproto(prompts, tokenizer, data_pack: DataPack, config) -> DataPr
     }
     if response_model_output_mask is not None:
         batch['model_output_mask'] = response_model_output_mask.to(torch.int8)
-    from verl import DataProto
+    from mono_rl import DataProto
     out = DataProto.from_dict(batch)
     data_pack.metrics["off_policy_steps"] = response_off_policy.tolist()
     out.meta_info["xperf_metrics"] = data_pack.metrics
@@ -339,7 +339,7 @@ def get_node_ip():
             import ray
             return ray._private.services.get_node_ip_address()
         elif os.getenv("WG_BACKEND", None) == "torch_rpc":
-            from verl_ext.single_controller.torchrpc.k8s_client import get_ip_addr
+            from mono_rl.single_controller.torchrpc.k8s_client import get_ip_addr
             return get_ip_addr()
         return None
 

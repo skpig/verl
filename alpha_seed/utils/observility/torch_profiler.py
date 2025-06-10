@@ -4,7 +4,7 @@ import os
 import torch
 import ray
 
-from verl.utils.debug import get_profiler_context
+from mono_rl.utils.debug import get_profiler_context
 
 
 def get_profiler_context_wrapped(filename,
@@ -19,7 +19,7 @@ def get_profiler_context_wrapped(filename,
     default_hdfs_dir = os.environ.get('PROFILE_HDFS_DIR')
 
     try:
-        from verl.utils.debug import MerlinLineageUploader
+        from mono_rl.utils.debug import MerlinLineageUploader
 
         # adapt for torchrun
         if ray.is_initialized():
@@ -59,7 +59,7 @@ def get_profiler_context_wrapped(filename,
 
 def profile_step(p, step=None):
     try:
-        from verl.utils.debug import VerlProfiler
+        from mono_rl.utils.debug import VerlProfiler
         if type(p) is VerlProfiler and step is not None:
             p.set_step(step)
     except ImportError:

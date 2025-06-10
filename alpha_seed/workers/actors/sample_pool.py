@@ -5,7 +5,7 @@ import queue
 import random
 import logging
 import math
-from verl import DataProto
+from mono_rl import DataProto
 
 logger = logging.getLogger(__file__)
 

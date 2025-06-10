@@ -20,7 +20,7 @@ import uuid
 from distlib.locators import Locator
 from pydantic import UUID4
 from transformers import PreTrainedTokenizer
-from verl import DataProto
+from mono_rl import DataProto
 import copy
 from contextlib import contextmanager, nullcontext
 
@@ -36,12 +36,11 @@ import uvicorn
 from typing import AsyncGenerator, List
 import asyncio
 import xperf_gpt
-from verl.single_controller.base.decorator import Execute
+from mono_rl.single_controller import Execute
 
 from alpha_seed.workers.xperf_rollout.session import InferenceSession, StepProfiler, LoadMetric
 from alpha_seed.workers.xperf_rollout.component.query import Query, AsyncQuery
-from single_controller.base.worker import WorkerHelper
-from single_controller.base import Worker
+from mono_rl.single_controller.base.worker import WorkerHelper, Worker
 
 from pathlib import Path
 import os
@@ -52,7 +51,7 @@ import torch.distributed as dist
 
 import torch.distributed
 from torch.distributed.device_mesh import init_device_mesh
-from single_controller.base.decorator import register, Dispatch
+from mono_rl.single_controller import register, Dispatch
 
 from contextlib import contextmanager
 import logging
@@ -73,7 +72,7 @@ import dill
 import ray
 
 try:
-    from verl.utils.debug.performance import NullProfileEnter
+    from mono_rl.utils.debug.performance import NullProfileEnter
 except:
     print('Cannot find profile utilities. Please use latest verl master')
     raise
@@ -249,7 +248,7 @@ class AsyncXPerfGPTRollout(object):
             assert tp_rank < tp_size
 
             # get a free port and addr
-            from single_controller.base.worker import WorkerHelper
+            from mono_rl.single_controller.base.worker import WorkerHelper
             worker_helper = WorkerHelper()
             if tp_rank == 0:
                 free_port_addr = list(worker_helper.get_availale_master_addr_port())

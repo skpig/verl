@@ -49,7 +49,7 @@ export SEC_KV_AUTH=1
 export BYTED_RAY_DISABLE_COLOR_LOG=true
 export HDFS_IO_THROW_EXCEPTION=1
 export USE_FLASH_ATTENTION_2=1
-export PYTHONPATH=$PYTHONPATH:/opt/tiger/alpha-seed:/opt/tiger/verl:/opt/tiger/verifiable_tasks:/opt/tiger/bpex_triton:/opt/tiger/seed_models
+export PYTHONPATH=$PYTHONPATH:/opt/tiger/mono_rl:/opt/tiger/alpha-seed:/opt/tiger/verl:/opt/tiger/verifiable_tasks:/opt/tiger/bpex_triton:/opt/tiger/seed_models
 
 train_file="${TRAIN_DATASET:-$TRAIN_FILE}"
 test_file="${TEST_DATASET:-$TEST_FILE}"

@@ -3,8 +3,8 @@ trigger:
   change
 jobs:
   vlm_e2e_runnable_tests:
-    # Merlin - data.aml.verl:v189
-    image: hub.byted.org/reckon/data.reckon.mlx.image_5940:2f550abbef6349f1fd520d7dbd4fcc1e
+    # Merlin - seed.mono_rl.dev:v5
+    image: hub.byted.org/reckon/data.reckon.mlx.image_10440:f01681fa57069fea9769780f4e25bba6
     if: ${{ !contains(Event.Change.Title, "WIP") }}
     runs-on:
       cluster: gpu-h20
@@ -40,9 +40,9 @@ jobs:
           - cd seed_models
           - pip3 install -e . --user
           - cd /opt/tiger
-          - git clone git@code.byted.org:data/verl
-          - cd verl
-          - pip3 install -e . --user
+          - git clone git@code.byted.org:data/open_verl
+          - mv open_verl verl
+          - git clone git@code.byted.org:seed/mono_rl.git
           - pip3 install --upgrade byted-wandb
           - pip3 install bytedance.ndtimeline --upgrade
           - pip3 install byted-omnistore==0.7.14
@@ -52,6 +52,7 @@ jobs:
       - name: vlm hybrid engine tests
         commands:
           - export NCCL_SHM_DISABLE=1
+          - export PYTHONPATH=/opt/tiger/mono_rl:$PYTHONPATH
           - wandb offline
           - ray stop --force
           - ray start --num-cpus=100 --head
@@ -65,6 +66,7 @@ jobs:
           - export N_GPUS_PER_NODE=8
           - export NCCL_SHM_DISABLE=1
           - export ALPHASEED_USE_NDTIMELINE=1
+          - export PYTHONPATH=/opt/tiger/mono_rl:$PYTHONPATH
           - wandb offline
           - ray stop --force
           - ray start --num-cpus=100 --head

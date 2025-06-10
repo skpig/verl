@@ -12,7 +12,7 @@ max_prompt_length=10240
 max_response_length=22528
 
 # tracking实验名
-export PYTHONPATH=$PYTHONPATH:/opt/tiger/verl:/opt/tiger/seed_models:/opt/tiger/verifiable_tasks:/opt/tiger/bpex_triton
+export PYTHONPATH=$PYTHONPATH:/opt/tiger/mono_rl:/opt/tiger/verl:/opt/tiger/seed_models:/opt/tiger/verifiable_tasks:/opt/tiger/bpex_triton
 
 trap "kill 0" EXIT
 

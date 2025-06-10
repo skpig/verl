@@ -22,7 +22,7 @@ import random
 import numpy as np
 from codetiming import Timer
 
-from verl import DataProto
+from mono_rl import DataProto
 import torch
 from verl.utils.tracking import Tracking
 import wandb
@@ -522,7 +522,7 @@ class GenClient:
                                     preprocess_mode="CHATML_SESSION")
 
         elif self.config.data.format == "rl":
-            from verl.utils.seed import CHAT_TEMPLATE
+            from mono_rl.utils.seed import CHAT_TEMPLATE
             self.tokenizer.chat_template = CHAT_TEMPLATE
             dataset = RLHFDataset(parquet_files=self.config.data.input_files,
                                   tokenizer=self.tokenizer,

@@ -19,7 +19,7 @@ import warnings
 from verl.utils.fs import copy_local_path_from_hdfs
 from verl.utils.distributed import initialize_global_process_group
 from verl.utils.fsdp_utils import get_fsdp_wrap_policy
-from verl import DataProto
+from mono_rl import DataProto
 
 import torch
 import torch.distributed

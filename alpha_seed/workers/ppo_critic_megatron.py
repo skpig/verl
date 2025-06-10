@@ -13,9 +13,9 @@ from tensordict import TensorDict
 
 from verl.utils.py_functional import append_to_dict
 from verl.utils.torch_functional import masked_mean
-from verl import DataProto
+from mono_rl import DataProto
 
-from verl.trainer.ppo.critic import BasePPOCritic
+from verl.workers.critic import BasePPOCritic
 from alpha_seed import core_algos
 
 from flash_attn.bert_padding import pad_input
@@ -364,7 +364,7 @@ class MegatronPPOCritic(BasePPOCritic):
         max_token_len = data.meta_info['max_token_len']
 
         # perform dynamic bsz
-        micro_batches, num_micro_batches, indices = rearrange_micro_batches(
+        micro_batches, indices = rearrange_micro_batches(
             batch=batch,
             max_token_len=max_token_len,
             dp_group=mpu.get_data_parallel_group(),
@@ -421,11 +421,10 @@ class MegatronPPOCritic(BasePPOCritic):
         for batch_idx, mini_batch in enumerate(dataloader):
             self._optimizer_zero_grad()
 
-            micro_batches, _, _ = rearrange_micro_batches(
-                batch=mini_batch,
-                max_token_len=self.config.ppo_max_token_len,
-                dp_group=mpu.get_data_parallel_group(),
-                min_num_micro_batch=mpu.get_pipeline_model_parallel_world_size())
+            micro_batches, _ = rearrange_micro_batches(batch=mini_batch,
+                                                       max_token_len=self.config.ppo_max_token_len,
+                                                       dp_group=mpu.get_data_parallel_group(),
+                                                       min_num_micro_batch=mpu.get_pipeline_model_parallel_world_size())
 
             metric_micro_batch = self._forward_backward_batch(micro_batches,
                                                               response_length=response_length,

@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 import pytest
 from omegaconf import OmegaConf
-from verl import DataProto
+from mono_rl import DataProto
 import copy
 import pandas as pd
 import numpy as np

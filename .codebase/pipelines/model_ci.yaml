@@ -3,8 +3,8 @@ trigger:
   change
 jobs:
   model_tests:
-    # Merlin - data.aml.verl:v189
-    image: hub.byted.org/reckon/data.reckon.mlx.image_5940:2f550abbef6349f1fd520d7dbd4fcc1e
+    # Merlin - seed.mono_rl.dev:v5
+    image: hub.byted.org/reckon/data.reckon.mlx.image_10440:f01681fa57069fea9769780f4e25bba6
     if: ${{ !contains(Event.Change.Title, "WIP") }}
     runs-on:
       cluster: gpu-l20-16
@@ -39,14 +39,16 @@ jobs:
           - pip3 install byted-omnistore==0.7.14
           - pip3 install --upgrade bytedance.ndtimeline
           - cd /opt/tiger
-          - git clone git@code.byted.org:data/verl
+          - git clone git@code.byted.org:data/open_verl
+          - mv open_verl verl
           - git clone git@code.byted.org:seed/seed_models
+          - git clone git@code.byted.org:seed/mono_rl.git
           - git clone git@code.byted.org:data/byted_optimizer.git
           - cd /opt/tiger/byted_optimizer
           - git checkout ad30d9d0c1d23167a26ea84a9c4a84090ebb1277
           - pip3 install -r requirements.txt
           - pip3 install -v --disable-pip-version-check --no-cache-dir --no-build-isolation -e ./ --user
-          - export PYTHONPATH=/opt/tiger/seed_models:/opt/tiger/verl/:/opt/tiger/byted_optimizer:$PYTHONPATH
+          - export PYTHONPATH=/opt/tiger/seed_models:/opt/tiger/byted_optimizer:/opt/tiger/mono_rl:$PYTHONPATH
           - cd -
       - name: monkey patch tests
         commands:
@@ -54,7 +56,7 @@ jobs:
       - name: parallelize tests
         commands:
           - export export NCCL_SHM_DISABLE=1
-          - export PYTHONPATH=/opt/tiger/seed_models:/opt/tiger/verl/:$PYTHONPATH
+          - export PYTHONPATH=$PYTHONPATH:/opt/tiger/seed_models:/opt/tiger/mono_rl
           - pytest tests/parallelize/test_create_mesh.py
           - pytest tests/parallelize/test_parallel_init.py
           - pytest tests/parallelize/test_group_gemm_ep.py

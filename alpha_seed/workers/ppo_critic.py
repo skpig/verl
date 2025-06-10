@@ -26,8 +26,8 @@ from transformers import PretrainedConfig
 
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
-from verl import DataProto
-from verl.trainer.ppo.critic import BasePPOCritic
+from mono_rl import DataProto
+from verl.workers.critic import BasePPOCritic
 from verl.utils.py_functional import append_to_dict
 from verl.utils.torch_functional import masked_mean
 from verl.utils.model import compute_position_id_with_mask
@@ -52,7 +52,7 @@ from alpha_seed.utils.observility import get_profiler_context_wrapped, profile_s
 __all__ = ['DataParallelPPOCritic']
 
 try:
-    from verl.utils.debug import MemoryProfiler
+    from mono_rl.utils.debug import MemoryProfiler
 except:
     print('Cannot find profile utilities. Please use latest verl master')
     raise

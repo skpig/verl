@@ -60,7 +60,7 @@ reward_sp_size=1
 # tracking实验名
 project_name='verl_example_math_ci'
 experiment_name='p6_400m_math-v1'
-export PYTHONPATH=$PYTHONPATH:/opt/tiger/verl:/opt/tiger/seed_models:/opt/tiger/verifiable_tasks:/opt/tiger/bpex_triton
+export PYTHONPATH=$PYTHONPATH:/opt/tiger/mono_rl:/opt/tiger/verl:/opt/tiger/seed_models:/opt/tiger/verifiable_tasks:/opt/tiger/bpex_triton
 python3 tasks/main_ppo.py \
     data.train_files=${TRAIN_FILE} \
     data.val_files=${TEST_FILE} \

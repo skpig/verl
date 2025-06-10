@@ -1,5 +1,5 @@
 import torch
-from verl import DataProto
+from mono_rl import DataProto
 from verl.utils.seqlen_balancing import rearrange_micro_batches
 
 
@@ -23,7 +23,7 @@ def get_text_model_type(config):
 
 
 def rearrange_micro_data_proto(max_token_len, mini_batch):
-    micro_batches, num_micro_batches, indices = rearrange_micro_batches(mini_batch.batch, max_token_len=max_token_len)
+    micro_batches, indices = rearrange_micro_batches(mini_batch.batch, max_token_len=max_token_len)
     non_tensor_batches = []
     for indice_group in indices:
         non_tensor_batch = {}

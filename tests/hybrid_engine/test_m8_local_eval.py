@@ -8,7 +8,7 @@ from alpha_seed.utils.server_client import KVStore
 from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRefWorker
 from alpha_seed.utils.validator.validation_manager import ValidateManager
 from tasks.main_ppo import RewardManager
-from single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
+from mono_rl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 import os
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"

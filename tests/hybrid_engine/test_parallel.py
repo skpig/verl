@@ -55,7 +55,7 @@ from alpha_seed.workers.fsdp.offload import offload_fsdp_optimizer, load_fsdp_op
 from alpha_seed.workers.fsdp.offload import activation_offload
 from alpha_seed.trainer.optim import get_optimizer_from_config
 
-from verl.utils.debug import get_profiler_context, MemoryProfiler
+from mono_rl.utils.debug import get_profiler_context, MemoryProfiler
 from verl.utils.fs import copy_local_path_from_hdfs
 from tests.hybrid_engine.utils import print_each_rank
 from flash_attn.ops.triton.cross_entropy import cross_entropy_loss

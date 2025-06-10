@@ -7,8 +7,8 @@ from omegaconf import OmegaConf
 from alpha_seed.workers.streaming_service.rollout_request_manager import RequestManager, RequestManagerRegisterCenter
 from verl.utils.tracking import Tracking
 from verl.utils.fs import copy_local_path_from_hdfs
-from verl.single_controller.ray import RayResourcePool, RayClassWithInitArgs, RayWorkerGroup
-from verl.single_controller.ray.base import create_colocated_worker_cls
+from mono_rl.single_controller.ray import RayResourcePool, RayClassWithInitArgs, RayWorkerGroup
+from mono_rl.single_controller.ray import create_colocated_worker_cls
 from transformers import AutoTokenizer
 
 import ray

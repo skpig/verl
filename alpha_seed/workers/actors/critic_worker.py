@@ -24,9 +24,9 @@ import ray
 import torch
 import torch.distributed
 
-from single_controller.base import Worker
-from single_controller.base.decorator import register, Dispatch
-from verl import DataProto
+from mono_rl.single_controller import Worker
+from mono_rl.single_controller import register, Dispatch
+from mono_rl import DataProto
 from verl.utils.fs import copy_local_path_from_hdfs
 from verl.utils.import_utils import import_external_libs
 from verl.utils.debug import log_gpu_memory_usage

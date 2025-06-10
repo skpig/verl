@@ -1,7 +1,7 @@
 import pytest
 from omegaconf import OmegaConf
 from tests.test_utils import ray_fixture, gpu_allocator, get_config, get_tokenizer, create_rollout_manager
-from verl import DataProto
+from mono_rl import DataProto
 import numpy as np
 import uuid
 

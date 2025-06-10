@@ -1,7 +1,7 @@
 set -x
 
 PYTHONPATH_ORIGIN=::/opt/tiger/arnold_toolbox:/opt/tiger/rh2:/opt/tiger/rh2:/opt/tiger/pyutil:/python:/python/lib/py4j-0.10.9-src.zip:/opt/tiger/arnold_toolbox:/opt/tiger/alpha-seed:/opt/tiger/rh2:/opt/tiger/pyutil
-PYTHONPATH_THIS=/opt/tiger/verl:/opt/tiger/seed_models:/opt/tiger/nccl
+PYTHONPATH_THIS=/opt/tiger/mono_rl:/opt/tiger/verl:/opt/tiger/seed_models:/opt/tiger/nccl
 export PYTHONPATH=$PYTHONPATH_ORIGIN:$PYTHONPATH_THIS
 
 export UCX_LOG_LEVEL=ERROR

@@ -57,9 +57,9 @@ import torch.distributed as dist
 import matplotlib.pyplot as plt
 
 import ray
-from single_controller.base.worker import Worker
-from single_controller.base.decorator import register, Dispatch
-from single_controller.ray import RayResourcePool, RayClassWithInitArgs, RayWorkerGroup
+from mono_rl.single_controller import Worker
+from mono_rl.single_controller import register, Dispatch
+from mono_rl.single_controller.ray import RayResourcePool, RayClassWithInitArgs, RayWorkerGroup
 
 import logging
 

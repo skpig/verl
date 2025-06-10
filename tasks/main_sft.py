@@ -5,7 +5,7 @@ from omegaconf import OmegaConf
 import os
 import ray
 
-from single_controller.ray import RayResourcePool, RayClassWithInitArgs, RayWorkerGroup
+from mono_rl.single_controller.ray import RayResourcePool, RayClassWithInitArgs, RayWorkerGroup
 
 import torch
 import torch.distributed as dist

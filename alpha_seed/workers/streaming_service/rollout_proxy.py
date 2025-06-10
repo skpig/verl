@@ -18,10 +18,10 @@ from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRe
 from alpha_seed.workers.streaming_service.rollout_request_manager import RequestManager
 from alpha_seed.workers.streaming_service.streaming_rollout import RemoteAsyncXPerfGPTRollout
 from alpha_seed.workers.xperf_rollout.component.query import Query
-from verl.single_controller.ray import RayWorkerGroup
-from verl.single_controller.ray.base import func_generator
-from verl.single_controller.ray.replicated_worker_group import ReplicatedRayWorkerGroup, ScalingRayWorkerGroup
-from verl import DataProto
+from mono_rl.single_controller.ray import RayWorkerGroup
+from mono_rl.single_controller.ray.base import func_generator
+from mono_rl.single_controller.ray.replicated_worker_group import ReplicatedRayWorkerGroup, ScalingRayWorkerGroup
+from mono_rl import DataProto
 
 from alpha_seed.workers.streaming_service.auto_scaling import MetricSource, SeriesMetrics
 from alpha_seed.workers.xperf_rollout.session import LoadMetric
@@ -59,7 +59,8 @@ def split_by_indices(big_worker_group: RayWorkerGroup, indices: List[List[int]],
     worker_groups = []
     for worker_indices in indices:
         workers = [big_worker_group._worker_names[i] for i in worker_indices]
-        new_wg = RayWorkerGroup.from_detached(workers, big_worker_group.ray_cls_with_init)
+        new_wg = RayWorkerGroup.from_detached(worker_names=workers,
+                                              ray_cls_with_init=big_worker_group.ray_cls_with_init)
         # 参考RayWorkerGroup.spawn，重新给detached worker bind回Worker的方法
         new_wg._bind_worker_method(rollout_cls, func_generator)
         new_wg.sub_cls_name = big_worker_group.sub_cls_name

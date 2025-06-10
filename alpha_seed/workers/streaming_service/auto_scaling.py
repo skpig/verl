@@ -6,9 +6,9 @@ from dataclasses import dataclass
 from typing import List
 
 import ray
-from verl.single_controller.ray import RayWorkerGroup
+from mono_rl.single_controller.ray import RayWorkerGroup
 
-from verl.single_controller.ray.replicated_worker_group import ReplicatedRayWorkerGroup, ScalingRayWorkerGroup
+from mono_rl.single_controller.ray.replicated_worker_group import ReplicatedRayWorkerGroup, ScalingRayWorkerGroup
 
 from alpha_seed.utils.profile.timeline import Tracer, CompleteEvent
 from alpha_seed.utils.server_client import is_local_ray_instance

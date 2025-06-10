@@ -50,7 +50,7 @@ def main(global_config):
     m8_path = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/M8_680m_SFT_hf'
     p6_path_qwen = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/qwen2.5_32b_v3.1.2_o1-mini-monologue_241201_hf'
     m10_path = 'hdfs://haruna/home/byte_data_seed/ssd_lq/public/seed_models/m10_680m_new'
-    from verl.utils.seed import CHAT_TEMPLATE
+    from mono_rl.utils.seed import CHAT_TEMPLATE
     from omegaconf import OmegaConf
 
     model_path = copy_local_path_from_hdfs(m10_path)
@@ -207,7 +207,7 @@ def main(global_config):
     eos_callback_fn = make_eos_call_back_fn(rollout.device_mesh)
     rollout.set_rollout_callback_function(eos_callback_fn=eos_callback_fn)
 
-    from verl import DataProto
+    from mono_rl import DataProto
 
     prompt = "Natalia sold clips to 48 of her friends in April, and then she sold half as many clips in May. How many clips did Natalia sell altogether in April and May?"
     chat = [{'role': 'user', 'content': prompt}]

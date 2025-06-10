@@ -3,7 +3,7 @@ import random
 import numpy as np
 from tensordict import TensorDict
 from collections import defaultdict
-from verl import DataProto
+from mono_rl import DataProto
 
 
 def select_training_samples(batch, strategy, config):

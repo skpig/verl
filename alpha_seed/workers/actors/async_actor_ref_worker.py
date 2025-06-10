@@ -28,12 +28,11 @@ import torch.distributed
 from omegaconf import DictConfig, open_dict
 import gc
 
-from single_controller.base import Worker
-from single_controller.base.decorator import register, Dispatch
-from verl import DataProto
+from mono_rl.single_controller import Worker
+from mono_rl.single_controller import register, Dispatch, Execute
+from mono_rl import DataProto
 from alpha_seed.utils.functional import update_model_config, get_text_config
 from verl.utils.model import print_model_size
-from verl.single_controller.base.decorator import Execute
 from alpha_seed.workers.fsdp.offload import (offload_fsdp_optimizer, load_fsdp_optimizer, offload_fsdp_model_to_cpu,
                                              load_fsdp_model_to_gpu)
 from alpha_seed.workers.megatron.offload import (offload_megatron_model_to_cpu, load_megatron_model_to_gpu,
@@ -1091,6 +1090,7 @@ class AsyncActorRolloutRefWorker(Worker):
         prompts.meta_info["complete_ratio"] = 0
         self.rollout_async = self.rollout.generate_sequences(prompts=prompts, is_async=True)
         next(self.rollout_async)
+        prompts = prompts.to('cpu')
         return prompts
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
