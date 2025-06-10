@@ -7,11 +7,19 @@ from alpha_seed.workers.agents.plugins import BasePlugin, PluginResponse
 
 class ExamplePlugin(BasePlugin):
 
-    def __init__(self, **kwargs):
+    def __init__(self, exclude_think=False, **kwargs):
+        exclude_args = {}
+        if exclude_think:
+            exclude_args = {
+                'exclude_begin_tag': '<think>',
+                'exclude_end_tag': '</think>',
+            }
+
         super().__init__(call_begin_tag="<plugin>",
                          call_end_tag="</plugin>",
                          result_begin_tag="<result>",
                          result_end_tag="</result>",
+                         **exclude_args,
                          **kwargs)
 
     async def __call__(self, call_str: str, envs: List[BaseEnv]) -> PluginResponse:

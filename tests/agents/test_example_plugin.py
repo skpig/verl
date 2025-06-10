@@ -23,3 +23,22 @@ def test_function_call(monkeypatch):
             'Slept for 0.5 seconds.')
 
     asyncio.run(main())
+
+
+def test_exclude_think(monkeypatch):
+    tokenizer = get_bbpe_tokenizer()
+    plugin = create_plugin_from_name('example_plugin', exclude_think=True, tokenizer=tokenizer)
+    env = get_basic_example_env()
+
+    async def main():
+        match_state = plugin.get_match_state()
+        call_str_list = plugin.add_string_match(f"<plugin>Add(x=5.5,y=6.83)</plugin>", match_state)
+        fut0 = plugin(call_str_list[0], envs=[env])
+        resp0 = await fut0
+
+        call_str_list = plugin.add_string_match(f"<think><plugin>Sleep(seconds=0.5)</plugin></think>", match_state)
+        assert len(call_str_list) == 0
+
+        assert resp0.status == PluginResponse.Status.SUCCESS and resp0.output == plugin.format_ret('12.33')
+
+    asyncio.run(main())
