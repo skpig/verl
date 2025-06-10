@@ -951,8 +951,8 @@ class RayPPOTrainer:
         torch.save(dataloader_state_dict, dataloader_local_path)
 
         # save global metrics
-        with open(os.path.join(local_global_step_folder, "global_metrics.json"), "w") as f:
-            json.dump(self.global_metrics, f, indent=4)
+        global_metrics_path = os.path.join(local_global_step_folder, "global_metrics.npy")
+        np.save(global_metrics_path, self.global_metrics)
 
         # latest checkpointed iteration tracker (for atomic usage)
         local_latest_checkpointed_iteration = os.path.join(self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt")
@@ -1011,10 +1011,9 @@ class RayPPOTrainer:
             print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
         
         # load global metrics
-        global_metrics_path = os.path.join(global_step_folder, "global_metrics.json")
+        global_metrics_path = os.path.join(global_step_folder, "global_metrics.npy")
         if os.path.exists(global_metrics_path):
-            with open(global_metrics_path, "r") as f:
-                self.global_metrics = json.load(f)
+            self.global_metrics = np.load(global_metrics_path, allow_pickle=True).item()
 
     def _balance_batch(self, batch: DataProto, metrics, logging_prefix="global_seqlen"):
         """Reorder the data on single controller such that each dp rank gets similar total tokens"""
