@@ -1112,6 +1112,9 @@ class RayPPOTrainer:
             for key in batch.non_tensor_batch:
                 new_data_proto_dict[key].extend([batch.non_tensor_batch[key][i]] * num_duplicates)  # repeat the non-tensor batch data
 
+        if len(reqId_to_respId_seqRange_map) == 0:
+            # if no split indices found, return a zero tensor
+            return torch.zeros_like(batch.batch["responses"])
 
         # breakpoint()
         # create a new DataProto of length  "\sum_i #steps of item i"
