@@ -238,8 +238,11 @@ class AsyncSGLangRollout(BaseRollout):
                 # NOTE(Chenyang): if you want to debug the SGLang engine output
                 # please set the following parameters
                 # Otherwise, it will make the engine run too slow
-                # log_level="INFO",
+                log_level="INFO",
                 # log_requests=True,
+                decode_log_interval=100000,
+                enable_metrics=True,
+                enable_cache_report=True,
                 # log_requests_level=2,
                 # max_running_requests=1,
             )

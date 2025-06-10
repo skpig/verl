@@ -641,7 +641,7 @@ class ActorRolloutRefWorker(Worker):
                 if isinstance(self.rollout, AsyncSGLangRollout) and hasattr(self.rollout, "_tool_schemas") and len(self.rollout._tool_schemas) > 0:
                     output = self.rollout.generate_sequences_with_tools(prompts=prompts)
                 else:
-                    output = self.rollout.generate_sequences(prompts=prompts)
+                    output = self.rollout.generate_sequences(prompts=prompts, **sampling_params)
             else:
                 output = self.rollout.generate_sequences(prompts=prompts, **sampling_params)
             log_gpu_memory_usage("After rollout generation", logger=logger)

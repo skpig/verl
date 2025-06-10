@@ -10,7 +10,10 @@ TEST_FILES="['${MY_DATA_DIR}DAPO-Math-17k/test.parquet', '${MY_DATA_DIR}MATH-500
 RUN_ID=$1
 
 # Model settings
+# total rollouts: ROLLOUT_N * BATCH_SIZE * REASONING_STEPS * MC_ROLLOUT_N = 8 * 64 * 4 * 6 ~= 16 * 512
+# total updates: ROLLOUT_N * BATCH_SIZE * INNER_EPOCHS // MINI_BSZ = 16
 ROLLOUT_N=8
+INNER_EPOCHS=3 # original setup is 2
 MC_ROLLOUT_N=6 # under the assumption of an average of 4 reasoning steps
 OVERLONG_BUFFER_LEN=1024
 MAX_PROMPT_LEN=$((1024 * 1))
@@ -69,6 +72,7 @@ CMD="python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.ppo_mini_batch_size=$MINI_BSZ \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=$BACKWARD_MAX_TOKEN_LEN \
+    actor_rollout_ref.actor.ppo_epochs=$INNER_EPOCHS \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.actor.clip_ratio_high=0.28 \
@@ -80,7 +84,7 @@ CMD="python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=$FORWARD_MAX_TOKEN_LEN \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP_SIZE \
-    actor_rollout_ref.rollout.name=sglang \
+    actor_rollout_ref.rollout.name=sglang_async \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.4 \
     actor_rollout_ref.rollout.n=$ROLLOUT_N \
     algorithm.use_kl_in_reward=True \
