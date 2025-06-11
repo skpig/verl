@@ -36,68 +36,12 @@ def extract_solution(solution_str):
     extracted_golds = parse(ground_truth_boxed, gold_extraction_target)
     return False if len(extracted_golds) == 0 else True
 
-system_prompt0 = """
-When tackling complex reasoning tasks, you should first thinks about the reasoning process in the mind and then provides the answer. 
-
-You should strictly follow the format below:
-
-<think>
-Your reasoning process step 1 here
-</think>
-<think>
-Your reasoning process step 2 here
-</think>
-<think>
-Your reasoning process step 3 here
-</think>
-...
-<think>
-Your reasoning process step N here
-</think>
-<answer>
-Put your final answer within \\boxed{}.
-</answer>
-"""
-system_prompt1 = """
-Your task is to solve the user's math problem. You should first thinks about the reasoning process in the mind and then provides the answer. 
-
-Your reasoning must be broken down into 3~5 distinct steps, each enclosed in `<think>` tags. An ideal step is **a logically complete inference**, such as stating serveral formulas, drawing a logical inference, etc.
-
-You should strictly follow the format below:
-
-<think>
-Reasoning step 1 here
-</think>
-<think>
-Reasoning step 2 here
-</think>
-...
-<think>
-Final reasoning step here
-</think>
-<answer>
-Put your final answer within \\boxed{}.
-</answer>
-"""
-system_prompt2 = """
-When tackling complex reasoning tasks, you should first thinks about the reasoning process in the mind and then provides the answer. The reasoning process is enclosed within <think> </think> and answer is enclosed within <answer> </answer> tags, respectively, i.e., 
-
-<think> reasoning process here </think> <answer> answer here </answer>.
-
-"""
-system_prompt3 = """Please reason step by step, and put your final answer within <answer> </answer> tags, i.e., <answer> your answer here </answer>"""
-all_prompts = [
-    system_prompt0,
-    system_prompt1,
-    system_prompt2,
-    system_prompt3
-]
 def format_question_to_prompt(question):
-    system_prompt = all_prompts[prompt_id]  # default system prompt
+    # system_prompt = all_prompts[prompt_id]  # default system prompt
     user_prompt = question
 
     return [
-        {"role": "system", "content": system_prompt},
+        # {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
         {"role": "assistant", "content": "<think>\n"}
     ]
@@ -105,8 +49,8 @@ def format_question_to_prompt(question):
 def process_numinamath_dataset():
     data_source = "PRIME-RL/Eurus-2-RL-Data"
     local_dir = os.path.basename(data_source)
-    train_path = os.path.join(MY_DATA_DIR, local_dir, "train.parquet" + f".{prompt_id}")
-    test_path = os.path.join(MY_DATA_DIR, local_dir, "test.parquet" + f".{prompt_id}")
+    train_path = os.path.join(MY_DATA_DIR, local_dir, "train.parquet")
+    test_path = os.path.join(MY_DATA_DIR, local_dir, "test.parquet")
     # 如果文件已存在且设置了恢复标志，则跳过处理
     if RESUME and os.path.exists(train_path):
         return
@@ -154,16 +98,13 @@ def process_numinamath_dataset():
     print("Size of NuminaMath train dataset:", len(train_dataset))
     print("Size of NuminaMath test dataset:", len(test_dataset))
 
-    
-
-
 def process_math500_dataset():
     # 'lighteval/MATH' is no longer available on huggingface.
     # Use mirror repo: DigitalLearningGmbH/MATH-lighteval
     # data_source = "DigitalLearningGmbH/MATH-lighteval"
     data_source = "HuggingFaceH4/MATH-500"
     local_dir = os.path.basename(data_source)
-    test_path = os.path.join(MY_DATA_DIR, local_dir, "test.parquet" + f".{prompt_id}")
+    test_path = os.path.join(MY_DATA_DIR, local_dir, "test.parquet")
     # skip if the file already exists
     if RESUME and os.path.exists(test_path):
         return
@@ -172,7 +113,6 @@ def process_math500_dataset():
     dataset = datasets.load_dataset(data_source, trust_remote_code=True)
 
     test_dataset = dataset["test"]
-
 
     # add a row to each data item that represents a unique id
     def make_map_fn(split):
@@ -196,12 +136,11 @@ def process_math500_dataset():
     test_dataset.to_parquet(test_path)
     print("Size of MATH-500 test dataset:", len(test_dataset))
 
-
 def process_amc_dataset():
     # 数据源为 AI-MO/aimo-validation-amc
     data_source = "AI-MO/aimo-validation-amc"
     local_dir = os.path.basename(data_source)
-    test_path = os.path.join(MY_DATA_DIR, local_dir, "test.parquet" + f".{prompt_id}")
+    test_path = os.path.join(MY_DATA_DIR, local_dir, "test.parquet")
     # 如果文件已存在且设置了恢复标志，则跳过处理
     if RESUME and os.path.exists(test_path):
         return
@@ -237,9 +176,9 @@ def process_dapomath_dataset():
     # 数据源为 dapomath/dapomath
     data_source = "BytedTsinghua-SIA/DAPO-Math-17k"
     local_dir = os.path.basename(data_source)
-    test_path = os.path.join(MY_DATA_DIR, local_dir, "test.parquet" + f".{prompt_id}")
-    train_path = os.path.join(MY_DATA_DIR, local_dir, "train.parquet" + f".{prompt_id}")
-    filtered_dataset_path = os.path.join(MY_DATA_DIR, local_dir, "filtered_dataset.parquet" + f".{prompt_id}")
+    test_path = os.path.join(MY_DATA_DIR, local_dir, "test.parquet")
+    train_path = os.path.join(MY_DATA_DIR, local_dir, "train.parquet")
+    filtered_dataset_path = os.path.join(MY_DATA_DIR, local_dir, "filtered_dataset.parquet")
     # 如果文件已存在且设置了恢复标志，则跳过处理
     if RESUME and os.path.exists(test_path):
         return
@@ -277,7 +216,6 @@ def process_dapomath_dataset():
     train_dataset, test_dataset = _["train"], _["test"]
     test_dataset = test_dataset.shuffle(42).select(range(100))  # only select the first 100 samples for testing
 
-
     # 为每个数据项添加一个表示唯一ID的行
     def make_map_fn(split):
         def process_fn(example, idx):
@@ -304,12 +242,9 @@ def process_dapomath_dataset():
 
 if __name__ == "__main__":
     argsort = argparse.ArgumentParser()
-    argsort.add_argument("--prompt_id", type=int, required=True, help="The ID of the prompt to use for formatting the question.")
     argsort.add_argument("--resume", action="store_true")   
     RESUME = argsort.parse_args().resume
     MY_DATA_DIR = os.getenv("MY_DATA_DIR")
-    prompt_id = argsort.parse_args().prompt_id
-    
 
     # process_numinamath_dataset()
     process_math500_dataset()
