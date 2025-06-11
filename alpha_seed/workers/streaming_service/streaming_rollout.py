@@ -336,7 +336,6 @@ class AsyncXPerfGPTRollout(object):
             aq = self.inference_engine.pending.query_pool.pop(query_id)
         await aq.wait_until_done()
         _ = self.inference_engine.finished.pop(query_id, None)
-        aq.query.input_embedding = None
         if aq.exception is not None:
             raise aq.exception
         return aq.query

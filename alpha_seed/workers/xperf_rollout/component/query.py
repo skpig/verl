@@ -106,7 +106,6 @@ class Query:
         self.temperature = None
         self.max_new_tokens = None
         self.max_length = None
-        self.input_embedding = None
         self._exception = None
 
         self.plugin_query = None
@@ -142,7 +141,6 @@ class Query:
     def reset_compute(self):
         self.kv_slot_ids = []
         self.to_context_phase()
-        self.input_embedding = None
         self.context_shift = 0
         self.prefix_already_computed_len = 0
         self.hidden_states = None
@@ -219,8 +217,6 @@ class Query:
     def clone(self) -> 'Query':
         ret = copy.copy(self)
         # skip any gpu tensors, as they might be mutated shortly
-        if ret.input_embedding is not None and ret.input_embedding.device != torch.device('cpu'):
-            ret.input_embedding = None
         if ret.hidden_states is not None and ret.hidden_states.device != torch.device('cpu'):
             ret.hidden_states = None
         return ret

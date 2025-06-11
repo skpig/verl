@@ -753,38 +753,35 @@ class InferenceSession:
             max_kv_index_len = max(max_kv_index_len, len(query.kv_slot_ids))
             if query.is_context_computing:
 
-                def _get_inp_embs(input_ids):
-                    input_ids = input_ids.cuda()
-                    if query.meta_info.get('pixel_values') is not None:
+                def _get_inp_embs(input_ids, start: int, end: int):
+                    is_vlm = query.meta_info.get('pixel_values') is not None
+                    if is_vlm:
+                        input_ids = input_ids.cuda()
                         input_embs = self._prepare_image_embeds(input_ids, query.meta_info['pixel_values'],
                                                                 query.meta_info['image_grid_hw'])
                     else:
+                        input_ids = input_ids[start:end].cuda()
                         input_embs = self.engine.get_input_embeddings(input_ids=input_ids)
                     if input_embs.ndim == 2:
                         input_embs = input_embs.unsqueeze(0)
+                    if is_vlm:
+                        input_embs = input_embs[:, start:end, :]
                     return input_embs
 
                 input_ids = torch.tensor(query.input_ids)
-                if query.input_embedding is None or query.input_embedding.shape[1] != len(input_ids):
-                    query.input_embedding = _get_inp_embs(input_ids)
-                else:
-                    assert query.input_embedding.shape[1] <= len(input_ids)
-                    if (prev_len := query.input_embedding.shape[1]) < len(input_ids):
-                        new_input_ids = input_ids[prev_len:]
-                        new_inp_embs = _get_inp_embs(new_input_ids)
-                        query.input_embedding = torch.concat([query.input_embedding, new_inp_embs], dim=1)
 
                 current_context_shift = query.context_shift + query.prefix_already_computed_len
                 # start from context_shift pos
-                query_input_emb = query.input_embedding[:, current_context_shift:, :]
                 if context_len > self.context_split_len or query.context_shift > 0:
-                    query_input_emb = query.input_embedding[:, current_context_shift:current_context_shift +
-                                                            self.context_split_len, :]
+                    query_input_emb = _get_inp_embs(input_ids, current_context_shift,
+                                                    current_context_shift + self.context_split_len)
                     logging_rank_only(
                         logging.debug, 0,
                         "trigger context split {} -> {}:{}".format(context_len, current_context_shift,
                                                                    current_context_shift + context_len))
                     context_len = query_input_emb.shape[1]
+                else:
+                    query_input_emb = _get_inp_embs(input_ids, current_context_shift, input_ids.shape[0])
 
                 query.context_shift += query_input_emb.shape[1]
                 max_context_len = max(max_context_len, context_len)

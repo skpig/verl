@@ -236,7 +236,6 @@ class CacheManager:
             for slot in query.kv_slot_ids:
                 self.available_slot_table.appendleft(slot)
             query.kv_slot_ids.clear()
-            query.input_embedding = None
             logging_rank_only(logging.debug, 0, "kv utils {}".format(
                 (self.slot_num - len(self.available_slot_table)) / self.slot_num))
 
