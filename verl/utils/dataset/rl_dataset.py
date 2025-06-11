@@ -55,8 +55,7 @@ def collate_fn(data_list: list[dict]) -> dict:
     return {**tensors, **non_tensors}
 
 
-system_prompt0 = """
-When tackling complex reasoning tasks, you should first thinks about the reasoning process in the mind and then provides the answer. 
+system_prompt0 = """When tackling complex reasoning tasks, you should first thinks about the reasoning process in the mind and then provides the answer. 
 
 You should strictly follow the format below:
 
@@ -77,8 +76,7 @@ Your reasoning process step N here
 Put your final answer within \\boxed{}.
 </answer>
 """
-system_prompt1 = """
-Your task is to solve the user's math problem. You should first thinks about the reasoning process in the mind and then provides the answer. 
+system_prompt1 = """Your task is to solve the user's math problem. You should first thinks about the reasoning process in the mind and then provides the answer. 
 
 Your reasoning must be broken down into 3~5 distinct steps, each enclosed in `<think>` tags. An ideal step is **a logically complete inference**, such as stating serveral formulas, drawing a logical inference, etc.
 
@@ -98,11 +96,9 @@ Final reasoning step here
 Put your final answer within \\boxed{}.
 </answer>
 """
-system_prompt2 = """
-When tackling complex reasoning tasks, you should first thinks about the reasoning process in the mind and then provides the answer. The reasoning process is enclosed within <think> </think> and answer is enclosed within <answer> </answer> tags, respectively, i.e., 
+system_prompt2 = """When tackling complex reasoning tasks, you should first thinks about the reasoning process in the mind and then provides the answer. The reasoning process is enclosed within <think> </think> and answer is enclosed within <answer> </answer> tags, respectively, i.e., 
 
 <think> reasoning process here </think> <answer> answer here </answer>.
-
 """
 system_prompt3 = """Please reason step by step, and put your final answer within <answer> </answer> tags, i.e., <answer> your answer here </answer>"""
 all_prompts = [
@@ -165,8 +161,8 @@ class RLHFDataset(Dataset):
         """
         Add system prompt to the document.
         """
-        assert doc[0]['role'] != "system", "The first message should not be a system message."
-        doc.insert(0, {"role": "system", "content": all_prompts[self.prompt_id]})
+        assert doc['prompt'][0]['role'] != "system", "The first message should not be a system message."
+        doc['prompt'].insert(0, {"role": "system", "content": all_prompts[self.config.prompt_id]})
 
         return doc
 
@@ -181,9 +177,10 @@ class RLHFDataset(Dataset):
         print(f"dataset len: {len(self.dataframe)}")
 
         # add back system prompt
+        breakpoint()
         self.dataframe = self.dataframe.map(
-            _add_system_prompt_to_doc,
-            num_proc=self.num_workers,
+            self._add_system_prompt_to_doc,
+            # num_proc=self.num_workers,
             desc="Adding system prompt",
         )
 
