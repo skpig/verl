@@ -2,15 +2,12 @@
 # TEMPLATE_TYPE=base # or chat
 BASE_MODEL=${MY_MODEL_DIR}Qwen/Qwen2.5-3B-Instruct
 TEMPLATE_TYPE=chat # or chat
-# TRAIN_FILE="${MY_DATA_DIR}Eurus-2-RL-Data/train.parquet"
-# TEST_FILES="['${MY_DATA_DIR}Eurus-2-RL-Data/test.parquet', '${MY_DATA_DIR}MATH-500/test.parquet', '${MY_DATA_DIR}aimo-validation-amc/test.parquet']"
-TRAIN_FILE="${MY_DATA_DIR}DAPO-Math-17k/train.parquet"
-TEST_FILES="['${MY_DATA_DIR}DAPO-Math-17k/test.parquet', '${MY_DATA_DIR}MATH-500/test.parquet', '${MY_DATA_DIR}aimo-validation-amc/test.parquet']"
 
 
 RUN_ID=$1
 
 # Model settings
+PROMPT_ID=$2
 ROLLOUT_N=16
 OVERLONG_BUFFER_LEN=512
 MAX_PROMPT_LEN=$((1024 * 1))
@@ -34,8 +31,14 @@ MODEL_NAME=$(basename $BASE_MODEL)
 DATA_NAME=DAPOMATH
 EXPERIMENT_NAME="ID${RUN_ID}_${DATA_NAME}_grpo_${MODEL_NAME}_n${ROLLOUT_N}_resplen${MAX_RESPONSE_LEN}_bsz${BATCH_SIZE}-${MINI_BSZ}"
 
+# TRAIN_FILE="${MY_DATA_DIR}Eurus-2-RL-Data/train.parquet"
+# TEST_FILES="['${MY_DATA_DIR}Eurus-2-RL-Data/test.parquet', '${MY_DATA_DIR}MATH-500/test.parquet', '${MY_DATA_DIR}aimo-validation-amc/test.parquet']"
+TRAIN_FILE="${MY_DATA_DIR}DAPO-Math-17k/train.parquet.${PROMPT_ID}"
+TEST_FILES="['${MY_DATA_DIR}DAPO-Math-17k/test.parquet.${PROMPT_ID}', '${MY_DATA_DIR}MATH-500/test.parquet.${PROMPT_ID}', '${MY_DATA_DIR}aimo-validation-amc/test.parquet.${PROMPT_ID}']"
 python3 examples/data_preprocess/custom.py \
-    --resume
+    --prompt_id $PROMPT_ID \
+    --resume \
+
 
 
 # set -x
