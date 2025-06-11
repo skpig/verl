@@ -285,10 +285,27 @@ class AsyncSGLangRollout(BaseRollout):
         # if len(old_sampling_params_args):
         for key, value in old_sampling_params_args.items():
             self.sampling_params[key] = value
+    
+    async def generate_one_sequence_with_updated_sampling_params(self, idx, image, max_new_tokens, **kwargs) -> DataProto:
+        """Generate one sequence with updated sampling params."""
+        # This function is used to update sampling params and generate one sequence
+        # It is used in the actor rollout to update sampling params before generating sequences
+        new_kwargs = {"max_new_tokens": max_new_tokens}
+        new_kwargs.update(kwargs)
+        with self.update_sampling_params(**new_kwargs):
+            output = await self._engine.async_generate(
+                prompt=None,  # because we have already convert it to prompt token id
+                return_logprob=True,
+                sampling_params=self.sampling_params,
+                input_ids=idx,
+                image_data=image,
+            )
+        return output
 
     @GPUMemoryLogger(role="sglang async rollout", logger=logger)
     @torch.no_grad()
     def generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
+        # breakpoint()
         # if self.config.free_cache_engine:
 
         idx = prompts.batch["input_ids"]  # (bs, prompt_length)
@@ -359,16 +376,51 @@ class AsyncSGLangRollout(BaseRollout):
         with self.update_sampling_params(**kwargs):
             print(f"{self.sampling_params=}")
             if self._tp_rank == 0:
-                loop = asyncio.get_event_loop()
-                output = loop.run_until_complete(
+                if non_tensor_batch.get("query_lens", None) is None:
+                    loop = asyncio.get_event_loop()
+                    output = loop.run_until_complete(
                     self._engine.async_generate(
-                        prompt=None,  # because we have already convert it to prompt token id
-                        sampling_params=self.sampling_params,
-                        return_logprob=True,
-                        input_ids=idx_list,
-                        image_data=image_list,
+                            prompt=None,  # because we have already convert it to prompt token id
+                            sampling_params=self.sampling_params,
+                            return_logprob=True,
+                            input_ids=idx_list,
+                            image_data=image_list,
+                        )
                     )
-                )
+                else:
+                    # breakpoint()
+                    query_len_lst = non_tensor_batch.pop("query_lens").tolist()
+                    loop = asyncio.get_event_loop()
+                    output = loop.run_until_complete(
+                        # self._engine.async_generate(
+                        #     prompt=None,  # because we have already convert it to prompt token id
+                        #     sampling_params=self.sampling_params,
+                        #     return_logprob=True,
+                        #     input_ids=idx_list,
+                        #     image_data=image_list,
+                        # )
+                        asyncio.gather(
+                            *[
+                                # self._engine.async_generate(
+                                #     prompt=None,  # because we have already convert it to prompt token id
+                                #     sampling_params=self.sampling_params,
+                                #     return_logprob=False,
+                                #     input_ids=idx,
+                                #     image_data=image,
+                                # )
+                                self.generate_one_sequence_with_updated_sampling_params(
+                                    idx=idx,
+                                    image=image,
+                                    max_new_tokens=self.config.response_length - query_len,
+                                    **kwargs
+                                )
+                                # for idx, image in zip(idx_list, image_list)
+                                for idx, image, query_len in zip(idx_list, image_list, query_len_lst)
+                            ]
+                        )
+                    )
+                    output = [i for sub in output for i in sub]  # flatten the list of lists
+                    # breakpoint()
             else:
                 output = None
             # Most naive implementation, can extract tensor and send via gloo if too slow

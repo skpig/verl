@@ -1108,6 +1108,7 @@ class RayPPOTrainer:
             split_indices_start = [0] + split_indices[:-1]  # start of each split, the first one is always 0
             reqId_to_respId_seqRange_map.extend([(i, start, end) for start, end in zip(split_indices_start, split_indices)])
         
+            new_data_proto_dict['query_lens'].extend([split_indices[i] for i in range(num_duplicates)])  # number of query tokens for each split
             new_data_proto_dict['raw_prompt_ids'].extend([raw_prompt_ids + responses_ids[:split_indices[i]] for i in range(num_duplicates)]) # all requests are not padded
             for key in batch.non_tensor_batch:
                 new_data_proto_dict[key].extend([batch.non_tensor_batch[key][i]] * num_duplicates)  # repeat the non-tensor batch data
@@ -1144,7 +1145,8 @@ class RayPPOTrainer:
         new_data_proto, pad_size = pad_dataproto_to_divisor(new_data_proto, self.actor_rollout_wg.world_size)
 
         # generate mc rollouts
-        vineppo_gen_batch = new_data_proto.pop(batch_keys=["input_ids", "attention_mask", "position_ids"], non_tensor_batch_keys=["raw_prompt_ids"], meta_info_keys=["sampling_params"])
+        vineppo_gen_batch = new_data_proto.pop(batch_keys=["input_ids", "attention_mask", "position_ids"], non_tensor_batch_keys=["raw_prompt_ids", "query_lens"], meta_info_keys=["sampling_params"])
+        # breakpoint()
         vineppo_gen_batch_output = self.actor_rollout_wg.generate_sequences(vineppo_gen_batch)
 
         new_data_proto = new_data_proto.repeat(repeat_times=mc_estimate_n, interleave=True)  # repeat the batch to align with responses
