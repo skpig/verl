@@ -55,7 +55,7 @@ Your reasoning process step 3 here
 Your reasoning process step N here
 </think>
 <answer>
-Put your final answer within \\ boxed {{}}.
+Put your final answer within \\boxed{}.
 </answer>
 """
 system_prompt1 = """
@@ -76,7 +76,7 @@ Reasoning step 2 here
 Final reasoning step here
 </think>
 <answer>
-Put your final answer within \\ boxed {{}}.
+Put your final answer within \\boxed{}.
 </answer>
 """
 system_prompt2 = """
@@ -85,10 +85,12 @@ When tackling complex reasoning tasks, you should first thinks about the reasoni
 <think> reasoning process here </think> <answer> answer here </answer>.
 
 """
+system_prompt3 = """Please reason step by step, and put your final answer within <answer> </answer> tags, i.e., <answer> your answer here </answer>"""
 all_prompts = [
     system_prompt0,
     system_prompt1,
-    system_prompt2
+    system_prompt2,
+    system_prompt3
 ]
 def format_question_to_prompt(question):
     system_prompt = all_prompts[prompt_id]  # default system prompt
