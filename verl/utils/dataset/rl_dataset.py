@@ -55,6 +55,65 @@ def collate_fn(data_list: list[dict]) -> dict:
     return {**tensors, **non_tensors}
 
 
+system_prompt0 = """
+When tackling complex reasoning tasks, you should first thinks about the reasoning process in the mind and then provides the answer. 
+
+You should strictly follow the format below:
+
+<think>
+Your reasoning process step 1 here
+</think>
+<think>
+Your reasoning process step 2 here
+</think>
+<think>
+Your reasoning process step 3 here
+</think>
+...
+<think>
+Your reasoning process step N here
+</think>
+<answer>
+Put your final answer within \\boxed{}.
+</answer>
+"""
+system_prompt1 = """
+Your task is to solve the user's math problem. You should first thinks about the reasoning process in the mind and then provides the answer. 
+
+Your reasoning must be broken down into 3~5 distinct steps, each enclosed in `<think>` tags. An ideal step is **a logically complete inference**, such as stating serveral formulas, drawing a logical inference, etc.
+
+You should strictly follow the format below:
+
+<think>
+Reasoning step 1 here
+</think>
+<think>
+Reasoning step 2 here
+</think>
+...
+<think>
+Final reasoning step here
+</think>
+<answer>
+Put your final answer within \\boxed{}.
+</answer>
+"""
+system_prompt2 = """
+When tackling complex reasoning tasks, you should first thinks about the reasoning process in the mind and then provides the answer. The reasoning process is enclosed within <think> </think> and answer is enclosed within <answer> </answer> tags, respectively, i.e., 
+
+<think> reasoning process here </think> <answer> answer here </answer>.
+
+"""
+system_prompt3 = """Please reason step by step, and put your final answer within <answer> </answer> tags, i.e., <answer> your answer here </answer>"""
+all_prompts = [
+    system_prompt0,
+    system_prompt1,
+    system_prompt2,
+    system_prompt3
+]
+
+
+
 class RLHFDataset(Dataset):
     """
     We assume the dataset contains a column that contains prompts and other information
@@ -64,7 +123,7 @@ class RLHFDataset(Dataset):
         self,
         data_files: Union[str, List[str]],
         tokenizer: PreTrainedTokenizer,
-        config: DictConfig,
+        config: DictConfig, # config.data
         processor: Optional[ProcessorMixin] = None,
     ):
         if not isinstance(data_files, (List, ListConfig)):
@@ -101,6 +160,15 @@ class RLHFDataset(Dataset):
         data_files = self.data_files if not use_origin_parquet else self.original_data_files
         for i, parquet_file in enumerate(data_files):
             self.data_files[i] = copy_to_local(src=parquet_file, cache_dir=self.cache_dir)
+        
+    def _add_system_prompt_to_doc(self, doc: dict):
+        """
+        Add system prompt to the document.
+        """
+        assert doc[0]['role'] != "system", "The first message should not be a system message."
+        doc.insert(0, {"role": "system", "content": all_prompts[self.prompt_id]})
+
+        return doc
 
     def _read_files_and_tokenize(self):
         dataframes = []
@@ -111,6 +179,13 @@ class RLHFDataset(Dataset):
         self.dataframe: datasets.Dataset = datasets.concatenate_datasets(dataframes)
 
         print(f"dataset len: {len(self.dataframe)}")
+
+        # add back system prompt
+        self.dataframe = self.dataframe.map(
+            _add_system_prompt_to_doc,
+            num_proc=self.num_workers,
+            desc="Adding system prompt",
+        )
 
         # filter out too long prompts
         if self.filter_overlong_prompts:

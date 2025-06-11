@@ -1,4 +1,5 @@
 data:
+  prompt_id: null
   tokenizer: null
   train_files: ~/data/rlhf/gsm8k/train.parquet
   val_files: ~/data/rlhf/gsm8k/test.parquet
