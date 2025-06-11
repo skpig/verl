@@ -90,8 +90,11 @@ def verify_format(model_output: str):
     
 #     return result, num_steps
 
-def extract_answer(model_output: str) -> str:
-    extraction = re.findall(r'<answer>(.*?)</answer>', model_output, re.DOTALL)
+def extract_answer(model_output: str, prompt_id: int) -> str:
+    if prompt_id in [0, 1, 2, 3]:
+        extraction = re.findall(r'<answer>(.*?)</answer>', model_output, re.DOTALL)
+    else:
+        raise NotImplementedError(f"Prompt ID {prompt_id} is not supported for answer extraction in math verify.")
     if len(extraction) == 0:
         return "None extraction"
     else:
@@ -248,7 +251,8 @@ def compute_score_for_statistics(data_source, solution_str, ground_truth, extra_
     #     extracted_model_output = extracted_model_output[1] if isinstance(extracted_model_output[1], str) else f"{extracted_model_output[0]}"
 
 
-def compute_score(data_source, solution_str, ground_truth, extra_info=None, is_valid=False) -> bool:
+def compute_score(data_source, solution_str, ground_truth, extra_info=None, is_valid=False, prompt_id=None) -> bool:
+    assert prompt_id is not None, "prompt_id must be provided for math_verify"
 
     try:
         verify_format_w_timeout = timeout(2)(verify_format)
@@ -283,7 +287,7 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None, is_v
 
         # during training
         if not is_valid:
-            extracted_predictions = extract_answer(solution_str) # only verify the answer part wrapped in <answer>...</answer>
+            extracted_predictions = extract_answer(solution_str, prompt_id) # only verify the answer part wrapped in <answer>...</answer>
             gold_extraction_target=(ExprExtractionConfig(),)# reduce computation time for training, since DAPOmath only requires ExprExtractionConfig
         # during validation
         else:
