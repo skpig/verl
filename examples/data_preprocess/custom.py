@@ -36,10 +36,7 @@ def extract_solution(solution_str):
     extracted_golds = parse(ground_truth_boxed, gold_extraction_target)
     return False if len(extracted_golds) == 0 else True
 
-    
-
-def format_question_to_prompt(question):
-    system_prompt = """
+system_prompt0 = """
 When tackling complex reasoning tasks, you should first thinks about the reasoning process in the mind and then provides the answer. 
 
 You should strictly follow the format below:
@@ -61,6 +58,40 @@ Your reasoning process step N here
 Put your final answer within \\ boxed {{}}.
 </answer>
 """
+system_prompt1 = """
+Your task is to solve the user's math problem. You should first thinks about the reasoning process in the mind and then provides the answer. 
+
+Your reasoning must be broken down into 3~5 distinct steps, each enclosed in `<think>` tags. An ideal step is **a logically complete inference**, such as stating serveral formulas, drawing a logical inference, etc.
+
+You should strictly follow the format below:
+
+<think>
+Reasoning step 1 here
+</think>
+<think>
+Reasoning step 2 here
+</think>
+...
+<think>
+Final reasoning step here
+</think>
+<answer>
+Put your final answer within \\ boxed {{}}.
+</answer>
+"""
+system_prompt2 = """
+When tackling complex reasoning tasks, you should first thinks about the reasoning process in the mind and then provides the answer. The reasoning process is enclosed within <think> </think> and answer is enclosed within <answer> </answer> tags, respectively, i.e., 
+
+<think> reasoning process here </think> <answer> answer here </answer>.
+
+"""
+all_prompts = [
+    system_prompt0,
+    system_prompt1,
+    system_prompt2
+]
+def format_question_to_prompt(question):
+    system_prompt = all_prompts[prompt_id]  # default system prompt
     user_prompt = question
 
     return [
@@ -72,8 +103,8 @@ Put your final answer within \\ boxed {{}}.
 def process_numinamath_dataset():
     data_source = "PRIME-RL/Eurus-2-RL-Data"
     local_dir = os.path.basename(data_source)
-    train_path = os.path.join(MY_DATA_DIR, local_dir, "train.parquet")
-    test_path = os.path.join(MY_DATA_DIR, local_dir, "test.parquet")
+    train_path = os.path.join(MY_DATA_DIR, local_dir, "train.parquet" + f".{prompt_id}")
+    test_path = os.path.join(MY_DATA_DIR, local_dir, "test.parquet" + f".{prompt_id}")
     # 如果文件已存在且设置了恢复标志，则跳过处理
     if RESUME and os.path.exists(train_path):
         return
@@ -84,14 +115,18 @@ def process_numinamath_dataset():
     train_dataset = dataset["train"]
     test_dataset = dataset["validation"]
 
-    gold_extraction_target=(LatexExtractionConfig(),)
+    # gold_extraction_target=(LatexExtractionConfig(),)
+    gold_extraction_target=(ExprExtractionConfig(),)
     def filter_fn(example):
-        golden_answer = '\\boxed{' + str(example['reward_model']['ground_truth']) + "}"
+        # golden_answer = '\\boxed{' + str(example['reward_model']['ground_truth']) + "}"
+        golden_answer = example['reward_model']['ground_truth']
         extracted_golds = parse(golden_answer, gold_extraction_target, parsing_timeout=5)
         # 过滤掉code data
         return example['ability'] == "math" and len(extracted_golds) > 0
     train_dataset = train_dataset.filter(filter_fn)
     test_dataset = test_dataset.filter(filter_fn)
+    print("Size of NuminaMath train dataset after filtering:", len(train_dataset))
+    print("Size of NuminaMath test dataset after filtering:", len(test_dataset))
     test_dataset = test_dataset.shuffle(42).select(range(100)) # only select the first 100 samples for testing
 
     # 为每个数据项添加一个表示唯一ID的行
@@ -126,7 +161,7 @@ def process_math500_dataset():
     # data_source = "DigitalLearningGmbH/MATH-lighteval"
     data_source = "HuggingFaceH4/MATH-500"
     local_dir = os.path.basename(data_source)
-    test_path = os.path.join(MY_DATA_DIR, local_dir, "test.parquet")
+    test_path = os.path.join(MY_DATA_DIR, local_dir, "test.parquet" + f".{prompt_id}")
     # skip if the file already exists
     if RESUME and os.path.exists(test_path):
         return
@@ -164,7 +199,7 @@ def process_amc_dataset():
     # 数据源为 AI-MO/aimo-validation-amc
     data_source = "AI-MO/aimo-validation-amc"
     local_dir = os.path.basename(data_source)
-    test_path = os.path.join(MY_DATA_DIR, local_dir, "test.parquet")
+    test_path = os.path.join(MY_DATA_DIR, local_dir, "test.parquet" + f".{prompt_id}")
     # 如果文件已存在且设置了恢复标志，则跳过处理
     if RESUME and os.path.exists(test_path):
         return
@@ -200,8 +235,9 @@ def process_dapomath_dataset():
     # 数据源为 dapomath/dapomath
     data_source = "BytedTsinghua-SIA/DAPO-Math-17k"
     local_dir = os.path.basename(data_source)
-    test_path = os.path.join(MY_DATA_DIR, local_dir, "test.parquet")
-    train_path = os.path.join(MY_DATA_DIR, local_dir, "train.parquet")
+    test_path = os.path.join(MY_DATA_DIR, local_dir, "test.parquet" + f".{prompt_id}")
+    train_path = os.path.join(MY_DATA_DIR, local_dir, "train.parquet" + f".{prompt_id}")
+    filtered_dataset_path = os.path.join(MY_DATA_DIR, local_dir, "filtered_dataset.parquet" + f".{prompt_id}")
     # 如果文件已存在且设置了恢复标志，则跳过处理
     if RESUME and os.path.exists(test_path):
         return
@@ -209,28 +245,35 @@ def process_dapomath_dataset():
     dataset = datasets.load_dataset(data_source, trust_remote_code=True, split="train")
 
     golden_extraction_target=(ExprExtractionConfig(),)
-    def filter_fn(example):
-        if not example['reward_model']['ground_truth']:
+    filtered_dataset_path = os.path.join(MY_DATA_DIR, local_dir, "filtered_dataset.parquet")
+    if os.path.exists(filtered_dataset_path):
+        print(f"Loading the filtered dataset from {filtered_dataset_path}...", flush=True)
+        dataset = datasets.load_dataset("parquet", data_files=filtered_dataset_path)
+    else:
+        def filter_fn(example):
+            if not example['reward_model']['ground_truth']:
+                return False
+            try:
+                # Try to convert answer to a number
+                float(example['reward_model']['ground_truth'])
+                is_number = True
+            except (ValueError, TypeError):
+                is_number = False
+                print("Answer is not a number:", example['reward_model']['ground_truth'])
+            
+            # golden_answer = '\\boxed{' + str(example['reward_model']['ground_truth']) + "}"
+            golden_answer = example['reward_model']['ground_truth']
+            extracted_golds = parse(golden_answer, golden_extraction_target, parsing_timeout=5)
+            # 过滤掉code data
+            return example['ability'] == "MATH" and len(extracted_golds) > 0
             return False
-        try:
-            # Try to convert answer to a number
-            float(example['reward_model']['ground_truth'])
-            is_number = True
-        except (ValueError, TypeError):
-            is_number = False
-            print("Answer is not a number:", example['reward_model']['ground_truth'])
-        
-        # golden_answer = '\\boxed{' + str(example['reward_model']['ground_truth']) + "}"
-        golden_answer = example['reward_model']['ground_truth']
-        extracted_golds = parse(golden_answer, golden_extraction_target, parsing_timeout=5)
-        # 过滤掉code data
-        return example['ability'] == "MATH" and len(extracted_golds) > 0
-        return False
-    dataset = dataset.filter(filter_fn)
+        dataset = dataset.filter(filter_fn)
+    print("Size of DAPO-Math dataset after filtering:", len(dataset))
 
     # 分割数据集为训练集和测试集
-    _ = dataset.train_test_split(test_size=100, seed=42)
+    _ = dataset.train_test_split(test_size=1000, seed=42)
     train_dataset, test_dataset = _["train"], _["test"]
+    test_dataset = test_dataset.shuffle(42).select(range(100))  # only select the first 100 samples for testing
 
 
     # 为每个数据项添加一个表示唯一ID的行
@@ -259,9 +302,11 @@ def process_dapomath_dataset():
 
 if __name__ == "__main__":
     argsort = argparse.ArgumentParser()
+    argsort.add_argument("--prompt_id", type=int, required=True, help="The ID of the prompt to use for formatting the question.")
     argsort.add_argument("--resume", action="store_true")   
     RESUME = argsort.parse_args().resume
     MY_DATA_DIR = os.getenv("MY_DATA_DIR")
+    prompt_id = argsort.parse_args().prompt_id
     
 
     # process_numinamath_dataset()
