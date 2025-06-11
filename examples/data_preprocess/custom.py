@@ -182,8 +182,6 @@ def process_dapomath_dataset():
     # 如果文件已存在且设置了恢复标志，则跳过处理
     if RESUME and os.path.exists(test_path):
         return
-    print(f"Loading the {data_source} dataset from huggingface...", flush=True)
-    dataset = datasets.load_dataset(data_source, trust_remote_code=True, split="train")
 
     golden_extraction_target=(ExprExtractionConfig(),)
     filtered_dataset_path = os.path.join(MY_DATA_DIR, local_dir, "filtered_dataset.parquet")
@@ -191,6 +189,8 @@ def process_dapomath_dataset():
         print(f"Loading the filtered dataset from {filtered_dataset_path}...", flush=True)
         dataset = datasets.load_dataset("parquet", data_files=filtered_dataset_path)
     else:
+        print(f"Loading the {data_source} dataset from huggingface...", flush=True)
+        dataset = datasets.load_dataset(data_source, trust_remote_code=True, split="train")
         def filter_fn(example):
             if not example['reward_model']['ground_truth']:
                 return False

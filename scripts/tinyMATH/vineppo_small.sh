@@ -12,8 +12,9 @@ RUN_ID=$1
 # Model settings
 # total rollouts: ROLLOUT_N * BATCH_SIZE * REASONING_STEPS * MC_ROLLOUT_N = 8 * 64 * 4 * 6 ~= 16 * 512
 # total updates: ROLLOUT_N * BATCH_SIZE * INNER_EPOCHS // MINI_BSZ = 16
+PROMPT_ID=$2
 ROLLOUT_N=8
-INNER_EPOCHS=2 # original setup is 2
+INNER_EPOCHS=3 # original setup is 2
 MC_ROLLOUT_N=6 # under the assumption of an average of 4 reasoning steps
 OVERLONG_BUFFER_LEN=1024
 MAX_PROMPT_LEN=$((1024 * 1))
@@ -58,6 +59,7 @@ export PYTHONPATH="."
 CMD="python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=vineppo \
     +algorithm.mc_rollout_n=$MC_ROLLOUT_N \
+    data.prompt_id=$PROMPT_ID \
     data.train_files=$TRAIN_FILE \
     data.val_files=\"$TEST_FILES\" \
     data.train_batch_size=$BATCH_SIZE \

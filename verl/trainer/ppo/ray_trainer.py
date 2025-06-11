@@ -319,6 +319,32 @@ def kmp_search(text: list[int], pattern: list[int]):
 
     return result
 
+@ray.remote
+def vineppo_reward_calculation_async(new_data_proto, reqId_to_respId_seqRange_map, config, tokenizer, value_tensor):
+    mc_estimate_n = config.algorithm.mc_rollout_n
+    # DEBUG: potential bug since the reward_fn only read `responses` field, which is partial resposnes indeed
+    # old_num_examine = self.reward_fn.num_examine
+    # self.reward_fn.num_examine = 0
+    # reward_list = self.reward_fn(new_data_proto, return_dict=True)["reward_extra_info"]['score']
+    # self.reward_fn.num_examine = old_num_examine
+
+    reward_tensor, reward_extra_infos_dict = ray.get(compute_reward_async.remote(new_data_proto, config, tokenizer))
+    reward_list = reward_extra_infos_dict['score']
+    assert len(reward_list) == len(new_data_proto), f"Reward list length {len(reward_list)} does not match batch size {len(new_data_proto)}"
+
+    # calculate the value
+    rollout_idx = 0
+    for i, seq_start, seq_end in reqId_to_respId_seqRange_map:
+        mean_reward = sum(reward_list[rollout_idx:rollout_idx + mc_estimate_n]) / mc_estimate_n
+        value_tensor[i, seq_start:seq_end] = mean_reward
+
+        rollout_idx += mc_estimate_n
+    
+    # delete all unused DataProto
+    del  new_data_proto
+
+    return value_tensor
+
 
 class RayPPOTrainer:
     """
@@ -1068,6 +1094,8 @@ class RayPPOTrainer:
         batch.reorder(global_idx)
         global_balance_stats = log_seqlen_unbalance(seqlen_list=global_seqlen_lst, partitions=global_partition_lst, prefix=logging_prefix)
         metrics.update(global_balance_stats)
+
+        return global_idx
     
     def vineppo_value_estimation(self, batch: DataProto, batch_raw_prompt_ids, mc_estimate_n: int = 4, metrics: Dict = None) -> torch.Tensor:
 
@@ -1094,7 +1122,7 @@ class RayPPOTrainer:
             # responses_ids = responses_ids[:last_non_pad_idx + 1]
 
             split_indices = [kmp_search(responses_ids, delimiters[i]) for i in range(len(delimiters))]  # list of lists, each sublist contains indices where the delimiter is found
-            split_indices = [idx for sublist in split_indices for idx in sublist]  # flatten the list
+            split_indices = [idx for sublist in split_indices for idx in sublist if idx != 0]  # flatten the list
             split_indices = sorted(set(split_indices))  # 去重并排序
 
             num_duplicates = len(split_indices)
@@ -1158,29 +1186,21 @@ class RayPPOTrainer:
         # update metrics
         metrics['perf/total_dedup_num_response_tokens'] += compute_response_mask(new_data_proto).sum().item()
 
-        # calculate rewards
-        # DEBUG: potential bug since the reward_fn only read `responses` field, which is partial resposnes indeed
-        old_num_examine = self.reward_fn.num_examine
-        self.reward_fn.num_examine = 0
-        reward_list = self.reward_fn(new_data_proto, return_dict=True)["reward_extra_info"]['score']
-        self.reward_fn.num_examine = old_num_examine
-        assert len(reward_list) == len(new_data_proto), f"Reward list length {len(reward_list)} does not match batch size {len(new_data_proto)}"
-
-        # calculate the value
+        # async calculate rewards
         value_tensor = torch.zeros_like(batch.batch["responses"]) # value_tensor shape is the same as input_ids
-        rollout_idx = 0
-        for i, seq_start, seq_end in reqId_to_respId_seqRange_map:
-            mean_reward = sum(reward_list[rollout_idx:rollout_idx + mc_estimate_n]) / mc_estimate_n
-            value_tensor[i, seq_start:seq_end] = mean_reward
+        future_value_tensor = vineppo_reward_calculation_async.remote(
+            new_data_proto=new_data_proto,
+            reqId_to_respId_seqRange_map=reqId_to_respId_seqRange_map,
+            config=self.config,
+            tokenizer=self.tokenizer,
+            value_tensor=value_tensor,
+        )
 
-            rollout_idx += mc_estimate_n
+        del vineppo_gen_batch, vineppo_gen_batch_output
+
+        return future_value_tensor
         
-        # delete all unused DataProto
-        del vineppo_gen_batch, vineppo_gen_batch_output, new_data_proto
-
-        return value_tensor
-        
-
+    
     def fit(self):
         """
         The training loop of PPO.
@@ -1294,15 +1314,14 @@ class RayPPOTrainer:
                             batch_copy = deepcopy(batch)  # avoid modifying the original batch
                             raw_prompt_ids = gen_batch.non_tensor_batch['raw_prompt_ids'].repeat(self.config.actor_rollout_ref.rollout.n)
                             assert len(raw_prompt_ids) == len(batch_copy), f"{len(raw_prompt_ids)=}, {len(batch_copy)=}, Not match, please check the batch generation logic."
-                            value_tensor = self.vineppo_value_estimation(batch_copy, batch_raw_prompt_ids=raw_prompt_ids, mc_estimate_n=self.config.algorithm.mc_rollout_n, metrics=metrics)
-                            batch.batch["values"] = value_tensor
+                            future_value_tensor = self.vineppo_value_estimation(batch_copy, batch_raw_prompt_ids=raw_prompt_ids, mc_estimate_n=self.config.algorithm.mc_rollout_n, metrics=metrics)
 
 
                     # balance the number of valid tokens on each dp rank.
                     # Note that this breaks the order of data inside the batch.
                     # Please take care when you implement group based adv computation such as GRPO and rloo
                     if self.config.trainer.balance_batch:
-                        self._balance_batch(batch, metrics=metrics)
+                        reorder_idx = self._balance_batch(batch, metrics=metrics)
 
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
@@ -1348,6 +1367,9 @@ class RayPPOTrainer:
                         if self.config.reward_model.launch_reward_fn_async:
                             reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
                         batch.batch["token_level_scores"] = reward_tensor
+                        if self.config.algorithm.adv_estimator == AdvantageEstimator.VINEPPO:
+                            value_tensor = ray.get(future_value_tensor) 
+                            batch.batch["values"] = value_tensor[reorder_idx] if self.config.trainer.balance_batch else value_tensor
 
                         print(f"{list(reward_extra_infos_dict.keys())=}")
                         if reward_extra_infos_dict:

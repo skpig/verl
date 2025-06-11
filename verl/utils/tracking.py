@@ -71,9 +71,9 @@ class Tracking:
                     project=project_name,
                     name=experiment_name,
                     config=config,
-                    resume_from=f"{resume_id}?_step={resume_step}"
-                    # resume='allow',
-                    # id=resume_id
+                    # resume_from=f"{resume_id}?_step={resume_step}"
+                    resume='allow',
+                    id=resume_id
                 )
                 print(f"Resuming wandb run {resume_id} from step {resume_step}")
             run.mark_preempting()
