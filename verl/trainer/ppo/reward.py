@@ -87,7 +87,7 @@ def load_reward_manager(config, tokenizer, num_examine, is_valid=False, **reward
         raise NotImplementedError
 
     from verl.utils.reward_score.math_verify import compute_score
-    final_compute_score = partial(compute_score, is_valid=is_valid)
+    final_compute_score = partial(compute_score, is_valid=is_valid, prompt_id=config.data.prompt_id)
 
     if compute_score is None:
         sandbox_config = config.reward_model.get("sandbox_fusion")
