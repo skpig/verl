@@ -15,7 +15,7 @@ from torch.distributed.fsdp.api import ShardingStrategy, MixedPrecision, CPUOffl
 from torch.distributed._tensor.placement_types import Placement
 from .extensions import register_dtensor_save_hook, parallelize_module
 from .initialize import parallel_load_safetensors, parallel_init_fsdp_fn
-from .offload.activation_offload import get_offload_context, CheckpointFunction
+from .offload.activation_offload import apply_activation_offload, ActOffloadPolicy, CheckpointFunction
 from .clip_grad_norm import clip_grad_norm_
 
 from transformers import PreTrainedModel
@@ -167,20 +167,12 @@ def fully_shard(
 
     # enable activation offload
     if act_offload:
-        if act_offload_kwargs is None:
-            act_offload_kwargs = {}
-        context = get_offload_context(True, model, **act_offload_kwargs)
-
-        def enter_act_offload(module: torch.nn.Module, input):
-            if torch.is_grad_enabled():
-                context.__enter__()
-
-        def exit_act_offload(module: torch.nn.Module, input, output):
-            if torch.is_grad_enabled():
-                context.__exit__()
-
-        model.register_forward_pre_hook(enter_act_offload, prepend=True)
-        model.register_forward_hook(exit_act_offload, prepend=False)
+        act_offload_kwargs = {} if act_offload_kwargs is None else act_offload_kwargs
+        act_offload_policy = ActOffloadPolicy(offload_size=(act_offload_kwargs.get('offload_threshold', 1024 * 1024),
+                                                            act_offload_kwargs.get('offload_upbound', None)),
+                                              buffer_size_gb=act_offload_kwargs.get('buffer_size', 40),
+                                              pin_memory=act_offload_kwargs.get('pin_memory', False))
+        apply_activation_offload(model, offload_policy=act_offload_policy)
 
     # default use sharded state dict for checkpoint save
     FSDP.set_state_dict_type(model, StateDictType.SHARDED_STATE_DICT)
