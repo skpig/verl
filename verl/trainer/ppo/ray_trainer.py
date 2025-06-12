@@ -419,7 +419,7 @@ class RayPPOTrainer:
                     " ]\n\n",
                     " >\n\n",
                 ]
-                self.step_segmentor = MatchStepSegmentator([self.tokenizer.encode(phrase, add_special_tokens=False) for phrase in trivial_string], min_length=80, before_indices=False)
+                self.step_segmentor = MatchStepSegmentator([self.tokenizer.encode(phrase, add_special_tokens=False) for phrase in trivial_string], min_length=60, before_indices=False)
             elif self.config.algorithm.segment_type == SegmentType.TAG:
                 think_tags = [
                     ['<', 'think'],
@@ -1126,15 +1126,6 @@ class RayPPOTrainer:
             prompt_ids = batch.batch["prompts"][i].tolist() # already left padded
             responses_ids = batch.batch["responses"][i].tolist() # already right padded
             assert prompt_ids + responses_ids == batch.batch["input_ids"][i].tolist(), "The input_ids should be the concatenation of prompt and response."
-            # # Find last occurrence of non-pad token
-            # last_non_pad_idx = next(i for i in range(len(responses_ids) - 1, -1, -1) 
-            #                     if responses_ids[i] != self.tokenizer.pad_token_id)
-            # # remove right padding of responses_ids
-            # responses_ids = responses_ids[:last_non_pad_idx + 1]
-
-            # split_indices = [kmp_search(responses_ids, delimiters[i]) for i in range(len(delimiters))]  # list of lists, each sublist contains indices where the delimiter is found
-            # split_indices = [idx for sublist in split_indices for idx in sublist if idx != 0]  # flatten the list
-            # split_indices = sorted(set(split_indices))  # 去重并排序
 
             split_indices = self.step_segmentor.search(response_ids=responses_ids)
 
@@ -1150,14 +1141,14 @@ class RayPPOTrainer:
             reqId_to_respId_seqRange_map.extend([(i, start, end) for start, end in zip(split_indices_start, split_indices)])
             num_steps.append(num_duplicates)
         
-            new_data_proto_dict['query_lens'].extend([split_indices[i] for i in range(num_duplicates)])  # number of query tokens for each split
-            new_data_proto_dict['raw_prompt_ids'].extend([raw_prompt_ids + responses_ids[:split_indices[i]] for i in range(num_duplicates)]) # all requests are not padded
+            new_data_proto_dict['query_lens'].extend([split_indices[j] for j in range(num_duplicates)])  # number of query tokens for each split
+            new_data_proto_dict['raw_prompt_ids'].extend([raw_prompt_ids + responses_ids[:split_indices[j]] for j in range(num_duplicates)]) # all requests are not padded
             for key in batch.non_tensor_batch:
                 new_data_proto_dict[key].extend([batch.non_tensor_batch[key][i]] * num_duplicates)  # repeat the non-tensor batch data
 
         if len(reqId_to_respId_seqRange_map) == 0:
-            # if no split indices found, return a zero tensor
-            return torch.zeros_like(batch.batch["responses"], dtype=torch.float32)
+            # if no split indices found, return a zero tensor wrapped with ray.put for ray.get() compatibility
+            return ray.put(torch.zeros_like(batch.batch["responses"], dtype=torch.float32))
 
         # breakpoint()
         # create a new DataProto of length  "\sum_i #steps of item i"
@@ -1202,6 +1193,7 @@ class RayPPOTrainer:
 
         # unpad the batch to the original size
         new_data_proto = unpad_dataproto(new_data_proto, pad_size=pad_size * mc_estimate_n)  
+        assert len(new_data_proto) == new_data_proto_length * mc_estimate_n, f"Length of new_data_proto is {len(new_data_proto)}, expected {new_data_proto_length * mc_estimate_n}"
 
         # update metrics
         metrics['perf/total_dedup_num_response_tokens'] += compute_response_mask(new_data_proto).sum().item()
