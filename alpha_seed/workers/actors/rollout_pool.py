@@ -139,7 +139,11 @@ class RolloutPool:
                 self.bon_ready_batch.put(index)
                 break
             return_batch.extend(ready_batch)
-            self.history_pool[index] = ready_batch
+            # self.history_pool[index] = ready_batch
+            # currently ready_batch in history_pool is not used
+            # ready_batch will occupy very large memory, especially in vlm tasks
+            empty_ready_batch = {}
+            self.history_pool[index] = empty_ready_batch
             self.pool.delete(index)
             self.pool_size -= self.num_bon
         complete_bon_bsz = len(return_batch)
