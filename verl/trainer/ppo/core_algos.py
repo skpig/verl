@@ -22,6 +22,8 @@ from collections import defaultdict
 
 import numpy as np
 import torch
+from enum import Enum
+from typing import List, Optional, Dict
 
 import verl.utils.torch_functional as verl_F
 
@@ -499,3 +501,96 @@ def kl_penalty(logprob: torch.FloatTensor, ref_logprob: torch.FloatTensor, kl_pe
         raise NotImplementedError
 
     raise NotImplementedError
+
+
+def build_kmp_table(pattern):
+    """构建部分匹配表（前缀函数）"""
+    n = len(pattern)
+    table = [0] * n
+    j = 0  # length of previous longest prefix suffix
+
+    for i in range(1, n):
+        while j > 0 and pattern[i] != pattern[j]:
+            j = table[j - 1]
+        if pattern[i] == pattern[j]:
+            j += 1
+            table[i] = j
+    return table
+
+def kmp_search(text: list[int], pattern: Optional[list[int]]=None, table: Optional[list[int]]=None, before_indices: bool = True):
+    """KMP算法在list上搜索 pattern 出现在 text 中的位置"""
+    assert pattern is not None or table is not None, "Either pattern or table must be provided."
+    if pattern is not None and table is None:
+        assert len(pattern) > 0, "Pattern must not be empty."
+        table = build_kmp_table(pattern)
+
+    result = []
+
+    j = 0  # index for pattern
+    for i in range(len(text)):
+        while j > 0 and text[i] != pattern[j]:
+            j = table[j - 1]
+        if text[i] == pattern[j]:
+            j += 1
+        if j == len(pattern):
+            if before_indices:
+                result.append(i - j + 1)
+            else:
+                result.append(i + 1)
+                
+            j = table[j - 1]
+
+    return result
+
+class SegmentType(Enum):
+    """Enum for segment types."""
+    TRIVIAL="trivial" # indicate "\n\n" as a segment
+    TAG="tag" # indicate "<think>" as a segment
+
+
+
+class MatchStepSegmentator:
+    """Segment a long CoT response_ids into segments
+    """
+    
+    def __init__(self, delimiter_ids_lst: List[List[int]], min_length: int = -1, before_indices: Optional[bool] = True):
+        """
+        Args:
+            delimiter_ids_lst: List of lists of delimiter ids. Each list is a set of delimiter ids.
+                e.g. [[10, 11], [20, 21]] means two sets of delimiters: [10, 11] and [20, 21].
+            min_length: Minimum length of the segment. If -1, no minimum length is enforced.
+            before_indices: If True, the indices returned are the start indices of the segments.
+                If False, the indices returned are the end indices of the segments + 1.
+                e.g. if the response_ids is [1, 2, 3, 10, 11, 4, 5] and the delimiter_ids is [10, 11],
+                and before_indices is True, the returned indices will be [3] (start of segment).
+                If before_indices is False, the returned indices will be [5] (end of segment + 1).
+        
+        """
+        self.delimiter_ids_lst = delimiter_ids_lst
+        assert [len(delimiter_ids) > 0 for delimiter_ids in delimiter_ids_lst] , "Delimiter IDs must not be empty."
+        # self.delimiter_table = build_kmp_table(delimiter_ids)
+        self.delimiter_table_lst = [build_kmp_table(delimiter_ids) for delimiter_ids in delimiter_ids_lst]
+        self.min_length = min_length
+        self.before_indices = before_indices
+
+    def search(self, response_ids: List[int]) -> List[int]:
+        # breakpoint()
+        """Search the delimiter_ids in response_ids and return the start indices of the segments."""
+        seg_indices =  [kmp_search(response_ids, pattern=delimiter_ids, table=delimiter_table, before_indices=self.before_indices) for delimiter_ids, delimiter_table in zip(self.delimiter_ids_lst, self.delimiter_table_lst)]
+        seg_indices = [idx for sub in seg_indices for idx in sub]  # flatten the list of lists
+        seg_indices = sorted(set(seg_indices))
+
+        # filter out segments that are too short
+        if self.min_length > 0:
+            final_seg_indices = []
+            start_id = 0
+            for i in range(len(seg_indices)):
+                if seg_indices[i] - start_id >= self.min_length:
+                    final_seg_indices.append(seg_indices[i])
+                    start_id = seg_indices[i]
+                else:
+                    # if the segment is too short, we skip it
+                    continue
+            return final_seg_indices
+        else:
+            return seg_indices

@@ -13,6 +13,7 @@ RUN_ID=$1
 # total rollouts: ROLLOUT_N * BATCH_SIZE * REASONING_STEPS * MC_ROLLOUT_N = 8 * 64 * 4 * 6 ~= 16 * 512
 # total updates: ROLLOUT_N * BATCH_SIZE * INNER_EPOCHS // MINI_BSZ = 16
 PROMPT_ID=$2
+STEP_SEGMENT=$3
 ROLLOUT_N=8
 INNER_EPOCHS=3 # original setup is 2
 MC_ROLLOUT_N=6 # under the assumption of an average of 4 reasoning steps
@@ -43,7 +44,7 @@ BACKWARD_MAX_TOKEN_LEN=$((6 * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN)))  # 3 for 40G
 PROJ_NAME="TinyMATH"
 MODEL_NAME=$(basename $BASE_MODEL)
 DATA_NAME=DAPOMATH
-EXPERIMENT_NAME="ID${RUN_ID}_${DATA_NAME}_vineppo_${MODEL_NAME}_n${ROLLOUT_N}_resplen${MAX_RESPONSE_LEN}_bsz${BATCH_SIZE}-${MINI_BSZ}"
+EXPERIMENT_NAME="ID${RUN_ID}_${DATA_NAME}_vineppo_${MODEL_NAME}_prompt${PROMPT_ID}_n${ROLLOUT_N}_resplen${MAX_RESPONSE_LEN}_bsz${BATCH_SIZE}-${MINI_BSZ}"
 
 python3 examples/data_preprocess/custom.py \
     --resume
@@ -59,6 +60,7 @@ export PYTHONPATH="."
 CMD="python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=vineppo \
     +algorithm.mc_rollout_n=$MC_ROLLOUT_N \
+    +algorithm.segment_type=$STEP_SEGMENT \
     data.prompt_id=$PROMPT_ID \
     data.train_files=$TRAIN_FILE \
     data.val_files=\"$TEST_FILES\" \

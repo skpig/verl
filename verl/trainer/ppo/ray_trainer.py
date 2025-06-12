@@ -53,7 +53,7 @@ from verl.single_controller.ray import (RayClassWithInitArgs, RayResourcePool,
                                         RayWorkerGroup)
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo import core_algos
-from verl.trainer.ppo.core_algos import agg_loss
+from verl.trainer.ppo.core_algos import agg_loss, MatchStepSegmentator, SegmentType
 from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
     compute_throughout_metrics,
@@ -285,39 +285,6 @@ def _timer(name: str, timing_raw: Dict[str, float]):
     timing_raw[name] += timer.last
     print("Duration of {}: {:.2f} seconds".format(name, timer.last), _time_stamp())
 
-def build_kmp_table(pattern):
-    """构建部分匹配表（前缀函数）"""
-    n = len(pattern)
-    table = [0] * n
-    j = 0  # length of previous longest prefix suffix
-
-    for i in range(1, n):
-        while j > 0 and pattern[i] != pattern[j]:
-            j = table[j - 1]
-        if pattern[i] == pattern[j]:
-            j += 1
-            table[i] = j
-    return table
-
-def kmp_search(text: list[int], pattern: list[int]):
-    """KMP算法在list上搜索 pattern 出现在 text 中的位置"""
-    if not pattern:
-        return list(range(len(text) + 1))
-
-    table = build_kmp_table(pattern)
-    result = []
-
-    j = 0  # index for pattern
-    for i in range(len(text)):
-        while j > 0 and text[i] != pattern[j]:
-            j = table[j - 1]
-        if text[i] == pattern[j]:
-            j += 1
-        if j == len(pattern):
-            result.append(i - j + 1) # the start index of the match
-            j = table[j - 1]
-
-    return result
 
 @ray.remote
 def vineppo_reward_calculation_async(new_data_proto, reqId_to_respId_seqRange_map, config, tokenizer, value_tensor):
@@ -419,6 +386,49 @@ class RayPPOTrainer:
             "perf/global_cumsum_total_dedup_num_tokens": 0,
         }
         # self.artifact = 
+
+        if self.config.algorithm.adv_estimator in [AdvantageEstimator.VINEPPO]:
+            # breakpoint()
+            # assert self.tokenizer.tokenizer_class == "Qwen2Tokenizer"
+            if isinstance(self.config.algorithm.segment_type, str):
+                try:
+                    self.config.algorithm.segment_type = SegmentType(value=self.config.algorithm.segment_type)
+                except ValueError:
+                    raise ValueError(f"Invalid segment_type {self.config.algorithm.segment_type}, must be one of {[member.value for member in SegmentType]}")
+            assert self.config.algorithm.segment_type in SegmentType, f"Invalid segment_type {self.config.algorithm.segment_type}, must be one of {[member.value for member in SegmentType]}"
+            if self.config.algorithm.segment_type == SegmentType.TRIVIAL:
+                trivial_string = [
+                    "\n\n",
+                    "\n\n\n",
+                    "\n\n\n\n",
+                    ".\n\n",
+                    ",\n\n",
+                    ";\n\n",
+                    ":\n\n",
+                    ")\n\n",
+                    "}\n\n",
+                    "]\n\n",
+                    ">\n\n",
+                    " \n\n",
+                    " .\n\n",
+                    " ,\n\n",
+                    " ;\n\n",
+                    " :\n\n",
+                    " )\n\n",
+                    " }\n\n",
+                    " ]\n\n",
+                    " >\n\n",
+                ]
+                self.step_segmentor = MatchStepSegmentator([self.tokenizer.encode(phrase, add_special_tokens=False) for phrase in trivial_string], min_length=80, before_indices=False)
+            elif self.config.algorithm.segment_type == SegmentType.TAG:
+                think_tags = [
+                    ['<', 'think'],
+                    ['<th', 'ink'],
+                    ['<think>']
+                ]
+                self.step_segmentor = MatchStepSegmentator([self.tokenizer.convert_tokens_to_ids(['<', 'think']), self.tokenizer.convert_tokens_to_ids(['<th', 'ink'])])
+            else:
+                raise NotImplementedError(f"Segment type {self.config.algorithm.segment_type} is not implemented, should be one of {list(SegmentType)}")
 
 
     def _validate_config(self):
@@ -1099,17 +1109,11 @@ class RayPPOTrainer:
     
     def vineppo_value_estimation(self, batch: DataProto, batch_raw_prompt_ids, mc_estimate_n: int = 4, metrics: Dict = None) -> torch.Tensor:
 
-        # split each response into multiple steps
-        if getattr(self, 'delimiters', None) is not None:
-            delimiters = self.delimiters
-        else:
-            delimiters = [self.tokenizer.convert_tokens_to_ids(['<', 'think']), self.tokenizer.convert_tokens_to_ids(['<th', 'ink'])]
-        
-        
         # create different query batches for each split
         reqId_to_respId_seqRange_map = []
         new_data_proto_dict = defaultdict(list)  # to store the new data proto
-        # the length of gen_batch is "train_batch_size * n_rollouts"
+        num_steps = []
+        # the length of `batch`` is "train_batch_size * n_rollouts"
         for i in range(len(batch)):
             raw_prompt_ids = batch_raw_prompt_ids[i] if isinstance(batch_raw_prompt_ids[i], list) else batch_raw_prompt_ids[i].tolist()
             prompt_ids = batch.batch["prompts"][i].tolist() # already left padded
@@ -1121,9 +1125,11 @@ class RayPPOTrainer:
             # # remove right padding of responses_ids
             # responses_ids = responses_ids[:last_non_pad_idx + 1]
 
-            split_indices = [kmp_search(responses_ids, delimiters[i]) for i in range(len(delimiters))]  # list of lists, each sublist contains indices where the delimiter is found
-            split_indices = [idx for sublist in split_indices for idx in sublist if idx != 0]  # flatten the list
-            split_indices = sorted(set(split_indices))  # 去重并排序
+            # split_indices = [kmp_search(responses_ids, delimiters[i]) for i in range(len(delimiters))]  # list of lists, each sublist contains indices where the delimiter is found
+            # split_indices = [idx for sublist in split_indices for idx in sublist if idx != 0]  # flatten the list
+            # split_indices = sorted(set(split_indices))  # 去重并排序
+
+            split_indices = self.step_segmentor.search(response_ids=responses_ids)
 
             num_duplicates = len(split_indices)
             # skip if no split indices found
@@ -1135,6 +1141,7 @@ class RayPPOTrainer:
 
             split_indices_start = [0] + split_indices[:-1]  # start of each split, the first one is always 0
             reqId_to_respId_seqRange_map.extend([(i, start, end) for start, end in zip(split_indices_start, split_indices)])
+            num_steps.append(num_duplicates)
         
             new_data_proto_dict['query_lens'].extend([split_indices[i] for i in range(num_duplicates)])  # number of query tokens for each split
             new_data_proto_dict['raw_prompt_ids'].extend([raw_prompt_ids + responses_ids[:split_indices[i]] for i in range(num_duplicates)]) # all requests are not padded
@@ -1143,7 +1150,7 @@ class RayPPOTrainer:
 
         if len(reqId_to_respId_seqRange_map) == 0:
             # if no split indices found, return a zero tensor
-            return torch.zeros_like(batch.batch["responses"])
+            return torch.zeros_like(batch.batch["responses"], dtype=torch.float32)
 
         # breakpoint()
         # create a new DataProto of length  "\sum_i #steps of item i"
@@ -1185,6 +1192,10 @@ class RayPPOTrainer:
 
         # update metrics
         metrics['perf/total_dedup_num_response_tokens'] += compute_response_mask(new_data_proto).sum().item()
+        metrics['response_length/#steps/mean'] = np.mean(num_steps)
+        metrics['response_length/#steps/max'] = np.max(num_steps)
+        metrics['response_length/#steps/min'] = np.min(num_steps)
+        metrics['response_length/#steps/std'] = np.std(num_steps)
 
         # async calculate rewards
         value_tensor = torch.zeros_like(batch.batch["responses"]) # value_tensor shape is the same as input_ids

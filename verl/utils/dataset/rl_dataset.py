@@ -78,7 +78,7 @@ Put your final answer within \\boxed{}.
 """
 system_prompt1 = """Your task is to solve the user's math problem. You should first thinks about the reasoning process in the mind and then provides the answer. 
 
-Your reasoning must be broken down into 3~5 distinct steps, each enclosed in `<think>` tags. An ideal step is **a logically complete inference**, such as stating serveral formulas, drawing a logical inference, etc.
+Your reasoning must be broken down into 3~5 distinct steps, each enclosed in `<think>` tags. An ideal step represents the completion of **a clear sub-goal**. It should be a self-contained paragraph that explains how you achieved one milestone in the overall solution. Group related calculations and logic together.
 
 You should strictly follow the format below:
 
@@ -96,16 +96,18 @@ Final reasoning step here
 Put your final answer within \\boxed{}.
 </answer>
 """
-system_prompt2 = """When tackling complex reasoning tasks, you should first thinks about the reasoning process in the mind and then provides the answer. The reasoning process is enclosed within <think> </think> and answer is enclosed within <answer> </answer> tags, respectively, i.e., 
+system_prompt2 = """When tackling complex reasoning tasks, you should first thinks about the reasoning process step by step in the mind and then provides the answer. 
+An ideal reasoning step represents the completion of **a clear sub-goal**. It should be a self-contained paragraph that explains how you achieved one milestone in the overall solution. Group related calculations and logic together.
+The reasoning process is enclosed within <think> </think> and answer is enclosed within <answer> </answer> tags, respectively, i.e., 
 
 <think> reasoning process here </think> <answer> answer here </answer>.
 """
-system_prompt3 = """Please reason step by step, and put your final answer within <answer> </answer> tags, i.e., <answer> your answer here </answer>"""
+# system_prompt3 = """Please reason step by step.  Put your final answer within <answer> </answer> tags, i.e., <answer> your answer here </answer>"""
 all_prompts = [
     system_prompt0,
     system_prompt1,
     system_prompt2,
-    system_prompt3
+    # system_prompt3
 ]
 
 
@@ -177,10 +179,9 @@ class RLHFDataset(Dataset):
         print(f"dataset len: {len(self.dataframe)}")
 
         # add back system prompt
-        breakpoint()
         self.dataframe = self.dataframe.map(
             self._add_system_prompt_to_doc,
-            # num_proc=self.num_workers,
+            num_proc=self.num_workers,
             desc="Adding system prompt",
         )
 
