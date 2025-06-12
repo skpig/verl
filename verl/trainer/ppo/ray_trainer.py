@@ -541,6 +541,13 @@ class RayPPOTrainer:
         if config.actor_rollout_ref.rollout.multi_turn.enable:
             assert config.actor_rollout_ref.rollout.multi_turn.tool_config_path is not None, "tool_config_path must be set when enabling multi_turn with tool, due to no role-playing support"
             assert config.algorithm.adv_estimator in [AdvantageEstimator.GRPO], "only GRPO is tested for multi-turn with tool"
+        
+        # check vineppo config
+        if config.algorithm.adv_estimator == AdvantageEstimator.VINEPPO:
+            if config.data.prompt_id in [0, 1]:
+                assert config.algorithm.segment_type == SegmentType.TAG.value, "vineppo with prompt_id 0 or 1 must use TAG segment type"
+            elif config.data.prompt_id == 2:
+                assert config.algorithm.segment_type == SegmentType.TRIVIAL.value, "vineppo with prompt_id 2 must use TRIVIAL segment type"
 
         print("[validate_config] All configuration checks passed successfully!")
 
@@ -1155,6 +1162,12 @@ class RayPPOTrainer:
         # breakpoint()
         # create a new DataProto of length  "\sum_i #steps of item i"
         new_data_proto_length = len(new_data_proto_dict['raw_prompt_ids'])
+        metrics['response_length/#steps/mean'] = np.mean(num_steps)
+        metrics['response_length/#steps/max'] = np.max(num_steps)
+        metrics['response_length/#steps/min'] = np.min(num_steps)
+        metrics['response_length/#steps/std'] = np.std(num_steps)
+        print(f"Generating {new_data_proto_length} queries for value estimation with {mc_estimate_n} MC estimates per sequence.")
+        print(f"#Steps statistics: mean={metrics['response_length/#steps/mean']}, max={metrics['response_length/#steps/max']}, min={metrics['response_length/#steps/min']}, std={metrics['response_length/#steps/std']}")
         # non-tensor batch
         for k, v in new_data_proto_dict.items():
             new_data_proto_dict[k] = np.array(v, dtype=object)
@@ -1192,13 +1205,9 @@ class RayPPOTrainer:
 
         # update metrics
         metrics['perf/total_dedup_num_response_tokens'] += compute_response_mask(new_data_proto).sum().item()
-        metrics['response_length/#steps/mean'] = np.mean(num_steps)
-        metrics['response_length/#steps/max'] = np.max(num_steps)
-        metrics['response_length/#steps/min'] = np.min(num_steps)
-        metrics['response_length/#steps/std'] = np.std(num_steps)
 
         # async calculate rewards
-        value_tensor = torch.zeros_like(batch.batch["responses"]) # value_tensor shape is the same as input_ids
+        value_tensor = torch.zeros_like(batch.batch["responses"], dtype=torch.float32) # value_tensor shape is the same as input_ids
         future_value_tensor = vineppo_reward_calculation_async.remote(
             new_data_proto=new_data_proto,
             reqId_to_respId_seqRange_map=reqId_to_respId_seqRange_map,
@@ -1462,7 +1471,7 @@ class RayPPOTrainer:
                 with _timer('log', timing_raw):
                     metrics.update(ray.get(rollout_metrics))
                     self._maybe_log_train_generations(batch)
-                    metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
+                    metrics.update(compute_data_metrics(batch=batch, report_value=self.use_critic or self.config.algorithm.adv_estimator == AdvantageEstimator.VINEPPO))
                     # TODO: implement actual tflpo and theoretical tflpo
                     n_gpus = self.resource_pool_manager.get_n_gpus()
                     metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))

@@ -40,12 +40,12 @@ def verify_format(model_output: str):
     result = 0
     
     # 检查是否有且仅有一个 "## Answer:" 
-    answer_matches = re.findall(r'<answer>\n(.*?)\n</answer>', model_output, re.DOTALL)
+    answer_matches = re.findall(r'<answer>(.*?)</answer>', model_output, re.DOTALL)
     if len(answer_matches) == 1:
         result |= ANSWER_MATCH_BIT
     
     # 1. 提取所有<think>...</think>标签
-    think_blocks = [i for i in re.findall(r'<think>\n.*?\n</think>', model_output, re.DOTALL)]
+    think_blocks = [i for i in re.findall(r'<think>.*?</think>', model_output, re.DOTALL)]
     
     # 2. 将所有标签拼接起来
     concatenated = ''.join(think_blocks)
@@ -306,12 +306,12 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None, is_v
             f.write(ground_truth)
 
 
-        print("====== Parse Golden ======")
+        # print("====== Parse Golden ======")
         extracted_predictions = parse(extracted_predictions, pred_extraction_target, parsing_timeout=3)
-        print("====== Parse Solution ======")
+        # print("====== Parse Solution ======")
         extracted_golds = parse(ground_truth, gold_extraction_target, parsing_timeout=3)
         
-        print(f"====== Verify {len(extracted_golds)} golds and {len(extracted_predictions)} predictions ======")
+        # print(f"====== Verify {len(extracted_golds)} golds and {len(extracted_predictions)} predictions ======")
         ret_score = verify(extracted_golds, extracted_predictions, timeout_seconds=3)
 
         if len(extracted_predictions) == 0:

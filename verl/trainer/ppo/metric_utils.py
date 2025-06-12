@@ -217,7 +217,7 @@ def compute_rollout_metrics(batch: DataProto, tokenizer) -> Dict[str, Any]:
     return metrics
 
 
-def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str, Any]:
+def compute_data_metrics(batch: DataProto, report_value: bool = True) -> Dict[str, Any]:
     """
     Computes various metrics from a batch of data for PPO training.
 
@@ -276,9 +276,9 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
     current_kl = masked_mean(kld, mask=response_mask, axis=-1)  # average within each sequence
     current_kl = torch.mean(current_kl, dim=0) # average across the batch
 
-    if use_critic:
+    if report_value:
         values = batch.batch["values"]
-        valid_values = torch.masked_select(values, response_mask)
+        valid_values = torch.masked_select(values, response_mask.bool())
         return_diff_var = torch.var(valid_returns - valid_values)
         return_var = torch.var(valid_returns)
 
@@ -310,7 +310,7 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
                 # vf explained var
                 "critic/vf_explained_var": (1.0 - return_diff_var / (return_var + 1e-5)).detach().item(),
             }
-            if use_critic
+            if report_value
             else {}
         ),
         # response length

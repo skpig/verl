@@ -90,7 +90,7 @@ class TestComputeDataMetrics(unittest.TestCase):
     
     def test_compute_data_metrics_with_critic(self):
         """Test compute_data_metrics with critic enabled."""
-        metrics = compute_data_metrics(self.batch, use_critic=True)
+        metrics = compute_data_metrics(self.batch, report_value=True)
         
         # Check that all expected metrics are present
         self.assertIn("critic/score/mean", metrics)
@@ -108,7 +108,7 @@ class TestComputeDataMetrics(unittest.TestCase):
     
     def test_compute_data_metrics_without_critic(self):
         """Test compute_data_metrics with critic disabled."""
-        metrics = compute_data_metrics(self.batch, use_critic=False)
+        metrics = compute_data_metrics(self.batch, report_value=False)
         
         # Check that critic-specific metrics are not present
         self.assertNotIn("critic/values/mean", metrics)
