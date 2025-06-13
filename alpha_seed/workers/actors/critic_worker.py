@@ -46,7 +46,7 @@ from alpha_seed.utils import ndtimeline
 from alpha_seed.utils.ckpt import download_minimal_required_files
 
 from seed_models.utils.count_flops import FlopsCounter
-from transformers import AutoConfig, AutoModelForTokenClassification, AutoTokenizer
+from transformers import AutoConfig, AutoModelForTokenClassification, AutoTokenizer, AutoProcessor
 
 from codetiming import Timer
 
@@ -115,6 +115,8 @@ class CriticWorker(Worker):
         # using random initialized model from any architecture. May not be the same as Actor.
         tokenizer_path = copy_local_path_from_hdfs(config.model.tokenizer_path)
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path,
+                                                       trust_remote_code=config.model.get('trust_remote_code', False))
+        self.processor = AutoProcessor.from_pretrained(tokenizer_path,
                                                        trust_remote_code=config.model.get('trust_remote_code', False))
 
         from omegaconf import OmegaConf
@@ -288,6 +290,7 @@ class CriticWorker(Worker):
         # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect
         # TODO(zhangchi.usc1992): 1. support create from random initialized model. 2. Support init with FSDP directly
         self.tokenizer = AutoTokenizer.from_pretrained(config_path)
+        self.processor = AutoProcessor.from_pretrained(config_path)
         critic_model_config = AutoConfig.from_pretrained(config_path)
         architectures = [
             arch.replace('ForCausalLM', 'ForTokenClassification') for arch in critic_model_config.architectures
@@ -441,7 +444,8 @@ class CriticWorker(Worker):
                                                            optimizer=self.critic_optimizer,
                                                            lr_scheduler=self.critic_lr_scheduler,
                                                            hf_config=self.critic_model_config,
-                                                           tokenizer=self.tokenizer)
+                                                           tokenizer=self.tokenizer,
+                                                           processor=self.processor)
 
         if self.config.train_memory_offload:
             self.to("cpu")

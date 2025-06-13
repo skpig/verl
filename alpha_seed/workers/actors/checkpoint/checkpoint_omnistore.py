@@ -11,7 +11,7 @@ import warnings
 import torch
 import torch.distributed
 
-from transformers import PretrainedConfig, PreTrainedTokenizer
+from transformers import PretrainedConfig, PreTrainedTokenizer, AutoProcessor
 
 from .checkpoint_manager import BaseCheckpointManager
 
@@ -51,8 +51,8 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
     """
 
     def __init__(self, model, optimizer: torch.optim.Optimizer, lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
-                 hf_config: PretrainedConfig, tokenizer: PreTrainedTokenizer):
-        super().__init__(model, optimizer, lr_scheduler, hf_config, tokenizer)
+                 hf_config: PretrainedConfig, tokenizer: PreTrainedTokenizer, processor: AutoProcessor):
+        super().__init__(model, optimizer, lr_scheduler, hf_config, tokenizer, processor)
         if self.rank == 0:
             print(f'OmniStore ckpt manager initialized, byted-omnistore version: {ACTUAL_OMNISTORE_VERSION}')
 

@@ -10,7 +10,7 @@ from torch.distributed.fsdp import ShardedStateDictConfig, ShardedOptimStateDict
 
 from verl.utils.fs import copy_local_path_from_hdfs
 
-from transformers import PretrainedConfig, PreTrainedTokenizer
+from transformers import PretrainedConfig, PreTrainedTokenizer, AutoProcessor
 
 from .checkpoint_manager import BaseCheckpointManager
 from ray.actor import ActorHandle
@@ -34,8 +34,8 @@ class CheckpointManagerV1(BaseCheckpointManager):
 
     def __init__(self, model: FSDP, optimizer: torch.optim.Optimizer,
                  lr_scheduler: torch.optim.lr_scheduler.LRScheduler, hf_config: PretrainedConfig,
-                 tokenizer: PreTrainedTokenizer, *args, **kwargs):
-        super().__init__(model, optimizer, lr_scheduler, hf_config, tokenizer)
+                 tokenizer: PreTrainedTokenizer, processor: AutoProcessor, *args, **kwargs):
+        super().__init__(model, optimizer, lr_scheduler, hf_config, tokenizer, processor)
 
     def load_checkpoint(self, hdfs_path=None, *args, **kwargs):
         if hdfs_path is None:

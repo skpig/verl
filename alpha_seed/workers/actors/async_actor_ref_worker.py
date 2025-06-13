@@ -56,6 +56,7 @@ from alpha_seed.utils.observility.training_stats import MetricsTorchDispatchMode
 from alpha_seed.utils.observility import get_profiler_context_wrapped
 from alpha_seed.utils.ckpt import download_minimal_required_files
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig, AutoModelForVision2Seq
+from transformers import AutoProcessor
 
 from seed_models.utils.count_flops import FlopsCounter
 
@@ -213,6 +214,7 @@ class AsyncActorRolloutRefWorker(Worker):
         # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect
         # TODO(zhangchi.usc1992): 1. support create from random initialized model. 2. Support init with FSDP directly
         self.tokenizer = AutoTokenizer.from_pretrained(self.local_path, trust_remote_code=trust_remote_code)
+        self.processor = AutoProcessor.from_pretrained(self.local_path, trust_remote_code=trust_remote_code)
         torch_dtype = torch.float32 if self._is_actor else torch.bfloat16
 
         # override model kwargs
@@ -819,7 +821,8 @@ class AsyncActorRolloutRefWorker(Worker):
                                                                optimizer=self.actor.actor_optimizer,
                                                                lr_scheduler=self.actor_lr_scheduler,
                                                                hf_config=self.actor_model_config,
-                                                               tokenizer=self.tokenizer)
+                                                               tokenizer=self.tokenizer,
+                                                               processor=self.processor)
 
         if self._is_ref:
             self.checkpoint_manager_ref = CheckpointManagerWrapper(
@@ -828,7 +831,8 @@ class AsyncActorRolloutRefWorker(Worker):
                 optimizer=None,
                 lr_scheduler=None,
                 hf_config=self.actor_model_config,  # same for actor and ref
-                tokenizer=self.tokenizer)
+                tokenizer=self.tokenizer,
+                processor=self.processor)
 
         ndtimeline.init_with_ray(self)
         torch.cuda.empty_cache()

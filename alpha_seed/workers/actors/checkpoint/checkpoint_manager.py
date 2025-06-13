@@ -8,7 +8,7 @@ import omegaconf
 import json
 import torch
 import torch.distributed
-from transformers import PretrainedConfig, PreTrainedTokenizer
+from transformers import PretrainedConfig, PreTrainedTokenizer, AutoProcessor
 import numpy as np
 import random
 from ray.actor import ActorHandle
@@ -30,7 +30,7 @@ class BaseCheckpointManager:
     """
 
     def __init__(self, model, optimizer: torch.optim.Optimizer, lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
-                 hf_config: PretrainedConfig, tokenizer: PreTrainedTokenizer):
+                 hf_config: PretrainedConfig, tokenizer: PreTrainedTokenizer, processor: AutoProcessor):
         self.previous_global_step = None
         self.previous_save_local_path = None
 
@@ -39,6 +39,7 @@ class BaseCheckpointManager:
         self.lr_scheduler = lr_scheduler
         self.hf_config = hf_config
         self.tokenizer = tokenizer
+        self.processor = processor
         self.ray_actor_name = ray.get_runtime_context().get_actor_name()
         self.rank = torch.distributed.get_rank()
 
@@ -94,6 +95,7 @@ class BaseCheckpointManager:
         os.makedirs(hf_local_path, exist_ok=True)
         self.hf_config.save_pretrained(hf_local_path)
         self.tokenizer.save_pretrained(hf_local_path)
+        self.processor.save_pretrained(hf_local_path)
         if hdfs_path is not None:
             ray.get(
                 ckpt_global_uploader_ref.register_upload_task.remote(role, global_step,
