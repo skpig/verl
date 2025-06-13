@@ -292,14 +292,15 @@ class AsyncSGLangRollout(BaseRollout):
         # It is used in the actor rollout to update sampling params before generating sequences
         new_kwargs = {"max_new_tokens": max_new_tokens}
         new_kwargs.update(kwargs)
-        with self.update_sampling_params(**new_kwargs):
-            output = await self._engine.async_generate(
-                prompt=None,  # because we have already convert it to prompt token id
-                return_logprob=True,
-                sampling_params=self.sampling_params,
-                input_ids=idx,
-                image_data=image,
-            )
+        copy_sampling_params = deepcopy(self.sampling_params)
+        copy_sampling_params.update(new_kwargs)
+        output = await self._engine.async_generate(
+            prompt=None,  # because we have already convert it to prompt token id
+            return_logprob=True,
+            sampling_params=copy_sampling_params,
+            input_ids=idx,
+            image_data=image,
+        )
         return output
 
     @GPUMemoryLogger(role="sglang async rollout", logger=logger)

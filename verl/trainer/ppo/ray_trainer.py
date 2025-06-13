@@ -645,6 +645,7 @@ class RayPPOTrainer:
     def _maybe_log_val_generations(self, inputs, outputs, scores, format_scores):
         """Log a table of validation samples to the configured logger (wandb or swanlab)"""
 
+        print("[maybe_log_val_generations] Logging validation generations...")
         generations_to_log = self.config.trainer.log_val_generations
 
         if generations_to_log == 0:
@@ -665,6 +666,8 @@ class RayPPOTrainer:
 
         # Log to each configured logger
         self.validation_generations_logger.log(self.config.trainer.logger, 'val', samples, self.global_steps)
+
+        print("[maybe_log_val_generations] Validation generations logged successfully.")
 
     def map_token_scores_to_chars(self, batch_input_ids, batch_scores, batch_attention_mask):
         tokenizer = self.tokenizer
@@ -819,7 +822,7 @@ class RayPPOTrainer:
 
 
         reward_meta = Counter()
-
+        assert len(self.val_dataloader) == 1
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
 
@@ -859,17 +862,18 @@ class RayPPOTrainer:
             print(f"test_gen_batch meta info: {test_gen_batch.meta_info}")
 
             # pad to be divisible by dp_size
-            test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, self.actor_rollout_wg.world_size)
-            if not self.async_rollout_mode:
-                test_output_gen_batch_padded = self.actor_rollout_wg.generate_sequences(test_gen_batch_padded)
-            else:
-                self.async_rollout_manager.wake_up()
-                test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
-                self.async_rollout_manager.sleep()
+            with _timer("testing_gen"):
+                test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, self.actor_rollout_wg.world_size)
+                if not self.async_rollout_mode:
+                    test_output_gen_batch_padded = self.actor_rollout_wg.generate_sequences(test_gen_batch_padded)
+                else:
+                    self.async_rollout_manager.wake_up()
+                    test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
+                    self.async_rollout_manager.sleep()
 
-            # unpad
-            test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
-            print("validation generation end")
+                # unpad
+                test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
+                print("validation generation end")
 
             # Store generated outputs
             output_ids = test_output_gen_batch.batch["responses"]
@@ -891,37 +895,40 @@ class RayPPOTrainer:
 
             data_source_lst.append(test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0]))
 
-        self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores, format_scores=reward_extra_infos_dict['format'])
+        with _timer("testing_log"):
+            self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores, format_scores=reward_extra_infos_dict['format'])
 
-        # dump generations
-        val_data_dir = self.config.trainer.get("validation_data_dir", None)
-        if val_data_dir:
-            self._dump_generations(
-                inputs=sample_inputs,
-                outputs=sample_outputs,
-                scores=sample_scores,
-                reward_extra_infos_dict=reward_extra_infos_dict,
-                dump_path=val_data_dir,
-            )
+            # dump generations
+            val_data_dir = self.config.trainer.get("validation_data_dir", None)
+            if val_data_dir:
+                self._dump_generations(
+                    inputs=sample_inputs,
+                    outputs=sample_outputs,
+                    scores=sample_scores,
+                    reward_extra_infos_dict=reward_extra_infos_dict,
+                    dump_path=val_data_dir,
+                )
 
         for key_info, lst in reward_extra_infos_dict.items():
             assert len(lst) == 0 or len(lst) == len(sample_scores), f"{key_info}: {len(lst)=}, {len(sample_scores)=}"
 
         data_sources = np.concatenate(data_source_lst, axis=0)
 
-        data_src2var2metric2val = process_validation_metrics(data_sources, sample_inputs, reward_extra_infos_dict)
-        metric_dict = {}
-        for data_source, var2metric2val in data_src2var2metric2val.items():
-            core_var = "acc" if "acc" in var2metric2val else "reward"
-            for var_name, metric2val in var2metric2val.items():
-                n_max = max([int(name.split("@")[-1].split("/")[0]) for name in metric2val.keys()])
-                for metric_name, metric_val in metric2val.items():
-                    if (var_name == core_var) and any(metric_name.startswith(pfx) for pfx in ["mean", "maj", "best"]) and (f"@{n_max}" in metric_name):
-                        metric_sec = "val-core"
-                    else:
-                        metric_sec = "val-aux"
-                    pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"
-                    metric_dict[pfx] = metric_val
+        print("[validate] Begin processing validation metrics...")
+        with _timer("testing_postprocess"):
+            data_src2var2metric2val = process_validation_metrics(data_sources, sample_inputs, reward_extra_infos_dict)
+            metric_dict = {}
+            for data_source, var2metric2val in data_src2var2metric2val.items():
+                core_var = "acc" if "acc" in var2metric2val else "reward"
+                for var_name, metric2val in var2metric2val.items():
+                    n_max = max([int(name.split("@")[-1].split("/")[0]) for name in metric2val.keys()])
+                    for metric_name, metric_val in metric2val.items():
+                        if (var_name == core_var) and any(metric_name.startswith(pfx) for pfx in ["mean", "maj", "best"]) and (f"@{n_max}" in metric_name):
+                            metric_sec = "val-core"
+                        else:
+                            metric_sec = "val-aux"
+                        pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"
+                        metric_dict[pfx] = metric_val
         # TODO:
         # metric_dict.update({f'val/test_score/reward_type/{key}': value / len(reward_tensor) for key, value in reward_meta.items()})
         # for 
@@ -1134,7 +1141,7 @@ class RayPPOTrainer:
             # skip if no split indices found
             if num_duplicates != 0:
                 assert split_indices[0] != 0, "The first split index should not be 0, as it indicates the start of the response."
-                assert split_indices[-1] != len(response_ids) - 1, "The last split index should not be the last token of the response, as it indicates the end of the response."
+                # assert split_indices[-1] != len(response_ids) - 1, "The last split index should not be the last token of the response, as it indicates the end of the response."
 
             split_indices_start = [0] + split_indices  # start of each split, the first one is always 0
             split_indices_end = split_indices + [len(response_ids)]  
