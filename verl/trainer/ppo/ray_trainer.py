@@ -1124,25 +1124,28 @@ class RayPPOTrainer:
         for i in range(len(batch)):
             raw_prompt_ids = batch_raw_prompt_ids[i] if isinstance(batch_raw_prompt_ids[i], list) else batch_raw_prompt_ids[i].tolist()
             prompt_ids = batch.batch["prompts"][i].tolist() # already left padded
-            responses_ids = batch.batch["responses"][i].tolist() # already right padded
-            assert prompt_ids + responses_ids == batch.batch["input_ids"][i].tolist(), "The input_ids should be the concatenation of prompt and response."
+            response_ids = batch.batch["responses"][i].tolist() # already right padded
+            assert prompt_ids + response_ids == batch.batch["input_ids"][i].tolist(), "The input_ids should be the concatenation of prompt and response."
 
-            split_indices = self.step_segmentor.search(response_ids=responses_ids)
+            split_indices = self.step_segmentor.search(response_ids=response_ids)
 
             num_duplicates = len(split_indices)
+
             # skip if no split indices found
-            if num_duplicates == 0:
-                continue
+            if num_duplicates != 0:
+                assert split_indices[0] != 0, "The first split index should not be 0, as it indicates the start of the response."
+                assert split_indices[-1] != len(response_ids) - 1, "The last split index should not be the last token of the response, as it indicates the end of the response."
 
-            assert split_indices[0] != 0, "The first split index should not be 0, as it indicates the start of the response."
-            assert split_indices[-1] != len(responses_ids) - 1, "The last split index should not be the last token of the response, as it indicates the end of the response."
+            split_indices_start = [0] + split_indices  # start of each split, the first one is always 0
+            split_indices_end = split_indices + [len(response_ids)]  
+            num_duplicates += 1
 
-            split_indices_start = [0] + split_indices[:-1]  # start of each split, the first one is always 0
-            reqId_to_respId_seqRange_map.extend([(i, start, end) for start, end in zip(split_indices_start, split_indices)])
+
+            reqId_to_respId_seqRange_map.extend([(i, start, end) for start, end in zip(split_indices_start, split_indices_end)])
             num_steps.append(num_duplicates)
         
-            new_data_proto_dict['query_lens'].extend([split_indices[j] for j in range(num_duplicates)])  # number of query tokens for each split
-            new_data_proto_dict['raw_prompt_ids'].extend([raw_prompt_ids + responses_ids[:split_indices[j]] for j in range(num_duplicates)]) # all requests are not padded
+            new_data_proto_dict['query_lens'].extend([split_indices_start[j] for j in range(num_duplicates)])  # number of query tokens for each split
+            new_data_proto_dict['raw_prompt_ids'].extend([raw_prompt_ids + response_ids[:split_indices_start[j]] for j in range(num_duplicates)]) # all requests are not padded
             for key in batch.non_tensor_batch:
                 new_data_proto_dict[key].extend([batch.non_tensor_batch[key][i]] * num_duplicates)  # repeat the non-tensor batch data
 

@@ -66,6 +66,18 @@ def get_kl_controller(kl_ctrl):
         raise NotImplementedError
 
 
+def compute_vineppo_advantage_return(
+    token_level_rewards: torch.Tensor,
+    values: torch.Tensor,
+    response_mask: torch.Tensor,
+    gamma: torch.Tensor,
+    lam: torch.Tensor,
+):
+    valid_response_lengths = response_mask.sum(dim=-1, keepdim=True) # (bs, 1)
+    reward = token_level_rewards.sum(dim=-1, keepdim=True) # (bs, 1)
+    advantage = token_level_rewards - values # (bs, response_length)
+
+
 def compute_gae_advantage_return(
     token_level_rewards: torch.Tensor,
     values: torch.Tensor,
