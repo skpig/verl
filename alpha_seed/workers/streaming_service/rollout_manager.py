@@ -342,6 +342,10 @@ class RolloutManager:
         train_batch = RolloutPool.dynamic_call(self.rollout_pool, "get_train_batch", return_batch_size)
         batch = DataProto.concat(train_batch)
 
+        if (key := 'model_output_mask') in batch.batch:
+            tensor = batch.batch[key]
+            tensor[tensor < 0] = 0
+
         if self._use_server:
             # maintain keys not handled in server mode
             batch.batch["prompts"] = batch.batch["input_ids"][:, :self.config.data.max_prompt_length]
@@ -738,7 +742,7 @@ class RolloutManager:
 
         if is_train and self.config.algorithm.use_model_output_mask:
             if (key := "model_output_mask") not in batch:
-                batch.batch[key] = _get_response_tensor(dtype=torch.int8, pad_val=0)
+                batch.batch[key] = _get_response_tensor(dtype=torch.int8, pad_val=-1)
             gen_batch_required_keys.append(key)
 
         gen_batch = batch.pop(batch_keys=gen_batch_required_keys)

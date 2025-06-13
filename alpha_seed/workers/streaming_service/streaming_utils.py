@@ -257,7 +257,7 @@ def pack_to_dataproto(prompts, tokenizer, data_pack: DataPack, config) -> DataPr
                                                   data_pack.response_model_output_mask,
                                                   max_new_tokens,
                                                   mode='model_output_mask',
-                                                  pad_token=0)
+                                                  pad_token=-1)
     else:
         response_model_output_mask = None
     response_ids = response_outputs["input_ids"][:, :max_new_tokens].to(torch.int32)
