@@ -1499,7 +1499,8 @@ class RayPPOTrainer(object):
         # Note that we start from step 1. After resume, we increment step by 1 to start next step
         self.global_step += 1
         start_step = self.global_step
-
+        rollout_counter = 0
+        rollout_pool_metrics = {}
         while True:
             for batch_dict in self.train_dataloader:
                 metrics = {}
