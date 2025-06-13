@@ -109,6 +109,7 @@ class RolloutManager:
         tokenizer: AutoTokenizer,
     ):
         self.config = config
+        self.config_dict = OmegaConf.to_container(self.config, resolve=True)
         self.logger = logger
         self.tokenizer = tokenizer
 
@@ -756,6 +757,8 @@ class RolloutManager:
                 if isinstance(agent_env, np.ndarray):
                     agent_env = agent_env.tolist()
                 gen_batch.non_tensor_batch['extra_data'][i].update({'agent_env': agent_env})
+        for i in range(len(gen_batch)):
+            gen_batch.non_tensor_batch['extra_data'][i].update({'config': self.config_dict})
 
         sample_kwargs = (self.config.actor_rollout_ref.rollout.train_generate_kwargs
                          if is_train else self.config.actor_rollout_ref.rollout.val_generate_kwargs)

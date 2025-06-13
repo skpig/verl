@@ -170,7 +170,7 @@ class QueryPlugin:
         self.tokenizer = None
         self.tp_group = None
         self.plugin_manager = None
-        self.futures.clear()
+        self.futures = []
         if is_finished:
             self.env_states = [
                 EnvStates(finished=env.finished, reward=env.reward, metrics=env.metrics) for env in self.envs
@@ -222,6 +222,9 @@ class QueryPlugin:
             # skip if reach max round
             return
         token = self.tokenizer.convert_ids_to_tokens([token_id])[0]
+        if token is None:
+            print(f"[ERROR]: get none token with id={token_id}")
+            return
         call_reqs = self.plugin_manager.add_token_match(token, state=self.plugin_match_state)
         if len(call_reqs) > 0:
             self.pending_call_reqs.extend(call_reqs)
@@ -235,7 +238,8 @@ class QueryPlugin:
                 inner_fut = self.plugin_manager.async_call(call_req=call_req,
                                                            envs=self.envs,
                                                            timeout=self.timeout,
-                                                           deps=None if dep_fut is None else [dep_fut])
+                                                           deps=None if dep_fut is None else [dep_fut],
+                                                           meta_info=self._query.meta_info)
             else:
                 inner_fut = None
             self.futures.append(WrappedFuture(inner_future=inner_fut))

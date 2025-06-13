@@ -1,7 +1,7 @@
 import asyncio
 from alpha_seed.workers.agents.plugins import create_plugin_from_name
 from alpha_seed.workers.agents.plugins.plugin_manager import PluginManager, PluginResponse
-from utils import get_basic_example_env, get_bbpe_tokenizer
+from .utils import get_basic_example_env, get_bbpe_tokenizer
 
 
 def test_function_call(monkeypatch):

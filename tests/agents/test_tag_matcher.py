@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from alpha_seed.workers.agents.plugins.tag_matcher import TagMatcher
 from transformers import AutoTokenizer
 from verl.utils.fs import copy_local_path_from_hdfs
-from utils import get_bbpe_tokenizer
+from .utils import get_bbpe_tokenizer
 
 
 def test_tag_matcher():

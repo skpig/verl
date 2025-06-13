@@ -19,10 +19,11 @@ def _select_rm_score_fn_from_external(module_filepath: str):
     return compute_score_fn
 
 
-def _select_rm_score_fn(reward_style):
-    if ((external_path := os.environ.get('EXTERNAL_REWARD_FN_PATH', None)) is not None) and \
-        os.path.isfile((external_path := os.path.join(external_path, f"{reward_style}.py"))):
-        return _select_rm_score_fn_from_external(external_path)
+def _select_rm_score_fn(reward_style, with_external=True):
+    if with_external:
+        if ((external_path := os.environ.get('EXTERNAL_REWARD_FN_PATH', None)) is not None) and \
+            os.path.isfile((external_path := os.path.join(external_path, f"{reward_style}.py"))):
+            return _select_rm_score_fn_from_external(external_path)
 
     if reward_style == "model-raw_score":
         return model_score_fn.raw_score

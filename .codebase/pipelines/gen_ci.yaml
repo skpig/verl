@@ -58,7 +58,7 @@ jobs:
           - pytest -n 4 -v tests/agents/test_example_env.py tests/agents/test_example_plugin.py tests/agents/test_query_plugin.py tests/agents/test_plugin_manager.py  tests/agents/test_tag_matcher.py
           - ray stop --force
           - ray start --num-cpus=100 --head
-          - pytest -n 4 -v tests/agents/test_e2e_gen.py
+          - pytest -n 4 -v tests/agents/test_e2e_gen.py tests/agents/test_call_server_in_rollout_actor.py tests/agents/test_reward_plugin.py
           - ray stop --force
       - name: rollout
         commands:

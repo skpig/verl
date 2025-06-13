@@ -3,7 +3,7 @@ import omegaconf
 import asyncio
 from alpha_seed.workers.agents.plugins.plugin_manager import PluginManager, PluginResponse
 from alpha_seed.workers.agents.envs import create_agent_envs_from_str
-from utils import get_plugin_config, get_basic_example_env, get_bbpe_tokenizer
+from .utils import get_plugin_config, get_basic_example_env, get_bbpe_tokenizer
 
 
 def test_call_from_sync():
@@ -48,7 +48,7 @@ def test_call_from_sync():
 
     resp = fut2.result()
     update_metrics(resp.metrics)
-    assert resp.plugin_resp.status == PluginResponse.Status.FAILED and resp.plugin_resp.output == 'Plugin example_plugin call failed: [TimeoutError()]'
+    assert resp.plugin_resp.status == PluginResponse.Status.FAILED and resp.plugin_resp.output == '<result></result>'
 
     assert all_metrics['example_plugin_success'] == 2
     assert all_metrics['example_plugin_failed'] == 1

@@ -10,7 +10,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from alpha_seed.workers.xperf_rollout.component.query import Query, batch_sync_tp_queries
 from alpha_seed.workers.xperf_rollout.component.query_plugin import TokenRole
-from utils import get_plugin_config, dist_worker
+from .utils import get_plugin_config, dist_worker
 import pytest
 
 

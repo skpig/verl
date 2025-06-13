@@ -114,6 +114,10 @@ class BasePlugin(ABC):
         pass
 
 
+class PluginRequireMetaInfo:
+    pass
+
+
 def create_plugin_from_name(plugin_name: str, tokenizer: AutoTokenizer, *args, **kwargs) -> BasePlugin:
     import importlib
     external_path = os.environ.get('EXTERNAL_PLUGIN_PATH', None)

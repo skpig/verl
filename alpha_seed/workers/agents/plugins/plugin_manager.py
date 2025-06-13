@@ -4,6 +4,7 @@ import time
 import contextlib
 from alpha_seed.workers.agents.plugins import (
     BasePlugin,
+    PluginRequireMetaInfo,
     PluginResponse,
     create_plugin_from_name,
 )
@@ -98,13 +99,22 @@ class PluginManager:
         envs: List[BaseEnv],
         timeout: Union[float, None] = None,
         deps: List[asyncio.Future] = None,
+        **kwargs,
     ) -> PluginCallResp:
         if deps is not None:
             await asyncio.gather(*deps, return_exceptions=True)
 
         name = call_req.name
         plugin = self._plugins[name]
-        task = asyncio.wait_for(asyncio.create_task(plugin(call_req.call_str, envs=envs)), timeout=timeout)
+        plugin_args = {
+            'call_str': call_req.call_str,
+            'envs': envs,
+        }
+        if isinstance(plugin, PluginRequireMetaInfo):
+            plugin_args.update({
+                'meta_info': kwargs['meta_info'],
+            })
+        task = asyncio.wait_for(asyncio.create_task(plugin(**plugin_args)), timeout=timeout)
         timer = AsyncTimer()
         metrics = dict()
         try:
@@ -113,7 +123,7 @@ class PluginManager:
             metrics[f"{name}_success"] = 1
         except Exception as e:
             metrics[f"{name}_failed"] = 1
-            plugin_resp = PluginResponse.failed(output=f"Plugin {name} call failed: [{repr(e)}]")
+            plugin_resp = PluginResponse.failed(output=plugin.format_ret(str(e)))
 
         return PluginCallResp(name, plugin_resp=plugin_resp, metrics=metrics)
 
@@ -123,11 +133,12 @@ class PluginManager:
         envs: List[BaseEnv],
         timeout: Union[float, None] = None,
         deps: List[concurrent.futures.Future] = None,
+        **kwargs,
     ) -> concurrent.futures.Future[List[PluginCallResp]]:
 
         aio_deps = None if deps is None else [asyncio.wrap_future(fut, loop=self._loop) for fut in deps]
-        future = asyncio.run_coroutine_threadsafe(self.__call__(call_req, envs=envs, timeout=timeout, deps=aio_deps),
-                                                  self._loop)
+        future = asyncio.run_coroutine_threadsafe(
+            self.__call__(call_req, envs=envs, timeout=timeout, deps=aio_deps, **kwargs), self._loop)
         return future
 
 

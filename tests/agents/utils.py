@@ -57,3 +57,52 @@ def get_bbpe_tokenizer():
         "hdfs://haruna/home/byte_data_seed/hdd_hldy/user/binxingyan/bbpe155k-v6.4.3-ml.pret")
     tokenizer = AutoTokenizer.from_pretrained(local_path)
     return tokenizer
+
+
+def get_math_test_dataproto(config, tokenizer):
+    import pandas as pd
+    import numpy as np
+    import uuid
+    from mono_rl import DataProto
+
+    sys_prompt = r"""Solve the following math problem."""
+    qa_list = [
+        (f"{sys_prompt}\nCalculate 1 + 2.", "3"),
+        (f"{sys_prompt}\nCalculate 3 + 5.", "8"),
+        (f"{sys_prompt}\nCalculate 5.3 + 2.4.", "7.7"),
+        (f"{sys_prompt}\nWhat's the sum of 100 and 201.", "301"),
+    ]
+
+    data = []
+    for question, answer in qa_list:
+        prompt = [{"role": "user", "content": question}]
+        reward_model = {'style': 'rule-lighteval/MATH', 'ground_truth': str(answer)}
+        data.append({"prompt": prompt, "reward_model": reward_model})
+    df = pd.DataFrame(data)
+
+    sentences = tokenizer.apply_chat_template(
+        [prompt for prompt in df.prompt.tolist()],
+        add_generation_prompt=True,
+        tokenize=False,
+    )
+    input_data = tokenizer(
+        sentences,
+        padding="max_length",
+        return_tensors="pt",
+        padding_side='left',
+        max_length=config.data.max_prompt_length,
+    )
+
+    input_ids = input_data["input_ids"]
+    attention_mask = input_data["attention_mask"]
+    data = {
+        'input_ids': input_ids,
+        'attention_mask': attention_mask,
+    }
+
+    batch = DataProto.from_dict(data)
+    batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(batch))], dtype=object)
+    batch.non_tensor_batch['rollout_id'] = np.array([str(uuid.uuid4()) for _ in range(len(batch))], dtype=object)
+    batch.non_tensor_batch['reward_model'] = np.array(df['reward_model'].tolist(), dtype=object)
+    batch.check_consistency()
+    return batch
