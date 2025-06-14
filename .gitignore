@@ -124,3 +124,5 @@ logs
 log
 outputs
 old_datasets/
+logprobs.txt
+*.tar
