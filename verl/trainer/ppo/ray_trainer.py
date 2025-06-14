@@ -811,7 +811,7 @@ class RayPPOTrainer:
             wandb.log_artifact(artifact)
 
 
-    def _validate(self):
+    def _validate(self, logger):
         data_source_lst = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
 
@@ -914,8 +914,8 @@ class RayPPOTrainer:
 
         data_sources = np.concatenate(data_source_lst, axis=0)
 
-        print("[validate] Begin processing validation metrics...")
-        with _timer("testing_postprocess"):
+        @ray.remote
+        def compute_validation_metrics(logger, step, data_sources, sample_inputs, reward_extra_infos_dict):
             data_src2var2metric2val = process_validation_metrics(data_sources, sample_inputs, reward_extra_infos_dict)
             metric_dict = {}
             for data_source, var2metric2val in data_src2var2metric2val.items():
@@ -929,12 +929,12 @@ class RayPPOTrainer:
                             metric_sec = "val-aux"
                         pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"
                         metric_dict[pfx] = metric_val
-        # TODO:
-        # metric_dict.update({f'val/test_score/reward_type/{key}': value / len(reward_tensor) for key, value in reward_meta.items()})
-        # for 
+            # TODO:
+            # metric_dict.update({f'val/test_score/reward_type/{key}': value / len(reward_tensor) for key, value in reward_meta.items()})
 
+            logger.log(data=metric_dict, step=step)
 
-        return metric_dict
+        return compute_validation_metrics.remote(logger, self.global_steps, data_sources, sample_inputs, reward_extra_infos_dict)
 
     def init_workers(self):
         """Init resource pool and worker group"""
@@ -1248,15 +1248,18 @@ class RayPPOTrainer:
             config=OmegaConf.to_container(self.config, resolve=True),
             resume_step=self.global_steps,
         )
+        ray_task_list = []
 
         # perform validation before training
         # currently, we only support validation using the reward_function.
         if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True) and self.global_steps == 0:
-            val_metrics = self._validate()
-            assert val_metrics, f"{val_metrics=}"
-            pprint(f"Initial validation metrics: {val_metrics}")
-            logger.log(data=val_metrics, step=self.global_steps)
+            ray_task_list.append(self._validate(logger))
+            # val_metrics = self._validate()
+            # assert val_metrics, f"{val_metrics=}"
+            # pprint(f"Initial validation metrics: {val_metrics}")
+            # logger.log(data=val_metrics, step=self.global_steps)
             if self.config.trainer.get("val_only", False):
+                ray.get(ray_task_list)
                 return
 
         # add tqdm
@@ -1452,11 +1455,16 @@ class RayPPOTrainer:
 
                     # validate
                     if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
+                        if len(ray_task_list) > 0:
+                            # wait until previous ray_task is finished
+                            [ray.get(task) for task in ray_task_list]
                         with _timer("testing", timing_raw):
-                            val_metrics: dict = self._validate()
-                            if is_last_step:
-                                last_val_metrics = val_metrics
-                        metrics.update(val_metrics)
+                            # hackin: log the data within the validation function as a ray task
+                            ray_task_list.append(self._validate(logger))
+                        #     val_metrics: dict = self._validate()
+                        #     if is_last_step:
+                        #         last_val_metrics = val_metrics
+                        # metrics.update(val_metrics)
 
                     if self.config.trainer.save_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.save_freq == 0):
                         with _timer("save_checkpoint", timing_raw):
