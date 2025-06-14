@@ -915,7 +915,7 @@ class RayPPOTrainer:
         data_sources = np.concatenate(data_source_lst, axis=0)
 
         @ray.remote
-        def compute_validation_metrics(logger, step, data_sources, sample_inputs, reward_extra_infos_dict):
+        def compute_validation_metrics(step, data_sources, sample_inputs, reward_extra_infos_dict):
             data_src2var2metric2val = process_validation_metrics(data_sources, sample_inputs, reward_extra_infos_dict)
             metric_dict = {}
             for data_source, var2metric2val in data_src2var2metric2val.items():
@@ -929,12 +929,10 @@ class RayPPOTrainer:
                             metric_sec = "val-aux"
                         pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"
                         metric_dict[pfx] = metric_val
-            # TODO:
-            # metric_dict.update({f'val/test_score/reward_type/{key}': value / len(reward_tensor) for key, value in reward_meta.items()})
 
-            logger.log(data=metric_dict, step=step)
+            return metric_dict, step
 
-        return compute_validation_metrics.remote(logger, self.global_steps, data_sources, sample_inputs, reward_extra_infos_dict)
+        return compute_validation_metrics.remote(self.global_steps, data_sources, sample_inputs, reward_extra_infos_dict)
 
     def init_workers(self):
         """Init resource pool and worker group"""
@@ -1253,19 +1251,22 @@ class RayPPOTrainer:
             config=OmegaConf.to_container(self.config, resolve=True),
             resume_step=self.global_steps,
         )
-        ray_task_list = []
+        ray_validate_task_list = []
 
         # perform validation before training
         # currently, we only support validation using the reward_function.
         if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True) and self.global_steps == 0:
-            ray_task_list.append(self._validate(logger))
+            ray_validate_task_list.append(self._validate(logger))
             # val_metrics = self._validate()
             # assert val_metrics, f"{val_metrics=}"
             # pprint(f"Initial validation metrics: {val_metrics}")
             # logger.log(data=val_metrics, step=self.global_steps)
             if self.config.trainer.get("val_only", False):
-                ray.get(ray_task_list)
+                ray.get(ray_validate_task_list)
                 return
+            prev_metric, prev_step = ray.get(ray_validate_task_list[0])
+            logger.log(data=prev_metric, step=prev_step, commit=True)
+
 
         # add tqdm
         progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
@@ -1458,14 +1459,19 @@ class RayPPOTrainer:
                                 dump_path=rollout_data_dir,
                             )
 
+                    # log the previous validation metrics
+                    if len(ray_validate_task_list) > 0:
+                        # wait until previous ray_task is finished
+                        for task in ray_validate_task_list:
+                            prev_metric, prev_step = ray.get(task)
+                            logger.log(data=prev_metric, step=prev_step, commit=True)
+                        ray_validate_task_list = []
+
                     # validate
                     if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
-                        if len(ray_task_list) > 0:
-                            # wait until previous ray_task is finished
-                            [ray.get(task) for task in ray_task_list]
                         with _timer("testing", timing_raw):
                             # hackin: log the data within the validation function as a ray task
-                            ray_task_list.append(self._validate(logger))
+                            ray_validate_task_list.append(self._validate(logger))
                         #     val_metrics: dict = self._validate()
                         #     if is_last_step:
                         #         last_val_metrics = val_metrics
@@ -1507,6 +1513,9 @@ class RayPPOTrainer:
 
 
                 if is_last_step:
+                    for task in ray_validate_task_list:
+                        prev_metric, prev_step = ray.get(task)
+                        logger.log(data=prev_metric, step=prev_step)
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
                     # save train result to local file
