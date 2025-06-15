@@ -1264,8 +1264,6 @@ class RayPPOTrainer:
             if self.config.trainer.get("val_only", False):
                 ray.get(ray_validate_task_list)
                 return
-            prev_metric, prev_step = ray.get(ray_validate_task_list[0])
-            logger.log(data=prev_metric, step=prev_step, commit=True)
 
 
         # add tqdm
@@ -1464,7 +1462,7 @@ class RayPPOTrainer:
                         # wait until previous ray_task is finished
                         for task in ray_validate_task_list:
                             prev_metric, prev_step = ray.get(task)
-                            logger.log(data=prev_metric, step=prev_step, commit=True)
+                            logger.log(data=prev_metric, step=prev_step)
                         ray_validate_task_list = []
 
                     # validate
