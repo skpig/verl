@@ -303,8 +303,7 @@ def vineppo_reward_calculation_async(new_data_proto, reqId_to_respId_seqRange_ma
     # calculate the value
     rollout_idx = 0
     for i, seq_start, seq_end in reqId_to_respId_seqRange_map:
-        # mean_reward = sum(reward_list[rollout_idx:rollout_idx + mc_estimate_n]) / mc_estimate_n
-        mean_reward = random.random() # for debug
+        mean_reward = sum(reward_list[rollout_idx:rollout_idx + mc_estimate_n]) / mc_estimate_n
         value_tensor[i, seq_start:seq_end] = mean_reward
 
         rollout_idx += mc_estimate_n
