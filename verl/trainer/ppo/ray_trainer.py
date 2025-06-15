@@ -1132,7 +1132,7 @@ class RayPPOTrainer:
 
                     batch.batch['response_mask'] = compute_response_mask(batch)
                     metrics['perf/total_dedup_num_response_tokens'] += batch.batch['response_mask'].sum().item()
-                    metrics['perf/total_dedup_num_prompt_tokens'] += sum(len(i) for i in gen_batch.non_tensor_batch['total_num_prompt_tokens'])
+                    metrics['perf/total_dedup_num_prompt_tokens'] += sum(len(i) for i in gen_batch.non_tensor_batch['raw_prompt_ids'])
                     # compute_rollout_metrics(batch=batch, tokenizer=self.tokenizer)
                     rollout_metrics = compute_rollout_metrics.remote(batch=batch, tokenizer=self.tokenizer)
 
