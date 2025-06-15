@@ -209,6 +209,10 @@ def process_dapomath_dataset():
             return example['ability'] == "MATH" and len(extracted_golds) > 0
             return False
         dataset = dataset.filter(filter_fn)
+        # 保存过滤后的数据集到 parquet 文件
+        if not os.path.exists(os.path.dirname(filtered_dataset_path)):
+            makedirs(os.path.dirname(filtered_dataset_path))
+        dataset.to_parquet(filtered_dataset_path)
     print("Size of DAPO-Math dataset after filtering:", len(dataset))
 
     # 分割数据集为训练集和测试集
