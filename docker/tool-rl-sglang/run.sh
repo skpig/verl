@@ -11,8 +11,6 @@ docker run \
     -v ${MY_DATA_DIR}:/data \
     -v ${MY_MODEL_DIR}:/pretrain \
     --ipc=host \
-    --network=host \
-    --add-host=host.docker.internal:host-gateway \
     --privileged \
     --name vineppo \
     tool-rl-sglang \
