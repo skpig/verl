@@ -54,6 +54,7 @@ jobs:
         commands:
           - export NCCL_SHM_DISABLE=1
           - export PYTHONPATH=$PYTHONPATH:/opt/tiger/mono_rl
+          - export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
           - cd -
           - pytest -n 4 -v tests/agents/test_example_env.py tests/agents/test_example_plugin.py tests/agents/test_query_plugin.py tests/agents/test_plugin_manager.py  tests/agents/test_tag_matcher.py
           - ray stop --force
@@ -64,6 +65,7 @@ jobs:
         commands:
           - export NCCL_SHM_DISABLE=1
           - export PYTHONPATH=$PYTHONPATH:/opt/tiger/mono_rl
+          - export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
           - cd -
           - pytest -n 4 -v tests/rollout/test_cache_manager.py
           - ray stop --force

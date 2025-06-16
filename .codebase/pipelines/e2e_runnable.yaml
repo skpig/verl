@@ -57,6 +57,7 @@ jobs:
           - export NCCL_SHM_DISABLE=1
           - export ALPHASEED_USE_NDTIMELINE=1
           - export PYTHONPATH=/opt/tiger/mono_rl:$PYTHONPATH
+          - export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
           - wandb offline
           - ray stop --force
           - ray start --num-cpus=100 --head

@@ -104,7 +104,7 @@ def get_test_config():
                 "rollout_pool": {
                     "warmup_step": 0,
                 },
-                "gpu_memory_utilization": 0.5,
+                "gpu_memory_utilization": 0.2,
                 "plugin": {
                     'enable': True,
                     'names': ['reward'],

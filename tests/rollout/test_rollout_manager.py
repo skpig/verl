@@ -73,7 +73,7 @@ def get_common_config():
                 "rollout_pool": {
                     "warmup_step": 0,
                 },
-                "gpu_memory_utilization": 0.5
+                "gpu_memory_utilization": 0.4
             },
         },
         "trainer": {

@@ -146,6 +146,7 @@ python3 tasks/main_ppo.py \
     +actor_rollout_ref.rollout.use_vllm=False \
     actor_rollout_ref.rollout.micro_batch_size=${gen_micro_batch_size} \
     actor_rollout_ref.rollout.log_prob_micro_batch_size=${infer_micro_batch_size} \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.2 \
     trainer.offload_train_memory=${offload_train_memory} \
     critic.profile.enable=False \
     critic.profile.upload_to_mlx=False \
