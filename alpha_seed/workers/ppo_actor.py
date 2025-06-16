@@ -170,6 +170,7 @@ class DataParallelPPOActor(BasePPOActor):
                                            labels=input_ids_rmpad_rolled,
                                            use_cache=False,
                                            compute_entropy=compute_entropy,
+                                           temperature=temperature,
                                            **image_kwargs)
                 full_entropy_rmpad, full_log_probs_rmpad = output.entropy, output.log_probs
 
