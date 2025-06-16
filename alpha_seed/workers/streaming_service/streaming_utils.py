@@ -1,13 +1,13 @@
 import os
 import random
 import socket
-
+import asyncio
 import ray
 import torch
 import numpy as np
 import torch.nn.functional as F
 from typing import *
-
+import aiohttp, copy
 from mono_rl import DataProto
 
 
@@ -385,3 +385,64 @@ def get_free_port_for_nccl_primitive():
 
 def is_ipv6(ip):
     return ':' in ip
+
+
+async def chat_completions(content, meta_info, config, host, port: int):
+    if is_ipv6(host):
+        host = f'[{host}]'
+    try:
+        timeout = aiohttp.ClientTimeout(total=9600)
+        session = aiohttp.ClientSession(timeout=timeout)
+        generation_kwargs = meta_info['generation_kwargs']
+        async with session.post(url=f"http://{host}:{port}/chat/completions",
+                                headers={"Authorization": "Bearer token-abc123"},
+                                json={
+                                    "model": "rollout",
+                                    "messages": content,
+                                    "top_p": generation_kwargs['top_p'],
+                                    "top_k": generation_kwargs['top_k'],
+                                    "temperature": generation_kwargs['temperature'],
+                                    "max_tokens": generation_kwargs['max_new_tokens'],
+                                    "max_length": config.prompt_length + config.response_length,
+                                    "meta_info": meta_info,
+                                },
+                                timeout=timeout) as resp:
+            ret = await resp.json()
+            assert resp.status == 200, f"chat_completions failed msg: {ret}"
+            return ret
+    except Exception as e:
+        raise (e)
+    finally:
+        await session.close()
+
+
+async def internal_call(item, config, host, port: int):
+    completion = None
+    try:
+        item.batch = item.batch.reshape(-1)
+        input_ids = item.batch['input_ids']
+        attention_mask = item.batch['attention_mask']
+        valid_input_len = torch.sum(attention_mask)
+        prompt_ids = input_ids[0, -valid_input_len:].tolist()
+        data = {"prompt": prompt_ids}
+        meta_info = copy.copy(item.meta_info)
+        # required for eos callback
+        meta_info['uid'] = item.non_tensor_batch['uid'][0]
+        meta_info['reward_model'] = item.non_tensor_batch['reward_model'][0]
+        meta_info['server_meta'] = {
+            'host': host,
+            'port': port,
+        }
+        # required for tool calling
+        if (key := 'extra_data') in item.non_tensor_batch:
+            meta_info[key] = item.non_tensor_batch[key][0]
+
+        completion = await chat_completions(data, meta_info, config, host, port)
+    except asyncio.CancelledError:
+        # Handle task cancellation (e.g., cleanup)
+        print("Request was cancelled!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        raise  # Re-raise to propagate the cancellation
+    except Exception as e:
+        print(f"Error occurred!!!!!!!!!!!!!!!!!!", e)
+        raise  # Re-raise the exception to propagate it further
+    return completion

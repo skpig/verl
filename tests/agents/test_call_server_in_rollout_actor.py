@@ -50,7 +50,7 @@ class SummaryPlugin(BasePlugin, PluginRequireMetaInfo):
 
         completion = await chat_completions(data, new_meta_info, config, server_meta['host'], server_meta['port'])
 
-        from alpha_seed.workers.agents import DataPack
+        from alpha_seed.workers.agents.handlers import DataPack
         data_pack = DataPack.create_from_completion_dict(completion['choices'][0]['message'])
         text = self.tokenizer.decode(data_pack.response_outputs[0], skip_special_tokens=False)
 

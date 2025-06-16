@@ -32,8 +32,8 @@ from alpha_seed.trainer.tensorcore_collect import tensorcore_collection
 from alpha_seed.utils.observility.pretty_print import pprint
 from alpha_seed.utils.functional import print_dataproto_size
 from alpha_seed.workers.streaming_service.streaming_utils import record_xperf_metrics
-from alpha_seed.workers.agents import select_handler_fn
-from alpha_seed.workers.agents import TaskContext
+from alpha_seed.workers.agents.handlers import select_handler_fn
+from alpha_seed.workers.agents.handlers import TaskContext
 from alpha_seed.workers.streaming_service.streaming_utils import pad, process_output
 
 

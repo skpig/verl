@@ -1,0 +1,41 @@
+from dataclasses import dataclass
+from typing import Callable, Dict
+import importlib
+import pkgutil
+from omegaconf import DictConfig
+
+
+@dataclass
+class TaskContext:
+    config: DictConfig
+    tokenizer: object
+    global_step: int
+    server_host: str
+    server_port: int
+
+
+def auto_import_submodules(package_name: str):
+    package = importlib.import_module(package_name)
+    for _, name, _ in pkgutil.walk_packages(package.__path__, package.__name__ + "."):
+        importlib.import_module(name)
+
+
+_HANDLER_REGISTRY: Dict[str, Callable] = {}
+
+
+def register_handler(name: str):
+
+    def decorator(fn: Callable):
+        _HANDLER_REGISTRY[name] = fn
+        return fn
+
+    return decorator
+
+
+def select_handler_fn(handler_type: str) -> Callable:
+    if handler_type not in _HANDLER_REGISTRY:
+        raise NotImplementedError(f"unsupported handler type: {handler_type}")
+    return _HANDLER_REGISTRY[handler_type]
+
+
+auto_import_submodules("alpha_seed.workers.agents.handlers")
