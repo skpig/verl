@@ -17,6 +17,7 @@
 import copy
 import logging
 import os
+import json
 import re
 from collections import defaultdict
 from typing import List, Optional, Union
@@ -197,6 +198,9 @@ class RLHFDataset(Dataset):
             )
 
             print(f"filter dataset len: {len(self.dataframe)}")
+        
+        print("==== Example Dataset ====")
+        print(json.dumps(self.dataframe[0], indent=2, ensure_ascii=False))
 
     def resume_dataset_state(self):
         self.serialize_dataset = not hasattr(self, "original_data_files")

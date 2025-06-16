@@ -83,6 +83,7 @@ def run_ppo(config) -> None:
 class TaskRunner:
     def run(self, config):
         # print initial config
+        import traceback
         from pprint import pprint
 
         from omegaconf import OmegaConf
@@ -187,7 +188,16 @@ class TaskRunner:
             train_sampler=train_sampler,
         )
         trainer.init_workers()
-        trainer.fit()
+        try:
+            trainer.fit()
+        except KeyboardInterrupt:
+            print("Training interrupted by user. Shutting down workers...")
+            for task in trainer.ray_validate_task_list:
+                prev_metric, prev_step = ray.get(task)
+                self.fit_logger.log(data=prev_metric, step=prev_step)
+            traceback.print_exc()
+
+            
 
 
 def create_rl_dataset(data_paths, data_config, tokenizer, processor):
