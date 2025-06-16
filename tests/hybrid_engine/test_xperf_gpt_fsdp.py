@@ -224,8 +224,6 @@ def main(global_config):
         'attention_mask': attention_mask,
         'off_policy_steps': torch.zeros(input_ids.shape[0], global_config.data.max_response_length),
         'rollout_log_probs': torch.randn(input_ids.shape[0], global_config.data.max_response_length),
-        'probs_gt_threshold_num': torch.zeros(input_ids.shape[0], global_config.data.max_response_length),
-        'probs_lt_threshold_sum': torch.zeros(input_ids.shape[0], global_config.data.max_response_length),
     }
 
     non_tensors = {

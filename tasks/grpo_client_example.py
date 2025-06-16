@@ -35,7 +35,7 @@ def init_client():
 
 # todo: fixme
 def set_default_values(batch, max_response_length):
-    missing_keys = ["rollout_log_probs", "probs_gt_threshold_num", "probs_lt_threshold_sum", "off_policy_steps"]
+    missing_keys = ["rollout_log_probs", "off_policy_steps"]
     for key in missing_keys:
         if key not in batch:
             batch.batch[key] = torch.zeros(batch.batch['input_ids'].shape[0],

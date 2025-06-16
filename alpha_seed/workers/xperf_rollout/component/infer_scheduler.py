@@ -179,9 +179,11 @@ class InferScheduler():
             if self.context_only:
                 next_tokens = None
             else:
-                next_tokens, log_probs, probs_gt_threshold_num, probs_lt_threshold_sum = self.sampler.sample(
-                    logits, need_torch_tensor=True, history_ids=history_ids, sample_kwargs=sample_kwargs)
-            return next_tokens, accepted_len, target_hidden_states, log_probs, probs_gt_threshold_num, probs_lt_threshold_sum
+                next_tokens, log_probs, = self.sampler.sample(logits,
+                                                              need_torch_tensor=True,
+                                                              history_ids=history_ids,
+                                                              sample_kwargs=sample_kwargs)
+            return next_tokens, accepted_len, target_hidden_states, log_probs
         else:
             # forward mtp spec
             accpeted_tokens, accepted_len, target_hidden_states = self.engine.forward_spec(
@@ -198,4 +200,4 @@ class InferScheduler():
             target_hidden_states = [
                 hidden_states[:accepted_len[i] + 1] for i, hidden_states in enumerate(target_hidden_states)
             ]
-            return accpeted_tokens, accepted_len, target_hidden_states, None, None, None
+            return accpeted_tokens, accepted_len, target_hidden_states, None

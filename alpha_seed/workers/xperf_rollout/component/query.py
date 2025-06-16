@@ -27,8 +27,6 @@ class Query:
     input_len: Optional[int]
     new_token_ids: Optional[List[int]]
     new_token_log_probs: Optional[List[int]]
-    probs_gt_threshold_num: Optional[List[int]]
-    probs_lt_threshold_sum: Optional[List[int]]
     kv_slot_ids: Optional[List[int]]
     is_context_computing: bool
     new_token_len: int
@@ -75,8 +73,6 @@ class Query:
         self.is_context_computing = True
         self.new_token_ids = []
         self.new_token_log_probs = []
-        self.probs_gt_threshold_num = []
-        self.probs_lt_threshold_sum = []
         self.kv_slot_ids = []
         self.new_token_len = 0
         self.output_prompt = ""
@@ -154,11 +150,9 @@ class Query:
     def output_tokens(self) -> List[int]:
         return (self.input_ids + self.new_token_ids)[self.original_input_len:]
 
-    def add_token(self, token_id, accepted_len=-1, log_prob=0.0, probs_gt_threshold_num=0, probs_lt_threshold_sum=0.0):
+    def add_token(self, token_id, accepted_len=-1, log_prob=0.0):
         self.accepted_len.append(accepted_len)
         self.new_token_log_probs.append(log_prob)
-        self.probs_gt_threshold_num.append(probs_gt_threshold_num)
-        self.probs_lt_threshold_sum.append(probs_lt_threshold_sum)
 
         self.new_token_ids.append(token_id)
         self.is_context_computing = False

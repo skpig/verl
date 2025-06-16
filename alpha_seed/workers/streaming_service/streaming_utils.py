@@ -178,8 +178,6 @@ from dataclasses import dataclass
 @dataclass
 class DataPack:
     response_log_probs: list
-    response_probs_gt_threshold_num: list
-    response_probs_lt_threshold_sum: list
     this_turn_off_policy_steps: list
     response_outputs: list
     response_model_output_mask: list
@@ -191,8 +189,6 @@ class DataPack:
     def create_from_completion(cls, message):
         data_pack = DataPack(response_outputs=[message.raw_output_ids],
                              response_log_probs=[message.response_log_probs],
-                             response_probs_gt_threshold_num=[message.response_probs_gt_threshold_num],
-                             response_probs_lt_threshold_sum=[message.response_probs_lt_threshold_sum],
                              response_model_output_mask=[message.model_output_mask],
                              this_turn_off_policy_steps=[[-1 for _ in range(len(message.raw_output_ids))]],
                              is_finished=[message.is_finished],
@@ -204,8 +200,6 @@ class DataPack:
     def create_from_completion_dict(cls, message):
         data_pack = DataPack(response_outputs=[message['raw_output_ids']],
                              response_log_probs=[message['response_log_probs']],
-                             response_probs_gt_threshold_num=[message['response_probs_gt_threshold_num']],
-                             response_probs_lt_threshold_sum=[message['response_probs_lt_threshold_sum']],
                              response_model_output_mask=[message['model_output_mask']],
                              this_turn_off_policy_steps=[[-1 for _ in range(len(message['raw_output_ids']))]],
                              is_finished=[message['is_finished']],
@@ -223,8 +217,6 @@ def pack_to_dataproto(prompts, tokenizer, data_pack: DataPack, config) -> DataPr
     off_policy_model_output_mask = prompts.batch.get('model_output_mask', None)
     off_turn_off_policy_steps = prompts.batch["off_policy_steps"]
     off_policy_response_log_probs = prompts.batch["rollout_log_probs"]
-    off_policy_probs_gt_threshold_num = prompts.batch["probs_gt_threshold_num"]
-    off_policy_probs_lt_threshold_sum = prompts.batch["probs_lt_threshold_sum"]
 
     from unittest.mock import patch
     # remove warning
@@ -240,14 +232,6 @@ def pack_to_dataproto(prompts, tokenizer, data_pack: DataPack, config) -> DataPr
                                       data_pack.response_log_probs,
                                       max_new_tokens,
                                       mode="log_prob")
-    response_probs_gt_threshold_num = _postprocess(off_policy_probs_gt_threshold_num,
-                                                   data_pack.response_probs_gt_threshold_num,
-                                                   max_new_tokens,
-                                                   mode="probs_gt_threshold_num")
-    response_probs_lt_threshold_sum = _postprocess(off_policy_probs_lt_threshold_sum,
-                                                   data_pack.response_probs_lt_threshold_sum,
-                                                   max_new_tokens,
-                                                   mode="probs_lt_threshold_sum")
     response_off_policy = _postprocess(off_turn_off_policy_steps,
                                        data_pack.this_turn_off_policy_steps,
                                        max_new_tokens,
@@ -269,8 +253,6 @@ def pack_to_dataproto(prompts, tokenizer, data_pack: DataPack, config) -> DataPr
     # all the tp ranks should contain the same data here. data in all ranks are valid
     batch = {
         'rollout_log_probs': response_log_probs.to(torch.bfloat16),
-        'probs_gt_threshold_num': response_probs_gt_threshold_num.to(torch.bfloat16),
-        'probs_lt_threshold_sum': response_probs_lt_threshold_sum.to(torch.bfloat16),
         'input_ids': input_ids.to(torch.int32),  # here input_ids become the whole sentences
         'attention_mask': attention_mask.to(torch.int8),
         'is_finished': torch.Tensor(data_pack.is_finished).to(torch.int8),

@@ -162,8 +162,6 @@ def apply_kl_penalty(data: DataProto,
                      kl_penalty='kl',
                      use_model_output_mask=False):
     rollout_log_probs = data.batch['rollout_log_probs']
-    probs_gt_threshold_num = data.batch['probs_gt_threshold_num']
-    probs_lt_threshold_sum = data.batch['probs_lt_threshold_sum']
     old_log_probs = data.batch['old_log_probs']
     responses = data.batch['responses']
     response_length = responses.size(1)
@@ -213,9 +211,7 @@ def apply_kl_penalty(data: DataProto,
     metrics.update({
         'rollout/kl_diff_max': kl_diff_max,
         'rollout/kl_diff_max_rollout_log_probs': rollout_log_probs_max,
-        'rollout/kl_diff_max_old_log_probs': old_log_probs_max,
-        'prob/probs_gt_threshold_num': masked_mean(probs_gt_threshold_num, mask=response_mask),
-        'prob/probs_lt_threshold_sum': masked_mean(probs_lt_threshold_sum, mask=response_mask)
+        'rollout/kl_diff_max_old_log_probs': old_log_probs_max
     })
 
     kl_diff_min = kl_diff.min().item()

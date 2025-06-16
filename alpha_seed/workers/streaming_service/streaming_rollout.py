@@ -469,8 +469,6 @@ class AsyncXPerfGPTRollout(object):
 
             response_outputs = []
             response_log_probs = []
-            response_probs_gt_threshold_num = []
-            response_probs_lt_threshold_sum = []
             is_finished = []
             off_policy_steps = []
             model_output_masks = []
@@ -480,8 +478,6 @@ class AsyncXPerfGPTRollout(object):
                 response_output_ids = (v.input_ids + v.new_token_ids)[len(prompt):]
                 response_outputs.append(response_output_ids)
                 response_log_probs.append(v.new_token_log_probs)
-                response_probs_gt_threshold_num.append(v.probs_gt_threshold_num)
-                response_probs_lt_threshold_sum.append(v.probs_lt_threshold_sum)
                 is_finished.append(v.is_finished)
                 off_policy_steps.append([-1] * len(v.new_token_log_probs))
                 model_output_masks.append(v.model_output_mask)
@@ -504,8 +500,6 @@ class AsyncXPerfGPTRollout(object):
             self.inference_engine.empty_cache()
             data_pack = DataPack(response_outputs=response_outputs,
                                  response_log_probs=response_log_probs,
-                                 response_probs_gt_threshold_num=response_probs_gt_threshold_num,
-                                 response_probs_lt_threshold_sum=response_probs_lt_threshold_sum,
                                  response_model_output_mask=model_output_masks,
                                  this_turn_off_policy_steps=off_policy_steps,
                                  is_finished=is_finished,

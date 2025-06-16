@@ -733,8 +733,6 @@ class RolloutManager:
         gen_batch_required_keys = ["input_ids", "attention_mask"]
         for key in [
                 "rollout_log_probs",
-                "probs_gt_threshold_num",
-                "probs_lt_threshold_sum",
                 "off_policy_steps",
         ]:
             if key not in batch:

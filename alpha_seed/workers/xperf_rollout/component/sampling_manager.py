@@ -49,7 +49,7 @@ class Sampler:
         if not self.do_sample:
             tokens = torch.argmax(next_token_scores, dim=-1).cpu().tolist() if not need_torch_tensor else torch.argmax(
                 next_token_scores, dim=-1)
-            return tokens, None, None, None
+            return tokens, None
         if self.do_sample:
             next_token_scores = self.topk_logits_wrapper(scores=next_token_scores,
                                                          per_query_arg=sample_kwargs.get("top_k", [None]))
@@ -68,9 +68,7 @@ class Sampler:
             self.metrics['prob_lt_1e-6'] += (token_probs < 1e-6).sum().item()
         if self.return_log_probs:
             log_probs = torch.log(token_probs)
-        probs_gt_threshold_num = torch.gt(probs, 1e-4).float().sum(-1)
-        probs_lt_threshold_sum = (torch.lt(probs, 1e-4).float() * probs).sum(-1)
-        return tokens.view(-1), log_probs.view(-1), probs_gt_threshold_num.view(-1), probs_lt_threshold_sum.view(-1)
+        return tokens.view(-1), log_probs.view(-1)
 
     def set_generator_strategy(self, **kwargs):
         for key, value in kwargs.items():

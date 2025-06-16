@@ -273,7 +273,7 @@ class QueryPlugin:
         """If all plugin call finished, append plugin token ids to response.
         Variables need to be maintained:
             - input_ids
-            - new_token_log_probs, probs_gt_threshold_num, probs_lt_threshold_num
+            - new_token_log_probs
             - output_ranges
         """
         if not self.all_plugin_call_done():
@@ -310,8 +310,6 @@ class QueryPlugin:
         query.input_ids.extend(plugin_tokens_ids)
         query.accepted_len.extend([-1] * token_len)
         query.new_token_log_probs.extend([0.0] * token_len)
-        query.probs_gt_threshold_num.extend([0] * token_len)
-        query.probs_lt_threshold_sum.extend([0.0] * token_len)
         new_range = TokenRange(start=cur_idx, end=cur_idx + token_len - 1, role=TokenRole.Tool)
         _add_range_to_range_list(self.output_ranges, new_range)
         self.do_edit_history()

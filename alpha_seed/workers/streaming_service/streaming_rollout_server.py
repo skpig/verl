@@ -71,8 +71,6 @@ class OpenAIProxy(ABC):
             raw_output_ids=query.output_tokens,
             response_log_probs=query.new_token_log_probs,
             is_finished=query.is_finished,
-            response_probs_gt_threshold_num=query.probs_gt_threshold_num,
-            response_probs_lt_threshold_sum=query.probs_lt_threshold_sum,
             model_output_mask=query.model_output_mask,
             extra_data=query.extra_data,
             metrics=query.metrics,

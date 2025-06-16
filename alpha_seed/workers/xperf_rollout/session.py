@@ -1006,7 +1006,7 @@ class InferenceSession:
             forward_inputs = self._prepare_forward_inputs(self.running)
             context_input = forward_inputs['context_input']
             decode_input = forward_inputs['decode_input']
-            next_tokens, accepted_len, hidden_states, log_probs, probs_gt_threshold_num, probs_lt_threshold_sum = self.infer_scheduler.forward_and_sample(
+            next_tokens, accepted_len, hidden_states, log_probs = self.infer_scheduler.forward_and_sample(
                 context_input=context_input,
                 decode_input=decode_input,
                 total_length=forward_inputs['total_length'],
@@ -1028,8 +1028,6 @@ class InferenceSession:
                                        accepted_len=accepted_len,
                                        index_in_running_batch=forward_inputs['forward_index'],
                                        log_probs=log_probs,
-                                       probs_gt_threshold_num=probs_gt_threshold_num,
-                                       probs_lt_threshold_sum=probs_lt_threshold_sum,
                                        hidden_states=hidden_states)
             self.infer_scheduler.next_step()
             if self.step_profiler is not None:
@@ -1090,7 +1088,7 @@ class InferenceSession:
                 #         f"{self.current_steps}: ctx_tokens: {ctx_tokens}, dec_tokens: {dec_tokens}, swap tokens: {self.cache_manager.page_swap_out_token}, per step: {(time.time() - last_time) / 100 * 1000} ms"
                 #     )
                 #     last_time = time.time()
-                next_tokens, accepted_len, hidden_states, log_probs, probs_gt_threshold_num, probs_lt_threshold_sum = self.infer_scheduler.forward_and_sample(
+                next_tokens, accepted_len, hidden_states, log_probs = self.infer_scheduler.forward_and_sample(
                     context_input=context_input,
                     decode_input=decode_input,
                     total_length=forward_inputs['total_length'],
@@ -1112,8 +1110,6 @@ class InferenceSession:
                                            accepted_len=accepted_len,
                                            index_in_running_batch=forward_inputs['forward_index'],
                                            log_probs=log_probs,
-                                           probs_gt_threshold_num=probs_gt_threshold_num,
-                                           probs_lt_threshold_sum=probs_lt_threshold_sum,
                                            hidden_states=hidden_states)
                 self.infer_scheduler.next_step()
                 if self.step_profiler is not None:
@@ -1161,8 +1157,6 @@ class InferenceSession:
                               index_in_running_batch,
                               accepted_len=None,
                               log_probs=None,
-                              probs_gt_threshold_num=None,
-                              probs_lt_threshold_sum=None,
                               hidden_states=None):
         next_running = [[], []]
         new_paused = []
@@ -1174,12 +1168,6 @@ class InferenceSession:
             assert (log_probs.shape[0] == len(index_in_running_batch)), (
                 f"log_probs shape mismatch, {log_probs.shape[0]} vs {len(index_in_running_batch)}")
             log_probs = log_probs.cpu().tolist()
-        if probs_gt_threshold_num is not None:
-            assert (probs_gt_threshold_num.shape[0] == len(index_in_running_batch))
-            probs_gt_threshold_num = probs_gt_threshold_num.cpu().tolist()
-        if probs_lt_threshold_sum is not None:
-            assert (probs_lt_threshold_sum.shape[0] == len(index_in_running_batch))
-            probs_lt_threshold_sum = probs_lt_threshold_sum.cpu().tolist()
         running_index_to_i = {idx: i for i, idx in enumerate(index_in_running_batch)}
         for idx, query in enumerate(self.running):
             # prefill only step
@@ -1200,13 +1188,9 @@ class InferenceSession:
                     next_token = query_next_tokens[token_idx]
                     if len(query.new_token_ids) == 0:
                         query.first_token_time = time.time() * 1000
-                    query.add_token(
-                        token_id=next_token,
-                        accepted_len=accepted_len[i] if accepted_len is not None else 0,
-                        log_prob=log_probs[i] if log_probs is not None else 0,
-                        probs_gt_threshold_num=probs_gt_threshold_num[i] if probs_gt_threshold_num is not None else 0,
-                        probs_lt_threshold_sum=probs_lt_threshold_sum[i] if probs_lt_threshold_sum is not None else 0,
-                    )
+                    query.add_token(token_id=next_token,
+                                    accepted_len=accepted_len[i] if accepted_len is not None else 0,
+                                    log_prob=log_probs[i] if log_probs is not None else 0)
                     if query.meet_pause_condition():
                         query.pause()
                         new_paused.append(query)
