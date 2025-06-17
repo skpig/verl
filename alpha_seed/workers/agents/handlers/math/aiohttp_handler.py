@@ -16,7 +16,7 @@ DataProtoItem(batch=TensorDict(
 
 
 @register_handler("math/aiohttp")
-async def process_single_batch(item, context):
+async def process_single_batch(item, context, **kwargs):
     os.environ["no_proxy"] = ""
     tokenizer = context.tokenizer
     config = context.config.actor_rollout_ref.rollout
