@@ -14,6 +14,7 @@
 # limitations under the License.
 from __future__ import annotations
 
+from codetiming import Timer
 import asyncio
 import logging
 import os
@@ -25,6 +26,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 import json
 from collections import Counter, defaultdict
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
@@ -51,6 +53,7 @@ from verl.utils.model import compute_position_id_with_mask
 from verl.utils.net_utils import is_ipv6
 from verl.utils.torch_functional import get_response_mask, pad_sequence_to_length
 from verl.workers.rollout.base import BaseRollout
+from verl.workers.rollout.mcts.mcts_node import MeasureType
 from verl.workers.rollout.schemas import (
     AsyncRolloutRequest,
     AsyncRolloutRequestStateEnum,
@@ -74,6 +77,17 @@ def get_tool_call_parser_type(tokenizer: PreTrainedTokenizer) -> str:
             return parser_type
     else:
         raise ValueError(f"No tool call parser found for tokenizer {tokenizer}")
+    
+
+@contextmanager
+def _timer(name: str, timing_raw: Dict[str, float]):
+    with Timer(name=name, logger=None) as timer:
+        print("Start timing of : ", name)
+        yield
+    if name not in timing_raw:
+        timing_raw[name] = 0
+    timing_raw[name] += timer.last
+    print("Duration of {}: {:.2f} seconds".format(name, timer.last))
 
 
 class AsyncSGLangRollout(BaseRollout):
@@ -618,7 +632,7 @@ class AsyncSGLangRollout(BaseRollout):
             
             # Backpropagation
             # print("Backpropagating results for request ID: {}".format(_req.data_id))
-            _req.generate_next_step(outputs)
+            _req.generate_next_step(outputs) # type: ignore
 
             # DEBUG:
             if _req.data_id in log_ids:
@@ -647,31 +661,30 @@ class AsyncSGLangRollout(BaseRollout):
             # """Temporary workaround for SGLang Engine to skip tokenizer init"""
             # self._engine.skip_tokenizer_init = True  # skip tokenizer init in SGLang Engine
             # self._engine.server_args.skip_tokenizer_init = True  # skip tokenizer init in SGLang Engine
-            start_time = time.time()
 
-            # each query only generate one MCTS tree
-            req_list = [
-                MCTS(
-                    data_id=prompts[i].batch["index"].item(),
-                    query_ids=_pre_process_inputs(self.pad_token_id, prompts.batch["input_ids"][i]),
-                    split_sequence=[self.tokenizer.convert_tokens_to_ids(['<', 'think']),self.tokenizer.convert_tokens_to_ids(['<th', 'ink'])],
-                    max_depth=self.config.mcts.max_depth,
-                    tokenizer=self.tokenizer,
-                    c_puct=self.config.mcts.c_puct,
-                    ground_truth=prompts.non_tensor_batch["reward_model"][i]['ground_truth'],
-                )
-                for i in range(prompts.batch.batch_size[0])
-            ]
-            loop = asyncio.get_event_loop()
-            output_req_list = loop.run_until_complete(
-                asyncio.gather(
-                    *[self._async_one_mcts(req, log_ids=prompts.batch['index'].tolist()[:20],**kwargs) for req in req_list],
-                )
-            )
-            sorted_output_req_list = sorted(output_req_list, key=lambda x: x.data_id)
 
-            end_time = time.time()
-            print(f"Async MCTS rollout took {end_time - start_time:.2f} seconds for requests")
+            with _timer("MCTS reward rollout", timing_raw=kwargs):
+                # each query only generate one MCTS tree
+                req_list = [
+                    MCTS(
+                        data_id=prompts[i].batch["index"].item(),
+                        query_ids=_pre_process_inputs(self.pad_token_id, prompts.batch["input_ids"][i]),
+                        split_sequence=[self.tokenizer.convert_tokens_to_ids(['<', 'think']),self.tokenizer.convert_tokens_to_ids(['<th', 'ink'])],
+                        max_depth=self.config.mcts.max_depth,
+                        tokenizer=self.tokenizer,
+                        c_puct=self.config.mcts.c_puct,
+                        ground_truth=prompts.non_tensor_batch["reward_model"][i]['ground_truth'],
+                        measure_name=MeasureType.REWARD,
+                    )
+                    for i in range(prompts.batch.batch_size[0])
+                ]
+                loop = asyncio.get_event_loop()
+                output_req_list = loop.run_until_complete(
+                    asyncio.gather(
+                        *[self._async_one_mcts(req, log_ids=prompts.batch['index'].tolist(), **kwargs) for req in req_list],
+                    )
+                )
+
 
             # # reset engine skip_tokenizer_init
             # self._engine.skip_tokenizer_init = False
@@ -680,6 +693,7 @@ class AsyncSGLangRollout(BaseRollout):
         else:
             sorted_output_req_list = None
 
+        return
         [sorted_output_req_list] = broadcast_pyobj(
             data=[sorted_output_req_list],
             rank=self._tp_rank,

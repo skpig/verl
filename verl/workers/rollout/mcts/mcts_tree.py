@@ -3,6 +3,9 @@
 # Adapted from https://github.com/MARIO-Math-Reasoning/Super_MARIO
 
 from __future__ import annotations
+import json
+from textwrap import indent
+from token import OP
 import uuid
 import os
 import traceback
@@ -13,7 +16,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 from pydantic import field_validator
 # from vllm.outputs import CompletionOutput, RequestOutput
 
-from .mcts_node import MCTSNode
+from .mcts_node import MCTSNode, MeasureType
 from verl.utils.reward_score.math_verify import compute_score as math_verify_compute_score
 
 # from rstar_deepthink.constants import (CODE_END, NO_VALID_CHILD,
@@ -79,6 +82,7 @@ class MCTS:
                  c_puct=2, 
                  ground_truth=None, # used for rollout reward estimation
                  compute_score: Callable = math_verify_compute_score,
+                 measure_name: MeasureType = MeasureType.REWARD,
                  **kwargs) -> None:
         self.data_id = data_id
         self.root = MCTSNode(prefix_ids=[],
@@ -94,6 +98,7 @@ class MCTS:
         self.ground_truth = ground_truth
         self.compute_score = compute_score
         self.search_turn = 0
+        self.measure_name = measure_name
         # self.terminate_tree = False  # 用于标记是否终止搜索树
 
 
@@ -129,18 +134,23 @@ class MCTS:
     #     return None if (node is None or node.is_terminal) else node
 
     # 根据 PUCT 值选择一个non-terminal的子节点
-    def _select_child(self, node: Type[MCTSNode]) -> Optional[Type[MCTSNode]]:
+    def _select_child(self, node: MCTSNode) -> Optional[MCTSNode]:
         best_value = -float("inf")
         best_childs = []
 
         for child in node.children:
             if child.is_terminal:  # 如果子节点是终止节点，则不能作为下一个展开节点，跳过
                 continue
-            puct_value = child.puct(c_puct=self.c_puct)  # 计算当前节点的 puct 值
-            if puct_value == best_value:
+            if self.measure_name == MeasureType.REWARD:
+                measure_value = child.puct(c_puct=self.c_puct)  # 计算当前节点的 puct 值
+            else:
+                measure_value = child.uct(c_puct=self.c_puct, measure=self.measure_name)  # 计算当前节点的 uct 值
+            
+
+            if measure_value == best_value:
                 best_childs.append(child)
-            elif puct_value > best_value:
-                best_value = puct_value
+            elif measure_value > best_value:
+                best_value = measure_value
                 best_childs = [child]
 
         # return best_childs[0] if best_childs else None  # 返回唯一最佳子节点, 尽管可能有多个相同的 puct 值的子节点
@@ -148,19 +158,19 @@ class MCTS:
 
     # 基于生成结果，展开当前节点，一次性生成多个子节点
     # TODO: 每一个output都是一个完整的rollout, create_child需要调用多次
-    def expand_and_simulate_node(self, output_object: List[Dict[str, Any]], node: Type[MCTSNode]) -> None:
+    def _expand_and_simulate_node(self, output_object: List[Dict[str, Any]], node: MCTSNode) -> None:
 
         for idx, output in enumerate(output_object):
             if output.get('output_ids') is not None:  # vllm engine output
-                output_text = self.tokenizer.decode(output['output_ids'], skip_special_tokens=True)
+                output_text = self.tokenizer.decode(output['output_ids'], skip_special_tokens=True) # type: ignore
                 output_ids = output['output_ids']
             elif output.get('text') is not None:  # vllm engine output
                 output_text = output['text']
                 output_ids = [i[1] for i in  output['meta_info']['output_token_logprobs']]
             else:
-                random_filename = f".cache/sglang_rtn/{uuid.uuid4().hex}.tmp"
+                random_filename = f".cache/sglang_rtn/bad_{uuid.uuid4().hex}.tmp"
                 with open(random_filename, "w") as f:
-                    f.write(output)
+                    f.write(json.dumps(output, indent=2, ensure_ascii=False))
                 continue
             score = self.compute_score(data_source=None, solution_str=output_text, ground_truth=self.ground_truth)['score']
             # score = random.random() > 0.98 # DEBUG:
@@ -168,7 +178,7 @@ class MCTS:
             #     self.terminate_tree = True
                 
 
-            self.recursive_create_child(
+            self._recursive_create_child(
                 node=node,
                 step_completion_ids=output_ids,
                 step_prefix_ids=self.create_prompt(node),
@@ -180,10 +190,10 @@ class MCTS:
         node.is_expand = True  # 标记当前节点为已展开
 
     # 创建子节点，同时进行backpropagate操作
-    def recursive_create_child(
+    def _recursive_create_child(
         self, 
-        node: Type[MCTSNode],
-        step_completion_ids: str, 
+        node: MCTSNode,
+        step_completion_ids: List[int],
         step_prefix_ids: List[int],
         step_logprobs,
         rollout_score: int,
@@ -207,7 +217,7 @@ class MCTS:
                 prefix_ids=cur_prefix,
                 resp_ids=step_completion_ids[start_index:index],
                 is_terminal=index == len(step_completion_ids), # only the last step is terminal / leaf
-                resp_logprob=sum(step_logprobs[start_index:index]) if step_logprobs is not None else None,
+                resp_logprob=sum(step_logprobs[start_index:index]),
                 parent=parent,
                 tag=f"{parent.tag}.{len(parent.children) + 1}",
             )
@@ -260,7 +270,10 @@ class MCTS:
 
 
         """BackPropagation"""
-        parent.update_recursive(rollout_score, root=self.root)
+        parent.update_recursive(
+            value={"reward": rollout_score, "nll": 0, "length": 0},
+            root=self.root
+        )
 
 
 
@@ -277,31 +290,16 @@ class MCTS:
     #     else:
     #         self.candidate_nodes.append(node)
 
-    # 中间过程记录答案及其 value 估计值
-    def record_intermediate_metric(self, answer, value_estimate):
-        self.intermediate_metric["question"] = self.question
-        self.intermediate_metric["gt"] = self.ground_truth
-        if self.intermediate_metric["rollout_indexs"] and self.rollout_idx in self.intermediate_metric["rollout_indexs"]:
-            index = self.intermediate_metric["rollout_indexs"].index(self.rollout_idx)
-            if value_estimate > self.intermediate_metric["value_estimate"][index]:
-                self.intermediate_metric["answers"][index] = answer
-                self.intermediate_metric["judgements"][index] = random.random() < 0.3
-                self.intermediate_metric["value_estimate"][index] = value_estimate
-        else:
-            self.intermediate_metric["answers"].append(answer)
-            self.intermediate_metric["judgements"].append(random.random() < 0.3)
-            self.intermediate_metric["value_estimate"].append(value_estimate)
-            self.intermediate_metric["rollout_indexs"].append(self.rollout_idx)
 
     # 选择下一步进行展开的节点（该节点必须是未被展开过）
-    def select_next_step(self, from_root=False) -> None:
+    def select_next_step(self, from_root=False) -> Optional[MCTSNode]:
         """
         Args:
             outputs: List of outputs from the model, each is a return of vllm engine
             from_root: Whether it is for initial selection or not.
         """
         # self.search_node = self.current_nodes[0] if self.current_nodes else None
-        self.current_nodes = []
+        self.current_nodes: List[MCTSNode] = []
 
         node = self.root
         # selection loop 
@@ -325,7 +323,7 @@ class MCTS:
     # 根据当前节点和模型输出，扩展当前节点，生成多个子节点
     def generate_next_step(self, outputs_lst: List[Dict[str, Any]]) -> None:
         self.search_turn += 1
-        self.expand_and_simulate_node(outputs_lst, self.current_nodes[0])
+        self._expand_and_simulate_node(outputs_lst, self.current_nodes[0])
         return
 
 
@@ -334,25 +332,11 @@ class MCTS:
             # value_estimate = outputs_object.value_estimate # inherit from current_nodes, FIXME: change to assert value_estimate = current_node.get_reward()
             # assert value_estimate is not None, "value_estimate is None, should not be None"
             # assert value_estimate == current_node.get_reward(), "value_estimate is not equal to current_node.get_reward()"
-            self.expand_and_simulate_node(outputs_object, current_node)
+            self._expand_and_simulate_node(outputs_object, current_node)
             # if self.config.update_leaf_value: # FIXME: useless
             #     for value_node in current_node.children:
             #         if value_node not in self.candidate_nodes and value_node.visit_count() < 1:
             #             self.candidate_nodes.append(value_node) 
-
-    # 返回整个搜索树中所有节点的状态
-    def return_states(self) -> Dict[str, Union[Any, Dict[str, str]]]:
-        candidates = [self.root]
-        states = {}
-        while candidates:
-            node = candidates.pop(0)
-            states[node.tag] = node.state
-            states[node.tag]["value"] = node.value
-            states[node.tag]["q_value"] = node.q_value()
-            states[node.tag]["visit_count"] = node.visit_count()
-            if node.has_children():
-                candidates.extend(node.children)
-        return states
 
     def is_terminated_node(self, node: MCTSNode) -> bool: #TODO: is called
         return node is None or node.is_terminal or node.depth > self.max_depth
@@ -383,8 +367,8 @@ class MCTS:
 
     def create_prompt(
         self,
-        node: MCTSNode = None,
-    ) -> str: # TODO: is called
+        node: Optional[MCTSNode] = None,
+    ) -> List[int]:
         if node is None:
             current_nodes = self.current_nodes
             assert len(current_nodes) == 1, "current_nodes is empty"
@@ -393,16 +377,16 @@ class MCTS:
         prompt_ids = node.state['prefix_ids'] + node.state['resp_ids']
         return prompt_ids
     
-    def collect_partial_solution(self, node: MCTSNode) -> str: #TODO: is called # collect generation in parents nodes #TODO: modify to concat input_ids
-        # from leaf to root, and reverse
-        trajectory = []
-        while node:
-            if node.state['text']:
-                trajectory.append(node.state['text'])
-            node = node.parent
-        return "".join(reversed(trajectory))
+    # def collect_partial_solution(self, node: MCTSNode) -> str: #TODO: is called # collect generation in parents nodes #TODO: modify to concat input_ids
+    #     # from leaf to root, and reverse
+    #     trajectory = []
+    #     while node:
+    #         if node.state['text']:
+    #             trajectory.append(node.state['text'])
+    #         node = node.parent
+    #     return "".join(reversed(trajectory))
     
-    def bound_string_to_limited_width(long_string: str, width: int = 100) -> str:
+    def bound_string_to_limited_width(self, long_string: str, width: int = 100) -> str:
         """
         将长字符串截断为指定宽度的字符串，保留完整的单词。
         如果字符串长度超过指定宽度，则从末尾开始换行"""
@@ -411,25 +395,36 @@ class MCTS:
         
         # Find all LaTeX equation blocks \(...\)
         equations = []
-        equation_pattern = r'\\\([^)]*\\\)'
+        equation_pattern = r'\\\(.*?\\\)'
         
         # Replace equations with placeholders and store them
-        temp_string = long_string
-        for i, match in enumerate(re.finditer(equation_pattern, long_string)):
-            placeholder = f"__EQUATION_{i}__"
+        string_slices = []
+        last_end = 0
+        for i, match in enumerate(re.finditer(equation_pattern, long_string, re.DOTALL)):
+            placeholder = f" __EQUATION__{i}__ "
             equations.append(match.group())
-            temp_string = temp_string.replace(match.group(), placeholder, 1)
+            # long_string = long_string[:match.start()] + placeholder + long_string[match.end():]
+            
+            string_slices.append(long_string[last_end:match.start()])
+            string_slices.append(placeholder)
+            last_end = match.end()
+        string_slices.append(long_string[last_end:])  # Add the remaining part of the string
+        long_string = ''.join(string_slices)
+
+
+            
         
         # Split into words, but treat equation placeholders as single units
-        words = temp_string.split()
+        words = long_string.split()
         lines = []
         current_line = ""
         
         for word in words:
             # Check if this word is an equation placeholder
-            if word.startswith("__EQUATION_") and word.endswith("__"):
+            if word.startswith("__EQUATION__") and word.endswith("__"):
                 # Restore the original equation
-                eq_index = int(word.split("_")[2])
+                print(f"Restoring equation: {word}")
+                eq_index = int(word.split("__")[2])
                 actual_word = equations[eq_index]
             else:
                 actual_word = word
@@ -451,7 +446,7 @@ class MCTS:
         
         return "\n".join(lines)
     
-    def draw_tree(self, node: MCTSNode=None) -> None:
+    def draw_tree(self, node: Optional[MCTSNode]=None) -> None:
         if node is None:
             node = self.root
         import matplotlib.pyplot as plt
@@ -465,37 +460,42 @@ class MCTS:
 
         G = nx.DiGraph()
 
-        def add_nodes_edges(current_node):
-            text = self.tokenizer.decode(current_node.state["resp_ids"]).replace(":"," ")
+        def add_nodes_edges(current_node, depth=0):
+            text = self.tokenizer.decode(current_node.state["resp_ids"]).replace(":"," ") # type: ignore
+            text = self.bound_string_to_limited_width(text, width=70)  # 限制宽度为100字符
             
             # print(text)
-            node_label = f'{text}\n\nQ={current_node._value_sum};N={current_node._visit_count};PUCT={current_node.puct(self.c_puct):.2f};prob={current_node.state["resp_prob"]:.2e}'
-            G.add_node(id(current_node), label=node_label)
+            node_label = f'{text}\n\nQ={current_node._reward_sum};N={current_node._visit_count};PUCT={current_node.puct(self.c_puct):.2f};\nNLL={current_node.state["resp_nll"]:.2e};NLL_NORM={current_node.state["resp_nll_norm"]:.2e};\nE={(current_node._entropy_sum / current_node._visit_count) :.2e};E_NORM={(current_node._entropy_sum_length_norm / current_node._visit_count) :.2e}'
+            G.add_node(id(current_node), label=node_label, depth=depth)
             if current_node.parent:
                 G.add_edge(id(current_node.parent), id(current_node))
             for child in current_node.children:
-                add_nodes_edges(child)
+                add_nodes_edges(child, depth=depth + 1)
 
         add_nodes_edges(node)
 
         # pos = graphviz_layout(G, prog='dot')
-        pos = nx.nx_agraph.pygraphviz_layout(G, prog='dot')
+        pos = nx.nx_agraph.pygraphviz_layout(G, prog='twopi', root=id(self.root),
+                                             args="-Goverlap=scale -Gsep=3")  # 使用twopi布局，根节点为self.root
         labels = nx.get_node_attributes(G, 'label')
+        colors = [data.get('depth', -1) for _, data in G.nodes(data=True)]
+        cmap = plt.cm.get_cmap('viridis', 15)  # 使用viridis颜色映射
 
-        plt.figure(figsize=(30, 20))  # 增大图像尺寸
+        plt.figure(figsize=(30, 30))  # 增大图像尺寸
         nx.draw(G, pos, labels=labels, with_labels=True, 
                 node_size=3000,  # 调整节点尺寸
-                node_color='lightblue', 
-                font_size=2,     # 缩小字体
+                node_color=colors,
+                cmap=cmap,  # 使用颜色映射
+                font_size=1.5,     # 缩小字体
                 alpha=0.7,       # 半透明效果
                 arrows=False,     # 显示箭头
-                arrowsize=5,    # 调整箭头大小
-                width=1.5)       # 调整边的宽度
+                # arrowsize=5,    # 调整箭头大小
+                width=0.5)       # 调整边的宽度
         plt.title('MCTS Tree')
         try:
-            os.makedirs(f'outputs/{self.data_id}', exist_ok=True)
+            os.makedirs(f'outputs/{self.data_id}/{self.measure_name}', exist_ok=True)
             # plt.savefig(f'outputs/{self.data_id}/{self.search_turn}.png', dpi=600, bbox_inches='tight')
-            plt.savefig(f'outputs/{self.data_id}/{self.search_turn}.pdf', dpi=600, bbox_inches='tight')
+            plt.savefig(f'outputs/{self.data_id}/{self.measure_name}/{self.search_turn}.pdf', dpi=600, bbox_inches='tight')
         except Exception as e:
             print(f"Error saving figure: {e}")
             traceback.print_exc()
