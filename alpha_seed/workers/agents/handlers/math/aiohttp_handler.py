@@ -25,7 +25,7 @@ async def process_single_batch(item, context):
 
     completion = await internal_call(item, config, host, port)
 
-    from alpha_seed.workers.agents.handlers import DataPack, pack_to_dataproto
+    from alpha_seed.workers.streaming_service.streaming_utils import DataPack, pack_to_dataproto
     data_pack = DataPack.create_from_completion_dict(completion['choices'][0]['message'])
     out = pack_to_dataproto(item, tokenizer, data_pack, config)  # dataproto
     return out

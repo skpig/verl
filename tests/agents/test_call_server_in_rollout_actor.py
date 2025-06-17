@@ -13,7 +13,7 @@ import uuid
 
 from alpha_seed.workers.agents.plugins import BasePlugin, PluginResponse, PluginRequireMetaInfo
 from alpha_seed.workers.agents.envs import BaseEnv
-from alpha_seed.workers.agents.math.aiohttp_handler import chat_completions
+from alpha_seed.workers.streaming_service.streaming_utils import chat_completions
 
 from tests.test_utils import gpu_allocator, ray_fixture, set_common_envs, get_config, get_tokenizer, create_rollout_manager, PytestXdistEnv
 from .utils import get_math_test_dataproto
