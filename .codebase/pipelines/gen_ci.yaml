@@ -12,7 +12,7 @@ jobs:
         shared-memory: 1024
     envs:
       LIBHDFS_OPTS: -Dhadoop.root.logger=warn,console
-    timeout: 30  # timeout 10min
+    timeout: 60  # timeout 10min
     retry: 2
     steps:
       - name: check env
@@ -71,4 +71,5 @@ jobs:
           - ray stop --force
           - ray start --num-cpus=100 --head
           - pytest -n 4 -v tests/rollout/test_rollout_manager.py
+          - pytest -n 2 -v tests/rollout/test_elastic_rollout.py
           - ray stop --force

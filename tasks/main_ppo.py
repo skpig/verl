@@ -640,33 +640,16 @@ def main(config):
             check_arnold_resources(config=config)
 
     # RequestManager register center
-    if is_local_ray_instance():
-        remote_cls = ray.remote(RequestManagerRegisterCenter)
-    else:
-        remote_cls = ray.remote(resources={"head": 1})(RequestManagerRegisterCenter)
-    rmrc = remote_cls.options(name='RequestManagerRegisterCenter').remote()
-    ray.get(rmrc.ready.remote())
+    rm_reg = RequestManagerRegisterCenter.init()
 
     # server 模式下，gen的架构均为RequestManager+Proxy+ReplicatedWorker，所以这里把RequestManager启动起来
     if config.actor_rollout_ref.rollout.mode == "server":
-        rms = []  # retain request managers to avoid being gc
-
-        def make_request_manager(instance_name: str):
-            if is_local_ray_instance():
-                remote_cls = ray.remote(RequestManager)
-            else:
-                # 非local模式下，让RequestManager只跑在head node上
-                remote_cls = ray.remote(resources={"head": 1})(RequestManager)
-            # note(lixiang): concurrency必须超过global batch size才行，不然会卡住更新不了请求，导致死锁
-            request_manager = remote_cls.options(name=f'RequestManager/{instance_name}',
-                                                 max_concurrency=102400).remote()
-            ray.wait([request_manager.ready.remote()])
-            rms.append(request_manager)
-
-        make_request_manager('hybrid_rollout')
-        make_request_manager('standalone_rollout')
-        make_request_manager('validation')
-        make_request_manager('hybrid_validation')
+        ray.get([
+            rm_reg.create.remote('hybrid_rollout'),
+            rm_reg.create.remote('standalone_rollout'),
+            rm_reg.create.remote('validation'),
+            rm_reg.create.remote('hybrid_validation'),
+        ])
 
     # elastic resource pool managers
     # FIXME(lixiang): arnold 扩缩容api不能并发调用，这里先假设只有1个弹性池，之后再改
@@ -684,7 +667,13 @@ def main(config):
             # Use a detached runner to prevent client scripts to run simultaneously
             runner = recreate_actor(ClientTaskRunner, name=ClientTaskRunner.name)
         else:
-            runner = TaskRunner.options(name=TaskRunner.name).remote()
+            stable_res = {}
+            if not is_local_ray_instance():
+                stable_res = {
+                    "worker": 1,
+                    "byted_stable_resource": 1,
+                }
+            runner = TaskRunner.options(name=TaskRunner.name, resources=stable_res).remote()
         ray.get(runner.main.remote(main_task, config=config))
 
 
@@ -929,7 +918,8 @@ def config_to_trainer_kwargs(config):
     resource_pool_spec = {
         global_pool_id: ([config.trainer.n_gpus_per_node] * config.trainer.nnodes,
                          '' if is_local_ray else config.trainer.elastic.stable_pool_name),
-        standalone_pool_id: ([config.streaming_rollout.n_gpus_per_node] * config.streaming_rollout.nnodes, ''),
+        standalone_pool_id: ([config.streaming_rollout.n_gpus_per_node] * config.streaming_rollout.nnodes,
+                             '' if is_local_ray else config.streaming_rollout.elastic.stable_pool_name),
         validation_pool_id: ([config.streaming_validator.n_gpus_per_node] * config.streaming_validator.nnodes,
                              '' if is_local_ray else config.streaming_validator.elastic.stable_pool_name),
     }

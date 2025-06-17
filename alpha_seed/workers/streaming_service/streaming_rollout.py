@@ -16,10 +16,13 @@ Create a XPerfGPT Rollout
 """
 import itertools
 import uuid
+from asyncio import CancelledError
 
 from distlib.locators import Locator
 from pydantic import UUID4
 from transformers import PreTrainedTokenizer
+
+from alpha_seed.workers.xperf_rollout.utils.base_weights_communicator import WeightsCommunicator
 from mono_rl import DataProto
 import copy
 from contextlib import contextmanager, nullcontext
@@ -33,7 +36,7 @@ import threading
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 import uvicorn
-from typing import AsyncGenerator, List
+from typing import AsyncGenerator, List, Type
 import asyncio
 import xperf_gpt
 from mono_rl.single_controller import Execute
@@ -60,7 +63,8 @@ from alpha_seed.workers.xperf_rollout.utils import get_xperf_gpt_config
 from alpha_seed.workers.xperf_rollout.utils.custom_xperf_convert_helper import XCustomInferenceModuleAdapter
 from alpha_seed.workers.streaming_service.streaming_utils import is_multihost_model, DataPack, pack_to_dataproto, get_gpus_per_node
 from alpha_seed.workers.xperf_rollout.utils.layout_convert_helper import offload_to_device
-from alpha_seed.workers.xperf_rollout.utils.pooled_ucx_weights_communicator import UCXWeightsCommunicator
+from alpha_seed.workers.xperf_rollout.utils.pooled_ucx_weights_communicator import UCXWeightsCommunicator, \
+    WeightsUpdatingInterrupt
 from alpha_seed.workers.xperf_rollout.utils.nccl_weights_communicator import NCCLWeightsCommunicator
 from alpha_seed.workers.streaming_service.xperf_model_prophet import XperfModelProphet
 from alpha_seed.workers.xperf_rollout.utils.logits_manipulate import logits_manipulate_fn_core, logits_manipulate_fn_eta, logits_manipulate_fn_minp, logits_manipulate_fn_clip
@@ -76,6 +80,8 @@ try:
 except:
     print('Cannot find profile utilities. Please use latest verl master')
     raise
+
+logger = logging.getLogger(__name__)
 
 
 @contextmanager
@@ -111,6 +117,9 @@ class AsyncXPerfGPTRollout(object):
         self.weights_loaded = threading.Event()  # 表示weights是否已经加载完毕，hybrid里回load/offload交替
         # 表示engine是否在gen loop里，hybrid模式如果weights offloaded，不应该在gen loop里，可以用这个event来判断状态
         self.gen_loop_exited = threading.Event()
+        self.stop_event = threading.Event()
+        if self.config.mode == "server" or self.role == "rollout_server":
+            self.stop_event.set()
 
     def initialize(self,
                    local_path=None,
@@ -331,16 +340,15 @@ class AsyncXPerfGPTRollout(object):
             self.inference_engine.pending.append(aq)
         return aq.id
 
-    async def get_inflight_query(self, query_id: str) -> Query:
+    # abort some queries that no longer necessary to run on this engine
+    def abort_queries(self, query_ids: List[str]):
+        # try to revoke from pending, running, paused and waiting list
+        # 将要abort的放进去，后面等待engine自己内部的循环同步点abort
         with self.inference_engine.update_weights_lock:
-            aq = self.inference_engine.pending.query_pool.pop(query_id)
-        await aq.wait_until_done()
-        _ = self.inference_engine.finished.pop(query_id, None)
-        if aq.exception is not None:
-            raise aq.exception
-        return aq.query
+            self.inference_engine.abort(query_ids)
 
     def get_all_queries(self, query_type: str) -> List[Query]:
+        assert self.process_thread.is_alive(), "process thread is not alive, please check the traceback in log"
         return self.inference_engine.get_all_queries(query_type=query_type, retain_finished=False)
 
     def get_load_metrics(self) -> LoadMetric:
@@ -374,9 +382,6 @@ class AsyncXPerfGPTRollout(object):
         self._set_tuner_config()
         self.input_queue = queue.Queue()
         self.output_queue = queue.Queue()
-        self.stop_event = threading.Event()
-        if self.config.mode == "server" or self.role == "rollout_server":
-            self.stop_event.set()
         # rollout_server 等于 standalone rollout + elastic模式
         use_async_gen = self.config.mode == "server" or self.role == "rollout_server"
         self.process_thread = threading.Thread(target=self.async_generate if use_async_gen else self.generate,
@@ -587,9 +592,12 @@ class RemoteAsyncXPerfGPTRollout(Worker):
             timeout = timedelta(minutes=int(os.getenv('NCCL_TIMEOUT', 60)))
             torch.distributed.init_process_group(backend="nccl", timeout=timeout)
         self.config = config
+        self.role = role
         self.rollout_actor = AsyncXPerfGPTRollout(config=self.config.rollout, role=role)
         self._weights_loaded = threading.Event()
         self._hybrid_rollout_addrs = None
+        self._stable_standalone_rollout_addrs = None  # stable的实例也会作为server，给elastic rollout提供参数
+        self.weights_communicator: WeightsCommunicator = None
 
     def _stop_engine(self):
         if self.rollout_actor.stop_event.is_set():
@@ -601,13 +609,17 @@ class RemoteAsyncXPerfGPTRollout(Worker):
         # wait until completely stopped
         self.rollout_actor.gen_loop_exited.wait()
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def initialized(self):
+        return self.weights_communicator is not None and self.weights_communicator.has_setup
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def ready(self):
         # worker是否ready可以接受请求(model compute相关)
         # 子类继承这个方法自定义就绪判断，例如需要额外初始化model的
         return self._weights_loaded.is_set()
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def will_be_destroyed(self):
         self._stop_engine()
         self.rollout_actor.reset_status()
@@ -621,9 +633,9 @@ class RemoteAsyncXPerfGPTRollout(Worker):
             ret.append(qid)
         return ret
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    async def get_inflight_query(self, query_id) -> Query:
-        return await self.rollout_actor.get_inflight_query(query_id)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
+    def abort_queries(self, query_ids: List[str]):
+        self.rollout_actor.abort_queries(query_ids)
 
     # 只在dp_size=1的情况下调用，所以这里rank0执行即可
     @register(execute_mode=Execute.RANK_ZERO, blocking=True)
@@ -643,18 +655,22 @@ class RemoteAsyncXPerfGPTRollout(Worker):
         self.weights_communicator = CommunicatorCls(inference_engine=self.rollout_actor.inference_engine,
                                                     standalone=self.rollout_actor.is_standalone,
                                                     device_mesh=self.rollout_actor.device_mesh)
-        # build device mesh
+
+        # save nccl master addr and port
         self.master_address = os.getenv('MASTER_ADDR', 'localhost')
         self.master_port = os.getenv('MASTER_PORT', '12345')
-
         print(f'Master address: {self.master_address}, Master port: {self.master_port}')
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    def setup_as_client(self, role, source_addresses, hybrid_rollout_addrs: List[str]):
+    def setup_as_client(self, role, source_addresses: List[str], hybrid_rollout_addrs: List[str]):
         self._hybrid_rollout_addrs = hybrid_rollout_addrs
         # connect to weight source after model initialized
         source_address = source_addresses[self.rank]
         self.weights_communicator.setup_as_client(role, source_address)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
+    def setup_as_relay(self, ifname=None):
+        return self.weights_communicator.setup_as_server(ifname)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def setup_standalone_worker_comm(self, hybrid_master_address, standalone_master_address, port, role):
@@ -674,20 +690,24 @@ class RemoteAsyncXPerfGPTRollout(Worker):
     # caller 自己去wait这个non-blocking
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def stop_server_before_weights_update_non_blocking(self):
+        self.weights_communicator.on_will_start_update()
         self._stop_engine()
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
     def stop_server_before_weights_update(self):
+        self.weights_communicator.on_will_start_update()
         self._stop_engine()
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def update_standalone_worker(self, role):
         offload_to_device(self.rollout_actor.inference_engine.engine.module, "cuda")
-        self.weights_communicator.wait_for_setup_completed()
-        with self.rollout_actor.inference_engine.update_weights_lock:
-            self.weights_communicator.update_standalone_worker(role)
-        self._weights_loaded.set()
-        self.rollout_actor.weights_loaded.set()
+        try:
+            with self.rollout_actor.inference_engine.update_weights_lock:
+                self.weights_communicator.update_standalone_worker(role)
+            self._weights_loaded.set()
+            self.rollout_actor.weights_loaded.set()
+        except WeightsUpdatingInterrupt as e:
+            logger.debug(f"weights update interrupt {role=}")
 
     # group 内任意一个rank发送结束信号即可
     @register(execute_mode=Execute.RANK_ZERO)
@@ -697,12 +717,59 @@ class RemoteAsyncXPerfGPTRollout(Worker):
     # caller 自己去wait这个non-blocking
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def restart_server_after_weights_update_non_blocking(self):
+        return self.restart_server_after_weights_update()
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
+    def restart_server_after_weights_update(self):
+        # 对于elastic rollout，update_standalone_worker并不阻塞，所以在restart时务必等update完了
+        # TODO(lixiang): 对于elastic的，可以放到后台线程去跑，提早返回
+        self.weights_communicator.update_standalone_worker_wait()
         with self.rollout_actor.inference_engine.update_weights_lock:
             self.rollout_actor.reset_status()
             self.rollout_actor.stop_event.clear()
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
-    def restart_server_after_weights_update(self):
-        with self.rollout_actor.inference_engine.update_weights_lock:
-            self.rollout_actor.reset_status()
-            self.rollout_actor.stop_event.clear()
+
+# for type annotation convenience
+def _unwrap_ray_remote(cls) -> Type[RemoteAsyncXPerfGPTRollout]:
+    if hasattr(cls, '__ray_actor_class__'):
+        cls = cls.__ray_actor_class__
+    return cls
+
+
+@ray.remote
+class ElasticAsyncXPerfGPTRollout(_unwrap_ray_remote(RemoteAsyncXPerfGPTRollout)):
+
+    def __init__(self, config: DictConfig, role: str, hybrid_rollout_addrs: List[str]):
+        super().__init__(config, role)
+        self.hybrid_rollout_addrs = hybrid_rollout_addrs
+        self._elastic_has_setup = threading.Event()
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def init_and_setup(self,
+                       weights_source_tp_group: List[str],
+                       setup_relay: bool,
+                       intermediately_update_weights: bool = False):
+        """
+        放在这里统一setup，返回一个ObjectRef，让调用方一次性等待整个初始化完成
+        :param weights_source_tp_group: 要连上的拉取weight的server address，目前是一个tp group的address
+        :param setup_relay: 是否要设置为relay提供别的worker拉参数
+        :param intermediately_update_weights: 初始化完之后是否立即拉一次参数，适用于elastic的场景
+        :return: relay address, worker group返回的则是整个tp group的address，如果setup_relay=False，则返回空字符串
+        """
+        self.init_model()
+        self.setup_as_client(self.role, weights_source_tp_group, self.hybrid_rollout_addrs)
+
+        relay_addr = ''
+        if setup_relay:
+            relay_addr = self.setup_as_relay()
+
+        if intermediately_update_weights:
+            self.update_standalone_worker(self.role)
+            self.restart_server_after_weights_update()
+
+        self._elastic_has_setup.set()
+        return relay_addr
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def initialized(self):
+        return self._elastic_has_setup.is_set()

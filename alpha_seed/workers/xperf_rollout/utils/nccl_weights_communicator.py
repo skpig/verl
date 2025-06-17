@@ -19,6 +19,10 @@ class NCCLWeightsCommunicator(WeightsCommunicator):
     def wait_for_setup_completed(self):
         self._setup_completed.wait()
 
+    @property
+    def has_setup(self):
+        return self._setup_completed.is_set()
+
     def setup_standalone_worker_comm(self, hybrid_master_address, standalone_master_address, port, role):
         assert role in ["standalone_rollout", "standalone_validator", "standalone_rollout_server"]
         assert (hybrid_master_address is not None)

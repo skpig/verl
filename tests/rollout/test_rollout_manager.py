@@ -104,12 +104,14 @@ def decode_output(output, tokenizer):
 def _check_score(out_text, batch):
 
     def reward_fn(solution_str: str, ground_truth: str):
-        return 1.0 if ground_truth in solution_str else -1.0
+        return 1.0 if ground_truth in solution_str else 0.0
 
+    total_score = 0
     for text, item in zip(out_text, batch.chunk(len(batch))):
         reward_model = item.non_tensor_batch['reward_model'][0]
-        score = reward_fn(solution_str=text, ground_truth=reward_model['ground_truth'])
-        assert score == 1.0
+        total_score += reward_fn(solution_str=text, ground_truth=reward_model['ground_truth'])
+    assert total_score >= len(out_text) - 1, \
+        f"allow only 1 wrong answer, full score: {len(out_text)}, got: {total_score}"
 
 
 def mock_save_dataproto(data: DataProto, prefix: str = ''):

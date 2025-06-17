@@ -126,4 +126,4 @@ def recreate_actor(actor_cls, name, *args, **kwargs):
 
 
 def is_local_ray_instance():
-    return 'node:__internal_head__' in ray.cluster_resources()
+    return len(ray.nodes()) <= 1

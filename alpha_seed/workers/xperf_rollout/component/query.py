@@ -19,14 +19,13 @@ class Query:
     idx: int
     original_input_ids: Optional[List[int]]
     input_ids: Optional[List[int]]
-    input_embedding: Optional[torch.Tensor]
     code_book: Optional[List[int]]
     constraint_decoding_predictor: Optional[Any]
     accepted_len: Optional[List[int]]
     input_prompt: Union[str, List[str]]
     input_len: Optional[int]
     new_token_ids: Optional[List[int]]
-    new_token_log_probs: Optional[List[int]]
+    new_token_log_probs: Optional[List[float]]
     kv_slot_ids: Optional[List[int]]
     is_context_computing: bool
     new_token_len: int
@@ -36,7 +35,8 @@ class Query:
     multiround_id: int
     multiround_len: int
     system_ids_len: int
-    created_time: float  # 此对象在request pool创建时间
+    created_time: float  # 此对象在client侧创建时间
+    enqueue_time: float  # 对象放入request pool的时间
     received_time: float  # 在engine侧第一次收到进入队列的时间
     first_scheduled_time: float  # 开始prefill的时间
     first_token_time: float  # prefill完的时间
@@ -72,7 +72,7 @@ class Query:
         self.input_len = len(input_ids)
         self.is_context_computing = True
         self.new_token_ids = []
-        self.new_token_log_probs = []
+        self.new_token_log_probs: List[float] = []
         self.kv_slot_ids = []
         self.new_token_len = 0
         self.output_prompt = ""
@@ -153,12 +153,12 @@ class Query:
     def add_token(self, token_id, accepted_len=-1, log_prob=0.0):
         self.accepted_len.append(accepted_len)
         self.new_token_log_probs.append(log_prob)
-
         self.new_token_ids.append(token_id)
         self.is_context_computing = False
-        self.new_token_len += 1
         if self.plugin_query:
             self.plugin_query.record_model_token(token_id)
+        # 其他字段都更新完后，最后commit这个更新
+        self.new_token_len += 1
 
     def meet_pause_condition(self) -> bool:
         if self.plugin_query:
@@ -203,6 +203,9 @@ class Query:
         return ret
 
     def reset_timestamp(self):
+        """
+        重置跟engine相关的时间戳，query生命周期时间戳不变
+        """
         self.received_time = 0
         self.first_scheduled_time = 0
         self.first_token_time = 0
@@ -210,9 +213,19 @@ class Query:
 
     def clone(self) -> 'Query':
         ret = copy.copy(self)
-        # skip any gpu tensors, as they might be mutated shortly
-        if ret.hidden_states is not None and ret.hidden_states.device != torch.device('cpu'):
-            ret.hidden_states = None
+
+        # copy的过程中，可能另外的线程正在调用add_token追加新的token，
+        # 为避免这里出现脏读，始终以new_token_len的值表示已经commit的token
+        # 所以这里复制已提交部分实现clone的读事务隔离
+        ret.accepted_len = ret.accepted_len[:ret.new_token_len]
+        ret.new_token_log_probs = ret.new_token_log_probs[:ret.new_token_len]
+        # new_token_ids比较特殊，每次reset_compute会把new_token_ids追加到input_ids里面
+        # 但new_token_len持续累加，所以这里算出来真正需要truncate的量
+        total_committed_tokens = ret.input_len + ret.new_token_len
+        new_token_ids_len = total_committed_tokens - len(ret.input_ids)
+        ret.new_token_ids = ret.new_token_ids[:new_token_ids_len]
+        # Note: 其他要保证事务隔离的列表对象在这里处理好再返回
+
         return ret
 
     @classmethod
@@ -266,6 +279,10 @@ class Query:
             self.plugin_query = copy.copy(self.plugin_query)
             self.plugin_query.detach()
 
+        # skip any gpu tensors, as they might be mutated shortly
+        if self.hidden_states is not None and self.hidden_states.device != torch.device('cpu'):
+            self.hidden_states = None
+
 
 class AsyncQuery:
     """
@@ -312,6 +329,21 @@ class InflightQueue:
     def truncate(self, length):
         with self.lock:
             self.queue = self.queue[length:]
+
+    def remove(self, query_ids: Set[str]):
+        with self.lock:
+            original_len = len(self.queue)
+            for query_id in query_ids:
+                self.query_pool.pop(query_id, None)
+
+            # in-place remove and compact the list
+            write_index = 0
+            for read_index in range(original_len):
+                if self.queue[read_index].id not in query_ids:
+                    if write_index != read_index:
+                        self.queue[write_index] = self.queue[read_index]
+                    write_index += 1
+            del self.queue[write_index:]
 
     def get_earliest(self, length) -> List[AsyncQuery]:
         with self.lock:

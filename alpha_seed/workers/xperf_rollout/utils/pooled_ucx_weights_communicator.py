@@ -1,7 +1,8 @@
 import os
+import time
 import traceback
 import random
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 import threading
 import asyncio
 import socket
@@ -21,11 +22,22 @@ from ucxx.exceptions import UCXConnectionResetError, UCXCanceledError
 from alpha_seed.workers.xperf_rollout.utils.base_weights_communicator import WeightsCommunicator
 from verl.utils.debug import log_gpu_memory_usage
 
+logger = logging.getLogger(__file__)
+
 
 def get_free_port():
     with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
         # 绑定到一个随机的可用端口
         s.bind(('::', 0))
+        # 获取绑定的端口号
+        port = s.getsockname()[1]
+    return port
+
+
+def get_free_port_v4():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        # 绑定到一个随机的可用端口
+        s.bind(('0.0.0.0', 0))
         # 获取绑定的端口号
         port = s.getsockname()[1]
     return port
@@ -52,7 +64,7 @@ class ConnectionPool:
         ip = ip.removeprefix("[")
         ip = ip.removesuffix("]")
         port = int(ip_port[1])
-        print(f"Creating endpoint with ip = {ip}, port = {port}")
+        print(f"Creating endpoint with remote ip = {ip}, remote port = {port}")
         ep = None
         for try_count in range(50):
             try:
@@ -74,9 +86,66 @@ class ConnectionPool:
             self.pool[address].append(ep)
 
 
+class WeightsUpdatingInterrupt(Exception):
+    pass
+
+
+class WeightUpdateRWLock:
+
+    def __init__(self):
+        self._readers = {}  # ep -> ts
+        self._read_lock = asyncio.Lock()  # 修改readers用的锁
+        self._resource_lock = asyncio.Lock()  # 修改被加锁资源本身用的锁
+        self._update_complete = asyncio.Event()  # 写锁具有更高优先级，获取到写锁之前不让新的读锁增加
+        self._resource_owner = ''  # ['read', 'write', ''], 标记当前资源被哪里锁了
+
+        # 初始状态下可让读锁
+        self._update_complete.set()
+
+    @property
+    def resource_owner(self):
+        return self._resource_owner
+
+    async def acquire_read(self, ep):
+        # 如果正准备update，就不让新来的acquire，避免不断有新来的client acquire下去导致update无法获取写锁
+        await self._update_complete.wait()
+        async with self._read_lock:
+            self._readers[ep] = time.time()
+            if len(self._readers) == 1:
+                t0 = time.time()
+                await self._resource_lock.acquire()
+                t1 = time.time()
+                self._resource_owner = 'read'
+                print(f'read _resource_lock.acquire(), cost={t1 - t0:.3f}s')
+
+    async def release_read(self, ep):
+        async with self._read_lock:
+            self._readers.pop(ep, None)
+            if len(self._readers) == 0:
+                if self._resource_owner != 'read':
+                    return
+                self._resource_lock.release()
+                self._resource_owner = ''
+                print('read _resource_lock.release()')
+
+    async def acquire_update(self):
+        self._update_complete.clear()
+        t0 = time.time()
+        await self._resource_lock.acquire()
+        t1 = time.time()
+        self._resource_owner = 'write'
+        print(f'update _resource_lock.acquire(), cost={t1 - t0:.3f}s')
+
+    def release_update(self):
+        self._resource_lock.release()
+        self._resource_owner = ''
+        self._update_complete.set()
+        print('update _resource_lock.release()')
+
+
 class UCXWeightsCommunicator(WeightsCommunicator):
 
-    def __init__(self, inference_engine, standalone, device_mesh):
+    def __init__(self, inference_engine, standalone: bool, device_mesh):
         self.inference_engine = inference_engine
         self.standalone = standalone
         self.device_mesh = device_mesh  # 注意不开tp时这个是None
@@ -85,9 +154,13 @@ class UCXWeightsCommunicator(WeightsCommunicator):
         self.server_up = False  # 是否作为server启动
         self.address = ""  # 作为server启动时，server的地址 ip:port 格式
         self._setup_completed = threading.Event()
+        self.client_thread = None  # client thread to receive weights
+        self.loop = None  # ucx server event loop
 
         self.server_finish_event = threading.Event()  # server侧的handler通知其他线程参数传输完成
         self.enter_ready = asyncio.Event()  # server侧的handler等待model参数准备好
+        # relay server 参数更新期间的互斥区，等正在读的client读完，新来的client等着
+        self.relay_server_update_lock = WeightUpdateRWLock()
         self.send_buffer_sema = asyncio.Semaphore(2)  # 由于send weight需要先copy到cupy buffer，为避免OOM，限制同时send数量
 
         # 作为actor server时，nccl world里的rank，用来做序号标记debug用
@@ -125,6 +198,14 @@ class UCXWeightsCommunicator(WeightsCommunicator):
     def wait_for_setup_completed(self):
         self._setup_completed.wait()
 
+    @property
+    def has_setup(self):
+        return self._setup_completed.is_set()
+
+    @property
+    def is_relay(self):
+        return self.server_up and self.standalone
+
     async def _event_handler(self, ep):
         while True:
             try:
@@ -136,8 +217,31 @@ class UCXWeightsCommunicator(WeightsCommunicator):
                 if tensor_key.startswith("register:"):
                     print(f"tensor_key = {tensor_key} received")
                     await ep.send_obj(f"r{self.rank}".encode("utf-8"))
+                elif tensor_key == "rank_start":
+                    # 在relay即将更新的期间，等待其更新完成再开始
+                    ack = 'ok'
+                    if self.standalone:
+                        # 如果当前已经在写锁中，即此relay server正在update weights，则driver侧已经调用stop_server_before_update，
+                        # 如果这时候elastic client刚启动，则可能在调用update_standalone_worker时走到这里，而relay server在等
+                        # driver 完成 stop_server_before_update，stop_server_before_update 会等所有standalone worker，
+                        # 其中elastic client的那个worker正在调用update_standalone_worker而不能响应stop_server_before_update
+                        # 导致循环等待死锁。因此这里直接return，跳过这个参数update
+                        if self.relay_server_update_lock.resource_owner == 'write':
+                            ack = 'skip'
+                        else:
+                            await self.relay_server_update_lock.acquire_read(ep)
+                    await ep.send_obj(ack.encode("utf-8"))
+                elif tensor_key == "rank_end":
+                    if self.standalone:
+                        await self.relay_server_update_lock.release_read(ep)
+                    await ep.send_obj(f"r{self.rank}".encode("utf-8"))
                 elif tensor_key == "group_end":
-                    print("tensor_key = group_end received")
+                    # 注意这里也要wait enter_ready，因为hybrid rollout虽然调用了update_standalone_worker，但可能没有马上能执行，
+                    # 而standalone不一定会访问到每个hybrid rollout rank，如果此时standalone已经传输完成，且广播group_end，
+                    # 次hybrid rollout rank还没enter_ready的话，就会这里server_finish_event set之后，再进入
+                    # update_standalone_worker，又把 server_finish_event clear 掉了，导致死等
+                    logger.debug("ucx server received 'group_end'")
+                    await self.enter_ready.wait()
                     self.server_finish_event.set()
                     await ep.send_obj(f"r{self.rank}".encode("utf-8"))
                 elif tensor_key == "ping":
@@ -164,6 +268,10 @@ class UCXWeightsCommunicator(WeightsCommunicator):
                             send_buf = cp.from_dlpack(dlpack).view(cp.uint8).copy()
                             cp.cuda.get_current_stream().synchronize()
                             await ep.send(send_buf)
+                            # deref: 被dlpack转移之后的tensor，需要这样手动assign None才不会造成内存泄漏
+                            weight = None
+                            del send_buf
+                        cp.get_default_memory_pool().free_all_blocks()
                 else:
                     # 注意不要乱发不知道的key，会处理不了
                     await self.enter_ready.wait()
@@ -177,8 +285,14 @@ class UCXWeightsCommunicator(WeightsCommunicator):
                         send_buf = cp.from_dlpack(dlpack).view(cp.uint8).copy()
                         cp.cuda.get_current_stream().synchronize()
                         await ep.send(send_buf)
+                        # deref: 被dlpack转移之后的tensor，需要这样手动assign None才不会造成内存泄漏
+                        weight_tensor = None  # deref
+                        del send_buf
+
+                    cp.get_default_memory_pool().free_all_blocks()
             except (UCXConnectionResetError, UCXCanceledError) as e:
-                print("connection reset by client side, server handler ignored", e)
+                if self.standalone:
+                    await self.relay_server_update_lock.release_read(ep)
                 break
             except Exception as e:
                 traceback.print_exc()
@@ -197,22 +311,29 @@ class UCXWeightsCommunicator(WeightsCommunicator):
                 logging.info(f"started listener on port {lf.port} with ip = {lf.ip}")
                 port_queue.put(port)
                 self.server_up = True
+                if self.standalone:
+                    # 对于relay server来说，因为不需要同步调用update_standalone_worker，因此一开始就把server设于enter状态
+                    self.enter_ready.set()
                 break
         assert self.server_up, "server cannot started"
         while True:
             await asyncio.sleep(0.1)
 
     def _start_server(self, port_queue: Queue):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
         # monitor asyncio tasks, use `telnet 127.0.0.1 21000` to connect to the monitor
+        base_port = 21000
+        if self.standalone:
+            base_port = 22000
         print(f"aiomonitor started on rank={self.rank}, "
-              f"use `telnet 127.0.0.1 {21000 + self.rank}` to connect to the monitor")
-        with aiomonitor.Monitor(loop, termui_port=21000 + self.rank, console_enabled=False):
-            loop.run_until_complete(self._server(port_queue))
-        loop.close()
+              f"use `telnet 127.0.0.1 {base_port + self.rank}` to connect to the monitor")
+        with aiomonitor.Monitor(self.loop, termui_port=base_port + self.rank, console_enabled=False):
+            self.loop.run_until_complete(self._server(port_queue))
+        self.loop.close()
 
     def setup_as_server(self, ifname=None) -> str:
+        ifname = os.environ.get('UCXX_IFNAME', ifname)
         ip = ucxx.get_address(ifname=ifname)
         assert ip is not None and ip != "", f"expecting ucxx.get_address return non-empty, got {ip}"
         port_queue = Queue()
@@ -226,15 +347,41 @@ class UCXWeightsCommunicator(WeightsCommunicator):
         self.address = f"{ip}:{port}"
         return self.address
 
-    def update_standalone_worker(self, role):
-        print(f"update_standalone_worker called with role = {role}")
+    def on_will_start_update(self):
+        # relay server 要更新前，提前获取写锁，避免elastic client这时候来获取到了上一个版本的旧参数
+        if self.is_relay:
+            # 注意这个锁不是加在transfer_weights()调用前后，因为relay server只作为server，不会调用transfer_weights
+            # 实际的transfer_weights由另一个weights_communicator调用，他们共享的是同一份underlying weights
+            # 因此这个写锁在hook方法里调用
+            asyncio.run_coroutine_threadsafe(self.relay_server_update_lock.acquire_update(), self.loop).result()
 
-        if self.server_up:  # called on server, skipping
+    def on_updated(self):
+        # relay server 参数更新完，在等的client可以开始传输了
+        if self.is_relay:
+            self.relay_server_update_lock.release_update()
+
+    def update_standalone_worker(self, role):
+        source_addr = self.source_address  # noqa: py-spy
+
+        # hybrid rollout才会走到这里
+        # standalone rollout relay server总是up状态，这里跳过
+        if self.server_up and not self.is_relay:
             self.server_finish_event.clear()
             self.enter_ready.set()  # notify client to read weights
             self.server_finish_event.wait()  # wait for all clients finish reading
             self.enter_ready.clear()  # clear for next turn
             self.inference_engine.current_steps = 0
+            return
+
+        async def await_start():
+            ep = await self.connection_pool.get_connection(self.source_address)
+            await ep.send_obj('rank_start'.encode('utf-8'))
+            ack = await ep.recv_obj()
+            return ep, ack
+
+        async def await_end(ep):
+            await ep.send_obj('rank_end'.encode('utf-8'))
+            ack = await ep.recv_obj()
             return
 
         async def transfer_single_weight(tensor_key, buffer):
@@ -294,18 +441,75 @@ class UCXWeightsCommunicator(WeightsCommunicator):
             # free all recv buffer space to avoid OOM
             cp.get_default_memory_pool().free_all_blocks()
 
-        print("start transfer_weights")
+        print(f"start transfer_weights {self.standalone=} {self.is_relay=}")
 
-        def client_run():
-            return asyncio.run(transfer_weights())
+        def client_run(exc_queue):
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            # monitor asyncio tasks, use `telnet 127.0.0.1 <port>` to connect to the monitor
+            port = get_free_port_v4()
+            print(f"aiomonitor of client_transfer_weights started on rank={self.rank}, "
+                  f"use `telnet 127.0.0.1 {port}` to connect to the monitor")
+            with aiomonitor.Monitor(loop, termui_port=port, console_enabled=False):
+                try:
+                    # step 1: 通知server，client即将拉取参数，server若还没准备好，可以在这个时候先处理好了再返回
+                    #   如果server是hybrid rollout：则等待参数就绪
+                    #   如果server时relay server： 则等relay自己拉完参数后再返回
+                    ep, ack = loop.run_until_complete(await_start())
+                    if ack == 'skip':
+                        print('client skip this weight transfer, will be updated soon')
+                        e = WeightsUpdatingInterrupt()
+                        tb = traceback.format_exc()
+                        exc_queue.put((e, tb))
+                        return
+                    else:
+                        # 没有relay server没有通知需要skip的话则继续运行，拉取参数
+                        exc_queue.put((None, None))
 
-        client_thread = threading.Thread(target=client_run)
-        client_thread.start()
-        client_thread.join()
-        print("finished transfer_weights")
+                    # step 2: 真正开始拉取参数
+                    loop.run_until_complete(transfer_weights())
+                    loop.run_until_complete(await_end(ep))
+                except Exception as e:
+                    tb = traceback.format_exc()
+                    exc_queue.put((e, tb))
+
+                # receive完weights后立即回调，通知此rank，不管整个worker group的状态
+                self.on_updated()
+
+            loop.close()
+
+        exc_queue = Queue()
+        self.client_thread = threading.Thread(target=client_run, args=(exc_queue,), daemon=True)
+        self.client_thread.start()
+
+        # 如果是elastic client则只需关注是否已经开始传输，过exc_queue提前知道传输状态，异常原路抛出
+        # 如果是stable client(as relay)，会等自己的传输完成才退出
+        # 非elastic的server mode下，standalone rollout也会被setup as relay，来保证这里不会提前退出(虽然relay没有被用到)
+        if self.standalone and not self.is_relay:
+            exc, tb = exc_queue.get()
+            if exc is not None:
+                print(tb)
+                raise exc
+        else:
+            # wait for transfer finish before returning. ensure the integrity of model weights
+            self.client_thread.join()
+            self.client_thread = None
+
+        # 把queue里接下来还有的exc也抛出了
+        while not exc_queue.empty():
+            exc, tb = exc_queue.get()
+            if exc is not None:
+                print(tb)
+                raise exc
 
         log_gpu_memory_usage(f'After {role} update')
         print("client finished")
+
+    def update_standalone_worker_wait(self):
+        t = self.client_thread
+        self.client_thread = None
+        if t is not None:
+            t.join()
 
     def update_standalone_worker_end(self, addresses: List[str]):
 
@@ -320,6 +524,7 @@ class UCXWeightsCommunicator(WeightsCommunicator):
                 self.connection_pool.put_connection(ep)
 
         async def broadcast_group_end_signal():
+            print('will broadcast group_end signal to all trainer actors')
             tasks = [asyncio.create_task(send_group_end_signal(addr)) for addr in addresses]
             await asyncio.gather(*tasks)
 

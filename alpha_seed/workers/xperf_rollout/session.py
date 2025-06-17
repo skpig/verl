@@ -9,6 +9,7 @@ Handles end-to-end inference process including:
 - Multi-GPU distributed inference
 """
 from dataclasses import dataclass
+from queue import Queue
 
 from torch.distributed import get_rank
 from xperf_gpt.inference import init_inference
@@ -20,7 +21,7 @@ from xperf_gpt.multi_models.visual.eva_vit import EVA_VIT_CONFIGS
 from alpha_seed.workers.xperf_rollout.component.query import Query, AsyncQuery, InflightQueue, batch_sync_tp_queries
 from alpha_seed.utils.observility import get_profiler_context_wrapped
 from xperf_gpt.utils import (logging_rank, logging_rank_only)
-from typing import List, Dict
+from typing import List, Dict, Set
 import logging
 import os
 import time
@@ -50,6 +51,9 @@ class LoadMetric:
     num_prefilling: int  # 正在跑prefill
     num_decoding: int  # 正在跑decode
     kv_cache_util: float  # kv cache util range 0~1
+    pending_ids: List[str]  # 放在pending列表里的query ids
+    waiting_ids: List[str]  # 放在waiting列表里的query ids
+    is_weights_updating: bool  # 是否正在更新weights期间
 
 
 class StepProfiler:
@@ -92,6 +96,22 @@ class StepProfiler:
         elif self.profiler is not None and hasattr(self.profiler, 'step'):
             self.profiler.step()
         self.step += 1
+
+
+def _remove_query_list_inplace(lst: List[Query], to_remove: Set[str]) -> List[Query]:
+    original_len = len(lst)
+    write_index = 0
+    ret = []
+    for read_index in range(original_len):
+        if lst[read_index].id not in to_remove:
+            if write_index != read_index:
+                lst[write_index] = lst[read_index]
+            write_index += 1
+        else:
+            ret.append(lst[read_index])
+    del lst[write_index:]
+    # 返回删除的元素
+    return ret
 
 
 class GetMaxSet:
@@ -239,6 +259,7 @@ class InferenceSession:
         self.paused: List[Query] = []
 
         self.all_accepted_queries: Dict[str, Query] = {}
+        self.queries_to_abort: Queue = Queue()  # 要abort掉的query将query_id放进queue里
         self.unfinished_off_policy_steps_set = GetMaxSet()
         self.stop_sequence_tokens: List[List[int]] = []
         self.common_prefix = ""
@@ -644,6 +665,10 @@ class InferenceSession:
                         self.all_accepted_queries.pop(q.id)
         return ret
 
+    def abort(self, query_ids: List[str]):
+        for query_id in query_ids:
+            self.queries_to_abort.put(query_id)
+
     def get_load_metrics(self) -> LoadMetric:
         num_prefill = 0
         num_decode = 0
@@ -661,6 +686,9 @@ class InferenceSession:
             num_prefilling=num_prefill,
             num_decoding=num_decode,
             kv_cache_util=self.cache_manager.get_kv_cache_utils(),
+            pending_ids=[q.id for q in self.pending.queue],
+            waiting_ids=[q.id for q in self.waiting],
+            is_weights_updating=self.status != "running",
         )
 
     def _finish_query(self, query):
@@ -931,6 +959,42 @@ class InferenceSession:
                 return True
         return False
 
+    # abort掉abort queue 里的 query
+    def _remove_aborted_queries(self):
+        num_abort = self.queries_to_abort.qsize()
+        num_abort_local = num_abort
+        num_abort_query_local_tensor = torch.tensor([num_abort], dtype=torch.int32, device="cuda")
+        if self.engine.module.tp_size > 1:
+            assert self.tp_group is not None, "tp_group not set!"
+            reduce_op = torch.distributed.ReduceOp.MIN
+            torch.distributed.all_reduce(num_abort_query_local_tensor, group=self.tp_group, op=reduce_op)
+            num_abort = num_abort_query_local_tensor.int().item()
+
+        if num_abort == 0:
+            return num_abort, num_abort_local
+
+        # get minimum synchronized aborts
+        to_abort: Set[str] = set()
+        for i in range(num_abort):
+            to_abort.add(self.queries_to_abort.get())
+
+        # remove from local list
+        with self._accepted_queries_mutex:
+            for query_id in to_abort:
+                self.all_accepted_queries.pop(query_id, None)
+        self.pending.remove(to_abort)
+        removed = []
+        removed.extend(_remove_query_list_inplace(self.paused, to_abort))
+        removed.extend(_remove_query_list_inplace(self.waiting, to_abort))
+        removed.extend(_remove_query_list_inplace(self.running, to_abort))
+
+        # release kv cache
+        for q in removed:
+            self.cache_manager.release_query(q)
+
+        return num_abort, num_abort_local
+
+    # consume more queries from pending to waiting list
     def _fetch_from_pending_queries(self) -> List[Query]:
         num_ready_query_local_tensor = torch.tensor([len(self.pending)], dtype=torch.float32, device="cuda")
         num_ready = len(self.pending)
@@ -1069,6 +1133,7 @@ class InferenceSession:
                     break
                 # each rank should have the same running and waiting
                 if (_idle()) or (self.current_steps % 20 == 0):
+                    self._remove_aborted_queries()
                     self.waiting = self._fetch_from_pending_queries()
                 self._try_resume_paused_queries()
                 self.running, self.waiting = self._select_running_queries()

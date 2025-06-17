@@ -420,17 +420,21 @@ streaming_rollout:
     elastic_pool_name: elasticworker
     min_replicas: 1  # 最少的副本数，最小值会放在稳定资源池上跑，超过最小值的部分会放到弹性资源池上跑
     max_replicas: 100
-    scale_up_threshold: 0.85  # 超过x%的时间都在gen的话，则触发
-    scale_up_wait: 1  # period，连续超过x个周期保持触发，则真正触发扩容
-    scale_down_threshold: 0.7
-    scale_down_wait: 2  # period
+    metrics_sampling_seconds: 5
+    scale_up_threshold: 2  # 平均每个engine生成的并发度超过x就扩
+    scale_up_wait: 20  # seconds，连续x seconds里的那个采样都超过threshold就扩
+    scale_down_threshold: 2  # 类似上面
+    scale_down_wait: 10  # 类似上面
   query_trace:
     enable: True
     from_step: 0
     to_step: 10
     upload_to_mlx: True
   proxy:
+    # 只对非elastic的server mode起作用，elastic一定是dynamic-balancing
+    lb_mode: dynamic-balancing  # ["dynamic-balancing", "even-distribution"]
     poll_internal_seconds: 2.
+    rebalance_threshold: 2  # 最小溢出x个才重新分发给其他
 
 streaming_validator:
   n_gpus_per_node: 0
@@ -439,6 +443,7 @@ streaming_validator:
     enable: false
     stable_pool_name: worker
 
+# 这是资源池的弹性伸缩
 elastic:
   enable: false
   pools:

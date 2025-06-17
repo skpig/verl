@@ -20,11 +20,8 @@ import itertools
 from ray import ObjectRef
 
 from alpha_seed.logging import refine_log
-from alpha_seed.utils.server_client import is_local_ray_instance
-from alpha_seed.workers.streaming_service.auto_scaling import HorizontalAutoScaling, ScalePolicyConfig
 from alpha_seed.workers.streaming_service.rollout_query_timeline import RolloutQueryTimeline
 from alpha_seed.workers.streaming_service.rollout_request_manager import get_all_request_manager_actors
-from alpha_seed.workers.streaming_service.streaming_rollout import RemoteAsyncXPerfGPTRollout
 
 refine_log()
 
@@ -48,8 +45,6 @@ import numpy as np
 from codetiming import Timer
 
 from alpha_seed.trainer.tensorcore_collect import tensorcore_collection
-from alpha_seed.utils.profile.smi_dmon import NvidiaSmiQueryGPUTracer
-from alpha_seed.utils.profile.timeline import CallStackTracer, GCEventTracer, Tracer, export_chrome_trace, tl_time_between, trace_into
 from alpha_seed.utils.select_strategy.bon_strategy import *
 from alpha_seed.utils.select_strategy.league_training_strategy import *
 from alpha_seed.utils.validator.validation_manager import *
@@ -69,7 +64,6 @@ from alpha_seed.workers.actors.sample_pool import SamplePool
 from mono_rl.single_controller import Worker
 from mono_rl.single_controller.ray import RayResourcePool, RayWorkerGroup, RayClassWithInitArgs
 from mono_rl.single_controller.ray import create_colocated_worker_cls
-from mono_rl.single_controller.ray.replicated_worker_group import ReplicatedRayWorkerGroup, ScalingRayWorkerGroup
 from mono_rl import DataProto
 from verl.utils.fs import copy_local_path_from_hdfs
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
@@ -113,7 +107,7 @@ class ResourcePoolManager:
     Define a resource pool specification. Resource pool will be initialized first.
     Mapping
     """
-    resource_pool_spec: dict[str, list[int]]
+    resource_pool_spec: dict[str, Tuple[list[int], str]]
     mapping: dict[Role, str]
     resource_pool_dict: dict[str, RayResourcePool] = field(default_factory=dict)
     server_client_split: bool = False
@@ -865,6 +859,7 @@ class RayPPOTrainer(object):
         actor_rollout_init_fut = self.actor_rollout_wg.init_model(
             remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init,
             from_scratch=self.build_model_from_scratch(from_step, 'actor'))
+        init_futures.append(('actor_rollout_init_model', actor_rollout_init_fut))
 
         if self.use_standalone_rollout and not self.use_elastic_streaming_rollout:
             # 使用固定副本数的standalone rollout，跟着actor_rollout_ref的逻辑一起走fusedworker在resource_pool定义好的资源上创建

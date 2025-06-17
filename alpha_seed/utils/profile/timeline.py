@@ -461,12 +461,10 @@ class WaterfallSlotTracer:
     def __init__(self, tracer: Tracer):
         self.tracer = tracer
         self._thread_slots = defaultdict(list)
-        self._sort_alignment_ts = time.time()
+        self._buffered_events: List[TracingEvent] = []
 
     def trace(self, evt: TracingEvent):
-        if isinstance(evt, (CompleteEvent, CoherentCompleteEvent)):
-            self.allocate_thread_slot(evt)
-        self.tracer.trace(evt)
+        self._buffered_events.append(evt)
 
     def allocate_thread_slot(self, evt: Union[CompleteEvent, CoherentCompleteEvent]):
         pid = evt.pid
@@ -490,6 +488,16 @@ class WaterfallSlotTracer:
 
         # assign tid to event
         evt.tid = available_slot.tid
+
+    def flush(self):
+        # reorder first
+        self._buffered_events.sort(key=lambda e: (e.pid, e.ts_to_sort))
+        # then allocate slot to be compacted in threads
+        for evt in self._buffered_events:
+            if isinstance(evt, (CompleteEvent, CoherentCompleteEvent)):
+                self.allocate_thread_slot(evt)
+            self.tracer.trace(evt)
+        self._buffered_events = []
 
 
 class OrderedTracer:

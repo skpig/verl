@@ -1,21 +1,24 @@
 import os
 import threading
 import time
+import traceback
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import List
 
 import ray
+from ray import ObjectRef
 from mono_rl.single_controller.ray import RayWorkerGroup
 
 from mono_rl.single_controller.ray.replicated_worker_group import ReplicatedRayWorkerGroup, ScalingRayWorkerGroup
 
-from alpha_seed.utils.profile.timeline import Tracer, CompleteEvent
+from alpha_seed.utils.profile.timeline import Tracer, CompleteEvent, CounterEvent
 from alpha_seed.utils.server_client import is_local_ray_instance
 
 
 @dataclass
 class ScalePolicyConfig:
+    metrics_sampling_seconds: float
     scale_up_threshold: float
     scale_down_threshold: float
     scale_up_wait: float
@@ -25,8 +28,8 @@ class ScalePolicyConfig:
 
 
 @dataclass
-class SeriesMetrics:
-    steps: List[float]
+class TimeSeriesMetrics:
+    timestamps: List[float]
     metrics: List[float]
 
 
@@ -35,7 +38,7 @@ class MetricSource:
     负责提供周期性观测指标用于计算扩缩容动作
     """
 
-    def get_recent_series_metrics(self, recent_n: int) -> SeriesMetrics:
+    def get_recent_time_series_metrics(self, recent_seconds: float) -> TimeSeriesMetrics:
         raise NotImplementedError
 
 
@@ -51,92 +54,131 @@ class HorizontalAutoScaling:
         self.worker_pool_name = worker_pool_name
         self.config = config
         self.metric_source = metric_source
-        self._recent_action_step = -1
         self._is_local_ray_cluster = is_local_ray_instance()
         self._tracer = Tracer.get_instance()
 
-        threading.Thread(target=self._resource_loop, daemon=True, name=f'scaling-loop/{worker_pool_name}').start()
+        threading.Thread(target=self._scaling_loop, daemon=True, name=f'scaling-loop/{worker_pool_name}').start()
 
-    def _resource_loop(self):
-        check_interval = 5
+    def _scaling_loop(self):
+        check_interval = self.config.metrics_sampling_seconds
+        loop_count = 0
         while True:
             time.sleep(check_interval)
+            loop_count += 1
 
-            # 检查是否需要扩容
-            if self.should_scale_up():
-                if self.resource_available():
-                    with self._tracing('scale_up'):
-                        fut = self.replicas.scale_up(1)
-                        print(f"scale up 1 more replica on pool({self.worker_pool_name})")
-                        ray.get(fut)
+            try:
+                # 检查是否需要扩容
+                should_scale_up, num_scale_up = self.should_scale_up()
+                if should_scale_up and num_scale_up > 0:
+                    num_able_scale_up = min(num_scale_up, self.max_scale_up_available())
+                    if num_able_scale_up > 0:
+                        with self._tracing('scale_up', num_able_scale_up):
+                            futs = self.replicas.scale_up(num_able_scale_up)
+                            print(f"scale up {num_able_scale_up} more replica on pool({self.worker_pool_name})")
+                            # 忽略这里返回的futs，因为等也没用，就让他们后台自己跑
+                            alive_num_replicas = len(self.replicas.alive_worker_group_ids)
+                            print(f"scale up done on pool({self.worker_pool_name}), current {alive_num_replicas=}")
+                    else:
+                        # do nothing, wait for next turn
+                        print(f"try to scale up {num_scale_up} more replica, but underlying resource is not enough. "
+                              "wait for cluster HPA ready")
+
+                    # 如果可扩，则不再判断是否要缩容
+                    continue
+
+                should_scale_down, num_scale_down = self.should_scale_down()
+                if should_scale_down and num_scale_down > 0:
+                    with self._tracing('scale_down', num_scale_down):
+                        futs = self.replicas.scale_down(num_scale_down)
+                        print(f"scale down {num_scale_down} replica on pool({self.worker_pool_name})")
                         alive_num_replicas = len(self.replicas.alive_worker_group_ids)
-                        print(f"scale up done on pool({self.worker_pool_name}), current {alive_num_replicas=}")
-                else:
-                    # do nothing, wait for next turn
-                    print("try to scale up 1 more replica, but underlying resource is not enough. "
-                          "wait for cluster HPA ready")
-            elif self.should_scale_down():
-                with self._tracing('scale_down'):
-                    fut = self.replicas.scale_up(-1)
-                    print(f"scale down 1 replica on pool({self.worker_pool_name})")
-                    ray.get(fut)
-                    alive_num_replicas = len(self.replicas.alive_worker_group_ids)
-                    print(f"scale down done on pool({self.worker_pool_name}), current {alive_num_replicas=}")
+                        print(f"scale down done on pool({self.worker_pool_name}), current {alive_num_replicas=}")
+            except Exception as e:
+                print(f'got exception during scaling resource loop, ignore this run')
+                traceback.print_exc()
 
     @contextmanager
-    def _tracing(self, event_name):
+    def _tracing(self, event_name, num_replicas):
         t0 = time.time() * 1e6
         yield
         t1 = time.time() * 1e6
-        evt = CompleteEvent(
-            pid='HorizontalAutoScaling',
-            tid=0,
-            name=event_name,
-            cat=event_name,
-            ts=t0,
-            dur=t1 - t0,
-        )
+        original_dur = t1 - t0
+        dur = max(1e6, original_dur)  # 最小显示1s的方块，避免找不到
+        evt = CompleteEvent(pid='HorizontalAutoScaling',
+                            tid=0,
+                            name=event_name,
+                            cat=event_name,
+                            ts=t0,
+                            dur=dur,
+                            args={
+                                'num_replicas': num_replicas,
+                                'original_dur_us': original_dur,
+                            })
+        self._tracer.trace(evt)
+
+    @contextmanager
+    def _tracing_each(self, object_name):
+        t0 = time.time() * 1e6
+        yield
+        t1 = time.time() * 1e6
+        evt = CompleteEvent(pid='HorizontalAutoScaling', tid=0, name=object_name, cat=object_name, ts=t0, dur=t1 - t0)
+        self._tracer.trace(evt)
+
+    def _trace_scaling_metrics(self, direction: str, metrics: TimeSeriesMetrics):
+        ts = metrics.timestamps[-1]
+        val = metrics.metrics[-1]
+        evt = CounterEvent(name=f'scale {direction}', pid='HorizontalAutoScaling', ts=ts * 1e6, data={
+            'current': val,
+        })
         self._tracer.trace(evt)
 
     def should_scale_up(self):
         # 先暂时把策略都实现在这个类里面
 
         # hard limit
-        if len(self.replicas) >= self.config.max_replicas:
-            return False
+        target_replicas = self.replicas.target_num_replicas
+        if target_replicas >= self.config.max_replicas:
+            return False, 0
 
         # 持续一段时间超过threshold，则scale up
-        recent_metrics = self.metric_source.get_recent_series_metrics(int(self.config.scale_up_wait))
+        recent_metrics = self.metric_source.get_recent_time_series_metrics(int(self.config.scale_up_wait))
         if not recent_metrics.metrics:
-            return False
-        latest_step = recent_metrics.steps[-1]
-        # 最近一个step scale过则跳过
-        if self._recent_action_step >= latest_step:
-            return False
+            return False, 0
+
+        self._trace_scaling_metrics('up', recent_metrics)
+
         # 过去观测的窗口每个值都超过阈值则scale up
-        ret = all(v > self.config.scale_up_threshold for v in recent_metrics.metrics)
-        if ret is True:
-            self._recent_action_step = latest_step
-        return ret
+        # 计算理论应该承载并发度
+        current_target_concurrency = self.config.scale_up_threshold * target_replicas
+        # 实际观测总并发度
+        latest_real_concurrency = recent_metrics.metrics[-1]
+        should = all(v > current_target_concurrency for v in recent_metrics.metrics)
+        # 按线性计算将实际并发度均摊到每个replica应有的并发度时需要scale up的replicas数
+        num_scale_up = latest_real_concurrency // self.config.scale_up_threshold - target_replicas  # 线性scale
+        return should, min(num_scale_up, self.config.max_replicas - target_replicas)
 
     def should_scale_down(self):
         # hard limit
-        if len(self.replicas) <= self.config.min_replicas:
-            return False
+        target_replicas = self.replicas.target_num_replicas
+        if target_replicas <= self.config.min_replicas:
+            return False, 0
 
         # 持续一段时间超过threshold，则scale up
-        recent_metrics = self.metric_source.get_recent_series_metrics(int(self.config.scale_down_wait))
+        recent_metrics = self.metric_source.get_recent_time_series_metrics(int(self.config.scale_down_wait))
         if not recent_metrics.metrics:
-            return False
-        latest_step = recent_metrics.steps[-1]
-        # 最近一个step scale过则跳过
-        if self._recent_action_step >= latest_step:
-            return False
+            return False, 0
+
+        self._trace_scaling_metrics('down', recent_metrics)
+
         # 过去观测的窗口每个值都超过阈值则scale up
-        ret = all(v < self.config.scale_down_threshold for v in recent_metrics.metrics)
-        if ret is True:
-            self._recent_action_step = latest_step
-        return ret
+        # 计算理论应该承载并发度
+        current_target_concurrency = self.config.scale_down_threshold * target_replicas
+        # 实际观测总并发度
+        latest_real_concurrency = recent_metrics.metrics[-1]
+        # 过去观测的窗口每个值都超过阈值
+        should = all(v < current_target_concurrency for v in recent_metrics.metrics)
+        num_scale_down = latest_real_concurrency // self.config.scale_down_threshold - target_replicas  # 线性scale
+        return should, min(abs(num_scale_down), abs(self.config.min_replicas - target_replicas))
 
     def resource_available(self) -> bool:
         # 只检查资源数量，不检查资源拓扑，最终的拓扑检查交给实例创建时的PG调度
@@ -151,3 +193,12 @@ class HorizontalAutoScaling:
             num_role_placeholder = 1
         # note(lixiang): ray现在的版本暂不支持每个node可用资源检查，所以这里只检查数量，不做拓扑检查
         return num_gpus_available >= num_gpus_required and num_role_placeholder >= 1
+
+    def max_scale_up_available(self) -> int:
+        unit = self.replicas.resource_unit
+        num_gpus_required = unit.world_size
+        total_available = ray.available_resources()
+        num_gpus_available = total_available.get('GPU', 0)
+
+        # note(lixiang): ray现在的版本暂不支持每个node可用资源检查，所以这里只检查数量，不做拓扑检查
+        return int(num_gpus_available // num_gpus_required)

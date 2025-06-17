@@ -150,27 +150,21 @@ def create_rollout_pool(config):
 
 
 # store the global request manager objects to avoid being gc
-request_managers = []
-
-
-def create_request_manager(instance_name: str):
-    remote_cls = ray.remote(RequestManager)
-    request_manager = remote_cls.options(name=f'RequestManager/{instance_name}', max_concurrency=102400).remote()
-    ray.wait([request_manager.ready.remote()])
-    request_managers.append(request_manager)
-    return request_manager
+rm_reg = None
 
 
 def create_rollout_manager(config):
-    rmrc_cls = ray.remote(RequestManagerRegisterCenter)
-    rmrc = rmrc_cls.options(name="RequestManagerRegisterCenter").remote()
-    ray.get(rmrc.ready.remote())
+    global rm_reg
+    rm_reg = RequestManagerRegisterCenter.init()
 
+    # server 模式下，gen的架构均为RequestManager+Proxy+ReplicatedWorker，所以这里把RequestManager启动起来
     if config.actor_rollout_ref.rollout.mode == "server":
-        create_request_manager('hybrid_rollout')
-        create_request_manager('standalone_rollout')
-        create_request_manager('validation')
-        create_request_manager('hybrid_validation')
+        ray.get([
+            rm_reg.create.remote('hybrid_rollout'),
+            rm_reg.create.remote('standalone_rollout'),
+            rm_reg.create.remote('validation'),
+            rm_reg.create.remote('hybrid_validation'),
+        ])
 
     logger = get_logger(config)
     tokenizer = get_tokenizer(config)

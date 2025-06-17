@@ -671,6 +671,10 @@ class AsyncActorRolloutRefWorker(Worker):
     def setup_as_server(self, ifname=None):
         return self.sharding_manager.weights_communicator.setup_as_server(ifname)
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def setup_as_relay(self, ifname=None):
+        return self.sharding_manager.weights_communicator.setup_as_server(ifname)
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
     def setup_as_client(self, role, source_addresses, all_rollout_addresses):
         # source_addresses: length等于自己的world size，根据自己的rank一一对应一个address即可
@@ -1279,9 +1283,9 @@ class AsyncActorRolloutRefWorker(Worker):
             ret.append(qid)
         return ret
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    async def get_inflight_query(self, query_id):
-        return await self.rollout.get_inflight_query(query_id)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
+    def abort_queries(self, query_ids: List[str]):
+        self.rollout.abort_queries(query_ids)
 
     # 只在dp_size=1的情况下调用，所以这里rank0执行即可，DP_COMPUTE与此参数暂不兼容
     @register(execute_mode=Execute.RANK_ZERO, blocking=True)

@@ -4,18 +4,18 @@ import random
 import threading
 import time
 import uuid
+from collections import defaultdict
 from dataclasses import dataclass
-from typing import List, Optional, Dict, Union
+from typing import List, Optional, Dict, Union, Tuple
 
-import numpy as np
 import ray
 import torch
 from ray import ObjectRef
-from ray.exceptions import ActorDiedError
+from ray.exceptions import ActorDiedError, GetTimeoutError, RayActorError
 
 from alpha_seed.utils.profile.timeline import Tracer, CompleteEvent, CounterEvent
 from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRefWorker
-from alpha_seed.workers.streaming_service.rollout_request_manager import RequestManager
+from alpha_seed.workers.streaming_service.rollout_request_manager import RequestManager, RequestManagerRegisterCenter
 from alpha_seed.workers.streaming_service.streaming_rollout import RemoteAsyncXPerfGPTRollout
 from alpha_seed.workers.xperf_rollout.component.query import Query
 from mono_rl.single_controller.ray import RayWorkerGroup
@@ -23,32 +23,83 @@ from mono_rl.single_controller.ray.base import func_generator
 from mono_rl.single_controller.ray.replicated_worker_group import ReplicatedRayWorkerGroup, ScalingRayWorkerGroup
 from mono_rl import DataProto
 
-from alpha_seed.workers.streaming_service.auto_scaling import MetricSource, SeriesMetrics
+from alpha_seed.workers.streaming_service.auto_scaling import MetricSource, TimeSeriesMetrics
 from alpha_seed.workers.xperf_rollout.session import LoadMetric
 
 
-def wait_ignore_actor_died(refs: List[ObjectRef]):
-    for f in refs:
-        try:
-            ray.get(f)
-        except ActorDiedError as e:
-            caller = inspect.stack()[1].frame.f_code.co_name
-            print(f"actor({e.actor_id}) died at function({caller}). ignore this as this is expected.")
+class NoAvailableWorker(RuntimeError):
+    pass
+
+
+@dataclass
+class InternalDiagnosisMetrics:
+    loop_cost: float
+    num_target_replicas: int
+    num_ready_replicas: int
+    num_initialized_replicas: int
+    num_alive_replicas: int
+    gmem_insufficient_count: int
+    total_standby_wgs: int  # 还有多少wg本轮可以接收请求
+    total_overload_num_slots: int  # 多少请求在wg上溢出要分发给别的wg
+    total_available_num_slots: int  # 本轮可接收请求的wg总共能接收多少
+    total_rebalanced: int  # 本轮发生重平衡的请求多少个
+    max_concurrency: int  # 本轮计算得到每个wg最大接受多少并发
+    dispatch_delay_acc: float  # query在request pool里到分发出去那一刻总共等待的时间，时间越长表示proxy分发能力越弱
+    enqueue_delay_acc: float  # query从创建到进入pool里产生的delay的累积
+
+    def to_dict(self):
+        # $前缀表示requests/query数量
+        # #前缀表示replica数量
+        return {
+            'loop_cost': self.loop_cost,
+            '#target': self.num_target_replicas,
+            '#ready': self.num_ready_replicas,
+            '#initialized': self.num_initialized_replicas,
+            '#alive': self.num_alive_replicas,
+            '#gmem full': self.gmem_insufficient_count,
+            '#standby': self.total_standby_wgs,
+            '$overload': self.total_overload_num_slots,
+            '$available': self.total_available_num_slots,
+            '$rebalanced': self.total_rebalanced,
+            '$max_concurrency': self.max_concurrency,
+            'dispatch_delay': self.dispatch_delay_acc,
+            'enqueue_delay': self.enqueue_delay_acc,
+        }
 
 
 class _MetricSourceImpl(MetricSource):
 
     def __init__(self, request_manager: RequestManager):
         self.req_mgr = request_manager
+        self.concurrency_ts = []  # [(ts, concurrency), ...]
 
-    def get_recent_series_metrics(self, recent_n: int) -> SeriesMetrics:
-        assert recent_n >= 1, f"need to retrieve at least one sample, got({recent_n})"
-        busy_ratio = ray.get(self.req_mgr.get_recent_step_busy_ratio.remote(recent_n))
-        if busy_ratio:
-            print(f"get recent busy% from request mgr got {[int(r * 100) for _, r in busy_ratio]}%")
-        return SeriesMetrics(
-            steps=[global_step for global_step, _ in busy_ratio],
-            metrics=[ratio for _, ratio in busy_ratio],
+    def get_recent_time_series_metrics(self, recent_seconds: float) -> TimeSeriesMetrics:
+        now = time.time()
+        concurrency = ray.get(self.req_mgr.get_concurrency.remote())
+        concurrency_values = concurrency.values()
+        if not concurrency_values:
+            return TimeSeriesMetrics([], [])
+        min_con = min(concurrency_values)
+        max_con = max(concurrency_values)
+        total_con = sum(concurrency_values)
+        print(f'get recent concurrency min={min_con} max={max_con} total={total_con}')
+        self.concurrency_ts.append((now, total_con))
+        tss = []
+        metrics = []
+        oldest_idx = 0
+        for idx, (ts, total_con) in enumerate(reversed(self.concurrency_ts)):
+            if ts > now - recent_seconds:
+                tss.append(ts)
+                metrics.append(total_con)
+            else:
+                # out of date
+                oldest_idx = idx + 1
+                break
+        # 取最后的N个，扔掉前面过期的指标
+        self.concurrency_ts = self.concurrency_ts[-oldest_idx:]
+        return TimeSeriesMetrics(
+            timestamps=list(reversed(tss)),
+            metrics=list(reversed(metrics)),
         )
 
 
@@ -73,6 +124,7 @@ class FixedReplicatedRayWorkerGroupAdapter(ReplicatedRayWorkerGroup):
 
     def __init__(self, wg_with_dp: RayWorkerGroup, tp_size: int, original_class_name: str):
         # 不支持scale，initializer传None
+        # original_class_name是fuse之前的class name, 见RayPPOTrainer.resource_pool_to_cls的定义
         super().__init__(None, wg_with_dp.resource_pool)  # noqa
         self.tp_size = tp_size
         assert wg_with_dp.world_size % tp_size == 0, \
@@ -88,6 +140,11 @@ class FixedReplicatedRayWorkerGroupAdapter(ReplicatedRayWorkerGroup):
         self.wgs = {uuid.uuid4().hex: wg for wg in split_wgs}
         self.alive_worker_group_ids = set(self.wgs.keys())
         self.ready_worker_group_ids = self.alive_worker_group_ids
+        self.initialized_worker_group_ids = self.alive_worker_group_ids
+
+    @property
+    def guaranteed(self):
+        return self
 
     def set_dead_callback(self, fn):
         pass
@@ -95,30 +152,69 @@ class FixedReplicatedRayWorkerGroupAdapter(ReplicatedRayWorkerGroup):
     def get_alive_worker_groups(self):
         return self.wgs
 
+    def get_initialized_worker_groups(self):
+        return self.wgs
+
     def get_ready_worker_groups(self):
         return self.wgs
 
+    @property
+    def target_num_replicas(self) -> int:
+        return len(self.wgs)
 
-class DispatchProgressBar:
 
-    def __init__(self, name, log_interval_seconds=5.):
-        self.name = name
-        self.acc_dispatched = 0
+class DebounceAccumulatedLogger:
+
+    def __init__(self, log_interval_seconds=15., accumulated_type=int):
         self.log_interval_seconds = log_interval_seconds
-        self._next_log_at = time.time() + log_interval_seconds
+        self.wg_latest_log_ts = defaultdict(time.time)  # wg_name -> ts
+        self.wg_accumulate_value = defaultdict(accumulated_type)  # wg_name -> val
 
-    def update(self, dispatched: int, pending_size: int, load, engine_id: str):
-        self.acc_dispatched += dispatched
-        total = self.acc_dispatched + pending_size
-        if total <= 0:
-            return
-        if time.time() > self._next_log_at:
-            print(
-                f"dispatch {self.acc_dispatched}/{total} (remain={pending_size}) queries from({self.name}) "
-                f"to wg({engine_id}, pending={load.num_pending}, P={load.num_prefilling}/D={load.num_decoding}, kv={load.kv_cache_util:.2f})"
-            )
-            self._next_log_at += self.log_interval_seconds
-            self.acc_dispatched = 0
+    def log(self, wg_name: str, val: int | float, fmt: str):
+        last_ts = self.wg_latest_log_ts[wg_name]
+        self.wg_accumulate_value[wg_name] += val
+        now = time.time()
+        if now - last_ts >= self.log_interval_seconds:
+            self.wg_latest_log_ts[wg_name] = now
+            acc = self.wg_accumulate_value[wg_name]
+            content = fmt.format(accumulated_value=acc)
+            print(content)
+
+
+@dataclass
+class StatisticalMetric:
+    minimum: float
+    maximum: float
+    mean: float
+    sum: float
+
+
+class ProxyMetricsLogger:
+
+    def __init__(self):
+        self.metrics = defaultdict(list)  # name -> val
+        self._last_step_metrics = {}
+
+    def log(self, kv: dict):
+        for k, v in kv.items():
+            self.metrics[k].append(v)
+
+    def step(self, global_step: int):
+        # go to next step
+        self._last_step_metrics = self.metrics
+        self.metrics = defaultdict(list)
+
+    def get_last_step_metrics(self) -> Dict[str, StatisticalMetric]:
+        ret = {}
+        for k, vl in self._last_step_metrics.items():
+            if len(vl) == 0:
+                continue
+            minimum = min(vl)
+            sum_ = sum(vl)
+            mean = sum_ / len(vl)
+            maximum = max(vl)
+            ret[k] = StatisticalMetric(minimum, maximum, mean, sum_)
+        return ret
 
 
 class RolloutWorkerGroupProxy(_MetricSourceImpl):
@@ -129,16 +225,17 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
 
     def __init__(self, replicas: Union[ReplicatedRayWorkerGroup, ScalingRayWorkerGroup], actor_addresses: List[str],
                  request_manager_name: str, poll_interval: float):
-        self.request_manager: RequestManager = ray.get_actor(f'RequestManager/{request_manager_name}')  # noqa
+        self.request_manager: RequestManager = RequestManagerRegisterCenter.get(request_manager_name)  # noqa
         super().__init__(self.request_manager)
         self.replicas = replicas
         self.actor_addresses = actor_addresses
         self._tracer = Tracer.get_instance()
+        self._stop_server_ts = 0
         self._update_worker_start_ts = 0
-        self._update_worker_finished_ts = 0
         self._request_manager_name = request_manager_name
         self.poll_interval = poll_interval
-        self._progress_bar = DispatchProgressBar(self._request_manager_name)
+        self._progress_logger = DebounceAccumulatedLogger()
+        self._metrics_logger = ProxyMetricsLogger()
 
         self.replicas.set_dead_callback(self._worker_group_dead_callback)
         self._loop_should_stop = threading.Event()
@@ -170,8 +267,8 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
 
     def _worker_group_dead_callback(self, worker_group_ids: List[str]):
         # worker group任意死了之后，通知request manager将运行中的请求释放掉
-        alive_worker_group_ids = self.replicas.ready_worker_group_ids
-        self.request_manager.handle_stale_requests.remote(alive_worker_group_ids)
+        ready_worker_group_ids = self.replicas.ready_worker_group_ids
+        self.request_manager.handle_stale_requests.remote(ready_worker_group_ids)
 
     def _dispatch_loop(self):
         print('start background dispatch loop')
@@ -197,20 +294,21 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
             # 在dispatch过程中，worker group死了也没关系，这个request会之后被标记为stale
             t0 = time.time()
             for engine_id, wg in self.replicas.get_ready_worker_groups().items():
-                wg: Union[RemoteAsyncXPerfGPTRollout, AsyncActorRolloutRefWorker]  # type anno
+                wg: Union[RayWorkerGroup, RemoteAsyncXPerfGPTRollout, AsyncActorRolloutRefWorker]  # type anno
+                wg_name = wg.group_name
                 try:
                     # 1. collect intermediate result
                     # get result(including partial) from engine, update to centralized request pool
                     queries: List[Query] = wg.get_all_queries(self._request_manager_name)
                     if len(queries) > 0:
-                        self.request_manager.update_intermediate_queries.remote(queries, engine_id)
+                        self.request_manager.update_intermediate_queries.remote(queries, engine_id, time.time())
 
                     # 2. send new request to worker group (engine)
                     load: LoadMetric = wg.get_load_metrics()[0]  # noqa, dp_size always =1
-                    gmem_insufficient = load.num_waiting > 0
+                    gmem_insufficient = load.kv_cache_util > 0.9
 
                     # note(hongbin): 始终让engine处于一个固定满并发的状态即可，减少动态插入新的具体进行prefill打断decode的case
-                    short = max_concurrency - load.num_prefilling - load.num_decoding - load.num_pending
+                    short = max_concurrency - load.num_prefilling - load.num_decoding - load.num_pending - load.num_waiting
                     # 如果gmem不够了就不发了
                     if short > 0 and not gmem_insufficient:
                         queries: List[Query] = ray.get(
@@ -220,7 +318,13 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
                                 # query的分类，区分一下是hybrid_rollout/standalone_rollout/validation，避免共用engine时不知道怎么update回去对应的来源
                                 q.meta_info['query_type'] = self._request_manager_name
                             wg.add_inflight_queries(queries)
-                            self._progress_bar.update(len(queries), pending_size, load, engine_id)
+                            pending_size -= len(queries)
+                            fmt = (
+                                "dispatch {accumulated_value} "
+                                f"(remain={pending_size}) queries from({self._request_manager_name}) to wg({wg_name}, "
+                                f"pending={load.num_pending}, W={load.num_waiting}/P={load.num_prefilling}/D={load.num_decoding}, "
+                                f"kv={load.kv_cache_util:.2f})")
+                            self._progress_logger.log(wg_name, len(queries), fmt)
 
                     loads[engine_id] = load
 
@@ -229,96 +333,143 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
                     # worker group and actors lifecycle
                     pass
 
-            # TODO: 识别卡住太久的query object，从engine中主动释放掉
-            # 1. request manager内自动管理staleness和每个query的gen速度，卡住的或者太慢的自动释放掉
-            # proxy拉取stale清单，向engine发送release请求，减少浪费算力
-            # 从engine将query update回request manager时，判断是否属于当前所assigned engine id
+            total, pending_size = ray.get(self.request_manager.get_size.remote())
+            throughput = ray.get(self.request_manager.get_estimated_throughput.remote())
+            self._trace_load_metrics(loads, throughput, total, pending_size)
 
             loop_cost = time.time() - t0  # noqa: for py-spy
             sleep_interval = max(0., self.poll_interval - loop_cost)
-            self._trace_load_metrics(loads)
 
     def update_standalone_worker(self, role) -> List[ObjectRef]:
-        # update转发给所有alive的worker，不用管其是否ready，一开始肯定不ready，需要update weights后才会ready
+        # update转发给所有initialized的worker，不用管其是否ready，一开始肯定不ready，需要update weights后才会ready
         self._update_worker_start_ts = time.time() * 1e6
         futs = []
-        for wg in self.replicas.get_alive_worker_groups().values():
-            fut = wg.update_standalone_worker(role)
-            futs.extend(fut)
-        # 这里直成同步等update完成，因为caller也是要等这个update完了才会进行下一步，这样就可以在这里把ActorDiedError也一起处理了
-        for f in futs:
-            try:
-                ray.get(f)
-            except ActorDiedError:
-                # ignore dead actors during the update. This worker group will not be included in the next dispatching loop
-                pass
+        for wg in self.replicas.get_initialized_worker_groups().values():
+            wg: Union[RayWorkerGroup, RemoteAsyncXPerfGPTRollout, AsyncActorRolloutRefWorker]
+            refs = wg.update_standalone_worker(role)
+            futs.append((wg, refs))
+        self.wait_ignore_actor_died(futs)
         # 返回一个占位符即可
         return [ray.put(None)]
 
     def update_standalone_worker_end(self):
         # 通知server侧结束参数拉取
         # 任意一个client通知即可，调用此方法时需要确保所有standalone rollout worker已经同步完参数
+        no_available_worker_retry = 0
+        max_no_available_worker_retry = 15
         while True:
             try:
-                all_alive_workers = list(self.replicas.get_alive_worker_groups().values())
-                if len(all_alive_workers) == 0:
-                    raise RuntimeError("no alive workers during weights update or all actors died")
+                # 注意这里必须用guaranteed去广播，因为其他best effort可能在广播过程中死掉，导致caller task runner那边 hang
+                all_initialized_workers = list(self.replicas.guaranteed.get_initialized_worker_groups().values())
+                if len(all_initialized_workers) == 0:
+                    raise NoAvailableWorker("no initialized workers during weights update or all actors died")
                 # any worker group sending will be ok
-                wg = random.choice(all_alive_workers)
+                wg = random.choice(all_initialized_workers)
                 wg.update_standalone_worker_end()
             except ActorDiedError:
                 # do nothing when actor dies unfortunately, try next run
                 time.sleep(0.1)
+            except NoAvailableWorker:
+                # underlying workers are still in liveness/readiness probe gap, wait for a bit more seconds
+                no_available_worker_retry += 1
+                if no_available_worker_retry > max_no_available_worker_retry:
+                    raise
+                time.sleep(1)
+                continue
             else:
                 break
-        self._update_worker_finished_ts = time.time() * 1e6
         evt = CompleteEvent(
             pid='RolloutProxy',
             tid='update',
             cat='update weights',
             name='update weights',
             ts=self._update_worker_start_ts,
-            dur=self._update_worker_finished_ts - self._update_worker_start_ts,
+            dur=time.time() * 1e6 - self._update_worker_start_ts,
         )
         self._tracer.trace(evt)
 
     def stop_server_before_weights_update(self):
+        self._stop_server_ts = time.time() * 1e6
         futs = []
-        for wg in self.replicas.get_alive_worker_groups().values():
-            fut = wg.stop_server_before_weights_update_non_blocking()
-            futs.extend(fut)
-        wait_ignore_actor_died(futs)
+        for wg in self.replicas.get_initialized_worker_groups().values():
+            wg: RemoteAsyncXPerfGPTRollout
+            ref = wg.stop_server_before_weights_update_non_blocking()
+            futs.append((wg, ref))
+        self.wait_ignore_actor_died(futs)
 
     def restart_server_after_weights_update(self):
         futs = []
-        for wg in self.replicas.get_alive_worker_groups().values():
-            fut = wg.restart_server_after_weights_update_non_blocking()
-            futs.extend(fut)
-        wait_ignore_actor_died(futs)
+        for wg in self.replicas.get_initialized_worker_groups().values():
+            wg: RemoteAsyncXPerfGPTRollout
+            ref = wg.restart_server_after_weights_update_non_blocking()
+            futs.append((wg, ref))
+        self.wait_ignore_actor_died(futs)
+
+        evt = CompleteEvent(
+            pid='RolloutProxy',
+            tid='update',
+            cat='stop/start server',
+            name='stop/start server',
+            ts=self._stop_server_ts,
+            dur=time.time() * 1e6 - self._stop_server_ts,
+        )
+        self._tracer.trace(evt)
+
+    def wait_ignore_actor_died(self, refs: List[Tuple[RayWorkerGroup, List[ray.ObjectRef]]]):
+        obj_wg_map = {}
+        remaining = set()
+        ready = set()
+        for (wg, ref_list) in refs:
+            for obj in ref_list:
+                obj_wg_map[obj] = wg
+                remaining.add(obj)
+        total_count = len(remaining)  # noqa: py-spy
+
+        while remaining:
+            done, not_done = ray.wait(list(remaining), num_returns=len(remaining), timeout=1.0)
+            for obj in done:
+                try:
+                    ray.get(obj)
+                    ready.add(obj)
+                except ActorDiedError as e:
+                    caller = inspect.stack()[1].frame.f_code.co_name
+                    print(f"actor({e.actor_id}) died at function({caller}). ignore this as this is expected.")
+                except Exception as e:
+                    # for other exceptions, carefully check whether it's caused by actor recycling by auto-scaling
+                    # if the wg is scheduled to destroy, ignore all errors on it
+                    wg = obj_wg_map[obj]
+                    if not wg.is_destroying:
+                        raise
+                finally:
+                    remaining.discard(obj)
+
+            not_ready_wgs = set()
+            for obj in remaining:
+                not_ready_wgs.add(obj_wg_map[obj])
+            not_ready_wg_names_list = [wg.worker_names for wg in not_ready_wgs]  # noqa: py-spy
+            not_ready_count = len(not_ready_wg_names_list)  # noqa: py-spy
+
+            # Optional: avoid tight loop
+            time.sleep(0.1)
 
     def stop(self):
         self._loop_should_stop.set()
         self._loop_thread.join()
 
-    def _get_adaptive_extra_num(self, kv_cache_util: float) -> int:
-        # 简单根据engine的kv cache决定着一轮发多少个请求
-        if kv_cache_util < 0.5:
-            return 32
-        elif kv_cache_util < 0.7:
-            return 16
-        elif kv_cache_util < 0.8:
-            return 8
-        elif kv_cache_util < 0.9:
-            return 4
-        elif kv_cache_util < 0.95:
-            return 2
-        else:
-            return 0
+    def step(self, global_step):
+        self._metrics_logger.step(global_step)
 
-    def _trace_load_metrics(self, loads: Dict[str, LoadMetric]):
+    def get_step_metrics(self):
+        return {}
+
+    def _trace_load_metrics(self, loads: Dict[str, LoadMetric], throughput: Dict[str, float], total: int,
+                            global_pending: int):
+        total_decoding_num = 0
         for wg_id, metric in loads.items():
+            total_decoding_num += metric.num_decoding
+            tp = throughput.get(wg_id) or 0
             evt = CounterEvent(
-                name='load metrics',
+                name='load metrics:',
                 pid=f'{self._request_manager_name} {wg_id}',
                 ts=metric.ts * 1e6,
                 data={
@@ -327,6 +478,218 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
                     'decoding': metric.num_decoding,
                     'pending': metric.num_pending,
                     'waiting': metric.num_waiting,
+                    'decode throughput': tp,
                 },
             )
             self._tracer.trace(evt)
+
+        # global pending running event
+        evt = CounterEvent(
+            name='request:',
+            pid=f'RequestManager/{self._request_manager_name}',  # 不区分hybrid/standalone
+            ts=time.time() * 1e6,
+            data={
+                '$decoding': total_decoding_num,
+                '$processing': total,
+                '$pending dispatch': global_pending,
+                '$decode TPS': sum(throughput.values()),
+            },
+        )
+        self._tracer.trace(evt)
+
+    def _trace_internal_diagnosis(self, internal_metrics: InternalDiagnosisMetrics):
+        evt = CounterEvent(
+            name='internal:',
+            pid=f'RequestManager/{self._request_manager_name}',  # 不区分hybrid/standalone
+            ts=time.time() * 1e6,
+            data=internal_metrics.to_dict(),
+        )
+        self._tracer.trace(evt)
+
+
+class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
+
+    def __init__(self, replicas: Union[ReplicatedRayWorkerGroup, ScalingRayWorkerGroup], actor_addresses: List[str],
+                 request_manager_name: str, poll_interval: float, rebalance_threshold: int):
+        super().__init__(replicas, actor_addresses, request_manager_name, poll_interval)
+        self._rebalance_threshold = rebalance_threshold
+        self.abort_logger = DebounceAccumulatedLogger()
+
+    def _dispatch_loop(self):
+        """
+        每个loop内自动均衡每个worker group正在跑的query，
+        如某些worker group跑得比较快，会自动从别的worker group匀过来一些，
+        如有新的query进来，会自动按照worker当前数量均分
+        """
+        print('start background dispatch loop with balanced mode')
+
+        sleep_interval = self.poll_interval
+        while True:
+            if self._loop_should_stop.is_set():
+                break
+            time.sleep(sleep_interval)
+
+            # 按照总量平分给每个ready replica，均匀分发
+            # 注意一开始可能还没有request进去request pool
+            # 也可能replicas还没ready
+            total, pending_size = ray.get(self.request_manager.get_size.remote())
+            num_ready_replicas = len(self.replicas.ready_worker_group_ids)
+            max_concurrency = total // max(1, num_ready_replicas)  # replicas可能还没ready
+            max_concurrency = min(max(max_concurrency, 1), 512)  # 限制在1-512范围内
+
+            # 纪录负载指标
+            loads = {}
+
+            # internal metrics
+            total_overload_num_slots = 0
+            total_available_num_slots = 0
+            total_standby_wgs = 0
+            gmem_insufficient_count = 0
+            total_rebalanced = 0
+            dispatch_delay = 0
+            enqueue_delay = 0
+
+            # 只将请求dispatch给ready worker group，每次循环都是最新的ready状态
+            # 在dispatch过程中，worker group死了也没关系，这个request会之后被标记为stale
+            t0 = time.time()
+            ready_wg_items = self.replicas.get_ready_worker_groups().items()
+            ready_wg_ids0 = set(engine_id for engine_id, _ in ready_wg_items)
+            for engine_id, wg in ready_wg_items:
+                wg: Union[RayWorkerGroup, RemoteAsyncXPerfGPTRollout, AsyncActorRolloutRefWorker]  # type anno
+                wg_name = wg.group_name
+                try:
+                    # 1. collect intermediate result
+                    # get result(including partial) from engine, update to centralized request pool
+                    queries: List[Query] = wg.get_all_queries(self._request_manager_name)
+                    if len(queries) > 0:
+                        self.request_manager.update_intermediate_queries.remote(queries, engine_id, time.time())
+
+                    # 2. send new request to worker group (engine)
+                    load: LoadMetric = wg.get_load_metrics()[0]  # noqa, dp_size always =1
+                    gmem_insufficient = load.kv_cache_util > 0.9
+
+                    short = max_concurrency - load.num_prefilling - load.num_decoding - load.num_pending - load.num_waiting
+
+                    # metrics
+                    total_overload_num_slots += short if short < 0 else 0
+                    total_available_num_slots += short if short > 0 else 0
+                    total_standby_wgs += 1 if short > 0 and not gmem_insufficient else 0
+                    gmem_insufficient_count += 1 if gmem_insufficient else 0
+
+                    # note(hongbin): 始终让engine处于一个固定满并发的状态即可，减少动态插入新的具体进行prefill打断decode的case
+                    # 优先让各个wg都均匀得到相等的query，内存满了就不再放过去
+                    if short > 0 and not gmem_insufficient:
+                        queries: List[Query] = ray.get(
+                            self.request_manager.get_next_pending_requests.remote(short, engine_id))
+                        if len(queries) > 0:
+                            for q in queries:
+                                # query的分类，区分一下是hybrid_rollout/standalone_rollout/validation，避免共用engine时不知道怎么update回去对应的来源
+                                q.meta_info['query_type'] = self._request_manager_name
+                            wg.add_inflight_queries(queries)
+                            pending_size -= len(queries)
+                            fmt = (
+                                "dispatch {accumulated_value} "
+                                f"(remain={pending_size}) queries from({self._request_manager_name}) to wg({wg_name}, "
+                                f"pending={load.num_pending}, W={load.num_waiting}/P={load.num_prefilling}/D={load.num_decoding}, "
+                                f"kv={load.kv_cache_util:.2f})")
+                            self._progress_logger.log(wg_name, len(queries), fmt)
+                            now = time.time()
+                            for q in queries:
+                                dispatch_delay += now - q.enqueue_time / 1e3
+                                # 还没开始生成过的才考虑算上enqueue delay
+                                if q.new_token_len == 0:
+                                    enqueue_delay += (q.enqueue_time - q.created_time) / 1e3
+                    else:
+                        # 满了之后再判断可以取出来哪些放过去的query，只驱逐，等下一轮循环时再分配
+
+                        # gmem不够导致的waiting，可以将其驱逐给别的wg
+                        waiting_query_ids = []
+                        futs = []
+                        if gmem_insufficient and not load.is_weights_updating:
+                            waiting_query_ids = load.waiting_ids + load.pending_ids  # 在pending里的也释放掉
+                            if len(waiting_query_ids) > 0:
+                                futs.append(
+                                    self.request_manager.release_by_ids.remote(waiting_query_ids, engine_id,
+                                                                               'memory insufficient'))
+
+                        # 驱逐了waiting仍然超了，再去除掉一些 (short/still_short是一个negative number)
+                        # rebalance_threshold的目的：不平衡只超出一点点就不管，让他继续跑，避免来回震荡调整
+                        still_short = short + len(waiting_query_ids)
+                        if still_short < -self._rebalance_threshold:
+                            futs.append(
+                                self.request_manager.release_shortest_n.remote(-still_short, engine_id, 'rebalance'))
+
+                        to_abort = []
+                        for released_ids in ray.get(futs):
+                            to_abort.extend(released_ids)
+                        if len(to_abort) > 0:
+                            total_rebalanced += len(to_abort)
+                            pending_size += len(to_abort)
+                            wg.abort_queries(to_abort)
+                            fmt = (
+                                'aborting {accumulated_value}x queries from ' +
+                                f'engine({wg_name}) W={load.num_waiting}/P={load.num_prefilling}/D={load.num_decoding}')
+                            self.abort_logger.log(wg_name, len(to_abort), fmt)
+
+                    loads[engine_id] = load
+
+                except ray.exceptions.ActorDiedError as e:
+                    # ignore actor died error, underlying replicated worker group will handle
+                    # worker group and actors lifecycle
+                    pass
+
+            # handle dead engines during the loop to avoid request from staling for too long
+            ready_wg_ids1 = self.replicas.ready_worker_group_ids
+            dead_wg_ids_during_loop = ready_wg_ids0 - ready_wg_ids1
+            if dead_wg_ids_during_loop:
+                ray.get(self.request_manager.handle_stale_requests.remote(ready_wg_ids1))
+
+            # observability
+            total, pending_size = ray.get(self.request_manager.get_size.remote())  # noqa: for py-spy
+            num_ready_replicas = len(self.replicas.ready_worker_group_ids)  # noqa: for py-spy
+            throughput = ray.get(self.request_manager.get_estimated_throughput.remote())
+            self._trace_load_metrics(loads, throughput, total, pending_size)
+
+            loop_cost = time.time() - t0  # noqa: for py-spy
+            sleep_interval = max(0., self.poll_interval - loop_cost)
+            num_target_replicas = self.replicas.target_num_replicas
+            num_alive_replicas = len(self.replicas.alive_worker_group_ids)
+            num_initialized_replicas = len(self.replicas.initialized_worker_group_ids)
+            internal_metrics = InternalDiagnosisMetrics(
+                loop_cost=loop_cost,
+                num_target_replicas=num_target_replicas,
+                num_ready_replicas=num_ready_replicas,
+                num_initialized_replicas=num_initialized_replicas,
+                num_alive_replicas=num_alive_replicas,
+                gmem_insufficient_count=gmem_insufficient_count,
+                total_standby_wgs=total_standby_wgs,
+                total_overload_num_slots=total_overload_num_slots,
+                total_available_num_slots=total_available_num_slots,
+                total_rebalanced=total_rebalanced,
+                max_concurrency=max_concurrency,
+                dispatch_delay_acc=dispatch_delay,
+                enqueue_delay_acc=enqueue_delay,
+            )
+            self._trace_internal_diagnosis(internal_metrics)
+
+            self._metrics_logger.log({
+                'num_ready_replicas': num_ready_replicas,
+                'loop_cost': loop_cost,
+                'rebalanced_count': total_rebalanced,
+            })
+
+    def get_step_metrics(self) -> dict:
+        metrics = self._metrics_logger.get_last_step_metrics()
+        try:
+            num_ready_replicas = metrics['num_ready_replicas']
+            loop_cost = metrics['loop_cost']
+            rebalanced_count = metrics['rebalanced_count']
+            return {
+                'rollout/elastic/num_ready_replicas_mean': num_ready_replicas.mean,
+                'rollout/elastic/num_ready_replicas_min': num_ready_replicas.minimum,
+                'rollout/elastic/num_ready_replicas_max': num_ready_replicas.maximum,
+                'rollout/proxy/loop_cost': loop_cost.mean,
+                'rollout/proxy/rebalanced_count_total': rebalanced_count.sum,
+            }
+        except KeyError as e:
+            return {}

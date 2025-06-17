@@ -29,10 +29,10 @@ from abc import ABC, abstractmethod
 from http import HTTPStatus
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from alpha_seed.workers.streaming_service.streaming_rollout import RemoteAsyncXPerfGPTRollout
 from alpha_seed.workers.streaming_service.protocol import (ChatCompletionRequest, ChatCompletion,
                                                            ChatCompletionMessageRollout, Choice, CompletionUsage,
                                                            ErrorResponse)
+from alpha_seed.workers.streaming_service.rollout_request_manager import RequestManagerRegisterCenter
 from alpha_seed.workers.streaming_service.streaming_utils import get_node_ip, get_free_port
 from alpha_seed.workers.xperf_rollout.component.query import AsyncQuery, Query
 
@@ -112,7 +112,7 @@ class AsyncXPerfGPTRolloutServer(OpenAIProxy):
         self.server_task = None
         self.host = None
         self.port = None
-        self.request_manager = ray.get_actor(f'RequestManager/{request_manager_name}')
+        self.request_manager = RequestManagerRegisterCenter.get(request_manager_name)
 
     async def create_chat_completion(self, request: ChatCompletionRequest, raw_request: Request):
         """

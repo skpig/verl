@@ -1,5 +1,6 @@
 import itertools
 import random
+from functools import partial
 from typing import *
 import asyncio
 import copy
@@ -16,10 +17,9 @@ from codetiming import Timer
 from omegaconf import OmegaConf, DictConfig
 from ray import ObjectRef
 
-from alpha_seed.utils.server_client import is_local_ray_instance
-from alpha_seed.workers.streaming_service.auto_scaling import HorizontalAutoScaling, ScalePolicyConfig
+from alpha_seed.workers.streaming_service.elastic_rollout_manager import ElasticRolloutManager
 from alpha_seed.workers.streaming_service.rollout_proxy import FixedReplicatedRayWorkerGroupAdapter, \
-    RolloutWorkerGroupProxy
+    RolloutWorkerGroupProxy, BalancedRolloutWorkerGroupProxy
 from alpha_seed.workers.streaming_service.streaming_rollout import RemoteAsyncXPerfGPTRollout
 from mono_rl import DataProto
 from mono_rl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, RayResourcePool
@@ -57,12 +57,13 @@ def _setup_standalone_comm(hybrid_wg, standalone_wg, role: str):
     ray.get(slave_fut)
 
 
-def _setup_standalone_comm_ucx(source_addresses_fut, standalone_wg, role: str):
-    all_actor_addresses = ray.get(source_addresses_fut)
+def _setup_standalone_comm_ucx(all_actor_addresses, standalone_wg, role: str):
     print(f"all ucx source addresses: {all_actor_addresses}")
     source_address_iter = itertools.cycle(all_actor_addresses)
     addresses = [next(source_address_iter) for _ in range(standalone_wg.world_size)]
     standalone_wg.setup_as_client(role, addresses, all_actor_addresses)
+    # 及时纯stable standalone也setup as relay是为了在weights同步过程中等传输完了再返回，如果不是relay则直接返回，在后台自动传完
+    standalone_wg.setup_as_relay()
 
 
 def _update_standalone_weights(hybrid_wg, server_wg, server_role: str):
@@ -132,7 +133,7 @@ class RolloutManager:
         self.rollout_pool_warmup_step = self.config.actor_rollout_ref.rollout.rollout_pool.get("warmup_step", 0)
 
         self.weights_communicator = self.config.actor_rollout_ref.rollout.weights_communicator
-        self._source_addresses_fut = None
+        self.elastic_rollout_mgr = ElasticRolloutManager(self.config)
 
         # worker groups
         self.hybrid_wg = None
@@ -198,13 +199,16 @@ class RolloutManager:
         if self.weights_communicator == 'ucx':
             # setup actor as server to serve weights update request
             self._source_addresses_fut = self.hybrid_wg.setup_as_server()
+            self.elastic_rollout_mgr.set_hybrid_rollout_address(self._source_addresses_fut)
 
             # setup standalone worker as client
             if self.train_standalone_wg is not None and not self._rollout_elastic_enabled:
                 # elastic rollout由每个实例scale up后setup，这里跳过
-                _setup_standalone_comm_ucx(self._source_addresses_fut, self.train_standalone_wg, "standalone_rollout")
+                _setup_standalone_comm_ucx(ray.get(self._source_addresses_fut), self.train_standalone_wg,
+                                           "standalone_rollout")
             if self.val_standalone_wg is not None:
-                _setup_standalone_comm_ucx(self._source_addresses_fut, self.val_standalone_wg, "standalone_validator")
+                _setup_standalone_comm_ucx(ray.get(self._source_addresses_fut), self.val_standalone_wg,
+                                           "standalone_validator")
         else:
             if self.train_standalone_wg is not None:
                 _setup_standalone_comm(self.hybrid_wg,
@@ -305,6 +309,9 @@ class RolloutManager:
 
         if self._use_server:
             self.rollout_server_started.wait()
+            self.hybrid_wg_proxy.step(step)
+            if self.train_standalone_wg_proxy is not None:
+                self.train_standalone_wg_proxy.step(step)
             assert complete_ratio in (0.0, 1.0), "complete_ratio must be 1.0 or 0.0 for server mode"
             # hybrid server mode
             gen_batch.union(batch)
@@ -366,6 +373,12 @@ class RolloutManager:
             batch.batch["responses"][:, -1] = self.tokenizer.eos_token_id
 
         metrics["rollout/training_batch"] = len(batch)
+
+        # collect metrics from proxy on server mode
+        if self._use_server and self.train_standalone_wg_proxy is not None:
+            proxy_metrics = self.train_standalone_wg_proxy.get_step_metrics()
+            metrics.update(proxy_metrics)
+
         pprint(f"training batches {len(batch)}.")
         print(f"gen step #{step}, elapsed: {time.time() - step_start}")
         return batch
@@ -622,6 +635,7 @@ class RolloutManager:
                 results.append(task.result())
 
         ready_batch = results
+        finished_num = len(ready_batch)
 
         dummy_batch = DataProto(meta_info={"xperf_metrics": self._merge_xperf_metrics(ready_batch)})
         record_xperf_metrics(dummy_batch,
@@ -629,6 +643,8 @@ class RolloutManager:
                              self.logger,
                              step,
                              prefix="standalone" if is_standalone else "hybrid")
+        metrics["rollout/standalone_completed_batch"] = finished_num
+        metrics["rollout/standalone_incompleted_batch"] = len(pending_batch) + len(gen_batch) - finished_num
         return ready_batch, pending
 
     def _val_batch_gen(self, gen_batch: DataProto, step: int, metrics: Dict, is_standalone: bool) -> DataProto:
@@ -764,8 +780,8 @@ class RolloutManager:
         gen_batch.meta_info.update({"generation_kwargs": sample_kwargs_dict})
         if not is_train:
             gen_batch.meta_info.update({
-                'eos_token_id': self.tokenizer.eos_token_id,
-                'pad_token_id': self.tokenizer.pad_token_id,
+                'eos_token_id': self.tokenizer.eos_token_id,  # noqa
+                'pad_token_id': self.tokenizer.pad_token_id,  # noqa
                 'validate': True,
                 'complete_ratio': 1.0,
             })
@@ -782,16 +798,25 @@ class RolloutManager:
 
         gen_tp_size = self.config.actor_rollout_ref.rollout.tensor_model_parallel_size
         poll_interval = self.config.streaming_rollout.proxy.poll_internal_seconds
+        rebalance_threshold = self.config.streaming_rollout.proxy.rebalance_threshold
+        lb_mode = self.config.streaming_rollout.proxy.lb_mode
+        if lb_mode == "even-distribution":
+            ProxyClass = RolloutWorkerGroupProxy
+        elif lb_mode == "dynamic-balancing":
+            ProxyClass = partial(BalancedRolloutWorkerGroupProxy, rebalance_threshold=rebalance_threshold)
+        else:
+            raise ValueError(f"config.streaming_rollout.proxy.lb_mode does not support {lb_mode=}, "
+                             f"please choose from ['even-distribution', 'dynamic-balancing']")
 
         # train
         # create replicated worker group and rollout proxy
-        self.hybrid_wg_proxy = RolloutWorkerGroupProxy(
+        self.hybrid_wg_proxy = ProxyClass(
             FixedReplicatedRayWorkerGroupAdapter(self.hybrid_wg, gen_tp_size, 'actor_rollout_ref'), [],
             'hybrid_rollout', poll_interval)
         self.hybrid_rollout_server = await listen('hybrid_rollout')
 
         if self.train_standalone_wg is not None:
-            self.train_standalone_wg_proxy = RolloutWorkerGroupProxy(
+            self.train_standalone_wg_proxy = ProxyClass(
                 FixedReplicatedRayWorkerGroupAdapter(self.train_standalone_wg, gen_tp_size, 'standalone_rollout'), [],
                 'standalone_rollout', poll_interval)
             self.standalone_rollout_server = await listen('standalone_rollout')
@@ -800,18 +825,19 @@ class RolloutManager:
             assert self.weights_communicator == 'ucx', 'weights_communicator must be "ucx" when using elastic rollout'
             assert self.train_standalone_wg is None, 'should not initialize train standalone when using elastic rollout'
             # 替换掉train_standalone_wg，接口一致
-            self.train_standalone_wg = self._init_elastic_rollout()
+            self.train_standalone_wg = self.elastic_rollout_mgr.init_elastic_rollout()
+            self.train_standalone_wg_proxy = self.train_standalone_wg
             self.standalone_rollout_server = await listen('standalone_rollout')
 
         # validation on hybrid engine
-        self.hybrid_val_wg_proxy = RolloutWorkerGroupProxy(
+        self.hybrid_val_wg_proxy = ProxyClass(
             FixedReplicatedRayWorkerGroupAdapter(self.hybrid_wg, gen_tp_size, 'actor_rollout_ref'), [],
             'hybrid_validation', poll_interval)
         self.hybrid_validation_rollout_server = await listen('hybrid_validation')
 
         # standalone validation
         if self.val_standalone_wg is not None:
-            self.val_wg_proxy = RolloutWorkerGroupProxy(
+            self.val_wg_proxy = ProxyClass(
                 FixedReplicatedRayWorkerGroupAdapter(self.val_standalone_wg, gen_tp_size, 'standalone_validator'), [],
                 'validation', poll_interval)
             self.validation_rollout_server = await listen('validation')
@@ -821,99 +847,3 @@ class RolloutManager:
 
         # 不能让这个event loop结束，因为每个oai server里面还有一个自己的server_task
         await asyncio.Future()
-
-    def _init_elastic_rollout(self):
-        poll_interval = self.config.streaming_rollout.proxy.poll_internal_seconds
-        # 每个rollout_worker用1个gpu，每个gpu对应1个rank
-        res_shape = [self.config.streaming_rollout.n_gpus_per_node] * self.config.streaming_rollout.nnodes
-        tp_size = sum(res_shape)
-
-        # 依赖actor的address作为ucx endpoint
-        hybrid_rollout_addrs = ray.get(self._source_addresses_fut)
-        print(f"all ucx source addresses: {hybrid_rollout_addrs}")
-
-        # 按照rollout的dp world进行切分，一定是正好切够的
-        assert len(hybrid_rollout_addrs) % tp_size == 0, \
-            f"hybrid rollout world size({len(hybrid_rollout_addrs)}) should be divisible by dp_world_size({tp_size})"
-        # 按TP维度切片，将相同tp rank的放一起
-        # shape: (tp_size, dp_size)
-        # [[TP0, ...] [TP1, ...] [TP2, ...] [TP3, ...]]
-        hybrid_dp_size = len(hybrid_rollout_addrs) // tp_size
-        hybrid_rollout_addresses_tp_groups = [
-            [hybrid_rollout_addrs[i * tp_size + j] for i in range(hybrid_dp_size)] for j in range(tp_size)
-        ]
-
-        # streaming+elastic的standalone rollout初始化
-        # rollout worker 初始化方式定义
-        rollout_cls = RayClassWithInitArgs(cls=RemoteAsyncXPerfGPTRollout,
-                                           config=self.config.actor_rollout_ref,
-                                           role="rollout_server")
-
-        def model_init(wg: Union[RayWorkerGroup, RemoteAsyncXPerfGPTRollout]) -> List[ObjectRef]:
-            # 需要确保actor初始化好才能setup rollout作为client去获取参数
-            # note(lixiang): 1 实际上这里引用了外层的actor_rollout_init_fut不是太好，但因为构造回调只能定义在这里，所以先这么写
-            # note(lixiang): 2
-            #  setup_rollout 的执行顺序为，init_model然后setup_as_client
-            #  合理的顺序为init_model，然后wait actor_rollout_init_fut，最后setup_as_client，
-            #  这里位了简化，暂时不拆开setup_rollout
-            ray.get(wg.init_model())
-
-            # 从dp group里随机选一组地址以负载平衡，更大规模的负载平衡再换别的分配的方式
-            random_dp_rank = random.randint(0, len(hybrid_rollout_addresses_tp_groups[0]) - 1)
-            dp_groups = [group[random_dp_rank] for group in hybrid_rollout_addresses_tp_groups]
-            return wg.setup_as_client('standalone_rollout_server', dp_groups, hybrid_rollout_addrs)
-
-        # 用代理类表示这个wg，里面会兼容ppo这里用到的方法
-        # 每个rollout_worker用1个gpu
-        res_shape = [self.config.streaming_rollout.n_gpus_per_node] * self.config.streaming_rollout.nnodes
-        stable_pool_name = self.config.streaming_rollout.elastic.stable_pool_name
-        elastic_pool_name = self.config.streaming_rollout.elastic.elastic_pool_name
-        stable_pool_res = [stable_pool_name]
-        elastic_pool_res = [elastic_pool_name]
-        if is_local_ray_instance():
-            # local ray的debug trial因为没有那些role的定义，所以这里不额外指定调度
-            stable_pool_res = []
-            elastic_pool_res = []
-
-        stable_res_pool = RayResourcePool(
-            process_on_nodes=res_shape,
-            use_gpu=True,
-            max_colocate_count=1,
-            additional_resources=stable_pool_res,  # 用于表示调度到指定资源池
-            name_prefix=f'standalone_rollout_stable_')
-        elastic_res_pool = RayResourcePool(
-            process_on_nodes=res_shape,
-            use_gpu=True,
-            max_colocate_count=1,
-            additional_resources=elastic_pool_res,  # 用于表示调度到指定资源池
-            name_prefix=f'standalone_rollout_elastic_')
-        # 稳定池跑最小副本数
-        min_guaranteed_replicas = ReplicatedRayWorkerGroup(rollout_cls, stable_res_pool, model_init)
-        # 弹性池跑伸缩副本
-        best_effort_replicas = ReplicatedRayWorkerGroup(rollout_cls, elastic_res_pool, model_init)
-        # 两个副本组合并一起组成伸缩组
-        replicas = ScalingRayWorkerGroup(min_guaranteed_replicas, best_effort_replicas)
-        # 封装给worker group的接口代理
-        rollout_proxy = RolloutWorkerGroupProxy(replicas, hybrid_rollout_addrs, 'standalone_rollout', poll_interval)
-
-        # 拉起最小副本数
-        model_init_futs = min_guaranteed_replicas.scale_up(self.config.streaming_rollout.elastic.min_replicas)
-        # 等actor创建好可以接收请求，不是等init_model完成
-        min_guaranteed_replicas.wait_for_alive(self.config.streaming_rollout.elastic.min_replicas)
-
-        # initialize rollout horizontal auto scaling control handle
-        elastic_pool_name = self.config.streaming_rollout.elastic.elastic_pool_name
-        policy = ScalePolicyConfig(
-            scale_up_threshold=self.config.streaming_rollout.elastic.scale_up_threshold,
-            scale_down_threshold=self.config.streaming_rollout.elastic.scale_down_threshold,
-            scale_up_wait=self.config.streaming_rollout.elastic.scale_up_wait,
-            scale_down_wait=self.config.streaming_rollout.elastic.scale_down_wait,
-            min_replicas=self.config.streaming_rollout.elastic.min_replicas,
-            max_replicas=self.config.streaming_rollout.elastic.max_replicas,
-        )
-        self.standalone_rollout_ha = HorizontalAutoScaling(replicas,
-                                                           elastic_pool_name,
-                                                           policy,
-                                                           metric_source=rollout_proxy)
-        ray.get(model_init_futs)
-        return rollout_proxy

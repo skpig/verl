@@ -1,6 +1,8 @@
 import multiprocessing
 import os
 import time
+import traceback
+
 import wandb
 from concurrent.futures import ProcessPoolExecutor
 from transformers import AutoTokenizer
@@ -111,7 +113,11 @@ def async_process_batch_samples_to_wandb(fname, hdfs_dir_name, tokenizer, step):
     # load from dist to prevent IPC
     print(f"[{time.ctime()}]logging samples from {fname} to wandb")
     wandb_batch = DataProto.load_from_disk(fname)
-    log_samples_to_wandb(wandb_batch, tokenizer, step)
+    try:
+        log_samples_to_wandb(wandb_batch, tokenizer, step)
+    except Exception as e:
+        print('wandb internal exception, ignore this time')
+        traceback.print_exc()
     print(f"[{time.ctime()}]removing {fname}")
     os.remove(fname)
 
