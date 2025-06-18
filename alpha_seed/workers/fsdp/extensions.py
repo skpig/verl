@@ -327,6 +327,10 @@ class FlexDTensor(FSDPExtensions):
             else:
                 new_optim_state_dict = optim_state_dict
 
+            # save peak resume memory by offload optimizer to cpu
+            from .offload.model_offload import offload_fsdp_optimizer  # avoid cycled import
+            offload_fsdp_optimizer(optim)
+
             fsdp_pg = model.process_group
             optim_state = orig_optim_state_dict_to_load(model, optim, new_optim_state_dict, is_named_optimizer,
                                                         load_directly, fsdp_pg)
