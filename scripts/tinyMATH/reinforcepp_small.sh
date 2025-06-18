@@ -1,8 +1,9 @@
 # BASE_MODEL=${MY_MODEL_DIR}Qwen/Qwen2.5-3B
 # TEMPLATE_TYPE=base # or chat
-BASE_MODEL=${MY_MODEL_DIR}Qwen/Qwen2.5-1.5B-Instruct
-TEMPLATE_TYPE=chat # or chat
-# TRAIN_FILE="${MY_DATA_DIR}Eurus-2-RL-Data/train.parquet"
+# BASE_MODEL=${MY_MODEL_DIR}Qwen/Qwen2.5-1.5B-Instruct
+# TEMPLATE_TYPE=chat # or chat
+BASE_MODEL=${MY_MODEL_DIR}Qwen/Qwen2.5-Math-1.5B-Instruct
+TEMPLATE_TYPE=chat # or chat# TRAIN_FILE="${MY_DATA_DIR}Eurus-2-RL-Data/train.parquet"
 # TEST_FILES="['${MY_DATA_DIR}Eurus-2-RL-Data/test.parquet', '${MY_DATA_DIR}MATH-500/test.parquet', '${MY_DATA_DIR}aimo-validation-amc/test.parquet']"
 TRAIN_FILE="${MY_DATA_DIR}DAPO-Math-17k/train.parquet"
 TEST_FILES="['${MY_DATA_DIR}DAPO-Math-17k/test.parquet', '${MY_DATA_DIR}MATH-500/test.parquet', '${MY_DATA_DIR}aimo-validation-amc/test.parquet']"
@@ -26,8 +27,8 @@ OFFLOAD=True
 FORWARD_BSZ=16
 BACKWARD_BSZ=8
 TOTAL_EPOCHS=1
-FORWARD_MAX_TOKEN_LEN=$((36 * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN))) # 12 for 40GB
-BACKWARD_MAX_TOKEN_LEN=$((8 * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN)))  # 4 for 40GB
+FORWARD_MAX_TOKEN_LEN=$((12 * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN))) # 12 for 40GB
+BACKWARD_MAX_TOKEN_LEN=$((3 * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN)))  # 4 for 40GB
 
 PROJ_NAME="TinyMATH"
 MODEL_NAME=$(basename $BASE_MODEL)
@@ -74,7 +75,7 @@ CMD="python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=$FORWARD_MAX_TOKEN_LEN \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP_SIZE \
     actor_rollout_ref.rollout.name=vllm \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
     actor_rollout_ref.rollout.n=$ROLLOUT_N \
     algorithm.use_kl_in_reward=True \
     reward_model.launch_reward_fn_async=True \

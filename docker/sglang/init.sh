@@ -1,4 +1,4 @@
-echo 'source ~/.python/verl-multiturn-rollout/bin/activate' >> ~/.bashrc
+echo 'source ~/.python/verl-sglang/bin/activate' >> ~/.bashrc
 echo 'export HF_ENDPOINT=https://hf-mirror.com' >> ~/.bashrc
 echo 'export WANDB_API_KEY="11e12737d5a4883f53fd55089f321f01171ffc5a"' >> ~/.bashrc
 echo 'export MY_MODEL_DIR=/pretrain/' >> ~/.bashrc
@@ -24,9 +24,7 @@ echo 'export MY_DATA_DIR=/data/' >> ~/.bashrc
 apt update
 apt install tmux
 apt-get install graphviz graphviz-dev
-pip install networkx[default,extra]
 apt install gh
-gh auth login
 git init
 git config --global user.name $1
 git config --global user.email $1.email
@@ -36,6 +34,9 @@ git checkout -t origin/hbz_TinyMATH
 
 # Install uv
 python3 -m pip install uv
+
+# create uv env
+uv venv ~/.python/verl-sglang
 
 # Install SGLang
 python3 -m uv pip install -e ".[sglang]"

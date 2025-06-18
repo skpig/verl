@@ -1,8 +1,9 @@
 # BASE_MODEL=${MY_MODEL_DIR}Qwen/Qwen2.5-3B
 # TEMPLATE_TYPE=base # or chat
-BASE_MODEL=${MY_MODEL_DIR}Qwen/Qwen2.5-1.5B-Instruct
-TEMPLATE_TYPE=chat # or chat
-# TRAIN_FILE="${MY_DATA_DIR}Eurus-2-RL-Data/train.parquet"
+# BASE_MODEL=${MY_MODEL_DIR}Qwen/Qwen2.5-1.5B-Instruct
+# TEMPLATE_TYPE=chat # or chat
+BASE_MODEL=${MY_MODEL_DIR}Qwen/Qwen2.5-Math-1.5B-Instruct
+TEMPLATE_TYPE=chat # or chat# TRAIN_FILE="${MY_DATA_DIR}Eurus-2-RL-Data/train.parquet"
 # TEST_FILES="['${MY_DATA_DIR}Eurus-2-RL-Data/test.parquet', '${MY_DATA_DIR}MATH-500/test.parquet', '${MY_DATA_DIR}aimo-validation-amc/test.parquet']"
 TRAIN_FILE="${MY_DATA_DIR}DAPO-Math-17k/train.parquet"
 TEST_FILES="['${MY_DATA_DIR}DAPO-Math-17k/test.parquet', '${MY_DATA_DIR}MATH-500/test.parquet', '${MY_DATA_DIR}aimo-validation-amc/test.parquet']"
