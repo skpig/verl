@@ -32,7 +32,7 @@ import math
 # 定义不同检查对应的位
 ANSWER_MATCH_BIT = 1
 REASONING_ORDER_BIT = 2
-def verify_format(model_output: str):
+def verify_format(model_output: str, prompt_id: int):
     """
     Verify if the answer is in a valid format.
     返回值为位掩码，不同位代表不同检查结果。
@@ -40,7 +40,10 @@ def verify_format(model_output: str):
     result = 0
     
     # 检查是否有且仅有一个 "## Answer:" 
-    answer_matches = re.findall(r'<answer>(.*?)</answer>', model_output, re.DOTALL)
+    if prompt_id in [0, 1, 2, 3]:
+        answer_matches = re.findall(r'<answer>(.*?)</answer>', model_output, re.DOTALL)
+    else:
+        raise NotImplementedError(f"Prompt ID {prompt_id} is not supported for answer extraction in math verify.")
     if len(answer_matches) == 1:
         result |= ANSWER_MATCH_BIT
     
@@ -91,7 +94,7 @@ def verify_format(model_output: str):
 #     return result, num_steps
 
 def extract_answer(model_output: str, prompt_id: int) -> str:
-    if prompt_id in [0, 1, 2]:
+    if prompt_id in [0, 1, 2, 3]:
         extraction = re.findall(r'<answer>(.*?)</answer>', model_output, re.DOTALL)
     else:
         raise NotImplementedError(f"Prompt ID {prompt_id} is not supported for answer extraction in math verify.")
@@ -256,7 +259,7 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None, is_v
 
     try:
         verify_format_w_timeout = timeout(2)(verify_format)
-        format_correctness, num_steps = verify_format_w_timeout(solution_str)
+        format_correctness, num_steps = verify_format_w_timeout(solution_str, prompt_id)
     except TimeoutException:
         print("Timeout detected in format verification, returning 0 score.")
         os.makedirs('/home/huangbz/verl/.cache/reward_error', exist_ok=True)
