@@ -363,25 +363,30 @@ def compute_data_metrics(self, batch: DataProto):
     origin_advantages = batch.batch['origin_advantages']
     prompt_mask = batch.batch['attention_mask'][:, :-response_length]
     response_mask = batch.batch['attention_mask'][:, -response_length:]
+    if batch.meta_info['use_model_output_mask']:
+        model_output_mask = batch.batch['model_output_mask'][:, -response_length:]
+    else:
+        model_output_mask = response_mask
 
     old_log_probs = batch.batch['old_log_probs']
     old_entropy = batch.batch['old_entropy']
 
     prompt_length = prompt_mask.sum(-1).float()
+    model_output_length = model_output_mask.sum(-1).float()  # (batch_size,)
     response_length = response_mask.sum(-1).float()  # (batch_size,)
     max_prompt_length = float(prompt_mask.size(-1))
     max_response_length = float(response_mask.size(-1))
 
     returns = batch.batch['returns']
 
-    response_mask_bool = response_mask.bool()
+    model_output_mask_bool = model_output_mask.bool()
 
-    valid_entropy = torch.masked_select(old_entropy, response_mask_bool)
+    valid_entropy = torch.masked_select(old_entropy, model_output_mask_bool)
 
-    valid_adv = torch.masked_select(advantages, response_mask_bool)
-    valid_origin_adv = torch.masked_select(origin_advantages, response_mask_bool)
-    valid_returns = torch.masked_select(returns, response_mask_bool)
-    valid_old_logprob = torch.masked_select(old_log_probs, response_mask_bool)
+    valid_adv = torch.masked_select(advantages, model_output_mask_bool)
+    valid_origin_adv = torch.masked_select(origin_advantages, model_output_mask_bool)
+    valid_returns = torch.masked_select(returns, model_output_mask_bool)
+    valid_old_logprob = torch.masked_select(old_log_probs, model_output_mask_bool)
 
     eos_adv = torch.gather(advantages, dim=1, index=response_length.unsqueeze(dim=1).long() - 1).reshape(-1)
     eos_original_adv = torch.gather(origin_advantages, dim=1,
@@ -408,6 +413,8 @@ def compute_data_metrics(self, batch: DataProto):
         valid_returns)
     response_length_mean, response_length_max, response_length_min, response_length_std = distributed_mean_max_min_std(
         response_length, compute_std=True)
+    model_output_length_mean, model_output_length_max, model_output_length_min, model_output_length_std = distributed_mean_max_min_std(
+        model_output_length, compute_std=True)
     response_clip_ratio = distributed_mean_max_min_std(torch.eq(response_length, max_response_length).float(),
                                                        compute_max=False,
                                                        compute_min=False,
@@ -466,6 +473,10 @@ def compute_data_metrics(self, batch: DataProto):
         'response_length/max': response_length_max.detach().item(),
         'response_length/min': response_length_min.detach().item(),
         'response_length/std': response_length_std.detach().item(),
+        'model_output_length/mean': model_output_length_mean.detach().item(),
+        'model_output_length/max': model_output_length_max.detach().item(),
+        'model_output_length/min': model_output_length_min.detach().item(),
+        'model_output_length/std': model_output_length_std.detach().item(),
         ## response clip ratio
         'response_length/clip_ratio': response_clip_ratio.detach().item(),
         # prompt length
@@ -478,13 +489,13 @@ def compute_data_metrics(self, batch: DataProto):
         'prob/mean': prob_mean.detach().item(),
     }
     for threshold in [1e-6, 1e-5, 1e-4, 1e-3]:
-        small_prob_mask = torch.logical_and(response_mask_bool, old_log_probs.exp() < threshold)
+        small_prob_mask = torch.logical_and(model_output_mask_bool, old_log_probs.exp() < threshold)
         small_prob_mask_sum = small_prob_mask.float().sum()
         local_small_prob_mask_sum = small_prob_mask_sum.clone()
-        response_mask_bool_sum = response_mask_bool.float().sum()
+        model_output_mask_bool_sum = model_output_mask_bool.float().sum()
         dist.all_reduce(small_prob_mask_sum, op=dist.ReduceOp.SUM, group=None, async_op=False)
-        dist.all_reduce(response_mask_bool_sum, op=dist.ReduceOp.SUM, group=None, async_op=False)
-        small_prob_ratio = small_prob_mask_sum / response_mask_bool_sum
+        dist.all_reduce(model_output_mask_bool_sum, op=dist.ReduceOp.SUM, group=None, async_op=False)
+        small_prob_ratio = small_prob_mask_sum / model_output_mask_bool_sum
 
         if local_small_prob_mask_sum == 0:
             small_prob_adv = torch.tensor(0, device=advantages.device)
@@ -502,19 +513,19 @@ def compute_data_metrics(self, batch: DataProto):
     if use_critic:
         values = batch.batch['values']
         upgo_advantages = batch.batch['upgo_advantages']
-        valid_values = torch.masked_select(values, response_mask_bool)
-        valid_upgo_adv = torch.masked_select(upgo_advantages, response_mask_bool)
+        valid_values = torch.masked_select(values, model_output_mask_bool)
+        valid_upgo_adv = torch.masked_select(upgo_advantages, model_output_mask_bool)
 
         valid_values_mean, valid_values_max, valid_values_min, valid_values_std = distributed_mean_max_min_std(
             valid_values)
         valid_upgo_adv_mean, valid_upgo_adv_max, valid_upgo_adv_min, valid_upgo_adv_std = distributed_mean_max_min_std(
             valid_upgo_adv)
 
-        return_diff_std = distributed_mean_max_min_std(torch.masked_select(returns - values, response_mask_bool),
+        return_diff_std = distributed_mean_max_min_std(torch.masked_select(returns - values, model_output_mask_bool),
                                                        compute_max=False,
                                                        compute_min=False,
                                                        compute_std=True)[-1]
-        return_std = distributed_mean_max_min_std(torch.masked_select(returns, response_mask_bool),
+        return_std = distributed_mean_max_min_std(torch.masked_select(returns, model_output_mask_bool),
                                                   compute_max=False,
                                                   compute_min=False,
                                                   compute_std=True)[-1]
@@ -1909,6 +1920,7 @@ class RayPPOTrainer(object):
                             batch.meta_info['use_critic'] = self.use_critic
                             batch.meta_info['mean'] = self.config.reward_model.mean
                             batch.meta_info['std'] = self.config.reward_model.std
+                            batch.meta_info['use_model_output_mask'] = self.config.algorithm.use_model_output_mask
                             data_metrics: DataProto = self.actor_rollout_wg.execute_with_func_generator(
                                 compute_data_metrics, batch)
                             data_metrics = data_metrics.meta_info['metrics']
