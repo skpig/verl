@@ -61,11 +61,15 @@ from alpha_seed.workers.actors.critic_worker import CriticWorker
 from alpha_seed.utils.alarm.lark_util import send_message_to_employee
 from alpha_seed.utils.server_client import validate_client_config, KVStore, ServerHealthCheck, TaskRunner, ClientTaskRunner, check_all_workers_alive, recreate_actor
 from alpha_seed.workers.streaming_service.rollout_request_manager import RequestManager, RequestManagerRegisterCenter
+from databus import collect_array
 
 user_email = os.getenv('ARNOLD_LARK_RECEIVER', '')
 task_url = os.getenv('ARNOLD_ORIGIN_PLATFORM_URL', '')
+ARNOLD_TRIAL_ID = os.environ.get("ARNOLD_TRIAL_ID", "0")
+ARNOLD_TRIAL_OWNER = os.environ.get("ARNOLD_TRIAL_OWNER", "0")
 ARNOLD_REGION = os.getenv("ARNOLD_REGION", "CN")
 ENABLE_REDIS_TRITON_CACHE = int(os.getenv("ENABLE_REDIS_TRITON_CACHE", '1'))
+CHANNEL = "llm_channel"
 
 
 def post_process_solution_str(config, solution_str, eos_token):
@@ -83,6 +87,12 @@ def post_process_solution_str(config, solution_str, eos_token):
     else:
         solution_str_post_proc = solution_str
     return solution_str_post_proc
+
+
+def send_to_kafka(message):
+    message["ARNOLD_TRIAL_ID"] = ARNOLD_TRIAL_ID
+    message["ARNOLD_TRIAL_OWNER"] = ARNOLD_TRIAL_OWNER
+    collect_array(CHANNEL, [json.dumps(message, ensure_ascii=False).encode("utf-8")])
 
 
 @ray.remote(num_cpus=1)
@@ -452,8 +462,6 @@ class RewardManager():
 
             if already_print_data_sources[reward_style] < static_conf.trainer.num_cases_to_wandb:
                 already_print_data_sources[reward_style] += 1
-                if reward_style == "code-sandbox":
-                    ground_truth = ''  # 对于OJ问题，ground_truth会比较大，扛不住
                 if self.log_image:
                     from xperf_gpt.multi_models.preprocess.data_decoder import BytesDecoder
                     if 'raw_image' in data[idx].non_tensor_batch and len(data[idx].non_tensor_batch['raw_image']) > 0:
@@ -471,6 +479,14 @@ class RewardManager():
                     global_index, global_step, img, prompt_str, solution_str, ground_truth, score, solution_str_save,
                     is_para_dup, is_trunc, valid_response_length
                 ])
+            send_to_kafka({
+                "global_index": global_index,
+                "prompt": prompt_str,
+                "response": solution_str,
+                "ground_truth": ground_truth,
+                "score": score,
+                "is_validation": is_validation
+            })
             save_to_hdfs.append([
                 global_index, idx, global_step, prompt_str, solution_str, ground_truth, score, solution_str_save,
                 is_para_dup, is_trunc, valid_response_length
