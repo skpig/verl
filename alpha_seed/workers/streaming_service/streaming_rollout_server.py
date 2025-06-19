@@ -125,7 +125,7 @@ class AsyncXPerfGPTRolloutServer(OpenAIProxy):
             return self.create_error_response(str(e))
 
         # submit query to request pool
-        query_id = ray.get(self.request_manager.put_new_query.remote(query))
+        query_id = await self.request_manager.put_new_query.remote(query)
 
         # await prompt generation finished
         finished_query = await self.request_manager.wait_until_finished.remote(query_id)

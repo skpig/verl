@@ -137,6 +137,7 @@ class RequestPool:
         一直等待某个request 生成完成才返回，返回后，这个request不再保存在pool里
         """
         await self._finished_events[request_id].wait()
+        self._finished_events.pop(request_id, None)
         return self.finished_requests.pop(request_id)
 
     def update(self, reqs: List[Request]):
@@ -171,7 +172,8 @@ class RequestPool:
             if r.finished:
                 self.finished_requests[r.request_id] = r
                 self.requests.pop(r.request_id)
-                evt = self._finished_events.pop(r.request_id, None)
+                # 注意event不要pop，可能调用方还没开始wait
+                evt = self._finished_events.get(r.request_id)
                 if evt is not None:
                     evt.set()
             else:
@@ -310,8 +312,8 @@ class RequestManagerRegisterCenter:
         return request_manager
 
     @staticmethod
-    def get(name: str):
-        return ray.get_actor(f'RequestManager/{name}')
+    def get(name: str) -> 'RequestManager':
+        return ray.get_actor(f'RequestManager/{name}')  # noqa
 
 
 class ProgressBar:
@@ -367,7 +369,7 @@ class RequestManager:
         print(f'RequestManager ready, {self.actor_name=}')
         return True
 
-    def put_new_query(self, query: Query) -> str:
+    async def put_new_query(self, query: Query) -> str:
         query.enqueue_time = time.time() * 1e3
         self.req_pool.put_new_requests([
             Request(

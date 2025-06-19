@@ -316,14 +316,12 @@ class AsyncQuery:
 class InflightQueue:
 
     def __init__(self):
-        self.query_pool: Dict[str, AsyncQuery] = {}
         self.queue: List[AsyncQuery] = []
         self.lock = Lock()
 
     def append(self, item: AsyncQuery):
         with self.lock:
             item.query.received_time = time.time() * 1000
-            self.query_pool[item.id] = item
             self.queue.append(item)
 
     def truncate(self, length):
@@ -333,8 +331,6 @@ class InflightQueue:
     def remove(self, query_ids: Set[str]):
         with self.lock:
             original_len = len(self.queue)
-            for query_id in query_ids:
-                self.query_pool.pop(query_id, None)
 
             # in-place remove and compact the list
             write_index = 0
