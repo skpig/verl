@@ -27,8 +27,6 @@ from PIL import Image
 from alpha_seed.prompts.load import random_transform, ith_transform
 from alpha_seed.utils.dataset.rl_dataset import RLHFDataset
 
-from alpha_seed.models.transformers.modeling_vlm import convert_tensor_to_numpy
-
 
 class BytesDecoder:
 
@@ -63,8 +61,6 @@ def collate_fn(data_list: list[dict]) -> dict:
         tensors[key] = torch.stack(val, dim=0)
 
     for key, val in non_tensors.items():
-        if key in ['pixel_values', 'image_grid_hw', 'num_image_tokens']:
-            val = [convert_tensor_to_numpy(v) for v in val]
         non_tensors[key] = np.fromiter(val, dtype=object)
 
     output = {}
@@ -189,7 +185,7 @@ class RLHFDatasetVL(RLHFDataset):
             row_dict_ret['attention_mask'] = attention_mask[0]
             if image is not None and len(image) > 0:
                 row_dict_ret['raw_image'] = []
-                row_dict_ret['pixel_values'] = inputs['pixel_values'].to(torch.bfloat16)
+                row_dict_ret['pixel_values'] = inputs['pixel_values']
                 row_dict_ret['image_grid_hw'] = torch.tensor(inputs['image_grid_hw'])
             else:
                 row_dict_ret['raw_image'] = []

@@ -57,11 +57,9 @@ def get_image_inputs(non_tensor_batch):
         non_none_values = [_ for _ in non_tensor_batch[key] if _ is not None]
         if len(non_none_values) == 0:
             return {}
-        if any(isinstance(value, np.ndarray) for value in non_none_values):
+        if isinstance(non_none_values[0], np.ndarray):
             if key == 'image_grid_hw':
-                non_none_values = [convert_numpy_to_tensor(value, int) for value in non_none_values]
-            elif key == 'pixel_values':
-                non_none_values = [convert_numpy_to_tensor(value) for value in non_none_values]
+                non_none_values = [torch.from_numpy(value.astype(int)) for value in non_none_values]
             else:
                 raise RuntimeError(f'tensor is expected, got {non_none_values}')
         image_kwargs[key] = torch.cat(non_none_values).cuda()

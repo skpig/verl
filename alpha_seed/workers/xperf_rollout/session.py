@@ -36,7 +36,6 @@ from threading import Lock
 from transformers import AutoTokenizer
 from xperf_gpt.multi_models.visual.inferencer import VITInferencer
 import numpy as np
-from alpha_seed.models.transformers.modeling_vlm import convert_tensor_to_numpy, convert_numpy_to_tensor
 
 # Constants
 BLOCK_SIZE_ALIGNMENT = 256
@@ -729,10 +728,10 @@ class InferenceSession:
     def _prepare_image_embeds(self, input_ids, pixel_values, image_grid_hw):
         assert pixel_values is not None
         if isinstance(pixel_values, np.ndarray):
-            pixel_values = convert_numpy_to_tensor(pixel_values, float)
+            pixel_values = torch.from_numpy(pixel_values.astype(float))
         pixel_values = pixel_values.to(torch.bfloat16).cuda(non_blocking=True)
         if isinstance(image_grid_hw, np.ndarray):
-            image_grid_hw = convert_numpy_to_tensor(image_grid_hw, int)
+            image_grid_hw = torch.from_numpy(image_grid_hw.astype(int))
 
         # compute image embedding
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
