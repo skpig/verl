@@ -1154,8 +1154,9 @@ class RayPPOTrainer(object):
         ref_remote_path = os.path.join(remote_global_step_folder, 'ref')
         checkpoint_infos = {}
         # load actor
-        if hdfs_io.hexists(os.path.join(
-                actor_remote_path, self._ckpt_ignore_marker_name('actor'))) and not hdfs_io.hexists(actor_remote_path):
+        if hdfs_io.hexists(
+                os.path.join(remote_global_step_folder,
+                             self._ckpt_ignore_marker_name('actor'))) and not hdfs_io.hexists(actor_remote_path):
             # critic warmup ckpt
             print('Ignore to load actor checkpoint which does not exist because it has not been optimized and thus '
                   'not been saved.')
