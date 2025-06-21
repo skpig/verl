@@ -1,6 +1,7 @@
 from typing import *
 import os
 from dataclasses import dataclass
+from alpha_seed.workers.agents import load_external_module
 from alpha_seed.workers.agents.envs import BaseEnv
 from alpha_seed.workers.agents.plugins.tag_matcher import TagMatcher
 from transformers import AutoTokenizer
@@ -118,13 +119,16 @@ class PluginRequireMetaInfo:
     pass
 
 
-def create_plugin_from_name(plugin_name: str, tokenizer: AutoTokenizer, *args, **kwargs) -> BasePlugin:
-    import importlib
-    external_path = os.environ.get('EXTERNAL_PLUGIN_PATH', None)
-    if (external_path is not None) and os.path.isfile((mod_path := os.path.join(external_path, f"{plugin_name}.py"))):
-        spec = importlib.util.spec_from_file_location(plugin_name, mod_path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-    else:
-        module = importlib.import_module(f".{plugin_name}", package="alpha_seed.workers.agents.plugins")
+def create_plugin_from_name(plugin_name: str,
+                            tokenizer: AutoTokenizer,
+                            external_lib: str = None,
+                            *args,
+                            **kwargs) -> BasePlugin:
+    module = load_external_module(package_name=plugin_name,
+                                  external_lib=external_lib,
+                                  external_path=os.environ.get('EXTERNAL_PLUGIN_PATH', None))
+    if module is None:
+        import importlib
+        module = importlib.import_module(f".{plugin_name.replace('/', '.')}",
+                                         package="alpha_seed.workers.agents.plugins")
     return module.create_plugin(tokenizer=tokenizer, *args, **kwargs)

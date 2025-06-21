@@ -59,7 +59,10 @@ class PluginManager:
         args_dict = config['args']
         for name in config['names']:
             args = {} if args_dict is None else args_dict.get(name, {})
-            self._plugins[name] = create_plugin_from_name(name, tokenizer=tokenizer, **args)
+            self._plugins[name] = create_plugin_from_name(name,
+                                                          tokenizer=tokenizer,
+                                                          external_lib=config['plugin_external_lib'],
+                                                          **args)
 
     def get_match_state(self) -> Dict:
         ret = dict()

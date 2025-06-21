@@ -1,6 +1,7 @@
 from typing import *
 import os
 from abc import ABC, abstractmethod
+from alpha_seed.workers.agents import load_external_module
 
 
 class BaseEnv(ABC):
@@ -32,24 +33,23 @@ class BaseEnv(ABC):
         pass
 
 
-def create_agent_envs_from_str(env_strs: Union[None, List[str], str], **kwargs) -> List[BaseEnv]:
+def create_agent_envs_from_str(env_strs: Union[None, List[str], str],
+                               external_lib: str = None,
+                               **kwargs) -> List[BaseEnv]:
     if env_strs is None:
         return []
     if isinstance(env_strs, str):
         env_strs = [env_strs]
 
+    external_path = os.environ.get('EXTERNAL_ENV_PATH', None)
     envs = []
     for env_str in env_strs:
         env_name = env_str.split('@')[0]
 
-        import importlib
-        external_path = os.environ.get('EXTERNAL_ENV_PATH', None)
-        if (external_path is not None) and os.path.isfile((mod_path := os.path.join(external_path, f"{env_name}.py"))):
-            spec = importlib.util.spec_from_file_location(env_name, mod_path)
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-        else:
-            module = importlib.import_module(f".{env_name}", package="alpha_seed.workers.agents.envs")
+        module = load_external_module(package_name=env_name, external_lib=external_lib, external_path=external_path)
+        if module is None:
+            import importlib
+            module = importlib.import_module(f".{env_name.replace('/', '.')}", package="alpha_seed.workers.agents.envs")
 
         env = module.create_from_env_str(env_str, **kwargs)
         envs.append(env)

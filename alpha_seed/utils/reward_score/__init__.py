@@ -6,24 +6,18 @@ from functools import partial
 
 from alpha_seed.utils.reward_score import model_score_fn, oj_utils, code_local_verifier, gsm8k, math_v1, math_v2, \
     math_deepscale, math_verifier, gpqa_verifier, verifier_service, logic_puzzle
+from alpha_seed.workers.agents import load_external_module
 
 
-def _select_rm_score_fn_from_external(module_filepath: str):
-    import importlib
-    module_name = os.path.basename(module_filepath)
-    spec = importlib.util.spec_from_file_location(module_name, module_filepath)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    compute_score_fn = getattr(module, 'compute_score')
-    assert hasattr(compute_score_fn, '__call__'), f"{module_filepath}.compute_score is not a function"
-    return compute_score_fn
+def _select_rm_score_fn(reward_style, external_lib: str = None):
 
-
-def _select_rm_score_fn(reward_style, with_external=True):
-    if with_external:
-        if ((external_path := os.environ.get('EXTERNAL_REWARD_FN_PATH', None)) is not None) and \
-            os.path.isfile((external_path := os.path.join(external_path, f"{reward_style}.py"))):
-            return _select_rm_score_fn_from_external(external_path)
+    external_module = load_external_module(package_name=reward_style,
+                                           external_lib=external_lib,
+                                           external_path=os.environ.get('EXTERNAL_REWARD_FN_PATH', None))
+    if external_module is not None:
+        compute_score_fn = getattr(external_module, 'compute_score')
+        assert hasattr(compute_score_fn, '__call__'), f"{reward_style}.compute_score is not a function"
+        return compute_score_fn
 
     if reward_style == "model-raw_score":
         return model_score_fn.raw_score

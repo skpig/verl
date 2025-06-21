@@ -589,7 +589,8 @@ class RolloutManager:
         ready_batch = []
         server_host = self.standalone_rollout_server.host if is_standalone else self.hybrid_rollout_server.host
         server_port = self.standalone_rollout_server.port if is_standalone else self.hybrid_rollout_server.port
-        handler_fn = select_handler_fn(self.config.rollout_server.handler)
+        handler_fn = select_handler_fn(self.config.rollout_server.handler,
+                                       external_lib=self.config.rollout_server.external_lib)
         context = TaskContext(
             config=self.config,
             tokenizer=self.tokenizer,
@@ -684,7 +685,8 @@ class RolloutManager:
             metrics["timing/update_rollout_server"] = timer.last
 
         ready_batch = []
-        handler_fn = select_handler_fn(self.config.rollout_server.handler)
+        handler_fn = select_handler_fn(self.config.rollout_server.handler,
+                                       external_lib=self.config.rollout_server.external_lib)
         server = self.validation_rollout_server if is_standalone else self.hybrid_validation_rollout_server
         context = TaskContext(
             config=self.config,

@@ -4,6 +4,7 @@ import importlib
 import pkgutil
 from omegaconf import DictConfig
 import os
+from alpha_seed.workers.agents import load_external_module
 
 
 @dataclass
@@ -35,18 +36,10 @@ def register_handler(name: str):
     return decorator
 
 
-def select_handler_fn(handler_type: str) -> Callable:
-    # Load an external handler dynamically
-    # Example, EXTERNAL_HANDLER_PATH=/opt/tiger/agents_extension/handlers
-    # `handler_type` should be the same as the registered name, as well as the module's filepath under EXTERNAL_HANDLER_PATH.
-    #   - If `handler_type` == 'xx', the handler should be registered in /opt/tiger/agents_extension/handlers/xx.py
-    #   - If `handler_type` == 'xx/yy', the handler should be registered in /opt/tiger/agents_extension/handlers/xx/yy.py
-    import importlib
-    external_path = os.environ.get('EXTERNAL_HANDLER_PATH', None)
-    if (external_path is not None) and os.path.isfile((mod_path := os.path.join(external_path, f"{handler_type}.py"))):
-        spec = importlib.util.spec_from_file_location(handler_type, mod_path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+def select_handler_fn(handler_type: str, external_lib: str = None) -> Callable:
+    _ = load_external_module(package_name=handler_type,
+                             external_lib=external_lib,
+                             external_path=os.environ.get('EXTERNAL_HANDLER_PATH', None))
 
     if handler_type not in _HANDLER_REGISTRY:
         raise NotImplementedError(f"unsupported handler type: {handler_type}")

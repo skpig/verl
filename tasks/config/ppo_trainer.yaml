@@ -148,6 +148,8 @@ actor_rollout_ref:
     weights_communicator: "nccl" # [nccl, ucx], elastic模式下只能用ucx
     plugin: &plugin_config
       enable: False
+      plugin_external_lib: null # [null, '/opt/tiger/agents_extension/plugins']
+      env_external_lib: null # [null, '/opt/tiger/agents_extension/envs']
       names: []
       args: null # null or dict[name, kwargs]
       pause_condition: on_trigger # [on_trigger, on_eos]
@@ -270,6 +272,7 @@ critic:
 reward_model:
   len_ema_json: null
   enable: False
+  external_lib: null # [null, /opt/tiger/agents_extension/reward_fn]
   model:
     input_tokenizer: ${actor_rollout_ref.model.path}  # set this to null if the chat template is identical
     path: hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/models/FsfairX-LLaMA3-RM-v0.1
@@ -407,6 +410,7 @@ trainer:
 
 rollout_server:
   handler: "math/aiohttp" # ["math/aiohttp"]
+  external_lib: null # [null, /opt/tiger/agents_extension/handlers]
   handler_kwargs: {}
 
 streaming_rollout:

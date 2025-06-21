@@ -158,8 +158,9 @@ class QueryPlugin:
         self.tp_group = session.tp_group
         self.plugin_manager: PluginManager = get_plugin_manager(self.config, tokenizer=self.tokenizer)
         self.plugin_match_state = self.plugin_manager.get_match_state()
+        env_external_lib = self.config['env_external_lib']
         if self.true_call:
-            self.envs = create_agent_envs_from_str(env_strs, tokenizer=self.tokenizer)
+            self.envs = create_agent_envs_from_str(env_strs, tokenizer=self.tokenizer, external_lib=env_external_lib)
 
     def detach(self):
         if self._query is None:

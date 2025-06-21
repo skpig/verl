@@ -291,7 +291,8 @@ class RewardManager():
 
             # select rm_score
             reward_style = data_item.non_tensor_batch['reward_model']['style']
-            compute_score_fn = _select_rm_score_fn(reward_style)
+            reward_fn_external_lib = self.config.reward_model.external_lib
+            compute_score_fn = _select_rm_score_fn(reward_style, external_lib=reward_fn_external_lib)
             ground_truth = data_item.non_tensor_batch['reward_model']['ground_truth']
             score_fn_inputs = {
                 "batch_info": data_item.batch,
