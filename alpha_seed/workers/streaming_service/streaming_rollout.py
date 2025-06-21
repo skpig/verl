@@ -589,7 +589,7 @@ class RemoteAsyncXPerfGPTRollout(Worker):
         super().__init__()
         if not torch.distributed.is_initialized():
             from datetime import timedelta
-            timeout = timedelta(minutes=int(os.getenv('NCCL_TIMEOUT', 60)))
+            timeout = timedelta(seconds=int(os.getenv('NCCL_TIMEOUT', 3600)))
             torch.distributed.init_process_group(backend="nccl", timeout=timeout)
         self.config = config
         self.role = role

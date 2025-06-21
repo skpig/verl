@@ -68,9 +68,8 @@ class CriticWorker(Worker):
 
         import torch.distributed
         if not torch.distributed.is_initialized():
-            timeout = timedelta(minutes=int(os.getenv('NCCL_TIMEOUT', 60)))
+            timeout = timedelta(seconds=int(os.getenv('NCCL_TIMEOUT', 3600)))
             torch.distributed.init_process_group(backend="nccl", timeout=timeout)
-
         self.config = config
         self.role = "critic"
 
@@ -84,6 +83,8 @@ class CriticWorker(Worker):
             fsdp_size = config.fsdp_size
             sp_size = config.ulysses_sequence_parallel_size
             tp_size = config.tp_size
+            # Monkey patch DeviceMesh._init_process_groups to inject timeout for NCCL
+            from alpha_seed.workers.fsdp import monkey_patch
             meshes = create_mesh(fsdp_size=fsdp_size, tp_size=tp_size, sp_size=sp_size, tp_outside=config.tp_outside)
             # Deprecated case: critic model is saved as ShardedTensor
             # we will always use full FSDP

@@ -35,6 +35,7 @@ from alpha_seed.utils.functional import update_model_config, get_text_config
 from verl.utils.model import print_model_size
 from alpha_seed.workers.fsdp.offload import (offload_fsdp_optimizer, load_fsdp_optimizer, offload_fsdp_model_to_cpu,
                                              load_fsdp_model_to_gpu)
+
 from alpha_seed.workers.megatron.offload import (offload_megatron_model_to_cpu, load_megatron_model_to_gpu,
                                                  offload_megatron_optimizer, load_megatron_optimizer)
 from alpha_seed.models.transformers.monkey_patch import apply_monkey_patch, get_parallel_plan, get_ignore_modules_in_mixed_precision
@@ -92,9 +93,8 @@ class AsyncActorRolloutRefWorker(Worker):
 
         self.config = config
         if not torch.distributed.is_initialized():
-            timeout = timedelta(minutes=int(os.getenv('NCCL_TIMEOUT', 60)))
+            timeout = timedelta(seconds=int(os.getenv('NCCL_TIMEOUT', 3600)))
             torch.distributed.init_process_group(backend="nccl", timeout=timeout)
-
         # build device mesh
         self.master_address = os.getenv('MASTER_ADDR', 'localhost')
         self.master_port = os.getenv('MASTER_PORT', '12345')
@@ -123,6 +123,8 @@ class AsyncActorRolloutRefWorker(Worker):
             actor_sp_size = config.actor.ulysses_sequence_parallel_size
 
             actor_tp_size = config.actor.tp_size
+            # Monkey patch DeviceMesh._init_process_groups to inject timeout for NCCL
+            from alpha_seed.workers.fsdp import monkey_patch
             actor_meshes = create_mesh(fsdp_size=actor_fsdp_size,
                                        tp_size=actor_tp_size,
                                        sp_size=actor_sp_size,
@@ -150,6 +152,8 @@ class AsyncActorRolloutRefWorker(Worker):
                 ref_fsdp_size = config.ref.fsdp_size
                 ref_sp_size = config.ref.ulysses_sequence_parallel_size
                 ref_tp_size = config.ref.tp_size
+                # Monkey patch DeviceMesh._init_process_groups to inject timeout for NCCL
+                from alpha_seed.workers.fsdp import monkey_patch
                 ref_meshes = create_mesh(fsdp_size=ref_fsdp_size,
                                          tp_size=ref_tp_size,
                                          sp_size=ref_sp_size,
