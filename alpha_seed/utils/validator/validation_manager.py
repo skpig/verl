@@ -73,6 +73,7 @@ class ValidateManager(object):
         self.val_thread.start()
 
         if is_async:
+            self.rollout_manager.wait_nccl_comm_threadsafe()
             return
         else:
             self.val_thread.join()

@@ -66,14 +66,20 @@ def _setup_standalone_comm_ucx(all_actor_addresses, standalone_wg, role: str):
     standalone_wg.setup_as_relay()
 
 
-def _update_standalone_weights(hybrid_wg, server_wg, server_role: str):
-    # update the rollout server, do weights binding
-    actor_fut = hybrid_wg.update_standalone_worker(server_role)
-    standalone_fut = server_wg.update_standalone_worker(server_role)
+def _update_standalone_weights(hybrid_wg,
+                               standalone_wg,
+                               standalone_role: str,
+                               threadsafe_nccl_comm: threading.Event = None):
+    actor_fut = hybrid_wg.update_standalone_worker(standalone_role)
+    standalone_fut = standalone_wg.update_standalone_worker(standalone_role)
     # note that we should wait for the weight sync to be completed to avoid standalone fail and driver continues
     ray.get(standalone_fut)
-    server_wg.update_standalone_worker_end()
+    standalone_wg.update_standalone_worker_end()
     ray.get(actor_fut)
+    # In the scenario of async val with multi-thread multi-stream nccl, set event to notify driver that weights have been updated, otherwise it might encounter the deadlock.
+    # For the async gen in training, it is safe. Only the main thread is used.
+    if threadsafe_nccl_comm is not None:
+        threadsafe_nccl_comm.set()
     hybrid_wg.release_param_and_cache()
 
 
@@ -120,7 +126,7 @@ class RolloutManager:
         self._rollout_elastic_enabled = self.config.streaming_rollout.elastic.enable
         self._server_args = self.config.rollout_server
         self.rollout_server_started = threading.Event()
-
+        self.threadsafe_nccl_comm = threading.Event()
         # batch for last step's input batch for standalone
         # initialized with [] to avoid len(None) error
         self.standalone_batch: DataProto = []
@@ -267,6 +273,10 @@ class RolloutManager:
         self._init_standalone_comms()
         self._init_eos_callback()
         self._initialized = True
+
+    def wait_nccl_comm_threadsafe(self):
+        self.threadsafe_nccl_comm.wait()
+        self.threadsafe_nccl_comm.clear()
 
     def resume(self, remote_global_step_folder: str, load_dataproto_fn: Callable):
         # async resume
@@ -651,7 +661,8 @@ class RolloutManager:
     def _val_batch_gen(self, gen_batch: DataProto, step: int, metrics: Dict, is_standalone: bool) -> DataProto:
         if is_standalone:
             with self._hybrid_wg_lock:
-                _update_standalone_weights(self.hybrid_wg, self.val_standalone_wg, "standalone_validator")
+                _update_standalone_weights(self.hybrid_wg, self.val_standalone_wg, "standalone_validator",
+                                           self.threadsafe_nccl_comm)
             validator_wg = self.val_standalone_wg
         else:
             validator_wg = self.hybrid_wg
@@ -680,7 +691,8 @@ class RolloutManager:
             with Timer(name="update_rollout_server", logger=None) as timer:
                 with server_update_weights_ctx(self.val_standalone_wg):
                     with self._hybrid_wg_lock:
-                        _update_standalone_weights(self.hybrid_wg, self.val_standalone_wg, "standalone_validator")
+                        _update_standalone_weights(self.hybrid_wg, self.val_standalone_wg, "standalone_validator",
+                                                   self.threadsafe_nccl_comm)
             print(f"[INFO] {step} val generate server[update weights and restart] {timer.last}")
             metrics["timing/update_rollout_server"] = timer.last
 
