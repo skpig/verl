@@ -537,8 +537,60 @@ def compute_data_metrics(self, batch: DataProto):
     return DataProto.from_dict({'dummy': torch.ones(size=(1,))}, meta_info={'metrics': metrics})
 
 
+def _deduplicate_shared_tensors(obj, visited_tensors=None):
+    """
+    Recursively deduplicate shared tensors to avoid RuntimeError during torch.save.
+    This function creates clones of tensors that share storage to ensure they can be saved.
+    Similar to how safetensors automatically handles tensor deduplication.
+    
+    Args:
+        obj: The object to process (can be tensor, dict, list, tuple, or custom object)
+        visited_tensors: Dict to track tensors by their storage pointer to avoid infinite recursion
+    
+    Returns:
+        Object with deduplicated tensors
+    """
+    if visited_tensors is None:
+        visited_tensors = {}
+
+    if isinstance(obj, torch.Tensor):
+        # Check if we've already processed a tensor with the same storage
+        storage_ptr = obj.storage().data_ptr() if obj.storage().size() > 0 else None
+        if storage_ptr is not None and storage_ptr in visited_tensors:
+            # Return a clone to avoid shared storage issues
+            return obj.detach().clone()
+
+        # Mark this storage as visited
+        if storage_ptr is not None:
+            visited_tensors[storage_ptr] = True
+
+        # For the first occurrence, we can return the original tensor
+        # but we'll clone it anyway to be safe
+        return obj.detach().clone()
+    elif isinstance(obj, dict):
+        return {key: _deduplicate_shared_tensors(value, visited_tensors) for key, value in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        deduplicated = [_deduplicate_shared_tensors(item, visited_tensors) for item in obj]
+        return type(obj)(deduplicated)
+    elif hasattr(obj, '__dict__'):
+        # Handle custom objects by processing their attributes
+        try:
+            new_obj = copy.copy(obj)
+            for attr_name, attr_value in obj.__dict__.items():
+                setattr(new_obj, attr_name, _deduplicate_shared_tensors(attr_value, visited_tensors))
+            return new_obj
+        except (TypeError, AttributeError, pkl.PicklingError):
+            # If the object can't be copied (e.g., contains staticmethod, lambda, etc.)
+            # just return the original object since our main goal is tensor deduplication
+            return obj
+    else:
+        # For primitive types and other objects, return as-is
+        return obj
+
+
 def save_dataproto(data: DataProto, path, prefix=''):
-    torch.save(data.batch, f"{prefix}.batch.pt")
+    # Deduplicate shared tensors before saving to avoid RuntimeError
+    torch.save(_deduplicate_shared_tensors(data.batch), f"{prefix}.batch.pt")
     torch.save(data.non_tensor_batch, f"{prefix}.non_tensor_batch.pt")
     torch.save(data.meta_info, f"{prefix}.meta_info.pt")
     hcopy(f"{prefix}.batch.pt", path)
