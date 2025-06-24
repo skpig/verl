@@ -776,6 +776,9 @@ class InferenceSession:
         prefill_only = self.enable_mtp_decoding and any([query.is_context_computing for query in running])
 
         for index, query in enumerate(running):
+            if len(query.input_ids) == 0:
+                query.init_from_prompt(self.tokenizer)
+            assert len(query.input_ids) > 0
             context_len = len(query.input_ids) - query.prefix_already_computed_len
             max_kv_index_len = max(max_kv_index_len, len(query.kv_slot_ids))
             if query.is_context_computing:
@@ -792,6 +795,7 @@ class InferenceSession:
                     if input_embs.ndim == 2:
                         input_embs = input_embs.unsqueeze(0)
                     if is_vlm:
+                        assert (input_embs.ndim == 3)
                         input_embs = input_embs[:, start:end, :]
                     return input_embs
 

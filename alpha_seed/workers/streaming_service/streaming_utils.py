@@ -398,15 +398,18 @@ async def chat_completions(content, meta_info, config, host, port: int):
         await session.close()
 
 
-async def internal_call(item, config, host, port: int):
+async def internal_call(item, config, host, port: int, prompt: str = ''):
     completion = None
     try:
-        item.batch = item.batch.reshape(-1)
-        input_ids = item.batch['input_ids']
-        attention_mask = item.batch['attention_mask']
-        valid_input_len = torch.sum(attention_mask)
-        prompt_ids = input_ids[0, -valid_input_len:].tolist()
-        data = {"prompt": prompt_ids}
+        if prompt == '':
+            item.batch = item.batch.reshape(-1)
+            input_ids = item.batch['input_ids']
+            attention_mask = item.batch['attention_mask']
+            valid_input_len = torch.sum(attention_mask)
+            prompt_ids = input_ids[0, -valid_input_len:].tolist()
+            data = {"prompt": prompt_ids}
+        else:
+            data = {"prompt": prompt}
         meta_info = copy.copy(item.meta_info)
         # required for eos callback
         meta_info['uid'] = item.non_tensor_batch['uid'][0]

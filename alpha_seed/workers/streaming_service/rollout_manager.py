@@ -813,7 +813,6 @@ class RolloutManager:
             if (key := "model_output_mask") not in batch:
                 batch.batch[key] = _get_response_tensor(dtype=torch.int8, pad_val=-1)
             gen_batch_required_keys.append(key)
-
         gen_batch = batch.pop(batch_keys=gen_batch_required_keys)
         gen_batch.non_tensor_batch = batch.non_tensor_batch
         # pack fields into extra_data (for tool calling...)
@@ -827,7 +826,16 @@ class RolloutManager:
                 gen_batch.non_tensor_batch['extra_data'][i].update({'agent_env': agent_env})
         for i in range(len(gen_batch)):
             gen_batch.non_tensor_batch['extra_data'][i].update({'config': self.config_dict})
-
+        # More efficient for server-client interaction
+        if (key := "prompt") not in gen_batch.non_tensor_batch and self._use_server:
+            input_ids_list = gen_batch.batch["input_ids"].tolist()
+            decoded = []
+            for ids in input_ids_list:
+                # Remove only padding tokens (usually tokenizer.pad_token_id)
+                filtered_ids = [id for id in ids if id != self.tokenizer.pad_token_id]
+                text = self.tokenizer.decode(filtered_ids, skip_special_tokens=False)
+                decoded.append(text)
+            gen_batch.non_tensor_batch[key] = np.array(decoded, dtype=object)
         sample_kwargs = (self.config.actor_rollout_ref.rollout.train_generate_kwargs
                          if is_train else self.config.actor_rollout_ref.rollout.val_generate_kwargs)
         sample_kwargs_dict = OmegaConf.to_container(sample_kwargs, resolve=True)

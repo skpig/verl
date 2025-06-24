@@ -1,6 +1,6 @@
 import copy
 import time
-import warnings
+import logging
 from typing import *
 from dataclasses import dataclass
 import uuid
@@ -10,7 +10,21 @@ import asyncio
 import copy
 import base64
 import dill
-from .query_plugin import QueryPlugin, batch_sync_tp_plugin_queries
+from xperf_gpt.utils import (logging_rank, logging_rank_only)
+from alpha_seed.workers.xperf_rollout.component.query_plugin import QueryPlugin, batch_sync_tp_plugin_queries
+
+
+def call_once_method(method):
+
+    def wrapper(self, *args, **kwargs):
+        flag_name = f"_has_run_{method.__name__}"
+        if getattr(self, flag_name, False):
+            logging_rank_only(logging.warning, 0, f"Method {method.__name__} has already been run.")
+            return
+        setattr(self, flag_name, True)
+        return method(self, *args, **kwargs)
+
+    return wrapper
 
 
 @dataclass
@@ -23,7 +37,6 @@ class Query:
     constraint_decoding_predictor: Optional[Any]
     accepted_len: Optional[List[int]]
     input_prompt: Union[str, List[str]]
-    input_len: Optional[int]
     new_token_ids: Optional[List[int]]
     new_token_log_probs: Optional[List[float]]
     kv_slot_ids: Optional[List[int]]
@@ -32,8 +45,6 @@ class Query:
     context_shift: int
     output_prompt: Union[str, List[str]]
     prefix_already_computed_len: int
-    multiround_id: int
-    multiround_len: int
     system_ids_len: int
     created_time: float  # 此对象在client侧创建时间
     enqueue_time: float  # 对象放入request pool的时间
@@ -69,7 +80,6 @@ class Query:
         self.accepted_len = []
         self.input_prompt = input_prompt
         self.prefix_already_computed_len = prefix_already_computed_len
-        self.input_len = len(input_ids)
         self.is_context_computing = True
         self.new_token_ids = []
         self.new_token_log_probs: List[float] = []
@@ -77,10 +87,6 @@ class Query:
         self.new_token_len = 0
         self.output_prompt = ""
         self.context_shift = 0
-        self.multiround_id = 0
-        self.multiround_len = len(input_prompt) if isinstance(input_prompt, list) else 0
-        self.multiround_input_len = 0
-        self.multiround_new_token_len = 0
         self.system_ids_len = system_ids_len
         self.hidden_states = None
         self.logits = None
@@ -141,6 +147,11 @@ class Query:
         self.prefix_already_computed_len = 0
         self.hidden_states = None
         return
+
+    @call_once_method
+    def init_from_prompt(self, tokenizer):
+        self.input_ids = tokenizer.encode(self.input_prompt)
+        self.original_input_ids = copy.copy(self.input_ids)
 
     @property
     def original_input_len(self):
@@ -221,7 +232,7 @@ class Query:
         ret.new_token_log_probs = ret.new_token_log_probs[:ret.new_token_len]
         # new_token_ids比较特殊，每次reset_compute会把new_token_ids追加到input_ids里面
         # 但new_token_len持续累加，所以这里算出来真正需要truncate的量
-        total_committed_tokens = ret.input_len + ret.new_token_len
+        total_committed_tokens = ret.original_input_len + ret.new_token_len
         new_token_ids_len = total_committed_tokens - len(ret.input_ids)
         ret.new_token_ids = ret.new_token_ids[:new_token_ids_len]
         # Note: 其他要保证事务隔离的列表对象在这里处理好再返回
@@ -229,8 +240,12 @@ class Query:
         return ret
 
     @classmethod
-    def from_request(cls, input_ids, request_id, sampling_kwargs, meta_info=None) -> 'Query':
-        query = Query(input_ids, input_prompt='', code_book=None, idx=request_id, prefix_already_computed_len=0)
+    def from_request(cls, input_ids, input_prompt, request_id, sampling_kwargs, meta_info=None) -> 'Query':
+        query = Query(input_ids,
+                      input_prompt=input_prompt,
+                      code_book=None,
+                      idx=request_id,
+                      prefix_already_computed_len=0)
         query.id = request_id
         query.top_k = sampling_kwargs.get("top_k", 0)
         query.top_p = sampling_kwargs.get("top_p", 1.0)

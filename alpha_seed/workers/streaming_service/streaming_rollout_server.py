@@ -59,15 +59,18 @@ class OpenAIProxy(ABC):
     def create_query(self, request: ChatCompletionRequest) -> Query:
         prompt = request.messages['prompt']
         if isinstance(prompt, str):
-            input_ids = self.tokenizer.encode(prompt)
+            input_ids = []
+            input_prompt = prompt
         else:
             input_ids = prompt
+            input_prompt = ""
         request_id = uuid.uuid4().hex
-        return Query.from_request(input_ids, request_id, request.to_sampling_params(), request.meta_info)
+        return Query.from_request(input_ids, input_prompt, request_id, request.to_sampling_params(), request.meta_info)
 
     def create_response(self, query: Query) -> JSONResponse:
         message = ChatCompletionMessageRollout(
             role="assistant",
+            prompt=query.input_prompt + query.output_prompt[0],
             raw_output_ids=query.output_tokens,
             response_log_probs=query.new_token_log_probs,
             is_finished=query.is_finished,
@@ -84,8 +87,8 @@ class OpenAIProxy(ABC):
         choices.append(choice_data)
 
         usage = CompletionUsage(completion_tokens=query.new_token_len,
-                                prompt_tokens=query.input_len,
-                                total_tokens=query.input_len + query.new_token_len)
+                                prompt_tokens=query.original_input_len,
+                                total_tokens=query.original_input_len + query.new_token_len)
 
         response = ChatCompletion(id=query.id,
                                   choices=choices,

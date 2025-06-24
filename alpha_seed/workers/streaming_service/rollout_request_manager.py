@@ -510,7 +510,7 @@ class RequestManager:
             dur=(received_time - req.last_pending_reschedule_ts) * 1000,
             args={
                 'query_id': query.id,
-                'input_len': query.input_len,
+                'input_len': query.original_input_len,
                 'step': req.global_step,
                 'stale_count': len(req.stale_histories),
             },
@@ -558,7 +558,7 @@ class RequestManager:
                 'query_id': query.id,
                 'input': query.input_prompt,
                 'output': query.output_prompt,
-                'original_input_len': query.input_len,  # 原始输入给定的prefill token数，对齐openai usage的指标
+                'original_input_len': query.original_input_len,  # 原始输入给定的prefill token数，对齐openai usage的指标
                 'output_len': query.new_token_len - len(query.input_ids),  # 本次decode的token数
                 'total_output_len': query.new_token_len,  # 总共decode的token数
                 'step': req.global_step,
