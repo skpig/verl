@@ -391,6 +391,13 @@ def cleanup_local_tmp_folder_safetensors_files(folder_path):
     if int(os.getenv("RAY_LOCAL_RANK", "0")) != 0:
         return
 
+    safe_folder_path = os.path.abspath(folder_path) if not os.path.isabs(folder_path) else folder_path
+    safe_folder_path = os.path.realpath(safe_folder_path)
+    if safe_folder_path.startswith("/mnt/"):
+        print(f"cleanup_local_tmp_folder_safetensors_files: folder_path={safe_folder_path} may be a remote dir, "
+              f"do not remove file or dir !")
+        return
+
     if not folder_path or not os.path.isdir(folder_path):
         return
 

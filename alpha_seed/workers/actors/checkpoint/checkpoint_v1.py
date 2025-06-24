@@ -9,6 +9,7 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, StateDictTy
 from torch.distributed.fsdp import ShardedStateDictConfig, ShardedOptimStateDictConfig
 
 from verl.utils.fs import copy_local_path_from_hdfs
+from omnistore.utilities.io.bfile import is_local_path
 
 from transformers import PretrainedConfig, PreTrainedTokenizer, AutoProcessor
 
@@ -47,12 +48,16 @@ class CheckpointManagerV1(BaseCheckpointManager):
         local_path = copy_local_path_from_hdfs(remote_path)
 
         state_dict = torch.load(local_path)
-        try:
-            os.remove(local_path)
-        except Exception as e:
-            print(
-                f'[rank-{self.rank}]: remove local resume ckpt file after loading failed, exception {e} will be ignored'
-            )
+
+        if not is_local_path(remote_path):
+            print(f'[rank-{self.rank}]: load_checkpoint remote_path={remote_path} is not local or fuse dir, '
+                  f'try to remove local_path={local_path}')
+            try:
+                os.remove(local_path)
+            except Exception as e:
+                print(
+                    f'[rank-{self.rank}]: remove local resume ckpt file after loading failed, exception {e} will be ignored'
+                )
 
         model_state_dict = state_dict['model']
         optimizer_state_dict = state_dict['optimizer']
@@ -79,7 +84,11 @@ class CheckpointManagerV1(BaseCheckpointManager):
         self.previous_global_step = global_step
 
         # remove previous local_path
-        self.remove_previous_save_local_path()
+        if not is_local_path(hdfs_path):
+            print(f'[rank-{self.rank}]: hdfs_path={hdfs_path} is not a local or fuse dir, '
+                  f'try to remove previous_save_local_path={self.previous_save_local_path}')
+            self.remove_previous_save_local_path()
+
         self.local_mkdir(local_path)
         torch.distributed.barrier()
 

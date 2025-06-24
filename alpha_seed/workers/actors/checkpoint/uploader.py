@@ -3,6 +3,7 @@ import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 import hdfs_io
 import asyncio
+from omnistore.utilities.io.bfile import is_local_path
 
 
 @ray.remote(num_gpus=0, num_cpus=1)
@@ -172,13 +173,19 @@ class CkptGlobalUploader:
                                                            'latest_checkpointed_iteration.txt')
         with open(local_latest_checkpointed_iteration, 'w') as f:
             f.write(str(global_step))
-        await asyncio.to_thread(hdfs_io.hput, local_latest_checkpointed_iteration, self.remote_checkpoint_folder)
+        print(f"write_tracker: write {str(global_step)} to {local_latest_checkpointed_iteration} success")
+
+        if not is_local_path(self.remote_checkpoint_folder):
+            await asyncio.to_thread(hdfs_io.hput, local_latest_checkpointed_iteration, self.remote_checkpoint_folder)
 
         # mark a checkpoint version for future checkpoint format change and compatibility
         local_ckpt_version = os.path.join(self.local_checkpoint_folder, 'checkpoint_version.txt')
         with open(local_ckpt_version, 'w') as f:
             f.write(self.ckpt_version)
-        await asyncio.to_thread(hdfs_io.hput, local_ckpt_version, self.remote_checkpoint_folder)
+        print(f"write_tracker: write {self.ckpt_version} to {local_ckpt_version} success")
+
+        if not is_local_path(self.remote_checkpoint_folder):
+            await asyncio.to_thread(hdfs_io.hput, local_ckpt_version, self.remote_checkpoint_folder)
 
 
 @ray.remote
@@ -198,6 +205,10 @@ def upload_ckpt_with_retry(local_path, remote_path, upload_retry_count):
 
 
 def upload_ckpt(local_path, remote_path):
+    if is_local_path(remote_path):
+        print(f"upload_ckpt: remote_path={remote_path} is a local or fuse dir, skipping upload")
+        return True
+
     try:
         hdfs_io.copy(src=local_path, dst=remote_path)
     except Exception:
@@ -211,4 +222,5 @@ def upload_ckpt(local_path, remote_path):
         else:
             import shutil
             shutil.rmtree(local_path, ignore_errors=True)
+
     return True

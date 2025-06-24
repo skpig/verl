@@ -3,6 +3,7 @@ import torch, os
 from omegaconf import OmegaConf, open_dict, ListConfig
 from alpha_seed.utils.dataset.rl_dataset import RLHFDataset
 from verl.utils.fs import copy_local_path_from_hdfs
+from omnistore.utilities.io.bfile import is_local_path
 
 
 class DataLoaderMgr:
@@ -143,8 +144,12 @@ class DataLoaderMgr:
 
         if isinstance(self.train_dataloader.dataset, RLHFDataset):
             train_dataloader.dataset.resume_dataset_state()
-        try:
-            os.remove(dataloader_local_path)
-        except Exception as e:
-            print(f'remove local dataloader ckpt file after loading failed, exception {e} will be ignored')
+
+        if not is_local_path(dataloader_remote_path):
+            print(f'dataloader_remote_path: {dataloader_remote_path} is not a local or fuse dir, '
+                  f'try to remove dataloader_local_path={dataloader_local_path}')
+            try:
+                os.remove(dataloader_local_path)
+            except Exception as e:
+                print(f'remove local dataloader ckpt file after loading failed, exception {e} will be ignored')
         return train_dataloader

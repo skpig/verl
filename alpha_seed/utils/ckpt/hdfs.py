@@ -3,6 +3,7 @@ from verl.utils.fs import copy_local_path_from_hdfs, md5_encode
 from hdfs_io import copy
 from filelock import FileLock
 from seed_models.utils.envs import SeedModelsEnvs
+from omnistore.utilities.io.bfile import is_local_path
 
 cache_dir = "/var/tmp"
 
@@ -69,3 +70,59 @@ def prepare_hdfs_copy_kwargs():
         'chunk_thread_num': SeedModelsEnvs.HDFS_CHUNK_THREAD_NUM,
     }
     return hdfs_kwargs
+
+
+def hdfs_path_map2_mount_path(hdfs_path: str, rw: bool = False) -> str:
+    if not hdfs_path.startswith("hdfs://"):
+        return ""
+    fuse_mount_maps = os.getenv("ARNOLD_HDFSFUSE_VOLUMES", None)
+    if not fuse_mount_maps:
+        return ""
+    try:
+        fuse_mount_maps = eval(fuse_mount_maps)
+    except Exception as e:
+        print(f'fuse_mount_maps={fuse_mount_maps} eval error: {e}')
+        return ""
+    hdfs_path = hdfs_path if hdfs_path.endswith("/") else hdfs_path + "/"
+    longest_matched = None
+    for record in fuse_mount_maps:
+        if "roles" in record and len(record["roles"]) > 0 and os.getenv("ARNOLD_ROLE", "NONE") not in record["roles"]:
+            continue
+        if rw and record["access_mode"] != "RW":
+            continue
+        record_hdfs_path = record.get("hdfs_path", "NONE")
+        record_hdfs_path = record_hdfs_path if record_hdfs_path.endswith("/") else record_hdfs_path + "/"
+        if (hdfs_path.startswith(record_hdfs_path) and
+            (not longest_matched or len(record_hdfs_path) > len(longest_matched["hdfs_path"]))):
+            longest_matched = record
+    if longest_matched:
+        sub_path = hdfs_path[len(longest_matched["hdfs_path"]):].strip("/")
+        return os.path.join(longest_matched.get("mount_path"), sub_path)
+    return ""
+
+
+def mount_path_map2_hdfs_path(mount_path: str) -> str:
+    if not is_local_path(mount_path):
+        return ""
+    fuse_mount_maps = os.getenv("ARNOLD_HDFSFUSE_VOLUMES", None)
+    if not fuse_mount_maps:
+        return ""
+    try:
+        fuse_mount_maps = eval(fuse_mount_maps)
+    except Exception as e:
+        print(f'fuse_mount_maps={fuse_mount_maps} eval error: {e}')
+        return ""
+    mount_path = mount_path if mount_path.endswith("/") else mount_path + "/"
+    longest_matched = None
+    for record in fuse_mount_maps:
+        if "roles" in record and len(record["roles"]) > 0 and os.getenv("ARNOLD_ROLE", "NONE") not in record["roles"]:
+            continue
+        record_mount_path = record.get("mount_path", "NONE")
+        record_mount_path = record_mount_path if record_mount_path.endswith("/") else record_mount_path + "/"
+        if (mount_path.startswith(record_mount_path) and
+            (not longest_matched or len(record_mount_path) > len(longest_matched["mount_path"]))):
+            longest_matched = record
+    if longest_matched:
+        sub_path = mount_path[len(longest_matched["mount_path"]):].strip("/")
+        return os.path.join(longest_matched.get("hdfs_path"), sub_path)
+    return ""

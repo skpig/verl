@@ -24,6 +24,7 @@ REQUIRED_OMNISTORE_VERSION = '0.7.14'
 ACTUAL_OMNISTORE_VERSION = check_omnistore_version(REQUIRED_OMNISTORE_VERSION)
 
 import omnistore
+from omnistore.utilities.io.bfile import is_local_path
 
 
 def check_ckpt_is_omnistore(path):
@@ -154,7 +155,11 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
         self.previous_global_step = global_step
 
         # remove previous local_path
-        self.remove_previous_save_local_path()
+        if not is_local_path(hdfs_path):
+            print(f'[rank-{self.rank}]: hdfs_path={hdfs_path} is not a local or fuse dir, '
+                  f'try to remove previous_save_local_path={self.previous_save_local_path}')
+            self.remove_previous_save_local_path()
+
         self.local_mkdir(path)
         torch.distributed.barrier()
 

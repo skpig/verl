@@ -6,6 +6,8 @@ from importlib.util import find_spec
 from typing import Any, Callable, List, Optional, Union
 
 from omegaconf import OmegaConf
+from omnistore.utilities.io.bfile import is_local_path
+from alpha_seed.utils.ckpt.hdfs import mount_path_map2_hdfs_path
 
 _SOURCE = "alpha-seed"
 
@@ -218,6 +220,8 @@ def report_trial_ckpts_load(checkpoint_infos: dict):
     region = get_region()
 
     for path, ckpt_info in checkpoint_infos.items():
+        if is_local_path(path):
+            path = mount_path_map2_hdfs_path(path) if mount_path_map2_hdfs_path(path) else path
         # Create base input asset
         input_asset = {
             "region": region,
@@ -261,6 +265,8 @@ def report_rl_ckpts_load(worker_configs: dict):
             if not path:
                 logger.info(f"Model {role} path is empty, skip lineage")
                 continue
+            if is_local_path(path):
+                path = mount_path_map2_hdfs_path(path) if mount_path_map2_hdfs_path(path) else path
         except Exception as e:
             logger.info(
                 f"Unable to get lineage info for role {role}, skip lineage. No affect to training process. {str(e)}")
@@ -309,6 +315,9 @@ def report_checkpoint_saved(
     builder = MerlinJobReportBuilder()
     extra = kwargs.pop("extra", {})
     extra = update_extra_with_robust_info(extra)
+
+    if is_local_path(path):
+        path = mount_path_map2_hdfs_path(path) if mount_path_map2_hdfs_path(path) else path
 
     if default_hdfs_path is None:
         checkpoint_index = path.find("/checkpoints/")

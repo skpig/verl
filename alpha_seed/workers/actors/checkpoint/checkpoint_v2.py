@@ -10,6 +10,7 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, StateDictTy
 from torch.distributed.fsdp import ShardedStateDictConfig, ShardedOptimStateDictConfig
 
 from verl.utils.fs import copy_local_path_from_hdfs
+from omnistore.utilities.io.bfile import is_local_path
 
 from transformers import PretrainedConfig, PreTrainedTokenizer, AutoProcessor
 from torch.distributed._tensor.api import DTensor, Shard, Replicate
@@ -106,7 +107,11 @@ class CheckpointManagerV2(BaseCheckpointManager):
         self.previous_global_step = global_step
 
         # remove previous local_path
-        self.remove_previous_save_local_path()
+        if not is_local_path(hdfs_path):
+            print(f'[rank-{self.rank}]: hdfs_path={hdfs_path} is not a local or fuse dir, '
+                  f'try to remove previous_save_local_path={self.previous_save_local_path}')
+            self.remove_previous_save_local_path()
+
         self.local_mkdir(local_path)
         torch.distributed.barrier()
 

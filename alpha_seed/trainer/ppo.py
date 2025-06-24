@@ -68,6 +68,7 @@ from mono_rl import DataProto
 from verl.utils.fs import copy_local_path_from_hdfs
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from hdfs_io import makedirs, hput, hcopy, hexists
+from omnistore.utilities.io.bfile import is_local_path
 
 try:
     from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
@@ -890,7 +891,8 @@ class RayPPOTrainer(object):
         self.ckpt_global_uploader = CkptGlobalUploader.options(name=CkptGlobalUploader.name).remote(
             tracker_role=uploader_tracker_role,
             ckpt_version=self.config.trainer.ckpt_version,
-            default_local_dir=self.config.trainer.default_local_dir,
+            default_local_dir=self.config.trainer.default_local_dir
+            if not is_local_path(self.config.trainer.default_hdfs_dir) else self.config.trainer.default_hdfs_dir,
             default_remote_dir=self.config.trainer.default_hdfs_dir,
             upload_retry_count=int(self.config.trainer.ckpt_upload_retry_count)) if (
                 ckpt_global_uploader is None and not server_client_split) else ckpt_global_uploader
@@ -1008,6 +1010,10 @@ class RayPPOTrainer(object):
 
         """
         # Attention!!! note that the latest_checkpointed_iteration.txt will be overriden if you resume from a previous checkpoint
+        if self.config.trainer.default_hdfs_dir and is_local_path(self.config.trainer.default_hdfs_dir):
+            print(f"save_checkpoint: default_hdfs_dir={self.config.trainer.default_hdfs_dir} is a local or fuse dir, "
+                  f"set default_local_dir={self.config.trainer.default_hdfs_dir}")
+            self.config.trainer.default_local_dir = self.config.trainer.default_hdfs_dir
 
         local_checkpoint_folder = os.path.join(self.config.trainer.default_local_dir, 'checkpoints')
         local_global_step_folder = os.path.join(local_checkpoint_folder, f'global_step_{self.global_step}')
@@ -1020,7 +1026,7 @@ class RayPPOTrainer(object):
         remote_checkpoint_folder = os.path.join(self.config.trainer.default_hdfs_dir, 'checkpoints')
         remote_global_step_folder = os.path.join(remote_checkpoint_folder, f'global_step_{self.global_step}')
 
-        makedirs(remote_global_step_folder)
+        makedirs(remote_global_step_folder, exist_ok=True)
 
         actor_remote_path = os.path.join(remote_global_step_folder, 'actor')
         critic_remote_path = os.path.join(remote_global_step_folder, 'critic')
