@@ -79,6 +79,7 @@ def get_plugin_enabled_common_config():
                 "name": "xperf_gpt",
                 "tensor_model_parallel_size": 2,
                 "mode": "batch",
+                "complete_ratio": 1.0,
                 "enable_paged_attention": False,
                 "plugin": {
                     "enable": True,

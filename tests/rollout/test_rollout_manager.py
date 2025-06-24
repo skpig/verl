@@ -125,8 +125,6 @@ def mock_save_dataproto(data: DataProto, prefix: str = ''):
 @pytest.mark.parametrize("gpu_allocator", [4], indirect=True)
 def test_train_generate(set_common_envs, gpu_allocator, ray_fixture, complete_ratio, is_server, weights_communicator,
                         elastic):
-    if is_server and (0.0 < complete_ratio < 1.0):
-        pytest.skip("skip is_server and 0<complete_ratio<1")
     if elastic:
         pytest.skip("temporarily disabled due to underlying ray state API conflict with multiple clusters")
     if elastic and weights_communicator == "nccl":

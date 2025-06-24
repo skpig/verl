@@ -180,6 +180,16 @@ class RequestPool:
                 # 匹配的request，暂时全量更新
                 self.requests[r.request_id] = r
 
+    def pop_remain_request(self):
+        # assign global_step back
+        remain_req_ids = list(self.requests.keys())
+        print(f"pop remain requests {len(remain_req_ids)}")
+        for r_id in remain_req_ids:
+            r = self.requests.pop(r_id)
+            self.finished_requests[r_id] = r
+            evt = self._finished_events.get(r.request_id)
+            evt.set()
+
     def update_stale(self, ready_engine_ids: Container[str]):
         # engine 死了立刻把请求释放，等待另外的engine处理
         with self._mutex:
@@ -273,10 +283,11 @@ class RequestPool:
 
 @ray.remote
 class RequestManagerRegisterCenter:
-    registry = []
+    router_white_list = ['standalone_rollout', 'hybrid_rollout']
 
     def __init__(self):
         self.names = set()
+        self.registry = []
 
     def ready(self):
         return True
@@ -310,6 +321,28 @@ class RequestManagerRegisterCenter:
         self.registry.append(request_manager)
         self.names.add(instance_name)
         return request_manager
+
+    def create_router(self, complete_ratio: float, instance_name: str = "RequestManagerRouter"):
+        resources = {}
+        if not is_local_ray_instance():
+            # 非local模式下，让RequestManager只跑在stable resources上
+            resources = {"worker": 1, "byted_stable_resource": 1}
+        # note(lixiang): concurrency必须超过global batch size才行，不然会卡住更新不了请求，导致死锁
+        request_manager_router = RequestManagerRouter.options(name=instance_name,
+                                                              resources=resources,
+                                                              max_concurrency=102400).remote()
+        ray.wait([request_manager_router.ready.remote()])
+        init_dest_req_manager_name = f'hybrid_rollout' if complete_ratio > 0.0 else f'standalone_rollout'
+        ray.wait([request_manager_router.set_dest_req_manager_name.remote(init_dest_req_manager_name)])
+        # 不add进self.names中
+        self.registry.append(request_manager_router)
+        return request_manager_router
+
+    @staticmethod
+    def get_router(name: str):
+        if name in RequestManagerRegisterCenter.router_white_list:
+            return ray.get_actor(f'RequestManagerRouter')
+        return ray.get_actor(f'RequestManager/{name}')
 
     @staticmethod
     def get(name: str) -> 'RequestManager':
@@ -405,6 +438,9 @@ class RequestManager:
             ) for q in queries
         ]
         self.req_pool.update(reqs)
+
+    def pop_remain_request(self):
+        self.req_pool.pop_remain_request()
 
     def _debug(self):
         return self.req_pool.requests, self.req_pool.finished_requests
@@ -579,6 +615,59 @@ class RequestManager:
 
     def dump_request_trace(self) -> List[dict]:
         return Tracer.merge_all()
+
+
+@ray.remote
+class RequestManagerRouter:
+
+    def __init__(self):
+        self.names = ['standalone_rollout', 'hybrid_rollout']
+        self.actor_name = ray.get_runtime_context().get_actor_name()
+        self._req_managers = {}
+        for name in self.names:
+            self._req_managers[name] = RequestManagerRegisterCenter.get(name)
+        self.dest_req_manager_name = None
+        self.queryid2manager = {}
+
+    def ready(self):
+        print(f'RequestManagerRouter ready, {self.actor_name=}')
+        return True
+
+    def set_dest_req_manager_name(self, name: str):
+        if 'RequestManager' in name:
+            name = name.split('/')[-1]
+        self.dest_req_manager_name = name
+        print(f"[INFO]set dest req manager name is {name}")
+        return True
+
+    async def put_new_query(self, query: Query) -> str:
+        real_dest = self.dest_req_manager_name
+        print(f"{real_dest=}")
+        request_manager_actor = self._req_managers[real_dest]
+        query_id = await request_manager_actor.put_new_query.remote(query)
+        self.queryid2manager[query.id] = real_dest
+        return query.id
+
+    async def reinput_query(self, query: Query) -> Query:
+        self.queryid2manager[query.id] = self.dest_req_manager_name
+        new_query = query.clone()
+        assert new_query.is_context_computing, "reinput query must be context computing phase"
+        query_id = await self.put_new_query(new_query)
+        return new_query.id
+
+    async def wait_until_finished(self, query_id: str) -> Query:
+        real_dest = self.queryid2manager[query_id]
+        query: Query = await self._req_managers[real_dest].wait_until_finished.remote(query_id)
+        if not query.is_finished:
+            print(f"reinput query {query_id}")
+            query_id = await self.reinput_query(query)
+            # 转移query
+            real_dest = self.queryid2manager[query_id]
+            new_query: Query = await self._req_managers[real_dest].wait_until_finished.remote(query_id)
+            assert new_query.is_finished, f"retry query {query_id} is not finished"
+            # print(f"[INFO]reinput query {query_id} finished! extra_new_token_len:{len(new_query.output_tokens)}, extra_new_token:{new_query.output_tokens}")
+            return new_query
+        return query
 
 
 def get_all_request_manager_actors() -> List[RequestManager]:

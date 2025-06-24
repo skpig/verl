@@ -667,6 +667,8 @@ def main(config):
             rm_reg.create.remote('validation'),
             rm_reg.create.remote('hybrid_validation'),
         ])
+        complete_ratio = config.actor_rollout_ref.rollout.get('complete_ratio', 1.0)
+        request_manager_router = ray.get(rm_reg.create_router.remote(complete_ratio))
 
     # elastic resource pool managers
     # FIXME(lixiang): arnold 扩缩容api不能并发调用，这里先假设只有1个弹性池，之后再改

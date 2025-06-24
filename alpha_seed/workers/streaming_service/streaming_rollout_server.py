@@ -112,7 +112,7 @@ class AsyncXPerfGPTRolloutServer(OpenAIProxy):
         self.server_task = None
         self.host = None
         self.port = None
-        self.request_manager = RequestManagerRegisterCenter.get(request_manager_name)
+        self.request_manager = RequestManagerRegisterCenter.get_router(request_manager_name)
 
     async def create_chat_completion(self, request: ChatCompletionRequest, raw_request: Request):
         """
@@ -129,6 +129,7 @@ class AsyncXPerfGPTRolloutServer(OpenAIProxy):
 
         # await prompt generation finished
         finished_query = await self.request_manager.wait_until_finished.remote(query_id)
+        # finished_query = await self.request_manager_router.wait_until_finished.remote(query_id)
         try:
             response = self.create_response(finished_query)
         except Exception as e:

@@ -239,6 +239,9 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
 
         self.replicas.set_dead_callback(self._worker_group_dead_callback)
         self._loop_should_stop = threading.Event()
+        self._loop_should_continue = threading.Event()
+        self._loop_should_continue.set()
+        self.is_waiting = False
         self._loop_thread = threading.Thread(target=self._dispatch_loop,
                                              name=f'{request_manager_name}-rollout-wg-proxy-dispatch-loop',
                                              daemon=True)
@@ -270,13 +273,28 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
         ready_worker_group_ids = self.replicas.ready_worker_group_ids
         self.request_manager.handle_stale_requests.remote(ready_worker_group_ids)
 
+    def release_running_queris(self):
+        print(f"release running queris in {self._request_manager_name}...")
+        # 先将finish query/unfinished query update到req_pool
+        for engine_id, wg in self.replicas.get_ready_worker_groups().items():
+            queries: List[Query] = wg.get_all_queries(self._request_manager_name)
+            if len(queries) > 0:
+                finished = len(list(None for q in queries if q.is_finished))
+                print(f"release {finished}/{len(queries)} queries in {self._request_manager_name}/{engine_id}")
+                ray.get(self.request_manager.update_intermediate_queries.remote(queries, engine_id, time.time()))
+            wg.release_running_queries()
+        ray.get(self.request_manager.pop_remain_request.remote())
+
     def _dispatch_loop(self):
-        print('start background dispatch loop')
+        print(f'start background dispatch loop for {self._request_manager_name}')
 
         sleep_interval = self.poll_interval
         while True:
             if self._loop_should_stop.is_set():
                 break
+            self.is_waiting = True
+            self._loop_should_continue.wait()
+            self.is_waiting = False
             time.sleep(sleep_interval)
 
             # 按照总量平分给每个ready replica，均匀分发
@@ -456,6 +474,14 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
         self._loop_should_stop.set()
         self._loop_thread.join()
 
+    def pause_loop(self):
+        self._loop_should_continue.clear()
+        while not self.is_waiting:
+            time.sleep(0.5)
+
+    def continue_loop(self):
+        self._loop_should_continue.set()
+
     def step(self, global_step):
         self._metrics_logger.step(global_step)
 
@@ -521,12 +547,15 @@ class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
         如某些worker group跑得比较快，会自动从别的worker group匀过来一些，
         如有新的query进来，会自动按照worker当前数量均分
         """
-        print('start background dispatch loop with balanced mode')
+        print(f'start background dispatch loop with balanced mode for {self._request_manager_name}')
 
         sleep_interval = self.poll_interval
         while True:
             if self._loop_should_stop.is_set():
                 break
+            self.is_waiting = True
+            self._loop_should_continue.wait()
+            self.is_waiting = False
             time.sleep(sleep_interval)
 
             # 按照总量平分给每个ready replica，均匀分发
