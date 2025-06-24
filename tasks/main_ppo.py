@@ -316,10 +316,18 @@ class RewardManager():
                 score_fn_inputs['env_state_bytes'] = base64.b64decode(env_state_bytes) if isinstance(
                     env_state_bytes, str) else env_state_bytes
 
-            if self.config.data.image_key is not None and format_reward != 0:
+            if isinstance(extra_data, dict) and (cached_score := extra_data.get('score', None)) is not None:
+                # score already calculated and is passed in extra_data
+                score = cached_score
+            elif self.config.data.image_key is not None and format_reward != 0:
                 score = 0
             else:
                 score = compute_score_fn(**score_fn_inputs)
+
+            score_msg = ''
+            if isinstance(score, dict) and all([key in score for key in ['score', 'msg']]):
+                score_msg = score['msg']
+                score = score['score']
 
             is_para_dup = para_dup.find_single_turn_duplicate(solution_str)[0]
             is_trunc = (response_length == valid_response_length) and score == -1
@@ -333,6 +341,7 @@ class RewardManager():
                 "reward_style": reward_style,
                 "valid_response_length": valid_response_length,
                 "score": score,
+                "score_msg": score_msg,
                 "is_para_dup": is_para_dup,
                 "is_trunc": is_trunc,
                 "idx": idx,
@@ -373,8 +382,14 @@ class RewardManager():
         all_dup_punish_scores = []
 
         all_final_scores_to_lens = defaultdict(list)
+
+        log_table_interval = 1
+        if self.config.trainer.num_cases_to_wandb > 0:
+            log_table_interval = max(1, len(data) // self.config.trainer.num_cases_to_wandb)
+
         static_conf = make_static_omegaconf(self.config)
-        for res in tqdm(as_completed(rm_res_future_list), total=len(data), desc="get_rm_score"):
+        i_to_idx = []
+        for i, res in tqdm(enumerate(as_completed(rm_res_future_list)), total=len(data), desc="get_rm_score"):
             output_dict = res.result()
             prompt_str = output_dict["prompt_str"]
             solution_str = output_dict["solution_str"]
@@ -382,6 +397,8 @@ class RewardManager():
             reward_style = output_dict['reward_style']
             valid_response_length = output_dict['valid_response_length']
             score = output_dict['score']
+            score_msg = output_dict['score_msg']
+
             is_para_dup = output_dict['is_para_dup']
             is_trunc = output_dict['is_trunc']
             idx = output_dict['idx']
@@ -391,6 +408,7 @@ class RewardManager():
             pause_tokens_index = output_dict['pause_tokens_index']
             format_reward = output_dict['format_reward']
             global_index = output_dict['global_index']
+            i_to_idx.append(idx)
 
             all_thinking_len.append(thinking_len)
 
@@ -461,7 +479,8 @@ class RewardManager():
             if reward_style not in already_print_data_sources:
                 already_print_data_sources[reward_style] = 0
 
-            if already_print_data_sources[reward_style] < static_conf.trainer.num_cases_to_wandb:
+            if i % log_table_interval == 0 and already_print_data_sources[
+                    reward_style] < static_conf.trainer.num_cases_to_wandb:
                 already_print_data_sources[reward_style] += 1
                 if self.log_image:
                     from xperf_gpt.multi_models.preprocess.data_decoder import BytesDecoder
@@ -477,8 +496,8 @@ class RewardManager():
                     solution_str_save = solution_str_post_proc[-32:]
 
                 self.log_table.append([
-                    global_index, global_step, img, prompt_str, solution_str, ground_truth, score, solution_str_save,
-                    is_para_dup, is_trunc, valid_response_length
+                    global_index, global_step, img, prompt_str, solution_str, ground_truth, score, score_msg,
+                    solution_str_save, is_para_dup, is_trunc, valid_response_length
                 ])
             send_to_kafka({
                 "global_index": global_index,
@@ -489,8 +508,8 @@ class RewardManager():
                 "is_validation": is_validation
             })
             save_to_hdfs.append([
-                global_index, idx, global_step, prompt_str, solution_str, ground_truth, score, solution_str_save,
-                is_para_dup, is_trunc, valid_response_length
+                global_index, idx, global_step, prompt_str, solution_str, ground_truth, score, score_msg,
+                solution_str_save, is_para_dup, is_trunc, valid_response_length
             ])
 
         raw_counter = Counter(counter_raw_scores)
@@ -523,6 +542,20 @@ class RewardManager():
         })
         log_counter.update({prefix + f"score_counter/{key}": value for key, value in counter.items()})
 
+        # add score_counter by data_source
+        if 'data_source' in data.non_tensor_batch:
+            score_by_data_source = defaultdict(list)
+            for i, score in enumerate(all_raw_scores):
+                idx = i_to_idx[i]
+                data_source = data.non_tensor_batch['data_source'][idx]
+                score_by_data_source[data_source].append(score)
+            for data_source, score_list in score_by_data_source.items():
+                counter = Counter(score_list)
+                log_counter.update({
+                    f"{prefix}score_counter_by_source/{data_source.replace('/', '_')}_{key}": val
+                    for key, val in counter.items()
+                })
+
         log_score_to_lens = {prefix + f"score_to_lens/{key}": value for key, value in all_final_scores_to_lens.items()}
         log_score = {
             prefix + f"score/raw": sum(all_raw_scores) / max(1, len(all_raw_scores)),
@@ -549,14 +582,14 @@ class RewardManager():
             log_table = {
                 f"gen&score_{self.rm_name}_{global_step}":
                     wandb.Table(columns=[
-                        "Index", "Step", "Image", "Prompt", "Gen Sequence", "GroundTruth", "Score",
+                        "Index", "Step", "Image", "Prompt", "Gen Sequence", "GroundTruth", "Score", "ScoreMsg",
                         "Gen Sequence PostProc", "Is_Dup", "Is_Trunc", "Len"
                     ],
                                 data=self.log_table)
             }
             if (not is_validation and global_step % self.config.trainer.logger_step_interval == 0) or global_step == 1:
                 # logger_step = global_step - global_step % self.config.trainer.logger_step_interval
-                self.logger.log(log_table, step=global_step, backend='tracking')
+                self.logger.log(log_table, step=global_step, backend='wandb')
 
         if self.config.trainer.save_cases_to_hdfs:
             print(f"reward_fn begin hput: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -565,8 +598,8 @@ class RewardManager():
 
             def async_hput(save_to_hdfs, dir_name, file_name):
                 df = pd.DataFrame(columns=[
-                    "global_index", "idx", "step", "prompt", "gen", "groundtruth", "score", "gen_postproc", "is_dup",
-                    "is_trunc", 'len'
+                    "global_index", "idx", "step", "prompt", "gen", "groundtruth", "score", "score_msg", "gen_postproc",
+                    "is_dup", "is_trunc", 'len'
                 ],
                                   data=save_to_hdfs)
                 df.to_parquet(f"{dir_name}{file_name}")
