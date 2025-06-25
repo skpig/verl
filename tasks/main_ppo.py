@@ -723,7 +723,6 @@ def main(config):
             if not is_local_ray_instance():
                 stable_res = {
                     "worker": 1,
-                    "byted_stable_resource": 1,
                 }
             runner = TaskRunner.options(name=TaskRunner.name, resources=stable_res).remote()
         ray.get(runner.main.remote(main_task, config=config))

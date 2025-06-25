@@ -316,7 +316,7 @@ class RequestManagerRegisterCenter:
     def init(cls):
         resources = {}
         if not is_local_ray_instance():
-            resources = {"worker": 1, "byted_stable_resource": 1}
+            resources = {"worker": 1}
         rmrc = RequestManagerRegisterCenter.options(name='RequestManagerRegisterCenter', resources=resources).remote()
         ray.get(rmrc.ready.remote())
         return rmrc
@@ -325,7 +325,7 @@ class RequestManagerRegisterCenter:
         resources = {}
         if not is_local_ray_instance():
             # 非local模式下，让RequestManager只跑在stable resources上
-            resources = {"worker": 1, "byted_stable_resource": 1}
+            resources = {"worker": 1}
         # note(lixiang): concurrency必须超过global batch size才行，不然会卡住更新不了请求，导致死锁
         request_manager = RequestManager.options(name=f'RequestManager/{instance_name}',
                                                  resources=resources,
@@ -339,7 +339,7 @@ class RequestManagerRegisterCenter:
         resources = {}
         if not is_local_ray_instance():
             # 非local模式下，让RequestManager只跑在stable resources上
-            resources = {"worker": 1, "byted_stable_resource": 1}
+            resources = {"worker": 1}
         # note(lixiang): concurrency必须超过global batch size才行，不然会卡住更新不了请求，导致死锁
         request_manager_router = RequestManagerRouter.options(name=instance_name,
                                                               resources=resources,
