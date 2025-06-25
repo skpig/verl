@@ -402,13 +402,21 @@ class Tracer(object):
         self.current_buf: List[Optional[TracingEvent]] = [None] * self._buffer_size
         self.current_pos: int = 0
         self.merged_buffers: List[List[TracingEvent]] = []  # [[buf0], [buf1], ...]
-        self._gc_trace_disabled = False
+        self._disabled = False
 
     def trace(self, evt: TracingEvent):
+        if self._disabled:
+            return
         self.current_buf[self.current_pos] = evt
         self.current_pos += 1
         if self.current_pos == self._buffer_size:
             self._rotate()
+
+    @staticmethod
+    def disable_all():
+        with _tracer_map_mtx:
+            for tid, tracer in _local_tracer_map.items():
+                tracer._disabled = True
 
     @contextmanager
     def complete_event(self, pid, tid, category, name):

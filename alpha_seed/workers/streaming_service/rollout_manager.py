@@ -322,7 +322,7 @@ class RolloutManager:
                ) == self.config.data.max_prompt_length, f"{prompt_len} != {self.config.data.max_prompt_length}"
         assert batch.batch['input_ids'].shape == batch.batch['attention_mask'].shape
 
-        gen_batch, batch = self._prepare_gen_batch(batch, is_train=True)
+        gen_batch, batch = self._prepare_gen_batch(batch, step, is_train=True)
         metrics = {} if metrics is None else metrics
         complete_ratio = (1.0 if is_warmup_step else self.config.actor_rollout_ref.rollout.get("complete_ratio", 1.0))
         gen_batch.meta_info.update({"complete_ratio": complete_ratio})
@@ -411,7 +411,7 @@ class RolloutManager:
         :return: batch to be train after generation, metrics
         """
         assert self._initialized
-        gen_batch, batch = self._prepare_gen_batch(batch, is_train=False)
+        gen_batch, batch = self._prepare_gen_batch(batch, step, is_train=False)
         metrics = {} if metrics is None else metrics
 
         if self._use_server:
@@ -790,7 +790,7 @@ class RolloutManager:
                 merged_metrics[key] += val
         return merged_metrics
 
-    def _prepare_gen_batch(self, batch: DataProto, is_train: bool):
+    def _prepare_gen_batch(self, batch: DataProto, step, is_train: bool):
 
         def _get_response_tensor(dtype, pad_val=-1):
             return torch.zeros(
@@ -839,7 +839,10 @@ class RolloutManager:
         sample_kwargs = (self.config.actor_rollout_ref.rollout.train_generate_kwargs
                          if is_train else self.config.actor_rollout_ref.rollout.val_generate_kwargs)
         sample_kwargs_dict = OmegaConf.to_container(sample_kwargs, resolve=True)
-        gen_batch.meta_info.update({"generation_kwargs": sample_kwargs_dict})
+        gen_batch.meta_info.update({
+            "step": step,
+            "generation_kwargs": sample_kwargs_dict,
+        })
         if not is_train:
             gen_batch.meta_info.update({
                 'eos_token_id': self.tokenizer.eos_token_id,  # noqa

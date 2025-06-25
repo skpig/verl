@@ -9,9 +9,9 @@ import ray
 
 from alpha_seed.utils.server_client import is_local_ray_instance
 from alpha_seed.workers.xperf_rollout.component.query import Query
-from alpha_seed.utils.profile.timeline import CoherentCompleteEvent, Tracer, TracingEvent, CompleteEvent, CounterEvent, \
+from alpha_seed.utils.profile.timeline import CoherentCompleteEvent, Tracer, TracingEvent, CompleteEvent, \
     FlowEvent, \
-    CombinedEvents, WaterfallSlotTracer, OrderedTracer
+    CombinedEvents, WaterfallSlotTracer
 
 
 @dataclass
@@ -61,18 +61,11 @@ class Request:
 
 
 @dataclass
-class StepRequestSpan:
-    global_step: int = 0
-    start_ts: float = 0  # step第一个request开始时间
-    end_ts: float = 0  # step结束时间，也是下一个step的开始时间
-    step_clear_ts: float = 0  # step内最后一个request完成的时间
-
-    def get_busy_ratio(self) -> float:
-        return (self.step_clear_ts - self.start_ts) / (self.end_ts - self.start_ts)
-
-    @property
-    def finished(self) -> bool:
-        return self.end_ts > self.start_ts
+class ProgressStat:
+    step: int
+    total: int
+    finished: int
+    token_throughput: float
 
 
 class RequestPool:
@@ -84,8 +77,9 @@ class RequestPool:
         self._mutex = threading.Lock()
 
         # metrics for observability
-        self._throughput_ts = time.time()
-        self._accumulated_token_counts = defaultdict(int)
+        self._metrics_max_retain_seconds = 300
+        # ts_bucket(10s) -> engine_id -> step -> count
+        self._accumulated_token_counts = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
 
     def __len__(self) -> int:
         return len(self.requests)
@@ -132,6 +126,7 @@ class RequestPool:
     def get_pool_size(self) -> Tuple[int, int]:
         return len(self.requests), len(self.finished_requests)
 
+    # 等待某个request生成完成
     async def wait(self, request_id: str) -> Request:
         """
         一直等待某个request 生成完成才返回，返回后，这个request不再保存在pool里
@@ -140,6 +135,7 @@ class RequestPool:
         self._finished_events.pop(request_id, None)
         return self.finished_requests.pop(request_id)
 
+    # 按request全量更新到request pool里
     def update(self, reqs: List[Request]):
         # assign global_step back
         for r in reqs:
@@ -153,6 +149,7 @@ class RequestPool:
             r.last_pending_reschedule_ts = cur_req.last_pending_reschedule_ts
 
         # 从engine中取出的结果，update到这里
+        ts_bucket_2s = int(time.time()) // 2 * 2
         for r in reqs:
             this_req = self.requests.get(r.request_id)
             if this_req is None:
@@ -167,7 +164,7 @@ class RequestPool:
 
             # compute decoding throughput
             new_decoded_len = r.query.new_token_len - this_req.query.new_token_len
-            self._accumulated_token_counts[r.assigned_engine_id] += new_decoded_len
+            self._accumulated_token_counts[ts_bucket_2s][r.assigned_engine_id][r.global_step] += new_decoded_len
 
             if r.finished:
                 self.finished_requests[r.request_id] = r
@@ -188,8 +185,10 @@ class RequestPool:
             r = self.requests.pop(r_id)
             self.finished_requests[r_id] = r
             evt = self._finished_events.get(r.request_id)
-            evt.set()
+            if evt is not None:
+                evt.set()
 
+    # mark stale queries as pending in request pool
     def update_stale(self, ready_engine_ids: Container[str]):
         # engine 死了立刻把请求释放，等待另外的engine处理
         with self._mutex:
@@ -215,6 +214,7 @@ class RequestPool:
                     req.assigned = False
                     req.last_pending_reschedule_ts = time.time() * 1e3
 
+    # mark the queries as pending from busy engines
     def release(self, waiting_query_ids: List[str], engine_id: str, stale_reason: str) -> List[str]:
         ret = []
         with self._mutex:
@@ -250,6 +250,7 @@ class RequestPool:
                 ret.append(query_id)
         return ret
 
+    # 返回某engine正在跑的前n个生成的最短的request
     def get_shortest_n(self, n: int, engine_id: str) -> List[Request]:
         reqs_for_engine = []
         with self._mutex:
@@ -261,16 +262,28 @@ class RequestPool:
         reqs_for_engine.sort(key=lambda r: r.query.new_token_len)
         return reqs_for_engine[:n]
 
-    def get_throughput(self) -> Dict[str, float]:
+    # 返回每个engine_id在最近给定的interval里的throughput
+    def get_throughput(self, step, interval=30) -> Dict[str, float]:
         now = time.time()
-        dt = now - self._throughput_ts
-        self._throughput_ts = now
-        token_counts = self._accumulated_token_counts
-        self._accumulated_token_counts = defaultdict(int)
+        since = now - interval
+        ts_buckets = sorted(self._accumulated_token_counts.keys())
+        token_count = defaultdict(int)
+        for bucket in reversed(ts_buckets):
+            if bucket > since:
+                for engine_id in list(self._accumulated_token_counts[bucket].keys()):
+                    count = self._accumulated_token_counts[bucket][engine_id][step]
+                    token_count[engine_id] += count
+
         ret = {}
-        for engine_id, count in token_counts.items():
-            tp = count / dt
-            ret[engine_id] = tp
+        for engine_id, count in token_count.items():
+            ret[engine_id] = count / interval
+
+        # clean up out dated ts buckets
+        out_dated_ts = now - self._metrics_max_retain_seconds
+        for bucket in ts_buckets:
+            if bucket < out_dated_ts:
+                self._accumulated_token_counts.pop(bucket, None)
+
         return ret
 
     def get_concurrency(self) -> Dict[str, int]:
@@ -397,6 +410,7 @@ class RequestManager:
         self.actor_name = ray.get_runtime_context().get_actor_name()
         self._rm_name = self.actor_name.removeprefix('RequestManager/')
         self._progress_bar = ProgressBar(self.actor_name)
+        self._query_id_log = defaultdict(set)  # step -> set(query.id)
 
     def ready(self):
         print(f'RequestManager ready, {self.actor_name=}')
@@ -404,15 +418,17 @@ class RequestManager:
 
     async def put_new_query(self, query: Query) -> str:
         query.enqueue_time = time.time() * 1e3
+        step = query.meta_info.get('step', self._step)
         self.req_pool.put_new_requests([
             Request(
                 request_id=query.id,
                 query=query,
-                global_step=self._step,
+                global_step=step,
                 last_pending_reschedule_ts=query.created_time,
                 updated_at=time.time(),
             )
         ])
+        self._query_id_log[step].add(query.id)
         return query.id
 
     async def wait_until_finished(self, query_id: str) -> Query:
@@ -482,7 +498,7 @@ class RequestManager:
         return total, pending
 
     def get_estimated_throughput(self) -> Dict[str, float]:
-        return self.req_pool.get_throughput()
+        return self.req_pool.get_throughput(self._step)
 
     def get_concurrency(self) -> Dict[str, int]:
         return self.req_pool.get_concurrency()
@@ -615,6 +631,42 @@ class RequestManager:
 
     def dump_request_trace(self) -> List[dict]:
         return Tracer.merge_all()
+
+    ## query_tool util function ##
+
+    def get_inflight_query_ids(self) -> List[str]:
+        return list(self.req_pool.requests.keys())
+
+    def get_finished_query_ids(self) -> List[str]:
+        return list(self.req_pool.finished_requests.keys())
+
+    def get_by_id(self, query_id: str) -> Optional[Request]:
+        return self.req_pool.requests.get(query_id)
+
+    def get_progress(self) -> List[ProgressStat]:
+        # 获取当前正在跑的
+        current_inflight = set(self.get_inflight_query_ids())
+
+        # 计算所有旧步骤的统计信息
+        ret = []
+        for step in list(self._query_id_log.keys()):
+            step_total = len(self._query_id_log[step])
+            step_finished = step_total - len(current_inflight.intersection(self._query_id_log[step]))
+
+            throughput = self.req_pool.get_throughput(step)
+            total_throughput = sum(throughput.values())
+
+            if step_finished < step_total:
+                ret.append(
+                    ProgressStat(
+                        step=step,
+                        total=step_total,
+                        finished=step_finished,
+                        token_throughput=total_throughput,
+                    ))
+
+        ret = sorted(ret, key=lambda p: p.step)
+        return ret
 
 
 @ray.remote

@@ -20,6 +20,8 @@ class RolloutQueryTimeline:
                 request_spans = ray.get(req_mgr.dump_request_trace.remote())
                 spans.extend(request_spans)
             self.save_path = export_chrome_trace('query_trace.json.gz', spans)
+        elif global_step > self.config.to_step:
+            Tracer.disable_all()
 
         if self.save_path is not None and self.config.upload_to_mlx and global_step == self.config.to_step + 1:
             # delay upload to next step to make sure file be flushed properly
