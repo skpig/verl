@@ -586,6 +586,8 @@ class AsyncXPerfGPTRollout(object):
             # 这里先等rollout的weights确定load好了再进入engine的循环，避免在hybrid engine里提前进入engine循环
             # 触发到_should_terminate里的tensor all reduce导致和actor model初始化互相死锁
             self.weights_loaded.wait()
+            if self.stop_event.is_set():
+                continue
             with logging_set_level(self.config.get('logging_level', 'WARN')), self.profiler_context as p:
                 try:
                     self.reset_status()
