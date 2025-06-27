@@ -410,6 +410,12 @@ async def internal_call(item, config, host, port: int, prompt: str = ''):
             data = {"prompt": prompt_ids}
         else:
             data = {"prompt": prompt}
+        if 'pixel_values_ref' in item.non_tensor_batch:
+            assert len(item.non_tensor_batch['pixel_values_ref']) == 1
+            pixel_values_ref = item.non_tensor_batch['pixel_values_ref'][0]
+            if pixel_values_ref is not None:
+                data['pixel_values_ref'] = pixel_values_ref
+                data['image_grid_hw'] = item.non_tensor_batch['image_grid_hw'][0].tolist()
         meta_info = copy.copy(item.meta_info)
         # required for eos callback
         meta_info['uid'] = item.non_tensor_batch['uid'][0]

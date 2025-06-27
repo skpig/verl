@@ -1,6 +1,6 @@
 import os
 from verl.utils.fs import copy_local_path_from_hdfs, md5_encode
-from hdfs_io import copy
+from hdfs_io import copy, hexists
 from filelock import FileLock
 from seed_models.utils.envs import SeedModelsEnvs
 from omnistore.utilities.io.bfile import is_local_path
@@ -20,7 +20,9 @@ def download_limited_chunks(model_path, rank, world_size):
 
 
 def download_config_and_tokenizer(model_path):
-    download_files = ['config.json', 'tokenizer.json', 'special_tokens_map.json', 'tokenizer_config.json']
+    download_files = [
+        'config.json', 'tokenizer.json', 'special_tokens_map.json', 'tokenizer_config.json', 'preprocessor_config.json'
+    ]
     local_path = copy_local_path_from_hdfs_files(model_path, download_files, cache_dir)
     return local_path
 
@@ -55,8 +57,9 @@ def copy_local_path_from_hdfs_files(src: str, files: list, cache_dir=None, filel
                 print(f'Copy from {src} to {local_folder_path}')
             for file_name in files:
                 remote_path = os.path.join(src, file_name)
-                print(f"copying file {remote_path} to {local_folder_path}")
-                copy(remote_path, local_folder_path)
+                if hexists(remote_path):
+                    print(f"copying file {remote_path} to {local_folder_path}")
+                    copy(remote_path, local_folder_path)
     return local_folder_path
 
 

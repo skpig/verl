@@ -574,6 +574,9 @@ class InferenceSession:
                 query.temperature = temperature[idx] if prompt_meta_info is not None else None
                 query.max_new_tokens = max_new_tokens[idx] if prompt_meta_info is not None else self.max_new_tokens
                 query.max_length = max_length[idx] if prompt_meta_info is not None else self.max_length
+                query.pixel_values = query.meta_info.pop("pixel_values", None)
+                query.pixel_values_ref = query.meta_info.pop("pixel_values_ref", None)
+                query.image_grid_hw = query.meta_info.pop("image_grid_hw", None)
                 query.attach_session(session=self)
                 with self._accepted_queries_mutex:
                     self.all_accepted_queries[query.id] = query
@@ -784,11 +787,10 @@ class InferenceSession:
             if query.is_context_computing:
 
                 def _get_inp_embs(input_ids, start: int, end: int):
-                    is_vlm = query.meta_info.get('pixel_values') is not None
+                    is_vlm = query.pixel_values is not None
                     if is_vlm:
                         input_ids = input_ids.cuda()
-                        input_embs = self._prepare_image_embeds(input_ids, query.meta_info['pixel_values'],
-                                                                query.meta_info['image_grid_hw'])
+                        input_embs = self._prepare_image_embeds(input_ids, query.pixel_values, query.image_grid_hw)
                     else:
                         input_ids = input_ids[start:end].cuda()
                         input_embs = self.engine.get_input_embeddings(input_ids=input_ids)

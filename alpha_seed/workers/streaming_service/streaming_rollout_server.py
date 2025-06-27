@@ -65,7 +65,15 @@ class OpenAIProxy(ABC):
             input_ids = prompt
             input_prompt = ""
         request_id = uuid.uuid4().hex
-        return Query.from_request(input_ids, input_prompt, request_id, request.to_sampling_params(), request.meta_info)
+        kwargs = {}
+        if 'pixel_values_ref' in request.messages:
+            kwargs['image_kwargs'] = {
+                'pixel_values_ref': request.messages['pixel_values_ref'],
+                'image_grid_hw': request.messages['image_grid_hw']
+            }
+            assert isinstance(kwargs['image_kwargs']['pixel_values_ref'], str)
+        return Query.from_request(input_ids, input_prompt, request_id, request.to_sampling_params(), request.meta_info,
+                                  **kwargs)
 
     def create_response(self, query: Query) -> JSONResponse:
         message = ChatCompletionMessageRollout(
@@ -132,7 +140,6 @@ class AsyncXPerfGPTRolloutServer(OpenAIProxy):
 
         # await prompt generation finished
         finished_query = await self.request_manager.wait_until_finished.remote(query_id)
-        # finished_query = await self.request_manager_router.wait_until_finished.remote(query_id)
         try:
             response = self.create_response(finished_query)
         except Exception as e:

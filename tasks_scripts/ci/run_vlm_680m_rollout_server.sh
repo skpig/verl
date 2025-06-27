@@ -1,5 +1,4 @@
 set -x
-export CUDA_LAUNCH_BLCOKING=True
 NUM_STEPS="${NUM_STEPS:-240}"
 
 N_GPUS_PER_NODE="${N_GPUS_PER_NODE:-8}"
@@ -74,7 +73,6 @@ python3 tasks/main_ppo.py \
     data.prompt_key=prompt \
     data.answer_key=answer \
     data.image_key=img \
-    data.dist_image=True \
     data.use_ref_answer=${use_ref_answer} \
     data.max_prompt_length=${max_prompt_length} \
     data.max_response_length=${max_response_length} \
@@ -119,7 +117,7 @@ python3 tasks/main_ppo.py \
     trainer.logger=['console','tracking'] \
     trainer.project_name=${project_name} \
     trainer.experiment_name=${experiment_name} \
-    trainer.n_gpus_per_node=${N_GPUS_PER_NODE} \
+    trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
     trainer.default_hdfs_dir=${default_hdfs_dir} \
     trainer.save_freq=${save_freq} \
@@ -148,7 +146,6 @@ python3 tasks/main_ppo.py \
     +actor_rollout_ref.rollout.use_vllm=False \
     actor_rollout_ref.rollout.micro_batch_size=${gen_micro_batch_size} \
     actor_rollout_ref.rollout.log_prob_micro_batch_size=${infer_micro_batch_size} \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.2 \
     trainer.offload_train_memory=${offload_train_memory} \
     critic.profile.enable=False \
     critic.profile.upload_to_mlx=False \
@@ -157,4 +154,6 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.actor.profile.upload_to_mlx=False \
     actor_rollout_ref.actor.profile.filename=actor.tp${xperf_tp_size}.fsdp${fsdp_size} \
     trainer.total_steps=${NUM_STEPS} \
-    trainer.save_cases_to_hdfs=False
+    trainer.save_cases_to_hdfs=False \
+    actor_rollout_ref.rollout.mode=server \
+    data.dist_image=True

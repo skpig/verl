@@ -46,6 +46,7 @@ from alpha_seed.workers.hybrid_engine.fsdp_gather import ulysses_pad_and_slice_i
 from alpha_seed.models.transformers.modeling_vlm import get_image_inputs, get_image_keys
 from alpha_seed.utils.observility.training_stats import sync_training_stats
 from alpha_seed.utils.observility import get_profiler_context_wrapped, profile_step
+from alpha_seed.utils.dataset.vlm_rl_dataset import get_image_manager
 from alpha_seed import core_algos
 from alpha_seed.models.transformers.monkey_patch import update_gate_ema
 from verl.utils.seqlen_balancing import rearrange_micro_batches, get_reverse_idx
@@ -110,12 +111,13 @@ class DataParallelPPOActor(BasePPOActor):
         self.compute_entropy_loss = core_algos.compute_entropy_loss
         self.entropy_from_logits = verl_F.entropy_from_logits
         self.loss_fn = default_loss_fn
+        self.image_manager = get_image_manager()
 
     def _forward_micro_batch(self, micro_batch: TensorDict, temperature, compute_entropy, non_tensor_batch):
         from flash_attn.bert_padding import index_first_axis, rearrange
 
         response_length = micro_batch['responses'].size(-1)
-        image_kwargs = get_image_inputs(non_tensor_batch)
+        image_kwargs = get_image_inputs(non_tensor_batch, image_manager=self.image_manager)
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
             if not self.use_rmpad:
                 raise NotImplementedError('only support rmpad mode')

@@ -72,4 +72,5 @@ jobs:
           - ray stop --force
           - ray start --num-cpus=100 --head
           - bash tasks_scripts/ci/run_vlm_680m.sh
+          - bash tasks_scripts/ci/run_vlm_680m_rollout_server.sh
           - ray stop --force

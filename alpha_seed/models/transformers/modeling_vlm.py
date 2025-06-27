@@ -5,6 +5,25 @@ from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_worl
 from dist_attn.ulysses.ops import slice_input_tensor
 from typing import Optional, Tuple, Union, List
 from transformers.modeling_outputs import MoeCausalLMOutputWithPast
+import ray
+
+
+def add_pixel_values_to_inflight_query(queries, image_manager):
+    image_refs = []
+    for query in queries:
+        if query.pixel_values_ref is not None:
+            assert isinstance(query.pixel_values_ref,
+                              str), f'pixel_values must be a str, but got {query.pixel_values_ref}'
+            image_refs.append(query.pixel_values_ref)
+    # convert str to object_ref
+    image_refs = ray.get(image_manager.get_refs.remote(image_refs))
+    pixel_values = ray.get(image_refs)
+    index = 0
+    for query in queries:
+        if query.pixel_values_ref is not None:
+            query.pixel_values = pixel_values[index]
+            index += 1
+    return queries
 
 
 def convert_tensor_to_numpy(tensor):
@@ -50,26 +69,43 @@ def get_dummy_image_features(self, pixel_values, image_grid_hw=None):
     return image_embeds
 
 
-def get_image_inputs(non_tensor_batch):
+def get_local_non_none_inputs(ref_list, image_manager):
+    ref_list = [r for r in ref_list if r is not None]
+    if len(ref_list) > 0:
+        if isinstance(ref_list[0], str):
+            for ref in ref_list:
+                assert isinstance(ref, str), "all data are expected to be ref str"
+            image_refs = ray.get(image_manager.get_refs.remote(ref_list))
+            images = ray.get(image_refs)
+        else:
+            images = ref_list
+        return images
+    return ref_list
+
+
+def get_image_inputs(non_tensor_batch, image_manager=None):
     image_kwargs = {}
-    image_keys = get_image_keys(non_tensor_batch)
-    for key in image_keys:
-        non_none_values = [_ for _ in non_tensor_batch[key] if _ is not None]
-        if len(non_none_values) == 0:
-            return {}
-        if isinstance(non_none_values[0], np.ndarray):
-            if key == 'image_grid_hw':
-                non_none_values = [torch.from_numpy(value.astype(int)) for value in non_none_values]
-            else:
-                raise RuntimeError(f'tensor is expected, got {non_none_values}')
-        image_kwargs[key] = torch.cat(non_none_values).cuda()
+    if 'pixel_values_ref' in non_tensor_batch:
+        pixel_values_ref = non_tensor_batch['pixel_values_ref']
+        assert image_manager is not None
+        pixel_values = get_local_non_none_inputs(pixel_values_ref, image_manager)
+    elif 'pixel_values' in non_tensor_batch:
+        pixel_values = non_tensor_batch['pixel_values']
+    else:
+        return image_kwargs
+    pixel_values = [convert_numpy_to_tensor(v, float) for v in pixel_values if v is not None]
+    if len(pixel_values) == 0:
+        return image_kwargs
+    image_kwargs['pixel_values'] = torch.cat(pixel_values).cuda()
+    image_grid_hw = [convert_numpy_to_tensor(v, int) for v in non_tensor_batch['image_grid_hw'] if v is not None]
+    image_kwargs['image_grid_hw'] = torch.cat(image_grid_hw).cuda()
     return image_kwargs
 
 
 def get_image_keys(non_tensor_batch):
-    if 'pixel_values' in non_tensor_batch:
-        return ['pixel_values', 'image_grid_hw']
-    return []
+    keys = ['pixel_values', 'image_grid_hw', 'pixel_values_ref']
+    keys = [k for k in keys if k in non_tensor_batch]
+    return keys
 
 
 def get_sp_input_embeds(

@@ -57,6 +57,7 @@ from alpha_seed.utils import ndtimeline
 from alpha_seed.utils.functional import print_dataproto_size
 from alpha_seed.utils.tracking_utils import async_process_batch_samples_to_wandb
 from alpha_seed.utils.multithreads import ThreadPoolManager
+from alpha_seed.utils.dataset.vlm_rl_dataset import load_image_data_dist
 from alpha_seed.workers.actors.checkpoint.utils import find_latest_ckpt_path_
 from alpha_seed.trainer.utils.dataloader_mgr import DataLoaderMgr
 from alpha_seed.workers.actors.sample_pool import SamplePool
@@ -608,6 +609,7 @@ def load_dataproto(path, prefix=''):
     batch = torch.load(batch)
     non_tensor_batch = copy_local_path_from_hdfs(non_tensor_batch)
     non_tensor_batch = torch.load(non_tensor_batch)
+    load_image_data_dist(non_tensor_batch)
     meta_info = copy_local_path_from_hdfs(meta_info)
     meta_info = torch.load(meta_info)
     return DataProto(batch=batch, non_tensor_batch=non_tensor_batch, meta_info=meta_info)
@@ -1551,8 +1553,10 @@ class RayPPOTrainer(object):
         rollout_counter = 0
         rollout_pool_metrics = {}
         while True:
+            start_data_time = time.time()
             for batch_dict in self.train_dataloader:
                 metrics = {}
+                metrics['timing/dataloader'] = time.time() - start_data_time
                 with Timer(name='step', logger=None) as step_timer:
                     # hybrid generate (on policy)
                     if self.config.trainer.load_train_batch_path is None:
@@ -2010,6 +2014,7 @@ class RayPPOTrainer(object):
                 metrics['timing/step'] = step_timer.last
                 # TODO: make a canonical logger that supports various backend
                 self.logger.log(data=metrics, step=self.global_step)
+                start_data_time = time.time()
 
                 self.global_step += 1
                 if self.global_step >= self.total_training_steps:

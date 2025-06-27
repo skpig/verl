@@ -22,7 +22,10 @@ async def process_single_batch(item, context, **kwargs):
     config = context.config.actor_rollout_ref.rollout
     host = context.server_host
     port = context.server_port
-    prompt = item.non_tensor_batch['prompt'][0]
+    if 'image_grid_hw' in item.non_tensor_batch:
+        prompt = ''
+    else:
+        prompt = item.non_tensor_batch['prompt'][0]
     completion = await internal_call(item, config, host, port, prompt=prompt)
     from alpha_seed.workers.streaming_service.streaming_utils import DataPack, pack_to_dataproto
     data_pack = DataPack.create_from_completion_dict(completion['choices'][0]['message'])

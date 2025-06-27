@@ -15,6 +15,7 @@
 Implement a multiprocess PPOCritic
 """
 
+import ray
 from typing import Iterable
 import itertools
 import gc
@@ -35,6 +36,7 @@ from verl.utils.model import compute_position_id_with_mask
 from tensordict import TensorDict
 
 from alpha_seed.utils.functional import rearrange_micro_data_proto
+from alpha_seed.utils.dataset.vlm_rl_dataset import get_image_manager
 from alpha_seed.workers.hybrid_engine.fsdp_gather import ulysses_pad_and_slice_inputs, ulysses_pad
 from alpha_seed.models.transformers.modeling_vlm import get_image_inputs, get_image_keys
 from alpha_seed import core_algos
@@ -92,12 +94,13 @@ class DataParallelPPOCritic(BasePPOCritic):
                                               wait=10)
 
         self.value_loss = core_algos.compute_value_loss
+        self.image_manager = get_image_manager()
 
     def _forward_micro_batch(self, micro_batch: TensorDict, non_tensor_batch):
         from flash_attn.bert_padding import pad_input, unpad_input, index_first_axis, rearrange
 
         response_length = micro_batch['responses'].size(-1)
-        image_kwargs = get_image_inputs(non_tensor_batch)
+        image_kwargs = get_image_inputs(non_tensor_batch, image_manager=self.image_manager)
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
             if self.use_rmpad:
                 input_ids = micro_batch['input_ids'].to(torch.int64)

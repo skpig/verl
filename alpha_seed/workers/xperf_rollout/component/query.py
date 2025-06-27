@@ -62,6 +62,9 @@ class Query:
     off_policy_steps: int
     meta_info: Optional[Dict]
     plugin_query: QueryPlugin
+    pixel_values: Optional[torch.Tensor]
+    pixel_values_ref: Optional[str]
+    image_grid_hw: Optional[torch.Tensor]
 
     def __init__(self,
                  input_ids,
@@ -70,7 +73,10 @@ class Query:
                  prefix_already_computed_len=0,
                  system_ids_len=0,
                  code_book=None,
-                 constraint_decoding_predictor=None):
+                 constraint_decoding_predictor=None,
+                 pixel_values=None,
+                 pixel_values_ref=None,
+                 image_grid_hw=None):
         self.id = uuid.uuid4().hex
         self.idx = idx
         self.original_input_ids = copy.copy(input_ids)
@@ -111,6 +117,9 @@ class Query:
         self._exception = None
 
         self.plugin_query = None
+        self.pixel_values = pixel_values
+        self.pixel_values_ref = pixel_values_ref
+        self.image_grid_hw = image_grid_hw
 
     # Check whether current query is going to enter the decoding stage
     def is_to_decoding_compute(self):
@@ -240,7 +249,13 @@ class Query:
         return ret
 
     @classmethod
-    def from_request(cls, input_ids, input_prompt, request_id, sampling_kwargs, meta_info=None) -> 'Query':
+    def from_request(cls,
+                     input_ids,
+                     input_prompt,
+                     request_id,
+                     sampling_kwargs,
+                     meta_info=None,
+                     image_kwargs=None) -> 'Query':
         query = Query(input_ids,
                       input_prompt=input_prompt,
                       code_book=None,
@@ -253,6 +268,10 @@ class Query:
         query.max_new_tokens = sampling_kwargs.get("max_new_tokens", 32)
         query.max_length = sampling_kwargs.get("max_length", 1024)
         query.meta_info = meta_info or {}
+        if image_kwargs is not None and len(image_kwargs) > 0:
+            query.pixel_values_ref = image_kwargs.get('pixel_values_ref')
+            query.pixel_values = image_kwargs.get('pixel_values')
+            query.image_grid_hw = image_kwargs['image_grid_hw']
         return query
 
     @property
@@ -297,6 +316,9 @@ class Query:
         # skip any gpu tensors, as they might be mutated shortly
         if self.hidden_states is not None and self.hidden_states.device != torch.device('cpu'):
             self.hidden_states = None
+
+        if self.pixel_values_ref is not None:
+            self.pixel_values = None
 
 
 class AsyncQuery:

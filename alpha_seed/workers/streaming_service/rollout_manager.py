@@ -388,6 +388,8 @@ class RolloutManager:
             batch.meta_info['global_img_token_num'] = [
                 t.shape[0] if t is not None else 0 for t in batch.non_tensor_batch['pixel_values']
             ]
+        elif 'img_token_num' in batch.non_tensor_batch:
+            batch.meta_info['global_img_token_num'] = list(batch.non_tensor_batch['img_token_num'])
 
         if self.config.algorithm.force_append_eos:
             batch.batch["input_ids"][:, -1] = self.tokenizer.eos_token_id

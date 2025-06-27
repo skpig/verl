@@ -53,9 +53,11 @@ from alpha_seed.workers.fsdp.initialize import (create_mesh, meta_device_init,
 from alpha_seed.workers.ppo_actor import DataParallelPPOActor
 from alpha_seed.utils.kernels.persist_gemm import deploy_persist_gemm
 from alpha_seed.models.transformers.parallel.collectives import get_memory
+from alpha_seed.models.transformers.modeling_vlm import add_pixel_values_to_inflight_query
 from alpha_seed.utils.observility.training_stats import MetricsTorchDispatchMode
 from alpha_seed.utils.observility import get_profiler_context_wrapped
 from alpha_seed.utils.ckpt import download_minimal_required_files
+from alpha_seed.utils.dataset.vlm_rl_dataset import get_image_manager
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig, AutoModelForVision2Seq
 from transformers import AutoProcessor
 
@@ -389,6 +391,7 @@ class AsyncActorRolloutRefWorker(Worker):
             f'invalid ulysses sequence parallel size: {get_text_config(actor_model_config).num_attention_heads=} % {self.config.actor.ulysses_sequence_parallel_size=} != 0'
 
         log_gpu_memory_usage('After actor optimizer init')
+        self.image_manager = get_image_manager()
         return actor_module_fsdp, actor_optimizer, actor_lr_scheduler, actor_model_config, metrics_context
 
     def _build_model_optimizer_mariana(self, model_path, role='actor'):
@@ -1083,7 +1086,6 @@ class AsyncActorRolloutRefWorker(Worker):
             'timing/weight_binding': binding_time
         })
         output = output.to('cpu')
-        # torch.distributed.barrier()
 
         log_gpu_memory_usage('After rollout generation')
         # clear kv cache
@@ -1282,6 +1284,7 @@ class AsyncActorRolloutRefWorker(Worker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
     def add_inflight_queries(self, queries: List[Query]):
         ret = []
+        queries = add_pixel_values_to_inflight_query(queries, self.image_manager)
         for q in queries:
             qid = self.rollout.add_inflight_query(q)
             ret.append(qid)

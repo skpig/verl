@@ -5,6 +5,7 @@ data:
   prompt_key: prompt
   answer_key: answer
   image_key: null
+  dist_image: False
   use_ref_answer: False
   max_prompt_length: 512
   max_response_length: 512

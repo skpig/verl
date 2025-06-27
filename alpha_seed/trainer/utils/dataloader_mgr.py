@@ -43,7 +43,12 @@ class DataLoaderMgr:
 
     def _create_datasets(self):
 
-        kwargs = {"processor": self.processor, 'image_key': self.config.data.image_key} if self.is_vlm else {}
+        kwargs = {
+            "processor": self.processor,
+            'image_key': self.config.data.image_key,
+            'tokenizer_file': self.config.actor_rollout_ref.model.path,
+            'dist_image': self.config.data.dist_image
+        } if self.is_vlm else {}
         data_auto_repeat = self.config.data.get('data_auto_repeat', False)
 
         self.train_dataset = self.RLHFDataset(parquet_files=self.config.data.train_files,

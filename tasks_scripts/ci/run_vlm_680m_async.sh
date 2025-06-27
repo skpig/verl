@@ -1,5 +1,4 @@
 set -x
-export CUDA_LAUNCH_BLCOKING=True
 NUM_STEPS="${NUM_STEPS:-240}"
 
 N_GPUS_PER_NODE="${N_GPUS_PER_NODE:-8}"
@@ -24,7 +23,7 @@ ppo_mini_batch_size=8
 val_batch_size=8
 total_epochs=200
 test_freq=-1
-save_freq=-1
+save_freq=1
 # 算法相关的参数
 actor_lr=2e-6
 critic_lr=2e-6
@@ -74,7 +73,7 @@ python3 tasks/main_ppo.py \
     data.prompt_key=prompt \
     data.answer_key=answer \
     data.image_key=img \
-    data.dist_image=True \
+    data.dist_image=False \
     data.use_ref_answer=${use_ref_answer} \
     data.max_prompt_length=${max_prompt_length} \
     data.max_response_length=${max_response_length} \
@@ -119,8 +118,12 @@ python3 tasks/main_ppo.py \
     trainer.logger=['console','tracking'] \
     trainer.project_name=${project_name} \
     trainer.experiment_name=${experiment_name} \
-    trainer.n_gpus_per_node=${N_GPUS_PER_NODE} \
+    trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
+    streaming_rollout.nnodes=1 \
+    streaming_rollout.n_gpus_per_node=2 \
+    streaming_validator.nnodes=1 \
+    streaming_validator.n_gpus_per_node=2 \
     trainer.default_hdfs_dir=${default_hdfs_dir} \
     trainer.save_freq=${save_freq} \
     trainer.test_freq=${test_freq} \
@@ -130,8 +133,8 @@ python3 tasks/main_ppo.py \
     trainer.need_log=False \
     trainer.log_file=/opt/tiger/alpha-seed/log.jsonl \
     trainer.resume_steps="disable" \
-    +actor_rollout_ref.rollout.complete_ratio=1.0 \
-    +actor_rollout_ref.rollout.max_off_policy_steps=0 \
+    +actor_rollout_ref.rollout.complete_ratio=0.5 \
+    +actor_rollout_ref.rollout.max_off_policy_steps=5 \
     actor_rollout_ref.actor.fsdp_size=${fsdp_size} \
     actor_rollout_ref.ref.fsdp_size=${fsdp_size} \
     reward_model.need_punish_trunc=True \
@@ -148,7 +151,6 @@ python3 tasks/main_ppo.py \
     +actor_rollout_ref.rollout.use_vllm=False \
     actor_rollout_ref.rollout.micro_batch_size=${gen_micro_batch_size} \
     actor_rollout_ref.rollout.log_prob_micro_batch_size=${infer_micro_batch_size} \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.2 \
     trainer.offload_train_memory=${offload_train_memory} \
     critic.profile.enable=False \
     critic.profile.upload_to_mlx=False \

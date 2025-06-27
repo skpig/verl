@@ -69,6 +69,7 @@ from alpha_seed.workers.xperf_rollout.utils.nccl_weights_communicator import NCC
 from alpha_seed.workers.streaming_service.xperf_model_prophet import XperfModelProphet
 from alpha_seed.workers.xperf_rollout.utils.logits_manipulate import logits_manipulate_fn_core, logits_manipulate_fn_eta, logits_manipulate_fn_minp, logits_manipulate_fn_clip
 from alpha_seed.utils.observility import get_profiler_context_wrapped, profile_step
+from alpha_seed.models.transformers.modeling_vlm import add_pixel_values_to_inflight_query
 from functools import partial
 import omegaconf
 import dill
@@ -331,6 +332,7 @@ class AsyncXPerfGPTRollout(object):
         # offload to meta device
         if not self.is_standalone:
             offload_to_device(self.inference_engine.engine.module, "meta")
+        self.image_manager = ray.get_actor("ImageManager")
         torch.cuda.empty_cache()
 
     def add_inflight_query(self, query: Query) -> str:
@@ -519,26 +521,47 @@ class AsyncXPerfGPTRollout(object):
             except Exception:
                 assert self.process_thread.is_alive()
 
+    def _batch_process_images(self, prompts, prompt_meta_info):
+        batch_size = len(prompts)
+        for key, value in prompts.non_tensor_batch.items():
+            v_hex_list = []
+            index_list = []
+            if key == 'pixel_values_ref':
+                for i in range(batch_size):
+                    if isinstance(value[i], str):
+                        v_hex = value[i]
+                        v_hex_list.append(v_hex)
+                        index_list.append(i)
+                if v_hex_list:
+                    image_refs = ray.get(self.image_manager.get_refs.remote(v_hex_list))
+                    images = ray.get(image_refs)
+                    for idx, i in enumerate(index_list):
+                        prompt_meta_info[i]['pixel_values'] = images[idx]
+                        prompt_meta_info[i]['pixel_values_ref'] = v_hex_list[idx]
+                for i in range(batch_size):
+                    if not isinstance(value[i], str):
+                        prompt_meta_info[i][key] = value[i]
+            else:
+                for i in range(batch_size):
+                    prompt_meta_info[i][key] = value[i]
+        return prompt_meta_info
+
     @torch.no_grad()
     def generate_sequences(self, prompts: DataProto, is_async=False):
         complete_ratio = prompts.meta_info.get('complete_ratio', 1)
         prompt_ids = prompts.batch['input_ids']  # (bs, prompt_length)
-        batch_size = prompt_ids.shape[0]
         # left-padded attention_mask
         off_turn_off_policy_steps = prompts.batch["off_policy_steps"]
         first_non_one_indices = (prompt_ids != self.tokenizer.pad_token_id).int().argmax(dim=1)
         rmv_padding_prompt_ids = [row[index:].tolist() for row, index in zip(prompt_ids, first_non_one_indices)]
         generation_kwargs = prompts.meta_info['generation_kwargs']
 
-        # (zhangchi.usc1992) note, here we pass all the non_tensor_batch and meta_info to the inference engine as prompt_meta_info.
         prompt_meta_info = [{
             "off_policy_steps": max(off_policy_step),
             "generation_kwargs": generation_kwargs,
         } for off_policy_step in off_turn_off_policy_steps.tolist()]
-        for key, value in prompts.non_tensor_batch.items():
-            for i in range(batch_size):
-                prompt_meta_info[i][key] = value[i]
 
+        prompt_meta_info = self._batch_process_images(prompts, prompt_meta_info)
         self.input_queue.put((rmv_padding_prompt_ids, complete_ratio, generation_kwargs, prompt_meta_info))
 
         if is_async:
@@ -628,6 +651,7 @@ class RemoteAsyncXPerfGPTRollout(Worker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
     def add_inflight_queries(self, queries: List[Query]):
         ret = []
+        queries = add_pixel_values_to_inflight_query(queries, self.rollout_actor.image_manager)
         for q in queries:
             qid = self.rollout_actor.add_inflight_query(q)
             ret.append(qid)
@@ -743,6 +767,7 @@ class ElasticAsyncXPerfGPTRollout(_unwrap_ray_remote(RemoteAsyncXPerfGPTRollout)
         super().__init__(config, role)
         self.hybrid_rollout_addrs = hybrid_rollout_addrs
         self._elastic_has_setup = threading.Event()
+        self.image_manager = ray.get_actor("ImageManager")
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def init_and_setup(self,

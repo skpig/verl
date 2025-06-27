@@ -130,7 +130,7 @@ class RLHFDataset(Dataset):
 
     def _download(self, origin=False):
         from verl.utils.fs import copy_local_path_from_hdfs
-        parquet_files = self.parquet_files if not origin else self.original_parquet_files
+        parquet_files = self.parquet_files if not origin else copy.deepcopy(self.original_parquet_files)
         for i, parquet_file in enumerate(parquet_files):
             self.parquet_files[i] = copy_local_path_from_hdfs(src=parquet_file, cache_dir=self.cache_dir)
 
