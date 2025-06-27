@@ -339,7 +339,7 @@ class RolloutManager:
                                                                      step=step,
                                                                      metrics=metrics,
                                                                      pending_batch=copy.copy(self.pending_batch),
-                                                                     is_standalone=(complete_ratio == 0.0),
+                                                                     use_standalone_only=(complete_ratio == 0.0),
                                                                      is_warmup_step=is_warmup_step,
                                                                      complete_ratio=complete_ratio)
         else:
@@ -592,10 +592,16 @@ class RolloutManager:
         return ready_batch, standalone_batch, pending_batch
 
     def _train_server_gen(self, gen_batch: DataProto, step: int, metrics: Dict, pending_batch: List[DataProto],
-                          is_standalone: bool, is_warmup_step: bool,
+                          use_standalone_only: bool, is_warmup_step: bool,
                           complete_ratio: float) -> Tuple[List[DataProto], List[DataProto]]:
         """streaming gen with server, only for train"""
-        if is_standalone:
+        # choose rollout destination
+        if use_standalone_only:
+            ray.get(self.request_manager_router.set_dest_req_manager_name.remote(f"standalone_rollout"))
+        else:
+            ray.get(self.request_manager_router.set_dest_req_manager_name.remote(f"hybrid_rollout"))
+
+        if use_standalone_only:
             with Timer(name="update_rollout_server", logger=None) as timer:
                 update_standalone_from_hybrid_with_lock(hybrid_wg_lock=self._hybrid_wg_lock,
                                                         hybrid_wg=self.hybrid_wg,
@@ -604,8 +610,8 @@ class RolloutManager:
             metrics["timing/update_rollout_server"] = timer.last
 
         ready_batch = []
-        server_host = self.standalone_rollout_server.host if is_standalone else self.hybrid_rollout_server.host
-        server_port = self.standalone_rollout_server.port if is_standalone else self.hybrid_rollout_server.port
+        server_host = self.standalone_rollout_server.host if use_standalone_only else self.hybrid_rollout_server.host
+        server_port = self.standalone_rollout_server.port if use_standalone_only else self.hybrid_rollout_server.port
         handler_fn = select_handler_fn(self.config.rollout_server.handler,
                                        external_lib=self.config.rollout_server.external_lib)
         context = TaskContext(
@@ -635,9 +641,6 @@ class RolloutManager:
             )
             start = time.time()
 
-            # done, pending = await asyncio.wait(running_batch + pending_batch,
-            #                                    timeout=0,
-            #                                    return_when=asyncio.ALL_COMPLETED)
             finished = 0
             for future in asyncio.as_completed(running_batch):
                 # 获取已完成结果
@@ -655,21 +658,20 @@ class RolloutManager:
             print(f"{len(done)=}, {len(pending)=}")
             return done, pending
 
-        if is_standalone:
-            ray.get(self.request_manager_router.set_dest_req_manager_name.remote(f"standalone_rollout"))
-        else:
-            ray.get(self.request_manager_router.set_dest_req_manager_name.remote(f"hybrid_rollout"))
-        with nullcontext() if is_standalone else self._hybrid_wg_lock:
-            with nullcontext() if is_standalone else hybrid_enable_server_ctx(self.hybrid_wg):
+        with nullcontext() if use_standalone_only else self._hybrid_wg_lock:
+            with nullcontext() if use_standalone_only else hybrid_enable_server_ctx(self.hybrid_wg):
                 done, pending = asyncio.run_coroutine_threadsafe(submit_and_wait(), self.loop).result()
 
         if complete_ratio > 0.0 and complete_ratio < 1.0:
+            # 如果是semi-sync，在这里才会update standalone，保持跟batch mode行为一致
             with Timer(name="update_rollout_server", logger=None) as timer:
                 update_standalone_from_hybrid_with_lock(hybrid_wg_lock=self._hybrid_wg_lock,
                                                         hybrid_wg=self.hybrid_wg,
                                                         standalone_wg=self.train_standalone_wg)
-                print(f"[INFO] {step} generate streaming[update weights and restart] {timer.last}")
-            self.transfer_unfinished_request()
+            print(f"[INFO] {step} generate streaming[update weights and restart] {timer.last}")
+            metrics["timing/update_rollout_server"] = timer.last
+
+            self.transfer_unfinished_request("standalone_rollout")
 
         pending = list(pending)
         results = []
@@ -687,15 +689,14 @@ class RolloutManager:
                              metrics,
                              self.logger,
                              step,
-                             prefix="standalone" if is_standalone else "hybrid")
+                             prefix="standalone" if use_standalone_only else "hybrid")
         metrics["rollout/standalone_completed_batch"] = finished_num
         metrics["rollout/standalone_incompleted_batch"] = len(pending_batch) + len(gen_batch) - finished_num
         return ready_batch, pending
 
-    def transfer_unfinished_request(self):
-        print(f"[INFO] Transfer unfinished requests from hybrid_rollout to standalone_rollout")
-        transfer_request_manager_name = f"standalone_rollout"
-        ray.get(self.request_manager_router.set_dest_req_manager_name.remote(transfer_request_manager_name))
+    def transfer_unfinished_request(self, dest_request_manager: str):
+        print(f"[INFO] Transfer unfinished requests from hybrid_rollout to {dest_request_manager}")
+        ray.get(self.request_manager_router.set_dest_req_manager_name.remote(dest_request_manager))
         self.hybrid_wg_proxy.pause_loop()
         self.hybrid_wg_proxy.release_running_queris()
         self.hybrid_wg_proxy.continue_loop()

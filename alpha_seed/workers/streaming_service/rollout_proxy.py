@@ -279,8 +279,7 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
         for engine_id, wg in self.replicas.get_ready_worker_groups().items():
             queries: List[Query] = wg.get_all_queries(self._request_manager_name)
             if len(queries) > 0:
-                finished = len(list(None for q in queries if q.is_finished))
-                print(f"release {finished}/{len(queries)} queries in {self._request_manager_name}/{engine_id}")
+                print(f"release {len(queries)} queries in {self._request_manager_name}/{wg.group_name}")
                 ray.get(self.request_manager.update_intermediate_queries.remote(queries, engine_id, time.time()))
             wg.release_running_queries()
         ray.get(self.request_manager.pop_remain_request.remote())

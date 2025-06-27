@@ -694,7 +694,6 @@ class RequestManagerRouter:
 
     async def put_new_query(self, query: Query) -> str:
         real_dest = self.dest_req_manager_name
-        print(f"{real_dest=}")
         request_manager_actor = self._req_managers[real_dest]
         query_id = await request_manager_actor.put_new_query.remote(query)
         self.queryid2manager[query.id] = real_dest
@@ -711,7 +710,6 @@ class RequestManagerRouter:
         real_dest = self.queryid2manager[query_id]
         query: Query = await self._req_managers[real_dest].wait_until_finished.remote(query_id)
         if not query.is_finished:
-            print(f"reinput query {query_id}")
             query_id = await self.reinput_query(query)
             # 转移query
             real_dest = self.queryid2manager[query_id]
