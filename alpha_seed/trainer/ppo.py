@@ -1159,8 +1159,9 @@ class RayPPOTrainer(object):
             return 0, None
 
         remote_checkpoint_folder = os.path.join(self.config.trainer.default_hdfs_dir, 'checkpoints')
-        remote_global_step_folder = find_latest_ckpt_path_(remote_checkpoint_folder,
-                                                           self.use_standalone_rollout)  # None if no latest
+        remote_global_step_folder = find_latest_ckpt_path_(
+            remote_checkpoint_folder, self.use_standalone_rollout,
+            self.config.actor_rollout_ref.rollout.mode)  # None if no latest
         # find remote_global_step_folder
         if self.config.trainer.resume_steps == 'auto':
             if remote_global_step_folder is None:
@@ -1184,7 +1185,8 @@ class RayPPOTrainer(object):
         # if resuming ckpt
         if self.config.trainer.resume_steps == 'auto':
             remote_checkpoint_folder = os.path.join(self.config.trainer.default_hdfs_dir, 'checkpoints')
-            remote_global_step_folder = find_latest_ckpt_path_(remote_checkpoint_folder, self.use_standalone_rollout)
+            remote_global_step_folder = find_latest_ckpt_path_(remote_checkpoint_folder, self.use_standalone_rollout,
+                                                               self.config.actor_rollout_ref.rollout.mode)
         else:
             remote_global_step_folder = self.config.trainer.resume_steps
         if hdfs_io.hexists(os.path.join(remote_global_step_folder,
