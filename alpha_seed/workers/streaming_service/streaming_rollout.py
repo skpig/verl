@@ -69,6 +69,7 @@ from alpha_seed.workers.xperf_rollout.utils.nccl_weights_communicator import NCC
 from alpha_seed.workers.streaming_service.xperf_model_prophet import XperfModelProphet
 from alpha_seed.workers.xperf_rollout.utils.logits_manipulate import logits_manipulate_fn_core, logits_manipulate_fn_eta, logits_manipulate_fn_minp, logits_manipulate_fn_clip
 from alpha_seed.utils.observility import get_profiler_context_wrapped, profile_step
+from alpha_seed.utils.dataset.vlm_rl_dataset import get_image_manager
 from alpha_seed.models.transformers.modeling_vlm import add_pixel_values_to_inflight_query
 from functools import partial
 import omegaconf
@@ -332,7 +333,7 @@ class AsyncXPerfGPTRollout(object):
         # offload to meta device
         if not self.is_standalone:
             offload_to_device(self.inference_engine.engine.module, "meta")
-        self.image_manager = ray.get_actor("ImageManager")
+        self.image_manager = get_image_manager()
         torch.cuda.empty_cache()
 
     def add_inflight_query(self, query: Query) -> str:
@@ -769,7 +770,7 @@ class ElasticAsyncXPerfGPTRollout(_unwrap_ray_remote(RemoteAsyncXPerfGPTRollout)
         super().__init__(config, role)
         self.hybrid_rollout_addrs = hybrid_rollout_addrs
         self._elastic_has_setup = threading.Event()
-        self.image_manager = ray.get_actor("ImageManager")
+        self.image_manager = get_image_manager()
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def init_and_setup(self,
