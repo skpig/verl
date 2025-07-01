@@ -813,6 +813,8 @@ def _reshard_fsdp_state_dict_to_xperf_p6dense(tp_model, state_dict, device_mesh:
             assert model_config.attention_bias
             if hasattr(model_config, 'o_bias') and not model_config.o_bias:
                 o_proj_bias = torch.zeros_like(dense_bias)
+            elif hasattr(model_config, 'attention_out_bias') and not model_config.attention_out_bias:
+                o_proj_bias = torch.zeros_like(dense_bias)
             else:
                 o_proj_bias = state_dict.pop(f'model.layers.{layer_index}.self_attn.o_proj.bias').full_tensor().to(
                     torch.bfloat16)
