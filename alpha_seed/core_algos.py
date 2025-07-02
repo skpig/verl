@@ -104,13 +104,17 @@ def compute_gae_advantage_return(token_level_rewards: torch.Tensor, values: torc
             critic_advantages_reversed = []
 
         gen_len = token_level_rewards.shape[-1]
+        nextvalues = 0
         for t in reversed(range(gen_len)):
-            nextvalues = values[:, t + 1] if t < gen_len - 1 else 0.0
+            cur_nextvalues = values[:, t + 1] if t < gen_len - 1 else 0.0
+            next_eos_mask = eos_mask[:, t + 1] if t < gen_len - 1 else 1.0
+            nextvalues = next_eos_mask * cur_nextvalues + (1 - next_eos_mask) * nextvalues
             delta = token_level_rewards[:, t] + gamma * nextvalues - values[:, t]
-            lastgaelam = delta + gamma * lam * lastgaelam
+            lastgaelam = (delta + gamma * lam * lastgaelam) * eos_mask[:, t] + lastgaelam * (1 - eos_mask[:, t])
             advantages_reversed.append(lastgaelam)
             if use_separate_critic_lam:
-                critic_lastgaelam = delta + gamma * critic_lam * critic_lastgaelam
+                critic_lastgaelam = (delta + gamma * critic_lam *
+                                     critic_lastgaelam) * eos_mask[:, t] + critic_lastgaelam * (1 - eos_mask[:, t])
                 critic_advantages_reversed.append(critic_lastgaelam)
         advantages = torch.stack(advantages_reversed[::-1], dim=1)
         if use_separate_critic_lam:
