@@ -373,7 +373,7 @@ async def chat_completions(content, meta_info, config, host, port: int):
     if is_ipv6(host):
         host = f'[{host}]'
     try:
-        timeout = aiohttp.ClientTimeout(total=9600)
+        timeout = aiohttp.ClientTimeout(config.rollout_server_args.timeout)
         session = aiohttp.ClientSession(timeout=timeout)
         generation_kwargs = meta_info['generation_kwargs']
         async with session.post(url=f"http://{host}:{port}/chat/completions",

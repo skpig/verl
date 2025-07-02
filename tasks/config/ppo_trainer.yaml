@@ -196,7 +196,7 @@ actor_rollout_ref:
       num_slots: 32
     enable_cuda_graph: False
     enable_paged_attention: False
-  rollout_server_args: ${rollout_server}
+    rollout_server_args: ${rollout_server}
   streaming_rollout_args: ${streaming_rollout}
   streaming_validator_args: ${streaming_validator}
   use_cuda_timer: False # doesn't take effect; only for backward-compatibility
@@ -412,6 +412,7 @@ trainer:
 rollout_server:
   handler: "math/aiohttp" # ["math/aiohttp"]
   external_lib: null # [null, /opt/tiger/agents_extension/handlers]
+  timeout: 9600
   handler_kwargs: {}
 
 streaming_rollout:
