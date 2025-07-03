@@ -1,4 +1,6 @@
 import re
+from pydantic import BaseModel
+from typing import List, Dict
 
 
 def summary_postprocess(input_text, last_response_sep=['<summarize>', '</summarize>'], last_response_strict=True):
@@ -29,20 +31,66 @@ def summary_postprocess(input_text, last_response_sep=['<summarize>', '</summari
     return input_text[start_index:end_index].strip()
 
 
-import re
+# Same Code Blocks as https://code.byted.org/seed/code_sandbox/blob/master/sandbox/utils/extraction.py
+language_to_aliases = {
+    'python': ['python', 'Python', 'py', 'Python3', 'python3', 'PY'],
+    'cpp': ['cpp', 'c++', 'C++', 'Cpp', 'CPP'],
+    'nodejs': ['javascript', 'Javascript', 'JavaScript', 'JS', 'js'],
+    'go': ['go', 'Go'],
+    'java': ['java', 'Java'],
+    'php': ['php'],
+    'csharp': ['csharp', 'c#', 'C#'],
+    'bash': ['bash', 'Bash', 'BASH', 'sh', 'shell'],
+    'typescript': ['typescript'],
+    'rust': ['rust', 'Rust', 'rs'],
+    'sql': ['sql', 'SQL', 'Sql'],
+    'D': ['D', 'd'],
+    'julia': ['julia', 'Julia', 'jl'],
+    'lua': ['lua', 'Lua'],
+    'php': ['php', 'PHP'],
+    'perl': ['perl', 'Perl', 'PERL'],
+    'R': ['R', 'r'],
+    'ruby': ['ruby', 'Ruby'],
+    'rust': ['rust', 'Rust', 'rs'],
+    'scala': ['scala', 'Scala'],
+    'kotlin': ['kotlin', 'Kotlin'],
+    'c': ['c', 'C'],
+    'html': ['html', 'Html', 'HTML'],
+    'javascript': ['javascript', 'Javascript', 'JavaScript'],
+    'verilog': ['verilog', 'Verilog', 'VERILOG'],
+    'racket': ['racket'],
+    'swift': ['swift'],
+    'react': ['tsx'],
+}
+
+aliases_to_language_tiled = {v: k for k, vs in language_to_aliases.items() for v in vs}
+
+fenced_code_block_pattern = re.compile(
+    # Starting with three backticks and optional language identifier
+    r'```([^\n]*)\n'
+    r'(.*?)'  # Non-greedy capture of the content
+    r'\n\s*```',  # Ending with three backticks
+    re.DOTALL | re.MULTILINE)
+
+
+# code extraction
+def extract_fenced_code(completion: str) -> List[Dict]:
+    code_matches = re.findall(fenced_code_block_pattern, completion)
+    results = []
+    for m in code_matches:
+        lang = aliases_to_language_tiled.get(m[0].strip(), '')
+        if lang != '':
+            results.append({
+                "lang": lang,
+                "code": m[1],
+            })
+    return results
 
 
 def last_codeblock_postprocess(input_text, codeblock_seps=['python', 'cpp', 'java'], last_response_strict=True):
-    languages_pattern = '|'.join(map(re.escape, codeblock_seps))
-    codeblock_start = f'```({languages_pattern})'
-    pattern = re.compile(codeblock_start + r'\n(.*?)(?:\n```)?(?=\n```|$)', re.DOTALL)
-    matches = list(pattern.finditer(input_text))
-
-    if matches:
-        last_match = matches[-1]
-        language = last_match.group(1)
-        code_content = last_match.group(2).rstrip()
-        return f'```{language}\n{code_content}\n```'
+    results = extract_fenced_code(input_text)
+    if len(results) > 0:
+        return f'```{results[-1]["lang"]}\n{results[-1]["code"]}\n```'
     else:
         if last_response_strict:
             return ''
