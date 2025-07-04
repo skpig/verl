@@ -34,7 +34,7 @@ import base64
 import time
 from threading import Lock
 from transformers import AutoTokenizer
-from xperf_gpt.multi_models.visual.inferencer import VITInferencer
+from alpha_seed.workers.xperf_rollout.utils.vit_inferencer import VITInferencer
 import numpy as np
 
 # Constants
