@@ -40,8 +40,6 @@ jobs:
           - cd seed_models
           - pip3 install -e . --user
           - cd /opt/tiger
-          - git clone git@code.byted.org:data/open_verl
-          - mv open_verl verl
           - git clone git@code.byted.org:seed/mono_rl.git
           - pip3 install --upgrade byted-wandb
           - pip3 install bytedance.ndtimeline --upgrade

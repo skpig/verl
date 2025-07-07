@@ -39,8 +39,6 @@ jobs:
           - pip3 install byted-omnistore==0.7.14
           - pip3 install --upgrade bytedance.ndtimeline
           - cd /opt/tiger
-          - git clone git@code.byted.org:data/open_verl
-          - mv open_verl verl
           - git clone git@code.byted.org:seed/seed_models
           - git clone git@code.byted.org:seed/mono_rl.git
           - git clone git@code.byted.org:data/byted_optimizer.git
