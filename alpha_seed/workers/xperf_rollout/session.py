@@ -715,7 +715,7 @@ class InferenceSession:
                 threshold = self.num_pred_tokens + 1 if self.enable_ngrams_decoding else 0
                 if self._exceed_length_condition(query, tokens_threshold=threshold):
                     self.all_accepted_queries[query.id].output_prompt = self.tokenizer.batch_decode(
-                        [query.new_token_ids]) if self.decode_output else ""
+                        [query.output_tokens]) if self.decode_output else ""
                     self._finish_query(query)
                 else:
                     if query.is_kv_cache_slot_allocated():
@@ -781,7 +781,8 @@ class InferenceSession:
         for index, query in enumerate(running):
             if len(query.input_ids) == 0:
                 query.init_from_prompt(self.tokenizer)
-            assert len(query.input_ids) > 0
+            assert len(query.input_ids) > 0 and len(query.input_ids) < self.max_length, \
+                f"input_ids length {len(query.input_ids)} must be greater than 0 and less than max_length {self.max_length}"
             context_len = len(query.input_ids) - query.prefix_already_computed_len
             max_kv_index_len = max(max_kv_index_len, len(query.kv_slot_ids))
             if query.is_context_computing:
@@ -1201,13 +1202,13 @@ class InferenceSession:
     def _meet_eos_condition(self, query, next_token):
         finished_sequences = False
         if next_token in self.eos_token_id:
-            self.all_accepted_queries[query.id].output_prompt = self.tokenizer.batch_decode([query.new_token_ids[:-1]]) \
+            self.all_accepted_queries[query.id].output_prompt = self.tokenizer.batch_decode([query.output_tokens[:-1]]) \
                 if self.decode_output else ""
             finished_sequences = True
         elif self._exceed_length_condition(query,
                                            tokens_threshold=self.num_pred_tokens +
                                            1 if self.enable_ngrams_decoding else 0):
-            self.all_accepted_queries[query.id].output_prompt = self.tokenizer.batch_decode([query.new_token_ids]) \
+            self.all_accepted_queries[query.id].output_prompt = self.tokenizer.batch_decode([query.output_tokens]) \
                 if self.decode_output else ""
             finished_sequences = True
         elif self.stop_sequence_tokens and next_token in [tokens[-1] for tokens in self.stop_sequence_tokens]:
@@ -1217,7 +1218,7 @@ class InferenceSession:
                     continue
                 finished_sequences |= (query.new_token_ids[-seq_len:] == stop_sequences)
             if finished_sequences:
-                self.all_accepted_queries[query.id].output_prompt = self.tokenizer.batch_decode([query.new_token_ids]) \
+                self.all_accepted_queries[query.id].output_prompt = self.tokenizer.batch_decode([query.output_tokens]) \
                     if self.decode_output else ""
 
         return finished_sequences
