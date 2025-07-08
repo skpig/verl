@@ -60,6 +60,7 @@ from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRe
 from alpha_seed.workers.actors.critic_worker import CriticWorker
 from alpha_seed.utils.alarm.lark_util import send_message_to_employee
 from alpha_seed.utils.server_client import validate_client_config, KVStore, ServerHealthCheck, TaskRunner, ClientTaskRunner, check_all_workers_alive, recreate_actor
+from alpha_seed.utils.ckpt import download_minimal_required_files
 from alpha_seed.workers.streaming_service.rollout_request_manager import RequestManager, RequestManagerRegisterCenter
 from databus import collect_array
 
@@ -103,7 +104,8 @@ class RemoteClient:
 
     def __init__(self, config, tokenizer_path) -> None:
         self.config = config
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+        local_path = download_minimal_required_files(tokenizer_path, from_scratch=False, rank=0, world_size=1)
+        self.tokenizer = AutoTokenizer.from_pretrained(local_path)
         self.results = {}
 
         self.call_oj = ray.remote(num_cpus=1)(oj_utils.compute_score)
@@ -1035,8 +1037,8 @@ def config_to_trainer_kwargs(config):
         val_reward_fn = RewardManager(tokenizer=tokenizer, config=config, logger=logger, rm_name="val")
 
         # we will always start a remote client
-        kwargs['remote_client'] = RemoteClient.options(name='remote_client').remote(config=config,
-                                                                                    tokenizer_path=local_path)
+        kwargs['remote_client'] = RemoteClient.options(name='remote_client').remote(
+            config=config, tokenizer_path=config.actor_rollout_ref.model.path)
 
         kwargs['tokenizer'] = tokenizer
         kwargs['logger'] = logger
