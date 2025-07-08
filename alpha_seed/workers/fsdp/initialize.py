@@ -91,16 +91,19 @@ class DeviceMeshManager:
         return self.device_meshes[args]
 
 
-def create_mesh(fsdp_size: int, tp_size: int, sp_size: int, tp_outside: bool = False):
+def create_mesh(fsdp_size: int, tp_size: int, oe_size: int, sp_size: int, tp_outside: bool = False):
     """
     Create device meshes for fsdp, tp, and sp.
 
     Returns:
         fsdp_mesh: DeviceMesh for FSDP/HSDP (can be 1-D or 2-D)
         tp_mesh: DeviceMesh for TP (1-D)
+        oe_mesh: DeviceMesh for OE (1-D)
         sp_mesh: DeviceMesh for SP (1-D)
         gather_mesh: DeviceMesh for data replication group (1-D)
     """
+    if oe_size > 1:
+        raise RuntimeError("oe_size can only be supported when strategy is vescale-fsdp2")
     world_size = dist.get_world_size()
     fsdp_size = world_size if fsdp_size <= 0 else fsdp_size
     assert world_size % (tp_size * sp_size) == 0, f'{world_size=} {tp_size=} {sp_size=}'
@@ -153,7 +156,7 @@ def create_mesh(fsdp_size: int, tp_size: int, sp_size: int, tp_outside: bool = F
                                                            mesh_dim_names=("dp", "replicate"))
     gather_mesh = gather_mesh["replicate"]
     assert gather_mesh.size() == gather_size
-    return fsdp_mesh, tp_mesh, sp_mesh, gather_mesh
+    return fsdp_mesh, tp_mesh, None, sp_mesh, gather_mesh
 
 
 def create_init_fn(module: torch.nn.Module) -> Callable:

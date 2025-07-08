@@ -35,8 +35,7 @@ from verl.utils.torch_functional import get_constant_schedule_with_warmup
 from verl.utils.model import print_model_size
 from alpha_seed.models.transformers.parallel.collectives import get_memory
 from alpha_seed.models.transformers.monkey_patch import apply_monkey_patch, get_parallel_plan
-from alpha_seed.workers.fsdp.initialize import (create_mesh, meta_device_init,
-                                                cleanup_local_tmp_folder_safetensors_files)
+from alpha_seed.workers.fsdp.initialize import (meta_device_init, cleanup_local_tmp_folder_safetensors_files)
 from alpha_seed.trainer.optim import get_optimizer_from_config
 from alpha_seed.workers.fsdp.offload import offload_fsdp_optimizer, load_fsdp_optimizer, offload_fsdp_model_to_cpu, load_fsdp_model_to_gpu
 from alpha_seed.workers.megatron.offload import offload_megatron_model_to_cpu, load_megatron_model_to_gpu
@@ -83,17 +82,27 @@ class CriticWorker(Worker):
             fsdp_size = config.fsdp_size
             sp_size = config.ulysses_sequence_parallel_size
             tp_size = config.tp_size
+            oe_size = config.oe_size
             # Monkey patch DeviceMesh._init_process_groups to inject timeout for NCCL
             from alpha_seed.workers.fsdp import monkey_patch
-            meshes = create_mesh(fsdp_size=fsdp_size, tp_size=tp_size, sp_size=sp_size, tp_outside=config.tp_outside)
+            if self.critic_strategy == 'vescale-fsdp2':
+                from alpha_seed.workers.vescale.initialize import create_mesh
+            else:
+                from alpha_seed.workers.fsdp.initialize import create_mesh
+            meshes = create_mesh(fsdp_size=fsdp_size,
+                                 tp_size=tp_size,
+                                 oe_size=oe_size,
+                                 sp_size=sp_size,
+                                 tp_outside=config.tp_outside)
             # Deprecated case: critic model is saved as ShardedTensor
             # we will always use full FSDP
             self.fsdp_mesh = None
             if not config.NO_DEVICE_MESH:
                 self.fsdp_mesh = meshes[0]
             self.tp_mesh = meshes[1]
-            self.sp_mesh = meshes[2]
-            self.gather_mesh = meshes[3]
+            self.oe_mesh = meshes[2]
+            self.sp_mesh = meshes[3]
+            self.gather_mesh = meshes[4]
             self.gather_manager = DataGatherManager(self.gather_mesh, self.sp_mesh)
 
             # normalize config

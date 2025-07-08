@@ -47,6 +47,7 @@ actor_rollout_ref:
     fsdp_size: -1
     tp_size: 1
     tp_outside: false
+    oe_size: 1
     ppo_micro_batch_size: 64
     use_dynamic_bsz: True
     ppo_max_token_len: -1
@@ -116,6 +117,7 @@ actor_rollout_ref:
     fsdp_size: -1
     tp_size: 1
     tp_outside: false
+    oe_size: 1
     use_dynamic_bsz: True
     max_token_len: -1
     ema: 1.0
@@ -237,6 +239,7 @@ critic:
   fsdp_size: -1
   tp_size: 1
   tp_outside: false
+  oe_size: 1
   NO_DEVICE_MESH: False # handle old critic ckpt stored as ShardedTensor
   ppo_mini_batch_size: ${actor_rollout_ref.actor.ppo_mini_batch_size}
   ppo_micro_batch_size: 64
@@ -285,6 +288,7 @@ reward_model:
   fsdp_size: -1
   tp_size: 1
   tp_outside: false
+  oe_size: 1
   micro_batch_size: 64
   use_dynamic_bsz: True
   max_token_len: -1

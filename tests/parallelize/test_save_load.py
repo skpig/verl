@@ -33,7 +33,7 @@ os.environ['NCCL_DEBUG'] = '0'
 def build_model(fsdp_size: int, tp_size: int, optimizer_type: str):
     torch.manual_seed(42)
 
-    meshes = create_mesh(fsdp_size, tp_size, 1)
+    meshes = create_mesh(fsdp_size, tp_size, 1, 1)
     fsdp_mesh, tp_mesh = meshes[:2]
 
     model = DummyModel().cuda()

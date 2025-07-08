@@ -125,6 +125,16 @@ def apply_monkey_patch_to_m10(config):
     apply_liger_kernel_to_m10(rope=True, rms=True)
 
 
+def apply_monkey_patch_to_m11(config):
+    from seed_models.models.m11.modeling_m11 import M11FlashAttention2, M11FusedMoeBlock, M11ForCausalLM
+    from .modeling_m11 import flash_attn2_rmpad_forward, fused_moe_block_forward, m11_casual_lm_forward
+
+    M11FlashAttention2.forward = flash_attn2_rmpad_forward
+    M11FusedMoeBlock.forward = fused_moe_block_forward
+    M11ForCausalLM.forward = m11_casual_lm_forward
+    # TODO(zhiqi.0) liger kernel is not supported yet
+
+
 def apply_monkey_patch_to_vlm(config):
     text_type = get_text_model_type(config)
     _PATCH_NAME_TO_FUNC[text_type](config)
@@ -142,7 +152,8 @@ _PATCH_NAME_TO_FUNC = {
     'seed_m8': apply_monkey_patch_to_m8,
     'deepseek_v3': apply_monkey_patch_to_ds3,
     'seed_vl': apply_monkey_patch_to_vlm,
-    'seed_m10': apply_monkey_patch_to_m10
+    'seed_m10': apply_monkey_patch_to_m10,
+    'seed_m11': apply_monkey_patch_to_m11,
 }
 
 from transformers import PretrainedConfig
@@ -173,6 +184,9 @@ def get_parallel_plan(config, tp_mesh: DeviceMesh) -> Dict[str, Placement]:
     if config.model_type == 'seed_m10':
         from .modeling_m10 import make_m10_plan
         make_plan_fn = make_m10_plan
+    if config.model_type == 'seed_m11':
+        from .modeling_m11 import make_m11_plan
+        make_plan_fn = make_m11_plan
     if config.model_type == "deepseek_v3":
         from .modeling_ds import make_dsv3_plan
         make_plan_fn = make_dsv3_plan

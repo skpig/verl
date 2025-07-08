@@ -48,8 +48,7 @@ from alpha_seed.workers.xperf_rollout.utils.layout_convert_helper import offload
 
 from alpha_seed.utils import ndtimeline
 from alpha_seed.workers.hybrid_engine.fsdp_gather import DataGatherManager
-from alpha_seed.workers.fsdp.initialize import (create_mesh, meta_device_init,
-                                                cleanup_local_tmp_folder_safetensors_files)
+from alpha_seed.workers.fsdp.initialize import (meta_device_init, cleanup_local_tmp_folder_safetensors_files)
 from alpha_seed.workers.ppo_actor import DataParallelPPOActor
 from alpha_seed.utils.kernels.persist_gemm import deploy_persist_gemm
 from alpha_seed.models.transformers.parallel.collectives import get_memory
@@ -123,18 +122,24 @@ class AsyncActorRolloutRefWorker(Worker):
         if self.actor_strategy in ('fsdp', 'vescale-fsdp2'):
             actor_fsdp_size = config.actor.fsdp_size
             actor_sp_size = config.actor.ulysses_sequence_parallel_size
-
+            actor_oe_size = config.actor.oe_size
             actor_tp_size = config.actor.tp_size
             # Monkey patch DeviceMesh._init_process_groups to inject timeout for NCCL
             from alpha_seed.workers.fsdp import monkey_patch
+            if self.actor_strategy == 'vescale-fsdp2':
+                from alpha_seed.workers.vescale.initialize import create_mesh
+            else:
+                from alpha_seed.workers.fsdp.initialize import create_mesh
             actor_meshes = create_mesh(fsdp_size=actor_fsdp_size,
                                        tp_size=actor_tp_size,
+                                       oe_size=actor_oe_size,
                                        sp_size=actor_sp_size,
                                        tp_outside=config.actor.tp_outside)
             self.actor_fsdp_mesh = actor_meshes[0]
             self.actor_tp_mesh = actor_meshes[1]  # shared for both train and inference
-            self.actor_sp_mesh = actor_meshes[2]
-            self.actor_gather_mesh = actor_meshes[3]
+            self.actor_oe_mesh = actor_meshes[2]
+            self.actor_sp_mesh = actor_meshes[3]
+            self.actor_gather_mesh = actor_meshes[4]
             self.actor_gather_manager = DataGatherManager(self.actor_gather_mesh, self.actor_sp_mesh)
             if torch.distributed.get_rank() == 0:
                 print(
@@ -153,17 +158,24 @@ class AsyncActorRolloutRefWorker(Worker):
             if self.ref_strategy in ('fsdp', 'vescale-fsdp2'):
                 ref_fsdp_size = config.ref.fsdp_size
                 ref_sp_size = config.ref.ulysses_sequence_parallel_size
+                ref_oe_size = config.ref.oe_size
                 ref_tp_size = config.ref.tp_size
                 # Monkey patch DeviceMesh._init_process_groups to inject timeout for NCCL
                 from alpha_seed.workers.fsdp import monkey_patch
+                if self.ref_strategy == 'vescale-fsdp2':
+                    from alpha_seed.workers.vescale.initialize import create_mesh
+                else:
+                    from alpha_seed.workers.fsdp.initialize import create_mesh
                 ref_meshes = create_mesh(fsdp_size=ref_fsdp_size,
                                          tp_size=ref_tp_size,
+                                         oe_size=ref_oe_size,
                                          sp_size=ref_sp_size,
                                          tp_outside=config.ref.tp_outside)
                 self.ref_fsdp_mesh = ref_meshes[0]
                 self.ref_tp_mesh = ref_meshes[1]
-                self.ref_sp_mesh = ref_meshes[2]
-                self.ref_gather_mesh = ref_meshes[3]
+                self.ref_oe_mesh = ref_meshes[2]
+                self.ref_sp_mesh = ref_meshes[3]
+                self.ref_gather_mesh = ref_meshes[4]
                 self.ref_gather_manager = DataGatherManager(self.ref_gather_mesh, self.ref_sp_mesh)
                 if torch.distributed.get_rank():
                     print(

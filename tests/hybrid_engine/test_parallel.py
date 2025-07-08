@@ -1,19 +1,19 @@
 """
 torchrun --nproc_per_node=$ARNOLD_WORKER_GPU --nnodes=$ARNOLD_WORKER_NUM --node_rank=$ARNOLD_ID \
     --master_addr=$ARNOLD_WORKER_0_HOST --master_port=12321 \
-    tests/hybrid_engine/test_parallel.py \
-    --model hdfs://harunava/home/byte_data_seed_us/hdd_va/user/zhiqi.0/rlhf/m8_2B5_sft \
-    --strategy fsdp \
-    --tp-size 1 \
+    -m tests.hybrid_engine.test_parallel \
+    --model hdfs://haruna/home/byte_data_seed/ssd_lq/public/seed_models/m11 \
+    --strategy vescale-fsdp2 \
+    --tp-size 4 \
+    --oe-size 8 \
     --sp-size 2 \
     --grad-accum 4 \
-    --max-token 16384 \
-    --seqlen 16384 \
+    --max-token 8192 \
+    --seqlen 8192 \
     --ce-loss-fusion \
     --act-offload \
     --optim-offload \
     2>&1 | tee fsdp.txt
-
 """
 import warnings
 
@@ -70,10 +70,14 @@ import verl.utils.torch_functional as verl_F
 # m8_path = 'hdfs://harunava/home/byte_data_seed_us/hdd_va/user/zhiqi.0/rlhf/m8_2B5_sft'
 
 
-def init_model(model_path: str, fsdp_size: int, tp_size: int, sp_size: int, optimizer_type: str):
+def init_model(model_path: str, fsdp_size: int, tp_size: int, oe_size: int, sp_size: int, optimizer_type: str):
 
-    meshes = create_mesh(fsdp_size, tp_size, sp_size)
-    fsdp_mesh, tp_mesh = meshes[:2]
+    if args.strategy == 'vescale-fsdp2':
+        from alpha_seed.workers.vescale.initialize import create_mesh
+    else:
+        from alpha_seed.workers.fsdp.initialize import create_mesh
+    meshes = create_mesh(fsdp_size, tp_size, oe_size, sp_size)
+    fsdp_mesh, tp_mesh, oe_mesh = meshes[:3]
     model_path = copy_local_path_from_hdfs(model_path)
 
     with meta_device_init(), warnings.catch_warnings():
@@ -110,6 +114,7 @@ def init_model(model_path: str, fsdp_size: int, tp_size: int, sp_size: int, opti
                            fsdp_mesh=fsdp_mesh,
                            tp_plan=get_parallel_plan(config, tp_mesh),
                            tp_mesh=tp_mesh,
+                           oe_mesh=oe_mesh,
                            recompute=True,
                            act_offload=args.act_offload,
                            param_offload=args.param_offload,
@@ -166,7 +171,7 @@ def gather_inputs(tensor: torch.Tensor, gather_mesh, gather_dim: int):
 
 def train(model, optimizer, meshes, steps: int = 20, profile_to_mlx: bool = False):
 
-    fsdp_mesh, tp_mesh, sp_mesh, gather_mesh = meshes
+    fsdp_mesh, tp_mesh, oe_mesh, sp_mesh, gather_mesh = meshes
     if sp_mesh.size() > 1:
         set_ulysses_sequence_parallel_group(sp_mesh.get_group())
 
@@ -318,11 +323,12 @@ def load_checkpoint(fsdp_model: FSDP, optimizer: torch.optim.Optimizer, folder):
 def test_performance(model_path: str,
                      fsdp_size: int,
                      tp_size: int,
+                     oe_size: int,
                      sp_size: int,
                      profile_to_mlx: bool = False,
                      optimizer_type: str = 'adam'):
 
-    model, optimizer, device_mesh = init_model(model_path, fsdp_size, tp_size, sp_size, optimizer_type)
+    model, optimizer, device_mesh = init_model(model_path, fsdp_size, tp_size, oe_size, sp_size, optimizer_type)
     train(model, optimizer, device_mesh, profile_to_mlx=profile_to_mlx)
 
 
@@ -333,6 +339,7 @@ if __name__ == '__main__':
     parser.add_argument("--strategy", type=str, choices=['fsdp', 'vescale-fsdp2'], default='fsdp')
     parser.add_argument("--fsdp-size", type=int, default=-1)
     parser.add_argument("--tp-size", type=int, default=2)
+    parser.add_argument("--oe-size", type=int, default=1)
     parser.add_argument("--sp-size", type=int, default=2)
     parser.add_argument("--profile-to-mlx", action='store_true', default=False)
     parser.add_argument("--test-save-load", action='store_true', default=False)
@@ -356,6 +363,7 @@ if __name__ == '__main__':
     test_performance(args.model,
                      fsdp_size=args.fsdp_size,
                      tp_size=args.tp_size,
+                     oe_size=args.oe_size,
                      sp_size=args.sp_size,
                      profile_to_mlx=args.profile_to_mlx,
                      optimizer_type=args.optimizer_type)
