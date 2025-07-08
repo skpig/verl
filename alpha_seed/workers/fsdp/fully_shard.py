@@ -40,6 +40,7 @@ def fully_shard(
     ignored_modules: Tuple = None,
     fsdp_kwargs: dict = None,
     act_offload_kwargs: dict = None,
+    train_mesh: DeviceMesh = None,
 ) -> Tuple[FSDP, Optional[MetricsTorchDispatchMode]]:
     """
     Create FSDP/HSDP with tensor parallelism extension.
@@ -146,8 +147,8 @@ def fully_shard(
         offload = CPUOffload(offload_params=True)
 
     # load pretrained weights
-    shards = parallel_load_safetensors(weights) if weights else {}
-    init_fn = parallel_init_fsdp_fn(model, shards)
+    shards = parallel_load_safetensors(weights, train_mesh) if weights else {}
+    init_fn = parallel_init_fsdp_fn(model, shards, train_mesh)
     # wrap to fsdp
     model: FSDP = FSDP(model,
                        use_orig_params=True,

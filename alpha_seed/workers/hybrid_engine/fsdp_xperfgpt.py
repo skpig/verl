@@ -58,21 +58,24 @@ class ActorXPerfGPTShardingManager(BaseShardingManager):
                  standalone=False,
                  only_bind_once=False,
                  backend='fsdp',
-                 weights_communicator="nccl"):
+                 weights_communicator="nccl",
+                 enable_actor_critic_spatial_mux=False):
         super().__init__()
         self.module = module
         self.inference_engine = inference_engine
         self.device_mesh = device_mesh
         self.model_config = model_config
         self.weights_communicator = weights_communicator
+        self.enable_actor_critic_spatial_mux = enable_actor_critic_spatial_mux
 
         # here standalone means standalone validator or standalone validator
         self.standalone = standalone
         self.bind_fn = get_xperf_gpt_weight_bind_fn(model_config,
                                                     self.inference_engine.engine.module.quant_mode,
+                                                    backend=backend,
                                                     is_custom_xperf=self.inference_engine.is_xperf_custom,
                                                     is_xperf_triton=self.inference_engine.is_xperf_triton,
-                                                    backend=backend)
+                                                    enable_actor_critic_spatial_mux=enable_actor_critic_spatial_mux)
 
         # Note that torch_random_states may be different on each dp rank
         self.torch_random_states = torch.cuda.get_rng_state()
@@ -112,7 +115,7 @@ class ActorXPerfGPTShardingManager(BaseShardingManager):
         # gather full state_dict in CPU
         if (not self.only_bind_once) or (not self._bind_fn_called):
             # materialize to cuda if tensors are on meta device
-            state_dict = self._get_actor_state_dict()
+            state_dict = self._get_actor_state_dict() if self.module else {}
             offload_to_device(self.inference_engine.engine.module, "cuda")
             # prepare the state_dict into a format for xperf_gpt
             if self.model_config.model_type == 'seed_vl':
@@ -179,7 +182,8 @@ class ActorXPerfGPTShardingManager(BaseShardingManager):
             tp_group = self.device_mesh['tp'].get_group()
             tp_size = self.device_mesh['tp'].size()
             tp_src_rank = torch.distributed.get_global_rank(tp_group, group_rank=0)
-            assert tp_size > 1
+            if tp_size == 1:
+                return data
 
             prev_device = data.batch.device
             data.batch = data.batch.cuda(device=torch.cuda.current_device())

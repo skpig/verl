@@ -10,6 +10,7 @@ import warnings
 
 import torch
 import torch.distributed
+from torch.distributed.device_mesh import DeviceMesh
 
 from transformers import PretrainedConfig, PreTrainedTokenizer, AutoProcessor
 
@@ -52,8 +53,9 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
     """
 
     def __init__(self, model, optimizer: torch.optim.Optimizer, lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
-                 hf_config: PretrainedConfig, tokenizer: PreTrainedTokenizer, processor: AutoProcessor):
-        super().__init__(model, optimizer, lr_scheduler, hf_config, tokenizer, processor)
+                 hf_config: PretrainedConfig, tokenizer: PreTrainedTokenizer, processor: AutoProcessor,
+                 device_mesh: DeviceMesh):
+        super().__init__(model, optimizer, lr_scheduler, hf_config, tokenizer, processor, device_mesh)
         if self.rank == 0:
             print(f'OmniStore ckpt manager initialized, byted-omnistore version: {ACTUAL_OMNISTORE_VERSION}')
 
@@ -98,6 +100,7 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
                 ckpt_state,
                 enable_shm_download_ckpt_tmp=enable_shm,
                 role=role,
+                process_group=self.group,
                 **additional_kwargs_dict,
             )
         elif strategy == 'vescale-fsdp2':
@@ -114,6 +117,7 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
                 ckpt_state,
                 enable_shm_download_ckpt_tmp=enable_shm,
                 role=role,
+                process_group=self.group,
                 **additional_kwargs_dict,
             )
         elif strategy == 'megatron':
@@ -129,6 +133,7 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
                 allow_extra_state_not_exists=True,
                 allow_client_state_not_exists=True,
                 role=role,
+                process_group=self.group,
                 **additional_kwargs_dict,
             )
         else:
@@ -161,7 +166,7 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
             self.remove_previous_save_local_path()
 
         self.local_mkdir(path)
-        torch.distributed.barrier()
+        torch.distributed.barrier(self.group)
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -204,6 +209,7 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
                     global_steps=global_step,
                     role=role,
                     ignore_append_global_steps_to_folder=True,
+                    process_group=self.group,
                     persistent_plan_dir=os.path.dirname(os.path.dirname(hdfs_path)),
                     callback=partial(self.save_callback,
                                      role=role,
@@ -230,6 +236,7 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
                     global_steps=global_step,
                     role=role,
                     ignore_append_global_steps_to_folder=True,
+                    process_group=self.group,
                     callback=partial(self.save_callback,
                                      role=role,
                                      global_step=global_step,
@@ -256,6 +263,7 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
                     global_steps=global_step,
                     role=role,
                     ignore_append_global_steps_to_folder=True,
+                    process_group=self.group,
                     persistent_plan_dir=os.path.dirname(os.path.dirname(hdfs_path)),
                     callback=partial(self.save_callback,
                                      role=role,
@@ -273,7 +281,7 @@ class CheckpointManagerOmniStore(BaseCheckpointManager):
             if hdfs_path:
                 ckpt_global_uploader_ref.start_uploading.remote(role, global_step)
                 print(f'[rank-{self.rank}]: Start uploading ckpt')
-        torch.distributed.barrier()
+        torch.distributed.barrier(self.group)
 
         self.previous_save_local_path = path
         safely_do(lambda: report_checkpoint_saved(path=hdfs_path, step=global_step, tag=role, omnistore={}),

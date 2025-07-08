@@ -2,7 +2,7 @@ name: unit tests
 trigger:
   change
 jobs:
-  e2e_optional_optimizer_test:
+  e2e_runnable_spatial_mux:
     # Merlin - data.aml.verl:v203 
     image: hub.byted.org/reckon/data.reckon.mlx.image_5940:c496dbfa4ce55747428f630c008cba06
     if: ${{ !contains(Event.Change.Title, "WIP") }}
@@ -40,30 +40,25 @@ jobs:
           - cd seed_models
           - pip3 install -e . --user
           - cd /opt/tiger
+          - git clone git@code.byted.org:data/open_verl
+          - mv open_verl verl
           - git clone git@code.byted.org:seed/mono_rl.git
           - pip3 install --upgrade byted-wandb
-          - pip3 install bytedance.ndtimeline==2.2.11
-          - pip3 install byted-omnistore==0.7.14
+          - pip3 install bytedance.ndtimeline --upgrade
+          - pip3 install byted-omnistore==1.0.7.dev19
           - pip3 install pylatexenc
+          - pip3 install openai
           - pip3 install pydantic==1.10.15
-          - cd /opt/tiger
-          - git clone git@code.byted.org:data/byted_optimizer.git
-          - cd byted_optimizer
-          - git checkout ad30d9d0c1d23167a26ea84a9c4a84090ebb1277
-          - pip3 install -r requirements.txt
-          - pip3 install -v --disable-pip-version-check --no-cache-dir --no-build-isolation -e ./ --user
-
-      - name: math v1 grpo, with adamw and lion optimizer from byted_optimizer
+      - name: math v1 ppo async mux
         commands:
           - cd -
-          - export NUM_STEPS=2
+          - export NUM_STEPS=4
           - export N_GPUS_PER_NODE=8
           - export NCCL_SHM_DISABLE=1
+          - export ALPHASEED_USE_NDTIMELINE=1
           - export PYTHONPATH=/opt/tiger/mono_rl:$PYTHONPATH
-          - export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
           - wandb offline
           - ray stop --force
           - ray start --num-cpus=100 --head
-          - bash tasks_scripts/ci/run_m8_100m_math_v1_grpo.sh OPTIM=adamw BF16STATE=True
-          - bash tasks_scripts/ci/run_m8_100m_math_v1_grpo.sh OPTIM=lion BF16STATE=True
+          - bash tasks_scripts/ci/run_m8_680m_math_v1_ppo_async_mux_fp8_fsdp.sh
           - ray stop --force

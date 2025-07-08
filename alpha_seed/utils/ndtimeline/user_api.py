@@ -16,6 +16,9 @@ def init_with_ray(wg):
     if hasattr(wg, "actor_strategy") and wg.actor_strategy in ['megatron']:
         # TODO: support megatron strategy
         return
+    if hasattr(wg, "enable_actor_critic_spatial_mux") and wg.enable_actor_critic_spatial_mux is True:
+        # TODO: support enable_actor_critic_spatial_mux strategy
+        return
     if (hasattr(wg, "_is_actor") and wg._is_actor) or (hasattr(wg, "_is_rollout") and wg._is_rollout):
         mocked_fsdp_shape = list(wg.actor_fsdp_mesh.shape)
         mocked_fsdp_shape[-1] *= wg.actor_tp_mesh.size()

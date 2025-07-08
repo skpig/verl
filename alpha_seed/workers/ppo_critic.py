@@ -26,6 +26,7 @@ import math
 from transformers import PretrainedConfig
 
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.device_mesh import DeviceMesh
 
 from mono_rl import DataProto
 from verl.workers.critic import BasePPOCritic
@@ -66,11 +67,13 @@ class DataParallelPPOCritic(BasePPOCritic):
                  config,
                  critic_module: nn.Module,
                  critic_optimizer: optim.Optimizer,
-                 critic_model_config: PretrainedConfig = None):
+                 critic_model_config: PretrainedConfig = None,
+                 critic_train_mesh: DeviceMesh = None):
         super().__init__(config=config)
         self.critic_module: FSDP = critic_module
         self.critic_optimizer = critic_optimizer
         self.critic_model_config = critic_model_config
+        self.critic_train_mesh = critic_train_mesh
         self.use_rmpad = self.config.get('use_rmpad', False)
         if torch.distributed.get_rank() == 0:
             print(f'Critic use_rmpad={self.use_rmpad}')
@@ -204,7 +207,8 @@ class DataParallelPPOCritic(BasePPOCritic):
         for batch_idx, mini_batch in enumerate(selected_data.chunk(chunk_size)):
             # for mini_batch in batch.split(self.config.ppo_mini_batch_size):
             if use_dynamic_bsz:
-                indices, micro_batches, non_tensor_batches = rearrange_micro_data_proto(max_token_len, mini_batch)
+                indices, micro_batches, non_tensor_batches = rearrange_micro_data_proto(
+                    max_token_len, mini_batch, self.critic_train_mesh.get_group())
             else:
                 micro_batches = batch.split(micro_batch_size)
                 num_micro_batches = len(micro_batches)
@@ -268,7 +272,7 @@ class DataParallelPPOCritic(BasePPOCritic):
             with self.profiler_context as p:
                 if self.config.use_dynamic_bsz:
                     indices, micro_batches, non_tensor_batches = rearrange_micro_data_proto(
-                        self.config.ppo_max_token_len, mini_batch)
+                        self.config.ppo_max_token_len, mini_batch, dp_group=self.critic_train_mesh.get_group())
                 else:
                     # split batch into micro_batches
                     micro_batches = mini_batch.split(self.config.ppo_micro_batch_size)

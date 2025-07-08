@@ -201,16 +201,13 @@ class AsyncXPerfGPTRollout(object):
             num_slots = max_batch_size
 
         # create a 2D device mesh
-        if tp_size > 1:
-            world_size = torch.distributed.get_world_size()
-            gen_dp_size = world_size // tp_size
+        world_size = torch.distributed.get_world_size()
+        gen_dp_size = world_size // tp_size
 
-            print(f'world_size: {world_size}, gen_dp_size: {gen_dp_size}, tp_size: {tp_size}')
-            self.device_mesh = init_device_mesh(device_type='cuda',
-                                                mesh_shape=(gen_dp_size, tp_size),
-                                                mesh_dim_names=('dp', 'tp'))
-        else:
-            self.device_mesh = None  # this is actually the whole world size. No need to have a device mesh for it.
+        print(f'world_size: {world_size}, gen_dp_size: {gen_dp_size}, tp_size: {tp_size}')
+        self.device_mesh = init_device_mesh(device_type='cuda',
+                                            mesh_shape=(gen_dp_size, tp_size),
+                                            mesh_dim_names=('dp', 'tp'))
 
         print("initializing xperf gpt...")
         print(

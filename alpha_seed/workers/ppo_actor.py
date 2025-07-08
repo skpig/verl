@@ -26,6 +26,7 @@ from transformers import PretrainedConfig
 from torch import nn
 import torch.distributed as dist
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.device_mesh import DeviceMesh
 
 from flash_attn.bert_padding import unpad_input, pad_input
 from flash_attn.ops.triton.cross_entropy import cross_entropy_loss
@@ -75,6 +76,7 @@ class DataParallelPPOActor(BasePPOActor):
             actor_model_config: PretrainedConfig = None,
             enable_non_reentrant_recompute: bool = False,
             metrics_context: ContextManager = nullcontext(),
+            actor_train_mesh: DeviceMesh = None,
     ):
         """When optimizer is None, it is Reference Policy.
 
@@ -86,6 +88,7 @@ class DataParallelPPOActor(BasePPOActor):
         self.actor_optimizer = actor_optimizer
         self.actor_model_config = actor_model_config
         self.metrics_context = metrics_context
+        self.actor_train_mesh = actor_train_mesh
         self.enable_non_reentrant_recompute = enable_non_reentrant_recompute
         self.use_rmpad = self.config.get('use_rmpad', False)
         if torch.distributed.get_rank() == 0:
@@ -253,7 +256,8 @@ class DataParallelPPOActor(BasePPOActor):
         chunk_size = math.ceil(selected_data.batch.batch_size[0] / self.config.ppo_mini_batch_size)
         for batch_idx, mini_batch in enumerate(selected_data.chunk(chunk_size)):
             if use_dynamic_bsz:
-                indices, micro_batches, non_tensor_batches = rearrange_micro_data_proto(max_token_len, mini_batch)
+                indices, micro_batches, non_tensor_batches = rearrange_micro_data_proto(
+                    max_token_len, mini_batch, self.actor_train_mesh.get_group())
             else:
                 micro_batches = mini_batch.chunk(math.ceil(mini_batch.batch.batch_size[0] / micro_batch_size))
                 num_micro_batches = len(micro_batches)
@@ -391,7 +395,7 @@ class DataParallelPPOActor(BasePPOActor):
             with self.profiler_context as p, metrics_exec_context:
                 if self.config.use_dynamic_bsz:
                     indices, micro_batches, non_tensor_batches = rearrange_micro_data_proto(
-                        self.config.ppo_max_token_len, mini_batch)
+                        self.config.ppo_max_token_len, mini_batch, self.actor_train_mesh.get_group())
                 else:
                     # split batch into micro_batches
                     micro_chunk_size = math.ceil(mini_batch.batch.batch_size[0] / self.config.ppo_micro_batch_size)

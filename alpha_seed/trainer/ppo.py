@@ -713,6 +713,8 @@ class RayPPOTrainer(object):
         if self.config.actor_rollout_ref.rollout.mode == "server":
             self.request_managers = get_all_request_manager_actors()
 
+        self.enable_actor_critic_spatial_mux = self.config.trainer.get("enable_actor_critic_spatial_mux", False)
+
         safely_do(lambda: report_job_config(config), rank=0)()
 
     def _create_dataloader(self):
@@ -772,9 +774,11 @@ class RayPPOTrainer(object):
             elif self.use_colocate_reference_policy:
                 role = 'rollout' if self.config.trainer.val_only else 'actor_rollout_ref'
                 resource_pool = self.resource_pool_manager.get_resource_pool(Role.ActorRolloutRef)
-                actor_rollout_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.ActorRolloutRef],
-                                                         config=self.config.actor_rollout_ref,
-                                                         role=role)
+                actor_rollout_cls = RayClassWithInitArgs(
+                    cls=self.role_worker_mapping[Role.ActorRolloutRef],
+                    config=self.config.actor_rollout_ref,
+                    role=role,
+                    enable_actor_critic_spatial_mux=self.enable_actor_critic_spatial_mux)
                 self.resource_pool_to_cls[resource_pool]['actor_rollout_ref'] = actor_rollout_cls
                 worker_configs['actor_rollout_ref'] = self.config.actor_rollout_ref
             else:
@@ -802,7 +806,9 @@ class RayPPOTrainer(object):
         # create critic
         if self.config.algorithm.adv_estimator == 'gae':
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.Critic)
-            critic_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Critic], config=self.config.critic)
+            critic_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Critic],
+                                              config=self.config.critic,
+                                              enable_actor_critic_spatial_mux=self.enable_actor_critic_spatial_mux)
             self.resource_pool_to_cls[resource_pool]['critic'] = critic_cls
             self.use_critic = True
             worker_configs['critic'] = self.config.critic
@@ -1772,12 +1778,9 @@ class RayPPOTrainer(object):
                     # So anything that requires ordering below this line will cause incorrect results
                     self._balance_batch(batch=batch, metrics=metrics, logging_prefix='global_seqlen')
 
-                    with Timer(name='old_log_probs', logger=None) as timer:
-                        batch = self.actor_rollout_wg.old_log_probs(batch)
-                    metrics['timing/old_log_probs'] = timer.last
+                    metrics.setdefault('timing/train_mem_offload', 0)
 
-                    print_dataproto_size(batch, head='After old log probs')
-
+                    # compute reference
                     if self.use_reference_policy:
                         if not (self.config.actor_rollout_ref.actor.kl_loss_weight == 0 and
                                 self.config.algorithm.kl_ctrl.kl_coef == 0):
@@ -1792,13 +1795,32 @@ class RayPPOTrainer(object):
 
                     print_dataproto_size(batch, head='After reference policy')
 
-                    metrics.setdefault('timing/train_mem_offload', 0)
+                    input_batch = batch
+                    if self.enable_actor_critic_spatial_mux:
+                        input_batch = input_batch.repeat(2, interleave=False)
+
+                    # compute actor
+                    actor_future = self.actor_rollout_wg.old_log_probs(input_batch)
 
                     # compute values
-                    if self.use_critic:
+                    if self.use_critic and self.enable_actor_critic_spatial_mux:
+                        critic_future = self.critic_wg.compute_values(input_batch)
 
+                    # get old_log_probs
+                    with Timer(name='old_log_probs', logger=None) as timer:
+                        output_batch = actor_future.get()
+                        batch = output_batch.chunk(2)[0] if self.enable_actor_critic_spatial_mux else output_batch
+                    metrics['timing/old_log_probs'] = timer.last
+
+                    print_dataproto_size(batch, head='After old log probs')
+
+                    # get values
+                    if self.use_critic:
+                        if not self.enable_actor_critic_spatial_mux:
+                            critic_future = self.critic_wg.compute_values(input_batch)
                         with Timer(name='values', logger=None) as timer:
-                            values = self.critic_wg.compute_values(batch)
+                            values = critic_future.get()
+                            values = values.chunk(2)[1] if self.enable_actor_critic_spatial_mux else values
                             batch = batch.union(values)
                         metrics['timing/values'] = timer.last
 
@@ -1838,11 +1860,51 @@ class RayPPOTrainer(object):
                     if self.global_step == 1:
                         print('Debugging', batch.batch)
 
+                    input_batch = batch
+                    if self.enable_actor_critic_spatial_mux:
+                        input_batch = input_batch.repeat(2, interleave=False)
+
+                    # update actor
+                    # implement critic warmup
+                    if self.config.trainer.critic_warmup <= self.global_step and self.global_step % self.config.trainer.actor_update_freq == 0:
+                        actor_future = self.actor_rollout_wg.update_actor(input_batch)
+
                     # update critic
-                    phasic_critic_update = self.config.algorithm.phasic_critic_interval > 0 and self.global_step % self.config.algorithm.phasic_critic_interval == 0
+                    if self.use_critic:
+                        critic_future = self.critic_wg.update_critic(input_batch)
+
+                    if self.config.trainer.critic_warmup <= self.global_step and self.global_step % self.config.trainer.actor_update_freq == 0:
+                        with Timer(name='update_actor', logger=None) as timer:
+                            if os.environ.get("MINISTEPS_ON_DRIVER", "0") == "1":
+                                dataloader = make_mini_step_dataloader(
+                                    batch, self.config.actor_rollout_ref.actor.ppo_mini_batch_size, True)
+                                ministeps_metrics = []
+                                for batch_idx, mini_batch in enumerate(dataloader):
+                                    if batch_idx == (len(dataloader) - 1):
+                                        mini_batch.meta_info["lr_scheduler_step"] = True
+                                    actor_output_mini = self.actor_rollout_wg.train_actor(mini_batch)
+                                    ministeps_metrics.append(actor_output_mini.meta_info['metrics'])
+
+                                actor_output = actor_output_mini
+                                actor_output_metrics = merge_ministeps_metrics(ministeps_metrics)
+                            else:
+                                actor_output = actor_future.get()
+                                actor_output = actor_output.chunk(
+                                    2)[0] if self.enable_actor_critic_spatial_mux else actor_output
+                                actor_output_metrics = reduce_metrics(actor_output.meta_info['metrics'])
+
+                        metrics.update(actor_output_metrics)
+                        metrics['memory/actor_max_allocated'] = actor_output.meta_info['memory/actor_max_allocated']
+                        metrics['memory/actor_max_reserved'] = actor_output.meta_info['memory/actor_max_reserved']
+                        metrics['timing/update_actor'] = timer.last
+                        print(f"After update_actor")
+
+                    # update critic
                     if self.use_critic:
                         with Timer(name='update_critic', logger=None) as timer:
-                            critic_output = self.critic_wg.update_critic(batch)
+                            critic_output = critic_future.get()
+                            critic_output = critic_output.chunk(
+                                2)[1] if self.enable_actor_critic_spatial_mux else critic_output
                         batch.batch['seq_vf'] = critic_output.batch['seq_vf']
                         metrics['timing/update_critic'] = timer.last
                         metrics['memory/critic_max_allocated'] = critic_output.meta_info['memory/critic_max_allocated']
@@ -1862,33 +1924,8 @@ class RayPPOTrainer(object):
                     if self.config.algorithm.priority_sample and self.config.algorithm.TD_priority_ratio > 0:
                         self.sample_pool.update_TD_priority_dict(batch)
 
-                    # implement critic warmup
-                    if self.config.trainer.critic_warmup <= self.global_step and self.global_step % self.config.trainer.actor_update_freq == 0:
-
-                        # update actor
-                        with Timer(name='update_actor', logger=None) as timer:
-                            if os.environ.get("MINISTEPS_ON_DRIVER", "0") == "1":
-                                dataloader = make_mini_step_dataloader(
-                                    batch, self.config.actor_rollout_ref.actor.ppo_mini_batch_size, True)
-                                ministeps_metrics = []
-                                for batch_idx, mini_batch in enumerate(dataloader):
-                                    if batch_idx == (len(dataloader) - 1):
-                                        mini_batch.meta_info["lr_scheduler_step"] = True
-                                    actor_output_mini = self.actor_rollout_wg.train_actor(mini_batch)
-                                    ministeps_metrics.append(actor_output_mini.meta_info['metrics'])
-
-                                actor_output = actor_output_mini
-                                actor_output_metrics = merge_ministeps_metrics(ministeps_metrics)
-                            else:
-                                actor_output = self.actor_rollout_wg.update_actor(batch)
-                                actor_output_metrics = reduce_metrics(actor_output.meta_info['metrics'])
-
-                        metrics.update(actor_output_metrics)
-                        metrics['memory/actor_max_allocated'] = actor_output.meta_info['memory/actor_max_allocated']
-                        metrics['memory/actor_max_reserved'] = actor_output.meta_info['memory/actor_max_reserved']
-                        metrics['timing/update_actor'] = timer.last
-
                     # phasic critic update
+                    phasic_critic_update = self.config.algorithm.phasic_critic_interval > 0 and self.global_step % self.config.algorithm.phasic_critic_interval == 0
                     if phasic_critic_update:
                         self.phasic_critic_buffer.meta_info['phasic_update'] = True
                         with Timer(name='phasic_critic_update', logger=None) as timer:

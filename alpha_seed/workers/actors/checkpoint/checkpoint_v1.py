@@ -7,6 +7,7 @@ import torch
 import torch.distributed
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, StateDictType
 from torch.distributed.fsdp import ShardedStateDictConfig, ShardedOptimStateDictConfig
+from torch.distributed.device_mesh import DeviceMesh
 
 from verl.utils.fs import copy_local_path_from_hdfs
 from omnistore.utilities.io.bfile import is_local_path
@@ -35,8 +36,8 @@ class CheckpointManagerV1(BaseCheckpointManager):
 
     def __init__(self, model: FSDP, optimizer: torch.optim.Optimizer,
                  lr_scheduler: torch.optim.lr_scheduler.LRScheduler, hf_config: PretrainedConfig,
-                 tokenizer: PreTrainedTokenizer, processor: AutoProcessor, *args, **kwargs):
-        super().__init__(model, optimizer, lr_scheduler, hf_config, tokenizer, processor)
+                 tokenizer: PreTrainedTokenizer, processor: AutoProcessor, device_mesh: DeviceMesh, *args, **kwargs):
+        super().__init__(model, optimizer, lr_scheduler, hf_config, tokenizer, processor, device_mesh)
 
     def load_checkpoint(self, hdfs_path=None, *args, **kwargs):
         if hdfs_path is None:
@@ -90,7 +91,7 @@ class CheckpointManagerV1(BaseCheckpointManager):
             self.remove_previous_save_local_path()
 
         self.local_mkdir(local_path)
-        torch.distributed.barrier()
+        torch.distributed.barrier(self.group)
 
         state_dict_cfg = ShardedStateDictConfig(offload_to_cpu=True)
         optim_cfg = ShardedOptimStateDictConfig(offload_to_cpu=True)
@@ -125,14 +126,14 @@ class CheckpointManagerV1(BaseCheckpointManager):
                                                                      hdfs_path))
             print(f'[rank-{self.rank}]: register upload ckpt task of path {path} to hdfs {hdfs_path} done')
         # wait for everyone to dump to local
-        torch.distributed.barrier()
+        torch.distributed.barrier(self.group)
 
         if self.rank == 0:
             self.save_hf_configs(local_path, hdfs_path, role, global_step, ckpt_global_uploader_ref)
             if hdfs_path:
                 ckpt_global_uploader_ref.start_uploading.remote(role, global_step)
                 print(f'[rank-{self.rank}]: start uploading ckpt')
-        torch.distributed.barrier()
+        torch.distributed.barrier(self.group)
 
         self.previous_save_local_path = local_path
         safely_do(lambda: report_checkpoint_saved(

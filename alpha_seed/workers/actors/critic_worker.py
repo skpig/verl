@@ -60,7 +60,7 @@ logger = logging.getLogger(__file__)
 @ray.remote
 class CriticWorker(Worker):
 
-    def __init__(self, config):
+    def __init__(self, config, enable_actor_critic_spatial_mux=False):
         super().__init__()
 
         warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -73,10 +73,19 @@ class CriticWorker(Worker):
         self.role = "critic"
 
         self.critic_strategy = config.strategy
+        self.enable_actor_critic_spatial_mux = enable_actor_critic_spatial_mux
+
+        self._is_valid_critic = True
+        if self.enable_actor_critic_spatial_mux:
+            critic_world_size = torch.distributed.get_world_size() // 2
+            if self.rank < critic_world_size:
+                self._is_valid_critic = False
 
         assert self.critic_strategy in ['fsdp', 'megatron', 'vescale-fsdp2']
 
         world_size = torch.distributed.get_world_size()
+        if self.enable_actor_critic_spatial_mux:
+            world_size = world_size // 2
 
         if self.critic_strategy in ('fsdp', 'vescale-fsdp2'):
             fsdp_size = config.fsdp_size
@@ -93,7 +102,9 @@ class CriticWorker(Worker):
                                  tp_size=tp_size,
                                  oe_size=oe_size,
                                  sp_size=sp_size,
-                                 tp_outside=config.tp_outside)
+                                 tp_outside=config.tp_outside,
+                                 enable_actor_critic_spatial_mux=self.enable_actor_critic_spatial_mux,
+                                 role=self.role)
             # Deprecated case: critic model is saved as ShardedTensor
             # we will always use full FSDP
             self.fsdp_mesh = None
@@ -103,7 +114,9 @@ class CriticWorker(Worker):
             self.oe_mesh = meshes[2]
             self.sp_mesh = meshes[3]
             self.gather_mesh = meshes[4]
-            self.gather_manager = DataGatherManager(self.gather_mesh, self.sp_mesh)
+            self.train_mesh = meshes[5]
+            if self._is_valid_critic:
+                self.gather_manager = DataGatherManager(self.gather_mesh, self.sp_mesh)
 
             # normalize config
             self.config.ppo_mini_batch_size //= (world_size // sp_size // tp_size)
@@ -128,6 +141,9 @@ class CriticWorker(Worker):
                                                        trust_remote_code=config.model.get('trust_remote_code', False))
         self.processor = AutoProcessor.from_pretrained(tokenizer_path,
                                                        trust_remote_code=config.model.get('trust_remote_code', False))
+
+        if not self._is_valid_critic:
+            return None, None, None, None
 
         from omegaconf import OmegaConf
         override_config = OmegaConf.to_container(self.config.model.get('override_config', OmegaConf.create()))
@@ -227,6 +243,7 @@ class CriticWorker(Worker):
             param_offload=config.model.fsdp_config.param_offload,
             weights=local_path if from_scratch else None,
             act_offload_kwargs=act_offload_kwargs,
+            train_mesh=self.train_mesh,
         )
         log_gpu_memory_usage('After critic FSDP')
 
@@ -393,28 +410,28 @@ class CriticWorker(Worker):
             if self.config.model.fsdp_config.param_offload:
                 return
             if device == "cuda":
-                if model:
+                if model and self.critic_module:
                     load_fsdp_model_to_gpu(self.critic_module)
-                if optimizer:
+                if optimizer and self.critic_optimizer:
                     load_fsdp_optimizer(self.critic_optimizer, torch.cuda.current_device())
                 gc.collect()
             elif device == "cpu":
-                if model:
+                if model and self.critic_module:
                     offload_fsdp_model_to_cpu(self.critic_module, model_empty_cache)
-                if optimizer:
+                if optimizer and self.critic_optimizer:
                     offload_fsdp_optimizer(self.critic_optimizer)
         elif self.critic_strategy == 'vescale-fsdp2':
             if self.config.model.fsdp_config.param_offload:
                 return
             if device == 'cuda':
-                if model:
+                if model and self.critic_module:
                     self.critic_module.to(torch.cuda.current_device(), non_blocking=True)
-                if optimizer:
+                if optimizer and self.critic_optimizer:
                     load_fsdp_optimizer(self.critic_optimizer)
             elif device == "cpu":
-                if model:
+                if model and self.critic_module:
                     self.critic_module.to('cpu', non_blocking=True)
-                if optimizer:
+                if optimizer and self.critic_optimizer:
                     offload_fsdp_optimizer(self.critic_optimizer)
         elif self.critic_strategy == 'megatron':
             if device == 'cuda':
@@ -436,7 +453,8 @@ class CriticWorker(Worker):
             self.critic = DataParallelPPOCritic(config=self.config,
                                                 critic_module=self.critic_module,
                                                 critic_optimizer=self.critic_optimizer,
-                                                critic_model_config=self.critic_model_config)
+                                                critic_model_config=self.critic_model_config,
+                                                critic_train_mesh=self.train_mesh)
         elif self.critic_strategy == 'megatron':
             from alpha_seed.workers.ppo_critic_megatron import MegatronPPOCritic
             self.critic_module, self.critic_optimizer, self.critic_lr_scheduler, self.critic_model_config = self._build_critic_model_optimizer_mariana(
@@ -449,25 +467,33 @@ class CriticWorker(Worker):
         if self.rank == 0:
             print(self.critic_model_config)
 
-        self.checkpoint_manager = CheckpointManagerWrapper(strategy=self.critic_strategy,
-                                                           model=self.critic_module,
-                                                           optimizer=self.critic_optimizer,
-                                                           lr_scheduler=self.critic_lr_scheduler,
-                                                           hf_config=self.critic_model_config,
-                                                           tokenizer=self.tokenizer,
-                                                           processor=self.processor)
+        if self._is_valid_critic:
+            self.checkpoint_manager = CheckpointManagerWrapper(strategy=self.critic_strategy,
+                                                               model=self.critic_module,
+                                                               optimizer=self.critic_optimizer,
+                                                               lr_scheduler=self.critic_lr_scheduler,
+                                                               hf_config=self.critic_model_config,
+                                                               tokenizer=self.tokenizer,
+                                                               device_mesh=self.train_mesh,
+                                                               processor=self.processor)
 
         if self.config.train_memory_offload:
             self.to("cpu")
         torch.cuda.empty_cache()
         ndtimeline.init_with_ray(self)
         self._model_initialized = True
-        if remove_safetensors_after_init:
+        if remove_safetensors_after_init and self._is_valid_critic:
             cleanup_local_tmp_folder_safetensors_files(self.critic_model_config._name_or_path)
 
-    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO, blocking=False)
     def compute_values(self, data: DataProto):
-        # data = data.to('cuda')
+        data = data.to('cpu')
+
+        if not self._is_valid_critic:
+            output = DataProto.from_dict(
+                tensors={'values': torch.empty_like(data.batch["responses"], device="cpu", dtype=torch.bfloat16)})
+            return output
+
         # Note we don't offload to cpu after compute_values
         # as it next will update critic
         if self.config.train_memory_offload:
@@ -486,62 +512,80 @@ class CriticWorker(Worker):
             output = self.gather_manager.postprocess_data(output)
         output = output.to('cpu')
 
-        # torch.cuda.empty_cache()
         return output
 
-    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO, blocking=False)
     def update_critic(self, data: DataProto):
         torch.cuda.reset_peak_memory_stats()
-        # data = data.to('cuda')
-
         log_gpu_memory_usage('Before Critic update')
+        data = data.to('cpu')
 
-        # optimizer will be loaded just before the step to save
-        # forward & backward memory
-        if self.config.train_memory_offload:
-            self.to("cuda", model=True, optimizer=False if self.critic_strategy in ('fsdp', 'vescale-fsdp2') else True)
+        if self._is_valid_critic:
+            # optimizer will be loaded just before the step to save
+            # forward & backward memory
+            if self.config.train_memory_offload:
+                self.to("cuda",
+                        model=True,
+                        optimizer=False if self.critic_strategy in ('fsdp', 'vescale-fsdp2') else True)
 
-        with self.gather_manager:
-            data = self.gather_manager.preprocess_data(data)
+            with self.gather_manager:
+                data = self.gather_manager.preprocess_data(data)
 
-            with Timer(name='update_critic', logger=None) as timer:
-                seq_vf, metrics = self.critic.update_critic(data=data)
-            delta_time = timer.last
+                with Timer(name='update_critic', logger=None) as timer:
+                    seq_vf, metrics = self.critic.update_critic(data=data)
+                delta_time = timer.last
 
-            global_num_tokens = data.meta_info['global_token_num']
-            kwargs = {}
-            if 'global_img_token_num' in data.meta_info:
-                kwargs['images_seqlens'] = data.meta_info['global_img_token_num']
-            estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time, **kwargs)
-            metrics['mfu/critic'] = estimated_flops * self.config.ppo_epochs / promised_flops / self.world_size
+                global_num_tokens = data.meta_info['global_token_num']
+                kwargs = {}
+                if 'global_img_token_num' in data.meta_info:
+                    kwargs['images_seqlens'] = data.meta_info['global_img_token_num']
+                estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time,
+                                                                                    **kwargs)
+                world_size = self.world_size // 2 if self.enable_actor_critic_spatial_mux else self.world_size
+                metrics['mfu/critic'] = estimated_flops * self.config.ppo_epochs / promised_flops / world_size
 
-            if self.critic_strategy in ('fsdp', 'vescale-fsdp2'):
-                self.critic_lr_scheduler.step()
-                lr = self.critic_lr_scheduler.get_last_lr()[0]
-            elif self.critic_strategy == 'megatron':
-                self.critic_lr_scheduler[0].step(1)
-                lr = self.critic_lr_scheduler[0].get_lr()
+                if self.critic_strategy in ('fsdp', 'vescale-fsdp2'):
+                    self.critic_lr_scheduler.step()
+                    lr = self.critic_lr_scheduler.get_last_lr()[0]
+                elif self.critic_strategy == 'megatron':
+                    self.critic_lr_scheduler[0].step(1)
+                    lr = self.critic_lr_scheduler[0].get_lr()
 
-            metrics['critic/lr(1e-4)'] = lr * 1e4
+                metrics['critic/lr(1e-4)'] = lr * 1e4
 
-            max_memory_allocated, max_memory_reserved = get_memory()
-            output = DataProto(batch=TensorDict(source={'seq_vf': seq_vf}, batch_size=(seq_vf.shape[0],)),
-                               meta_info={
-                                   'metrics': metrics,
-                                   'memory/critic_max_allocated': max_memory_allocated,
-                                   'memory/critic_max_reserved': max_memory_reserved
-                               })
-            output = self.gather_manager.postprocess_data(output)
+                max_memory_allocated, max_memory_reserved = get_memory(group=self.train_mesh.get_group())
+                output = DataProto(batch=TensorDict(source={'seq_vf': seq_vf}, batch_size=(seq_vf.shape[0],)),
+                                   meta_info={
+                                       'metrics': metrics,
+                                       'memory/critic_max_allocated': max_memory_allocated,
+                                       'memory/critic_max_reserved': max_memory_reserved
+                                   })
+                output = self.gather_manager.postprocess_data(output)
 
-        if self.config.train_memory_offload:
-            self.to("cpu", model_empty_cache=False)
-        output = output.to('cpu')
+            if self.config.train_memory_offload:
+                self.to("cpu", model_empty_cache=False)
+            output = output.to('cpu')
+
+        if self.enable_actor_critic_spatial_mux:
+            gather_obj = [None for _ in range(torch.distributed.get_world_size())]
+            torch.distributed.all_gather_object(gather_obj, output.meta_info if self._is_valid_critic else {})
+
+            if not self._is_valid_critic:
+                batch_size = data.batch["responses"].shape[0]
+                output = DataProto(batch=TensorDict(
+                    source={'seq_vf': torch.empty((batch_size), device="cpu", dtype=torch.float)},
+                    batch_size=batch_size),
+                                   meta_info=gather_obj[self.train_mesh.size()])
+                return output
 
         log_gpu_memory_usage('After Critic update')
         return output
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, hdfs_path=None, version='v1', enable_shm=False):
+        if not self._is_valid_critic:
+            return
+
         if self.config.train_memory_offload:
             self.to("cuda")
         fsdp_mesh = self.fsdp_mesh if self.critic_strategy in ('fsdp', 'vescale-fsdp2') else None
@@ -564,6 +608,9 @@ class CriticWorker(Worker):
                         global_step=0,
                         ckpt_global_uploader_ref=None,
                         enable_shm=False):
+        if not self._is_valid_critic:
+            return
+
         if self.config.train_memory_offload:
             self.to("cuda")
         self.checkpoint_manager.save_checkpoint(

@@ -39,10 +39,10 @@ def identity_allreduce(tensor: torch.Tensor, group: dist.ProcessGroup, name: Opt
     return IdentityAllreduce.apply(tensor, group, name)
 
 
-def get_memory():
+def get_memory(group=None):
     max_memory_allocated = torch.tensor(torch.cuda.max_memory_allocated() / 2**30, device=torch.cuda.current_device())
     max_memory_reserved = torch.tensor(torch.cuda.max_memory_reserved() / 2**30, device=torch.cuda.current_device())
     if dist.is_initialized():
-        dist.all_reduce(max_memory_allocated, op=dist.ReduceOp.MAX, group=None, async_op=False)
-        dist.all_reduce(max_memory_reserved, op=dist.ReduceOp.MAX, group=None, async_op=False)
+        dist.all_reduce(max_memory_allocated, op=dist.ReduceOp.MAX, group=group, async_op=False)
+        dist.all_reduce(max_memory_reserved, op=dist.ReduceOp.MAX, group=group, async_op=False)
     return max_memory_allocated.item(), max_memory_reserved.item()

@@ -22,32 +22,25 @@ from functools import partial
 
 from transformers import PretrainedConfig
 
-from torch.distributed._tensor import DTensor, Replicate, Shard
-from torch.distributed.device_mesh import DeviceMesh
+from alpha_seed.workers.xperf_rollout.utils.weights_adapter import WeightsAdapter
 
-from seed_models import P4Config, P5Config, P6Config
-from alpha_seed.utils.functional import get_text_model_type
-
-from alpha_seed.workers.xperf_rollout.utils.bf16_convert_helper import (
-    _reshard_fsdp_state_dict_to_xperf_p4, _reshard_fsdp_state_dict_to_xperf_p5, _reshard_fsdp_state_dict_to_xperf_p6,
-    _reshard_fsdp_state_dict_to_xperf_p6dense, _reshard_fsdp_state_dict_to_xperf_p7,
-    _reshard_fsdp_state_dict_to_xperf_deepseek_v3, _reshard_fsdp_state_dict_to_xperf_m8,
-    _reshard_fsdp_state_dict_to_xperf_vl, _reshard_fsdp_state_dict_to_xperf_m10)
+from alpha_seed.workers.xperf_rollout.utils.bf16_convert_helper import (_reshard_fsdp_state_dict_to_xperf_deepseek_v3,
+                                                                        _reshard_fsdp_state_dict_to_xperf_vl)
 
 # megatron
 from alpha_seed.workers.xperf_rollout.utils.bf16_convert_helper import (_reshard_fsdp_state_dict_to_xperf_m8_megatron)
 
 from alpha_seed.workers.xperf_rollout.utils.fp8_convert_helper import (
-    _reshard_fsdp_state_dict_to_xperf_p6_fp8, _reshard_fsdp_state_dict_to_xperf_p6dense_fp8,
     _reshard_fsdp_state_dict_to_xperf_m8_fp8, _reshard_fsdp_state_dict_to_xperf_deepseek_v3_fp8,
-    _reshard_fsdp_state_dict_to_xperf_vl_m8_fp8)
+    _reshard_fsdp_state_dict_to_xperf_vl_fp8)
 
 
 def get_xperf_gpt_weight_bind_fn(model_config: PretrainedConfig,
                                  quant_mode: str = "NO_QUANT",
                                  backend='fsdp',
                                  is_custom_xperf: bool = False,
-                                 is_xperf_triton: bool = False):
+                                 is_xperf_triton: bool = False,
+                                 enable_actor_critic_spatial_mux: bool = False):
     if is_custom_xperf:
         from alpha_seed.workers.xperf_rollout.utils.custom_xperf_convert_helper import _reshard_state_dict_to_xperf_custom
         return partial(_reshard_state_dict_to_xperf_custom, model_config=model_config, backend=backend)
@@ -58,38 +51,21 @@ def get_xperf_gpt_weight_bind_fn(model_config: PretrainedConfig,
         return partial(_reshard_fsdp_state_dict_to_xperf_triton_m8, model_config=model_config, backend=backend)
     if backend == 'fsdp':
         if quant_mode == "WFP8":
-            if model_config.model_type == 'seed_p6':
-                return partial(_reshard_fsdp_state_dict_to_xperf_p6_fp8, model_config=model_config)
-            elif model_config.model_type == 'seed_p6dense':
-                return partial(_reshard_fsdp_state_dict_to_xperf_p6dense_fp8, model_config=model_config)
-            elif model_config.model_type == 'seed_m8':
-                return partial(_reshard_fsdp_state_dict_to_xperf_m8_fp8, model_config=model_config)
-            elif model_config.model_type == "seed_vl":
-                return partial(_reshard_fsdp_state_dict_to_xperf_vl_m8_fp8, model_config=model_config)
+            if model_config.model_type == "seed_vl":
+                return partial(_reshard_fsdp_state_dict_to_xperf_vl_fp8,
+                               model_config=model_config,
+                               enable_actor_critic_spatial_mux=enable_actor_critic_spatial_mux)
             elif model_config.model_type == 'deepseek_v3':
                 return partial(_reshard_fsdp_state_dict_to_xperf_deepseek_v3_fp8, model_config=model_config)
-            else:
-                raise NotImplementedError(f'Unsupported model type {model_config.model_type} in WFP8 quant mode')
-        if model_config.model_type == 'seed_p4':
-            return partial(_reshard_fsdp_state_dict_to_xperf_p4, model_config=model_config)
-        elif model_config.model_type == 'seed_p5':
-            return partial(_reshard_fsdp_state_dict_to_xperf_p5, model_config=model_config)
-        elif model_config.model_type == 'seed_p6':
-            return partial(_reshard_fsdp_state_dict_to_xperf_p6, model_config=model_config)
-        elif model_config.model_type == 'seed_p6dense':
-            return partial(_reshard_fsdp_state_dict_to_xperf_p6dense, model_config=model_config)
-        elif model_config.model_type == 'seed_p7':
-            return partial(_reshard_fsdp_state_dict_to_xperf_p7, model_config=model_config)
-        elif model_config.model_type == 'seed_m8':
-            return partial(_reshard_fsdp_state_dict_to_xperf_m8, model_config=model_config)
-        elif model_config.model_type == 'seed_vl':
-            return partial(_reshard_fsdp_state_dict_to_xperf_vl, model_config=model_config)
-        elif model_config.model_type == 'deepseek_v3':
-            return partial(_reshard_fsdp_state_dict_to_xperf_deepseek_v3, model_config=model_config)
-        elif model_config.model_type == "seed_m10":
-            return partial(_reshard_fsdp_state_dict_to_xperf_m10, model_config=model_config)
         else:
-            raise NotImplementedError(f'Unsupported model type {model_config.model_type} in default bf16 mode')
+            if model_config.model_type == 'seed_vl':
+                return partial(_reshard_fsdp_state_dict_to_xperf_vl,
+                               model_config=model_config,
+                               enable_actor_critic_spatial_mux=enable_actor_critic_spatial_mux)
+            elif model_config.model_type == 'deepseek_v3':
+                return partial(_reshard_fsdp_state_dict_to_xperf_deepseek_v3, model_config=model_config)
+
+        return WeightsAdapter(model_config, quant_mode, enable_actor_critic_spatial_mux)
 
     elif backend == 'megatron':
         if quant_mode == "WFP8":

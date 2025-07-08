@@ -22,8 +22,8 @@ def get_text_model_type(config):
     return get_text_config(config).model_type
 
 
-def rearrange_micro_data_proto(max_token_len, mini_batch):
-    micro_batches, indices = rearrange_micro_batches(mini_batch.batch, max_token_len=max_token_len)
+def rearrange_micro_data_proto(max_token_len, mini_batch, dp_group=None):
+    micro_batches, indices = rearrange_micro_batches(mini_batch.batch, max_token_len=max_token_len, dp_group=dp_group)
     non_tensor_batches = []
     for indice_group in indices:
         non_tensor_batch = {}

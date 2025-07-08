@@ -87,7 +87,7 @@ class AsyncActorRolloutRefWorker(Worker):
     or a hybrid engine based on the config.rollout
     """
 
-    def __init__(self, config: DictConfig, role: str):
+    def __init__(self, config: DictConfig, role: str, enable_actor_critic_spatial_mux: bool = False):
         super().__init__()
 
         warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -118,6 +118,14 @@ class AsyncActorRolloutRefWorker(Worker):
         self.ref_strategy = config.ref.strategy
         self.local_path = None
         self.hybrid_rollout_addresses = None
+        self.enable_actor_critic_spatial_mux = enable_actor_critic_spatial_mux
+
+        self._is_valid_actor = self._is_actor
+        if self.enable_actor_critic_spatial_mux:
+            actor_world_size = torch.distributed.get_world_size() // 2
+            if self.rank >= actor_world_size:
+                self._is_valid_actor = False
+
         # actor model
         if self.actor_strategy in ('fsdp', 'vescale-fsdp2'):
             actor_fsdp_size = config.actor.fsdp_size
@@ -134,13 +142,17 @@ class AsyncActorRolloutRefWorker(Worker):
                                        tp_size=actor_tp_size,
                                        oe_size=actor_oe_size,
                                        sp_size=actor_sp_size,
-                                       tp_outside=config.actor.tp_outside)
+                                       tp_outside=config.actor.tp_outside,
+                                       enable_actor_critic_spatial_mux=self.enable_actor_critic_spatial_mux,
+                                       role=self.role)
             self.actor_fsdp_mesh = actor_meshes[0]
             self.actor_tp_mesh = actor_meshes[1]  # shared for both train and inference
             self.actor_oe_mesh = actor_meshes[2]
             self.actor_sp_mesh = actor_meshes[3]
             self.actor_gather_mesh = actor_meshes[4]
-            self.actor_gather_manager = DataGatherManager(self.actor_gather_mesh, self.actor_sp_mesh)
+            self.actor_train_mesh = actor_meshes[5]
+            if self._is_valid_actor:
+                self.actor_gather_manager = DataGatherManager(self.actor_gather_mesh, self.actor_sp_mesh)
             if torch.distributed.get_rank() == 0:
                 print(
                     f"Created actor with fsdp_size={self.actor_fsdp_mesh.shape}, tp_size={self.actor_tp_mesh.size()}, "
@@ -176,6 +188,7 @@ class AsyncActorRolloutRefWorker(Worker):
                 self.ref_oe_mesh = ref_meshes[2]
                 self.ref_sp_mesh = ref_meshes[3]
                 self.ref_gather_mesh = ref_meshes[4]
+                self.ref_train_mesh = ref_meshes[5]
                 self.ref_gather_manager = DataGatherManager(self.ref_gather_mesh, self.ref_sp_mesh)
                 if torch.distributed.get_rank():
                     print(
@@ -255,7 +268,7 @@ class AsyncActorRolloutRefWorker(Worker):
         metrics_context = None
 
         # we only need actor_model_config in rollout
-        if self._is_standalone_rollout or self._is_standalone_validator:
+        if role == "actor" and not self._is_valid_actor or self._is_standalone_rollout or self._is_standalone_validator:
             return actor_module_fsdp, actor_optimizer, actor_lr_scheduler, actor_model_config, metrics_context
 
         if use_rmpad:
@@ -299,6 +312,7 @@ class AsyncActorRolloutRefWorker(Worker):
             print_model_size(actor_module)
 
         fsdp_mesh = self.ref_fsdp_mesh if role == 'ref' else self.actor_fsdp_mesh
+        train_mesh = self.ref_train_mesh if role == 'ref' else self.actor_train_mesh
         tp_mesh = self.ref_tp_mesh if role == 'ref' else self.actor_tp_mesh
         tp_outside = self.config.ref.tp_outside if role == "ref" else self.config.actor.tp_outside
 
@@ -363,7 +377,8 @@ class AsyncActorRolloutRefWorker(Worker):
             weights=self.local_path if from_scratch else None,
             ignored_modules=ignored_modules,
             enable_training_stats=enable_training_stats,
-            act_offload_kwargs=act_offload_kwargs)
+            act_offload_kwargs=act_offload_kwargs,
+            train_mesh=train_mesh)
         log_gpu_memory_usage(f'After {role} FSDP init')
 
         # create optimizer for actor
@@ -584,15 +599,16 @@ class AsyncActorRolloutRefWorker(Worker):
         # Note that in standalone case, model is None.
         weights_communicator = self.config.rollout.weights_communicator
         if self.actor_strategy in ('fsdp', 'vescale-fsdp2'):
-            sharding_manager = FSDPXPerfGPTShardingManager(module=self.actor_module_fsdp,
-                                                           model_config=self.actor_model_config,
-                                                           inference_engine=rollout.inference_engine,
-                                                           device_mesh=rollout.device_mesh,
-                                                           standalone=self._is_standalone_rollout or
-                                                           self._is_standalone_validator,
-                                                           only_bind_once=self.role == "rollout",
-                                                           backend='fsdp',
-                                                           weights_communicator=weights_communicator)
+            sharding_manager = FSDPXPerfGPTShardingManager(
+                module=self.actor_module_fsdp,
+                model_config=self.actor_model_config,
+                inference_engine=rollout.inference_engine,
+                device_mesh=rollout.device_mesh,
+                standalone=self._is_standalone_rollout or self._is_standalone_validator,
+                only_bind_once=self.role == "rollout",
+                backend='fsdp',
+                weights_communicator=weights_communicator,
+                enable_actor_critic_spatial_mux=self.enable_actor_critic_spatial_mux)
         elif self.actor_strategy == 'megatron':
             sharding_manager = MegatronXPerfGPTShardingManager(module=self.actor_module_mariana,
                                                                model_config=self.actor_model_config,
@@ -617,13 +633,13 @@ class AsyncActorRolloutRefWorker(Worker):
             if self._is_actor:
                 if self.actor_strategy == 'fsdp':
                     if not self.config.actor.fsdp_config.param_offload:
-                        if model:
+                        if model and self.actor_module_fsdp:
                             load_fsdp_model_to_gpu(self.actor_module_fsdp)
                         if optimizer and self.actor_optimizer is not None:
                             load_fsdp_optimizer(self.actor_optimizer, device)
                 elif self.actor_strategy == 'vescale-fsdp2':
                     if not self.config.actor.fsdp_config.param_offload:
-                        if model:
+                        if model and self.actor_module_fsdp:
                             self.actor_module_fsdp.to('cuda')
                         if optimizer and self.actor_optimizer is not None:
                             load_fsdp_optimizer(self.actor_optimizer, device)
@@ -650,13 +666,13 @@ class AsyncActorRolloutRefWorker(Worker):
             if self._is_actor:
                 if self.actor_strategy == 'fsdp':
                     if not self.config.actor.fsdp_config.param_offload:
-                        if model:
+                        if model and self.actor_module_fsdp:
                             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
                         if optimizer and self.actor_optimizer is not None:
                             offload_fsdp_optimizer(self.actor_optimizer)
                 elif self.actor_strategy == 'vescale-fsdp2':
                     if not self.config.actor.fsdp_config.param_offload:
-                        if model:
+                        if model and self.actor_module_fsdp:
                             self.actor_module_fsdp.to('cpu')
                         if optimizer and self.actor_optimizer is not None:
                             offload_fsdp_optimizer(self.actor_optimizer)
@@ -709,6 +725,8 @@ class AsyncActorRolloutRefWorker(Worker):
         ref_tp_size = config.ref.tp_size
         # normalize config
         if self._is_actor:
+            if self.enable_actor_critic_spatial_mux:
+                world_size = world_size // 2
             if self.actor_strategy in ('fsdp', 'vescale-fsdp2'):
                 sp_size = config.actor.ulysses_sequence_parallel_size
                 self.config.actor.ppo_mini_batch_size //= (world_size // sp_size // actor_tp_size)
@@ -779,7 +797,7 @@ class AsyncActorRolloutRefWorker(Worker):
                     model_path=self.config.model.path, role='actor')
 
         # load from checkpoint
-        if self._is_actor or self._is_rollout:
+        if self._is_valid_actor:
             OmegaConf.set_struct(self.config.actor, True)
             if self.actor_strategy in ('fsdp', 'vescale-fsdp2'):
                 with open_dict(self.config.actor):
@@ -792,7 +810,8 @@ class AsyncActorRolloutRefWorker(Worker):
                                                   actor_optimizer=self.actor_optimizer,
                                                   actor_model_config=self.actor_model_config,
                                                   enable_non_reentrant_recompute=enable_non_reentrant_recompute,
-                                                  metrics_context=self.metrics_context)
+                                                  metrics_context=self.metrics_context,
+                                                  actor_train_mesh=self.actor_train_mesh)
             elif self.actor_strategy == 'megatron':
                 # TODO: build megatron actor
                 self.actor = MegatronPPOActor(config=self.config.actor,
@@ -820,7 +839,8 @@ class AsyncActorRolloutRefWorker(Worker):
                     self.config.ref.use_ce_loss_fusion = use_ce_loss_fusion
                 self.ref_policy = DataParallelPPOActor(config=self.config.ref,
                                                        actor_module=self.ref_module_fsdp,
-                                                       actor_model_config=self.actor_model_config)
+                                                       actor_model_config=self.actor_model_config,
+                                                       actor_train_mesh=self.ref_train_mesh)
             elif self.ref_strategy == 'megatron':
                 # TODO: build megatron actor
                 self.ref_module_mariana = self._build_model_optimizer_mariana(model_path=self.config.model.path,
@@ -837,7 +857,7 @@ class AsyncActorRolloutRefWorker(Worker):
             self.rollout, self.sharding_manager = self._build_rollout()
             self.rollout_async = None
 
-        if self._is_actor or self._is_rollout:
+        if self._is_valid_actor:
             self.flops_counter = FlopsCounter(self.actor_model_config)
             self.checkpoint_manager = CheckpointManagerWrapper(strategy=self.actor_strategy,
                                                                model=self.actor.actor_module,
@@ -845,6 +865,7 @@ class AsyncActorRolloutRefWorker(Worker):
                                                                lr_scheduler=self.actor_lr_scheduler,
                                                                hf_config=self.actor_model_config,
                                                                tokenizer=self.tokenizer,
+                                                               device_mesh=self.actor_train_mesh,
                                                                processor=self.processor)
 
         if self._is_ref:
@@ -855,6 +876,7 @@ class AsyncActorRolloutRefWorker(Worker):
                 lr_scheduler=None,
                 hf_config=self.actor_model_config,  # same for actor and ref
                 tokenizer=self.tokenizer,
+                device_mesh=self.ref_train_mesh,
                 processor=self.processor)
 
         ndtimeline.init_with_ray(self)
@@ -898,10 +920,13 @@ class AsyncActorRolloutRefWorker(Worker):
         # 通知所有actor server退出weights transfer
         self.sharding_manager.weights_communicator.update_standalone_worker_end(self.hybrid_rollout_addresses)
 
-    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO, blocking=False)
     def update_actor(self, data: DataProto):
         torch.cuda.reset_peak_memory_stats()
-        # data = data.to('cuda')
+        data = data.to('cpu')
+
+        if not self._is_valid_actor:
+            return DataProto()
 
         assert self._is_actor
         # data.batch = data.batch.cuda()
@@ -923,7 +948,8 @@ class AsyncActorRolloutRefWorker(Worker):
             if 'global_img_token_num' in data.meta_info:
                 kwargs['images_seqlens'] = data.meta_info['global_img_token_num']
             estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time, **kwargs)
-            metrics['mfu/actor'] = estimated_flops * self.config.actor.ppo_epochs / promised_flops / self.world_size
+            world_size = self.world_size // 2 if self.enable_actor_critic_spatial_mux else self.world_size
+            metrics['mfu/actor'] = estimated_flops * self.config.actor.ppo_epochs / promised_flops / world_size
 
             data = self.actor_gather_manager.postprocess_data(data)
 
@@ -938,7 +964,7 @@ class AsyncActorRolloutRefWorker(Worker):
         log_gpu_memory_usage('After update policy', logger=logger)
 
         # TODO: here, we should return all metrics
-        max_memory_allocated, max_memory_reserved = get_memory()
+        max_memory_allocated, max_memory_reserved = get_memory(group=self.actor_train_mesh.get_group())
         output = DataProto(
             meta_info={
                 'metrics': metrics,
@@ -1009,15 +1035,24 @@ class AsyncActorRolloutRefWorker(Worker):
         torch.cuda.empty_cache()
         return output
 
-    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO, blocking=False)
     def old_log_probs(self, prompts: DataProto):
         log_gpu_memory_usage('Before old_log_probs')
-
         prompts = prompts.to('cpu')
+
         # set to False if it is validation
         recompute_log_prob = prompts.meta_info.get('recompute_log_prob', True)
 
-        assert self._is_actor
+        if not self._is_valid_actor:
+            output = prompts
+            if recompute_log_prob:
+                output.batch['old_log_probs'] = torch.empty_like(output.batch["responses"],
+                                                                 device="cpu",
+                                                                 dtype=torch.bfloat16)
+                output.batch['old_entropy'] = torch.empty_like(output.batch["responses"],
+                                                               device="cpu",
+                                                               dtype=torch.bfloat16)
+            return output
 
         output = prompts
         if self._is_actor and recompute_log_prob:
@@ -1135,6 +1170,7 @@ class AsyncActorRolloutRefWorker(Worker):
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_ref_log_prob(self, data: DataProto):
         log_gpu_memory_usage('Before compute_ref_log_prob')
+        data = data.to('cpu')
 
         torch.cuda.reset_peak_memory_stats()
         assert self._is_ref
@@ -1199,6 +1235,9 @@ class AsyncActorRolloutRefWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, hdfs_path=None, version='v1', enable_shm=False, model='actor'):
+        if model == "actor" and not self._is_valid_actor:
+            return
+
         ckpt_manager, parallel_strategy, device_mesh = self._save_load_checkpoint_helper(version, model)
 
         if self.config.actor.train_memory_offload:
@@ -1223,6 +1262,9 @@ class AsyncActorRolloutRefWorker(Worker):
                         ckpt_global_uploader_ref=None,
                         enable_shm=False,
                         model='actor'):
+        if model == "actor" and not self._is_valid_actor:
+            return
+
         ckpt_manager, parallel_strategy, device_mesh = self._save_load_checkpoint_helper(version, model)
 
         if self.config.actor.train_memory_offload:

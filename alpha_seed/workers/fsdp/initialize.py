@@ -44,10 +44,12 @@ import math
 import itertools
 import warnings
 from contextlib import contextmanager
+from functools import reduce
+import operator
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.device_mesh import init_device_mesh, DeviceMesh
 from torch.distributed._tensor import Replicate, Shard
 from safetensors.torch import load_file
 from verl.utils.fs import copy_local_path_from_hdfs
@@ -90,8 +92,25 @@ class DeviceMeshManager:
             self.device_meshes[args] = device_mesh
         return self.device_meshes[args]
 
+    def init_device_mesh_custom(self, device_type, mesh_shape, start_device_id, *, mesh_dim_names=None):
+        args = (device_type, tuple(mesh_shape), start_device_id,
+                tuple(mesh_dim_names) if mesh_dim_names is not None else mesh_dim_names)
+        if args not in self.device_meshes:
+            device_mesh = DeviceMesh(device_type=device_type,
+                                     mesh=torch.arange(start_device_id, start_device_id +
+                                                       reduce(operator.mul, mesh_shape, 1)).reshape(mesh_shape),
+                                     mesh_dim_names=mesh_dim_names)
+            self.device_meshes[args] = device_mesh
+        return self.device_meshes[args]
 
-def create_mesh(fsdp_size: int, tp_size: int, oe_size: int, sp_size: int, tp_outside: bool = False):
+
+def create_mesh(fsdp_size: int,
+                tp_size: int,
+                oe_size: int,
+                sp_size: int,
+                tp_outside: bool = False,
+                enable_actor_critic_spatial_mux: bool = False,
+                role: str = None):
     """
     Create device meshes for fsdp, tp, and sp.
 
@@ -104,7 +123,14 @@ def create_mesh(fsdp_size: int, tp_size: int, oe_size: int, sp_size: int, tp_out
     """
     if oe_size > 1:
         raise RuntimeError("oe_size can only be supported when strategy is vescale-fsdp2")
-    world_size = dist.get_world_size()
+
+    if enable_actor_critic_spatial_mux:
+        world_size = dist.get_world_size() // 2
+        start_device_id = 0 if "actor" in role else world_size
+    else:
+        world_size = dist.get_world_size()
+        start_device_id = 0
+
     fsdp_size = world_size if fsdp_size <= 0 else fsdp_size
     assert world_size % (tp_size * sp_size) == 0, f'{world_size=} {tp_size=} {sp_size=}'
     # train mesh
@@ -116,47 +142,111 @@ def create_mesh(fsdp_size: int, tp_size: int, oe_size: int, sp_size: int, tp_out
                       f"Ingore this warning if this is creating standalone rollout.")
         fsdp_size = remain_size
     dp_size = remain_size // fsdp_size
-    if dp_size == 1:
-        if tp_outside:
-            train_mesh = DeviceMeshManager().init_device_mesh("cuda", (tp_size, fsdp_size),
-                                                              mesh_dim_names=("tp", "fsdp"))
+    if enable_actor_critic_spatial_mux:
+        rank = dist.get_rank()
+        if dp_size == 1:
+            if tp_outside:
+                train_mesh = DeviceMeshManager().init_device_mesh_custom("cuda", (tp_size, fsdp_size),
+                                                                         start_device_id,
+                                                                         mesh_dim_names=("tp", "fsdp"))
+            else:
+                train_mesh = DeviceMeshManager().init_device_mesh_custom("cuda", (fsdp_size, tp_size),
+                                                                         start_device_id,
+                                                                         mesh_dim_names=("fsdp", "tp"))
+            if rank >= start_device_id and rank < start_device_id + world_size:
+                fsdp_mesh = train_mesh["fsdp"]
+                tp_mesh = train_mesh["tp"]
+            else:
+                fsdp_mesh = None
+                tp_mesh = None
         else:
-            train_mesh = DeviceMeshManager().init_device_mesh("cuda", (fsdp_size, tp_size),
-                                                              mesh_dim_names=("fsdp", "tp"))
-        fsdp_mesh = train_mesh["fsdp"]
-        tp_mesh = train_mesh["tp"]
+            if tp_outside:
+                train_mesh = DeviceMeshManager().init_device_mesh_custom("cuda", (tp_size, dp_size, fsdp_size),
+                                                                         start_device_id,
+                                                                         mesh_dim_names=("tp", "dp", "fsdp"))
+            else:
+                train_mesh = DeviceMeshManager().init_device_mesh_custom("cuda", (dp_size, fsdp_size, tp_size),
+                                                                         start_device_id,
+                                                                         mesh_dim_names=("dp", "fsdp", "tp"))
+            if rank >= start_device_id and rank < start_device_id + world_size:
+                fsdp_mesh = train_mesh["dp", "fsdp"]
+                tp_mesh = train_mesh["tp"]
+            else:
+                fsdp_mesh = None
+                tp_mesh = None
     else:
-        if tp_outside:
-            train_mesh = DeviceMeshManager().init_device_mesh("cuda", (tp_size, dp_size, fsdp_size),
-                                                              mesh_dim_names=("tp", "dp", "fsdp"))
+        if dp_size == 1:
+            if tp_outside:
+                train_mesh = DeviceMeshManager().init_device_mesh("cuda", (tp_size, fsdp_size),
+                                                                  mesh_dim_names=("tp", "fsdp"))
+            else:
+                train_mesh = DeviceMeshManager().init_device_mesh("cuda", (fsdp_size, tp_size),
+                                                                  mesh_dim_names=("fsdp", "tp"))
+            fsdp_mesh = train_mesh["fsdp"]
+            tp_mesh = train_mesh["tp"]
         else:
-            train_mesh = DeviceMeshManager().init_device_mesh("cuda", (dp_size, fsdp_size, tp_size),
-                                                              mesh_dim_names=("dp", "fsdp", "tp"))
-        fsdp_mesh = train_mesh["dp", "fsdp"]
-        tp_mesh = train_mesh["tp"]
-    assert fsdp_mesh.size() == fsdp_size * dp_size, f'{fsdp_size=} {dp_size=}'
-    assert tp_mesh.size() == tp_size
+            if tp_outside:
+                train_mesh = DeviceMeshManager().init_device_mesh("cuda", (tp_size, dp_size, fsdp_size),
+                                                                  mesh_dim_names=("tp", "dp", "fsdp"))
+            else:
+                train_mesh = DeviceMeshManager().init_device_mesh("cuda", (dp_size, fsdp_size, tp_size),
+                                                                  mesh_dim_names=("dp", "fsdp", "tp"))
+            fsdp_mesh = train_mesh["dp", "fsdp"]
+            tp_mesh = train_mesh["tp"]
+        assert fsdp_mesh.size() == fsdp_size * dp_size, f'{fsdp_size=} {dp_size=}'
+        assert tp_mesh.size() == tp_size
+    train_mesh = DeviceMeshManager().init_device_mesh_custom("cuda", (tp_size * dp_size * fsdp_size,),
+                                                             start_device_id,
+                                                             mesh_dim_names=("train",))
     # sp mesh
     gather_size = tp_size * sp_size
     data_dp_size = world_size // gather_size
-    if tp_outside:
-        data_mesh = DeviceMeshManager().init_device_mesh("cuda", (tp_size, sp_size, data_dp_size),
-                                                         mesh_dim_names=("tp", "sp", "dp"))
+    if enable_actor_critic_spatial_mux:
+        if tp_outside:
+            data_mesh = DeviceMeshManager().init_device_mesh_custom("cuda", (tp_size, sp_size, data_dp_size),
+                                                                    start_device_id,
+                                                                    mesh_dim_names=("tp", "sp", "dp"))
+        else:
+            data_mesh = DeviceMeshManager().init_device_mesh_custom("cuda", (data_dp_size, sp_size, tp_size),
+                                                                    start_device_id,
+                                                                    mesh_dim_names=("dp", "sp", "tp"))
+        if rank >= start_device_id and rank < start_device_id + world_size:
+            sp_mesh = data_mesh["sp"]
+        else:
+            sp_mesh = None
     else:
-        data_mesh = DeviceMeshManager().init_device_mesh("cuda", (data_dp_size, sp_size, tp_size),
-                                                         mesh_dim_names=("dp", "sp", "tp"))
-    sp_mesh = data_mesh["sp"]
-    assert sp_mesh.size() == sp_size
+        if tp_outside:
+            data_mesh = DeviceMeshManager().init_device_mesh("cuda", (tp_size, sp_size, data_dp_size),
+                                                             mesh_dim_names=("tp", "sp", "dp"))
+        else:
+            data_mesh = DeviceMeshManager().init_device_mesh("cuda", (data_dp_size, sp_size, tp_size),
+                                                             mesh_dim_names=("dp", "sp", "tp"))
+        sp_mesh = data_mesh["sp"]
+        assert sp_mesh.size() == sp_size
     # data gather mesh
-    if tp_outside:
-        gather_mesh = DeviceMeshManager().init_device_mesh("cuda", (gather_size, data_dp_size),
-                                                           mesh_dim_names=("replicate", "dp"))
+    if enable_actor_critic_spatial_mux:
+        if tp_outside:
+            gather_mesh = DeviceMeshManager().init_device_mesh_custom("cuda", (gather_size, data_dp_size),
+                                                                      start_device_id,
+                                                                      mesh_dim_names=("replicate", "dp"))
+        else:
+            gather_mesh = DeviceMeshManager().init_device_mesh_custom("cuda", (data_dp_size, gather_size),
+                                                                      start_device_id,
+                                                                      mesh_dim_names=("dp", "replicate"))
+        if rank >= start_device_id and rank < start_device_id + world_size:
+            gather_mesh = gather_mesh["replicate"]
+        else:
+            gather_mesh = None
     else:
-        gather_mesh = DeviceMeshManager().init_device_mesh("cuda", (data_dp_size, gather_size),
-                                                           mesh_dim_names=("dp", "replicate"))
-    gather_mesh = gather_mesh["replicate"]
-    assert gather_mesh.size() == gather_size
-    return fsdp_mesh, tp_mesh, None, sp_mesh, gather_mesh
+        if tp_outside:
+            gather_mesh = DeviceMeshManager().init_device_mesh("cuda", (gather_size, data_dp_size),
+                                                               mesh_dim_names=("replicate", "dp"))
+        else:
+            gather_mesh = DeviceMeshManager().init_device_mesh("cuda", (data_dp_size, gather_size),
+                                                               mesh_dim_names=("dp", "replicate"))
+        gather_mesh = gather_mesh["replicate"]
+        assert gather_mesh.size() == gather_size
+    return fsdp_mesh, tp_mesh, None, sp_mesh, gather_mesh, train_mesh
 
 
 def create_init_fn(module: torch.nn.Module) -> Callable:
@@ -243,7 +333,7 @@ def get_device_init_context(use_meta_tensor=True):
     return init_context
 
 
-def parallel_load_safetensors(filepath):
+def parallel_load_safetensors(filepath, train_mesh=None):
 
     # copy from hdfs into local filepath
     if filepath.startswith("hdfs://"):
@@ -266,13 +356,14 @@ def parallel_load_safetensors(filepath):
 
     total_files = len(safetensors2param)
     ckpt_chunks = sorted(safetensors2param.keys())
-    world_size = dist.get_world_size()
+    world_size = train_mesh.size() if train_mesh else dist.get_world_size()
     size = int(math.ceil(total_files / world_size))
     ckpt_chunks = list(map(lambda x: ckpt_chunks[x * size:x * size + size], list(range(world_size))))
 
     shard_states = {}
     device = torch.cuda.current_device()
-    for rank, files in enumerate(ckpt_chunks):
+    start = 0 if not train_mesh or train_mesh.get_rank() == train_mesh.get_local_rank() else world_size
+    for rank, files in enumerate(ckpt_chunks, start):
         if rank == dist.get_rank():
             for file in files:
                 file = os.path.join(filepath, file)
@@ -286,7 +377,9 @@ def parallel_load_safetensors(filepath):
     return shard_states
 
 
-def parallel_init_fsdp_fn(module: torch.nn.Module, shard_states: Dict[str, torch.nn.Parameter]):
+def parallel_init_fsdp_fn(module: torch.nn.Module,
+                          shard_states: Dict[str, torch.nn.Parameter],
+                          train_mesh: DeviceMesh = None):
 
     state2fqn = {}
     for name, state in itertools.chain(module.named_parameters(remove_duplicate=False),
@@ -325,7 +418,8 @@ def parallel_init_fsdp_fn(module: torch.nn.Module, shard_states: Dict[str, torch
         if param_name not in shard_states:
             warnings.warn(f"state not found in shard states: {param_name}, init it from random")
             assert is_param
-            if dist.get_rank() == 0:
+            target = 0 if not train_mesh or train_mesh.get_rank() == train_mesh.get_local_rank() else train_mesh.size()
+            if dist.get_rank() == target:
                 initializer_range = (2.5 * max(state.shape))**-0.5
                 size = list(state.size())
                 if hasattr(state, "_spec"):
@@ -336,11 +430,12 @@ def parallel_init_fsdp_fn(module: torch.nn.Module, shard_states: Dict[str, torch
                     torch.randn(size, dtype=state.dtype, device=device, requires_grad=state.requires_grad) *
                     initializer_range)
             else:
-                shard_states[param_name] = 0
+                shard_states[param_name] = target
         loaded = shard_states[param_name]
+        group = train_mesh.get_group() if train_mesh else None
         if isinstance(loaded, (torch.nn.Parameter, torch.Tensor)):
             loaded = loaded.to(dtype=param.dtype, device=device)
-            dist.broadcast(loaded, src=dist.get_rank())
+            dist.broadcast(loaded, src=dist.get_rank(), group=group)
             if hasattr(state, "_spec"):
                 copy_to_local(param, loaded.data, state._spec)
             else:
@@ -349,10 +444,10 @@ def parallel_init_fsdp_fn(module: torch.nn.Module, shard_states: Dict[str, torch
             assert isinstance(loaded, int)  # the rank that holds the state
             if hasattr(state, "_spec"):
                 full_data = make_full_tensor(param, state._spec)
-                dist.broadcast(full_data, src=loaded)
+                dist.broadcast(full_data, src=loaded, group=group)
                 copy_to_local(param, full_data, state._spec)
             else:
-                dist.broadcast(param.data, src=loaded)
+                dist.broadcast(param.data, src=loaded, group=group)
         shard_states.pop(param_name)
         del loaded
         return param

@@ -12,6 +12,7 @@ from transformers import PretrainedConfig, PreTrainedTokenizer, AutoProcessor
 import numpy as np
 import random
 from ray.actor import ActorHandle
+from torch.distributed.device_mesh import DeviceMesh
 
 
 class BaseCheckpointManager:
@@ -29,8 +30,14 @@ class BaseCheckpointManager:
     - huggingface tokenizer and config for ckpt merge
     """
 
-    def __init__(self, model, optimizer: torch.optim.Optimizer, lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
-                 hf_config: PretrainedConfig, tokenizer: PreTrainedTokenizer, processor: AutoProcessor):
+    def __init__(self,
+                 model,
+                 optimizer: torch.optim.Optimizer,
+                 lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
+                 hf_config: PretrainedConfig,
+                 tokenizer: PreTrainedTokenizer,
+                 processor: AutoProcessor,
+                 device_mesh: DeviceMesh = None):
         self.previous_global_step = None
         self.previous_save_local_path = None
 
@@ -40,8 +47,10 @@ class BaseCheckpointManager:
         self.hf_config = hf_config
         self.tokenizer = tokenizer
         self.processor = processor
+        self.device_mesh = device_mesh
+        self.group = device_mesh.get_group() if device_mesh is not None else None
+        self.rank = device_mesh.get_local_rank() if device_mesh is not None else torch.distributed.get_rank()
         self.ray_actor_name = ray.get_runtime_context().get_actor_name()
-        self.rank = torch.distributed.get_rank()
 
     def load_checkpoint(self, *args, **kwargs):
         raise NotImplementedError
@@ -64,7 +73,7 @@ class BaseCheckpointManager:
     def wait_previous_upload(self, role, ckpt_global_uploader_ref):
         if self.previous_global_step:
             ray.get(ckpt_global_uploader_ref.wait_by_role.remote(role, self.previous_global_step))
-        torch.distributed.barrier()
+        torch.distributed.barrier(self.group)
 
     @staticmethod
     def local_mkdir(path):

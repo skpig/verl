@@ -69,8 +69,8 @@ class CheckpointManagerV2(BaseCheckpointManager):
 
     def __init__(self, model: FSDP, optimizer: torch.optim.Optimizer,
                  lr_scheduler: torch.optim.lr_scheduler.LRScheduler, hf_config: PretrainedConfig,
-                 tokenizer: PreTrainedTokenizer, processor: AutoProcessor, *args, **kwargs):
-        super().__init__(model, optimizer, lr_scheduler, hf_config, tokenizer, processor)
+                 tokenizer: PreTrainedTokenizer, processor: AutoProcessor, device_mesh: DeviceMesh, *args, **kwargs):
+        super().__init__(model, optimizer, lr_scheduler, hf_config, tokenizer, processor, device_mesh)
 
     def load_checkpoint(self, hdfs_path=None, device_mesh: DeviceMesh = None, *args, **kwargs):
         if hdfs_path is None:
@@ -113,7 +113,7 @@ class CheckpointManagerV2(BaseCheckpointManager):
             self.remove_previous_save_local_path()
 
         self.local_mkdir(local_path)
-        torch.distributed.barrier()
+        torch.distributed.barrier(self.group)
 
         # NOTE (jianyujiang): v2 ckpt must have device_mesh
         should_save_ckpt = device_mesh.ndim > 1 and device_mesh.get_local_rank(0) == 0  # HSDP's first FSDP group
@@ -152,14 +152,14 @@ class CheckpointManagerV2(BaseCheckpointManager):
                                                                      hdfs_path))
             print(f'[rank-{self.rank}]: register upload ckpt task of path {path} to hdfs {hdfs_path} done')
         # wait for everyone to dump to local
-        torch.distributed.barrier()
+        torch.distributed.barrier(self.group)
 
         if self.rank == 0:
             self.save_hf_configs(local_path, hdfs_path, role, global_step, ckpt_global_uploader_ref)
             if hdfs_path:
                 ckpt_global_uploader_ref.start_uploading.remote(role, global_step)
                 print(f'[rank-{self.rank}]: start uploading ckpt')
-        torch.distributed.barrier()
+        torch.distributed.barrier(self.group)
 
         self.previous_save_local_path = local_path
         safely_do(lambda: report_checkpoint_saved(

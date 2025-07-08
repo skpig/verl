@@ -3,8 +3,8 @@ trigger:
   change
 jobs:
   gen_ut:
-    # Merlin - seed.mono_rl.dev:v5
-    image: hub.byted.org/reckon/data.reckon.mlx.image_10440:f01681fa57069fea9769780f4e25bba6
+    # Merlin - data.aml.verl:v203 
+    image: hub.byted.org/reckon/data.reckon.mlx.image_5940:c496dbfa4ce55747428f630c008cba06
     if: ${{ !contains(Event.Change.Title, "WIP") }}
     runs-on:
       cluster: gpu-l20-16

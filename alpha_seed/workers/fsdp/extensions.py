@@ -7,6 +7,7 @@ from torch.distributed._shard.sharded_tensor.shard import Shard
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._fsdp_extensions import FSDPExtensions
 from torch.distributed.device_mesh import DeviceMesh
+import torch.distributed as dist
 from torch.distributed._tensor import DeviceMesh, DTensor, Replicate, Shard
 from torch.distributed._tensor.placement_types import Placement
 from dataclasses import dataclass
@@ -143,6 +144,29 @@ def _append_state_with_tp_spec(tensor: DTensor, shard: Placement, tp_mesh: Devic
     return tensor
 
 
+class GuaranteeProcessGroupWorldContext:
+    """
+    A context manager to guarantee all processes can see the true dist.group.WORLD during FSDP extensions' communications.
+    This is useful when dist.group.WORLD being patched by OmniStore for supporting separate actor critic scenario.
+    """
+
+    def __init__(self, true_world):
+        self.world_before_patch = None
+        self.true_world = true_world
+
+    def __enter__(self):
+        print(f"enter context world: {dist.group.WORLD} true world: {self.true_world}")
+        if dist.group.WORLD != self.true_world:
+            self.world_before_patch = dist.group.WORLD
+            dist.group.WORLD = self.true_world
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        print(f"exit context world: {dist.group.WORLD} before patch: {self.world_before_patch}")
+        if self.world_before_patch is not None:
+            dist.group.WORLD = self.world_before_patch
+
+
 class FlexDTensor(FSDPExtensions):
 
     def __init__(self, shard_plan: Dict, tp_outside: bool):
@@ -154,6 +178,7 @@ class FlexDTensor(FSDPExtensions):
             if self.tp_mesh is not None:
                 assert self.tp_mesh is spec.mesh
             self.tp_mesh = spec.mesh
+        self.true_world = dist.group.WORLD
 
     def chunk_dtensor(self, tensor: torch.Tensor, rank: int, device_mesh: DeviceMesh) -> torch.Tensor:
         """Shards a tensor/DTensor to DTensor and returns the local DTensor."""
@@ -253,26 +278,27 @@ class FlexDTensor(FSDPExtensions):
             assert fsdp_mesh is not None, f"Please init FSDP module with device_mesh"
             # NOTE we don't support diverse process group for different FSDP sub-modules
             fsdp_pg = model.process_group
-            optim_state = orig_optim_state_dict(model, optim, optim_state_dict, fsdp_pg)
-            if extension.tp_mesh is None:
-                return optim_state
+            with GuaranteeProcessGroupWorldContext(self.true_world):
+                optim_state = orig_optim_state_dict(model, optim, optim_state_dict, fsdp_pg)
+                if extension.tp_mesh is None:
+                    return optim_state
 
-            global_device_mesh = extension.tp_mesh._parent_mesh
-            assert global_device_mesh.ndim in (2, 3)
-            # extend placements by adding TP placement
-            for fqn in sorted(optim_state["state"].keys()):
-                fqn_state = {}
-                for key, val in optim_state["state"][fqn].items():
-                    if isinstance(val, DTensor):
-                        if fqn not in extension.fqn2spec:
-                            raise KeyError(f"cannot find {fqn} in tp sepc: {extension.fqn2spec}")
-                        shard = extension.fqn2spec[fqn].shard
-                        val = _append_state_with_tp_spec(val, shard, extension.tp_mesh, extension.tp_outside)
-                        assert len(
-                            val.placements) == val.device_mesh.ndim, f"{key}: {val.placements} | {val.device_mesh}"
-                    fqn_state[key] = val
-                optim_state["state"][fqn] = fqn_state
-            return optim_state
+                global_device_mesh = extension.tp_mesh._parent_mesh
+                assert global_device_mesh.ndim in (2, 3)
+                # extend placements by adding TP placement
+                for fqn in sorted(optim_state["state"].keys()):
+                    fqn_state = {}
+                    for key, val in optim_state["state"][fqn].items():
+                        if isinstance(val, DTensor):
+                            if fqn not in extension.fqn2spec:
+                                raise KeyError(f"cannot find {fqn} in tp sepc: {extension.fqn2spec}")
+                            shard = extension.fqn2spec[fqn].shard
+                            val = _append_state_with_tp_spec(val, shard, extension.tp_mesh, extension.tp_outside)
+                            assert len(
+                                val.placements) == val.device_mesh.ndim, f"{key}: {val.placements} | {val.device_mesh}"
+                        fqn_state[key] = val
+                    optim_state["state"][fqn] = fqn_state
+                return optim_state
 
         # monkey patch
         FSDP.optim_state_dict = staticmethod(optim_state_patch)
@@ -290,50 +316,52 @@ class FlexDTensor(FSDPExtensions):
             assert fsdp_mesh is not None, f"Please init FSDP module with device_mesh"
             extension: FlexDTensor = model._fsdp_extension
 
-            # NOTE we don't support diverse process group for different FSDP sub-modules
-            if extension.tp_mesh is not None:
-                global_device_mesh = extension.tp_mesh._parent_mesh
-                assert global_device_mesh.ndim in (2, 3)
-                new_optim_state_dict = {"state": {}, "param_groups": optim_state_dict["param_groups"]}
-                for fqn in sorted(optim_state_dict["state"].keys()):
-                    fqn_state = {}
-                    for key, val in optim_state_dict["state"][fqn].items():
-                        if isinstance(val, DTensor):
-                            device_mesh = val.device_mesh
-                            placements = copy.deepcopy(val.placements)[:-1]
-                            mesh_dim_names = device_mesh.mesh_dim_names
-                            if "tp" not in mesh_dim_names:
-                                warnings.warn(
-                                    "Cannot detect tp mesh when loading optimizer, this can only happen when the checkpoint is saved before tp support."
-                                )
-                                fsdp_mesh = device_mesh
-                            elif extension.tp_outside:
-                                assert mesh_dim_names[0] == "tp"
-                                fsdp_mesh = device_mesh[mesh_dim_names[1:]]
-                            else:
-                                assert mesh_dim_names[-1] == "tp"
-                                fsdp_mesh = device_mesh[mesh_dim_names[:-1]]
-                            assert fsdp_mesh.ndim <= 2
-                            val = DTensor.from_local(
-                                local_tensor=val._local_tensor,
-                                device_mesh=fsdp_mesh,
-                                placements=placements,
-                                run_check=False,
-                                shape=val.size(),
-                                stride=val.stride(),
-                            )
-                        fqn_state[key] = val
-                    new_optim_state_dict["state"][fqn] = fqn_state
-            else:
-                new_optim_state_dict = optim_state_dict
-
-            # save peak resume memory by offload optimizer to cpu
-            from .offload.model_offload import offload_fsdp_optimizer  # avoid cycled import
-            offload_fsdp_optimizer(optim)
-
             fsdp_pg = model.process_group
-            optim_state = orig_optim_state_dict_to_load(model, optim, new_optim_state_dict, is_named_optimizer,
-                                                        load_directly, fsdp_pg)
+            with GuaranteeProcessGroupWorldContext(self.true_world):
+                # NOTE we don't support diverse process group for different FSDP sub-modules
+                if extension.tp_mesh is not None:
+                    global_device_mesh = extension.tp_mesh._parent_mesh
+                    assert global_device_mesh.ndim in (2, 3)
+                    new_optim_state_dict = {"state": {}, "param_groups": optim_state_dict["param_groups"]}
+                    for fqn in sorted(optim_state_dict["state"].keys()):
+                        fqn_state = {}
+                        for key, val in optim_state_dict["state"][fqn].items():
+                            if isinstance(val, DTensor):
+                                device_mesh = val.device_mesh
+                                placements = copy.deepcopy(val.placements)[:-1]
+                                mesh_dim_names = device_mesh.mesh_dim_names
+                                if "tp" not in mesh_dim_names:
+                                    warnings.warn(
+                                        "Cannot detect tp mesh when loading optimizer, this can only happen when the checkpoint is saved before tp support."
+                                    )
+                                    fsdp_mesh = device_mesh
+                                elif extension.tp_outside:
+                                    assert mesh_dim_names[0] == "tp"
+                                    fsdp_mesh = device_mesh[mesh_dim_names[1:]]
+                                else:
+                                    assert mesh_dim_names[-1] == "tp"
+                                    fsdp_mesh = device_mesh[mesh_dim_names[:-1]]
+                                assert fsdp_mesh.ndim <= 2
+                                val = DTensor.from_local(
+                                    local_tensor=val._local_tensor,
+                                    device_mesh=fsdp_mesh,
+                                    placements=placements,
+                                    run_check=False,
+                                    shape=val.size(),
+                                    stride=val.stride(),
+                                )
+                            fqn_state[key] = val
+                        new_optim_state_dict["state"][fqn] = fqn_state
+                else:
+                    new_optim_state_dict = optim_state_dict
+
+                # save peak resume memory by offload optimizer to cpu
+                from .offload.model_offload import offload_fsdp_optimizer  # avoid cycled import
+                offload_fsdp_optimizer(optim)
+
+                fsdp_pg = model.process_group
+                optim_state = orig_optim_state_dict_to_load(model, optim, new_optim_state_dict, is_named_optimizer,
+                                                            load_directly, fsdp_pg)
             return optim_state
 
         # monkey patch
