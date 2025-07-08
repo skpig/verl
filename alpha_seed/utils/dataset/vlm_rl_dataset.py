@@ -136,7 +136,7 @@ class DistImageLoader:
         self.n_partition = n_partition
         if tokenizer_file.startswith('hdfs'):
             self.tokenizer_file = download_config_and_tokenizer(tokenizer_file)
-        self.processor = AutoImageProcessor.from_pretrained(tokenizer_file)
+        self.processor = AutoImageProcessor.from_pretrained(self.tokenizer_file)
         image_keys = [image_key]
         if isinstance(parquet_files, str):
             parquet_files = [parquet_files]
