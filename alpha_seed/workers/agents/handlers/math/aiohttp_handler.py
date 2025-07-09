@@ -1,8 +1,13 @@
-from alpha_seed.workers.agents.handlers import register_handler
+from transformers.utils import PaddingStrategy
+
+from alpha_seed.workers.agents.handlers.base import AsyncAgent, ThreadedAgent
+from alpha_seed.workers.agents.handlers import register_handler, TaskContext
 from alpha_seed.workers.streaming_service.streaming_utils import internal_call
+import torch
 import asyncio
 import os
-import aiohttp
+
+from mono_rl import DataProto
 ''' example input: 
 DataProtoItem(batch=TensorDict(
     fields={
@@ -16,7 +21,7 @@ DataProtoItem(batch=TensorDict(
 
 
 @register_handler("math/aiohttp")
-async def process_single_batch(item, context, **kwargs):
+async def process_single_batch(item: DataProto, context: TaskContext, **kwargs):
     os.environ["no_proxy"] = ""
     tokenizer = context.tokenizer
     config = context.config.actor_rollout_ref.rollout
@@ -31,6 +36,42 @@ async def process_single_batch(item, context, **kwargs):
     data_pack = DataPack.create_from_completion_dict(completion['choices'][0]['message'])
     out = pack_to_dataproto(item, tokenizer, data_pack, config)  # dataproto
     return out
+
+
+@register_handler("general/single_turn")
+class SingleTurn(AsyncAgent):
+
+    async def __call__(self, item: DataProto, context: TaskContext, **kwargs):
+        os.environ["no_proxy"] = ""
+        tokenizer = self.tokenizer
+        config = context.config
+        rollout_config = context.config.actor_rollout_ref.rollout
+        if 'image_grid_hw' in item.non_tensor_batch:
+            # vlm mode里input_ids已经提前处理好，所以这里不用prompt
+            prompt = ''
+        else:
+            # tokenize and left pad
+            prompt = item.non_tensor_batch['prompt'][0]
+            prompt_data = await tokenizer.batch_encode_plus_async([prompt],
+                                                                  padding=PaddingStrategy.MAX_LENGTH,
+                                                                  padding_side='left',
+                                                                  add_special_tokens=False,
+                                                                  max_length=config.data.max_prompt_length)
+            item.batch['input_ids'] = torch.tensor(prompt_data.input_ids, dtype=torch.int32)
+            item.batch['attention_mask'] = torch.tensor(prompt_data.attention_mask, dtype=torch.int8)
+        # 因为已经提前tokenize好，不传prompt
+        completion = await self.llm.complete(item, rollout_config)
+        from alpha_seed.workers.streaming_service.streaming_utils import DataPack, pack_to_dataproto
+        data_pack = DataPack.create_from_completion_dict(completion['choices'][0]['message'])
+        out = pack_to_dataproto(item, tokenizer, data_pack, rollout_config)  # dataproto
+        return out
+
+
+@register_handler("general/single_turn/sync")
+class SingleTurnSync(ThreadedAgent):
+
+    def __call__(self, item: DataProto, context: TaskContext, **kwargs):
+        pass
 
 
 if __name__ == '__main__':

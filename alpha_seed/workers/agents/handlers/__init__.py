@@ -1,20 +1,25 @@
 from dataclasses import dataclass
-from typing import Callable, Dict
+from typing import Callable, Dict, Optional
 import importlib
 import pkgutil
 from omegaconf import DictConfig
 import os
+
+from transformers import PreTrainedTokenizer
+
 from alpha_seed.workers.agents import load_external_module
 
 
 @dataclass
 class TaskContext:
     config: DictConfig
-    tokenizer: object
     global_step: int
     server_host: str
     server_port: int
     is_train: bool
+    # 尽量不要用这个字段，只是用来兼容旧的代码的，Executor给handler_fn传参时会一并给这个对象赋值
+    #  see: alpha_seed.workers.agents.executor.RayActorExecutor
+    tokenizer: Optional[PreTrainedTokenizer] = None
 
 
 def auto_import_submodules(package_name: str):

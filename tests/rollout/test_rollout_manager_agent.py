@@ -13,12 +13,14 @@ from tests.test_utils import gpu_allocator, ray_fixture, set_common_envs, get_co
 
 
 def get_dataproto(config, tokenizer):
-    sys_prompt = r"""Solve the following math problem."""
+    question_prompt = (
+        "We define a new math operator @, where you can only call an external tool to compute. Please "
+        "put your final answer inside \\boxed{} only in the last turn. Now answer the following question")
     qa_list = [
-        (f"{sys_prompt}\nCalculate 1 + 2.", "3"),
-        (f"{sys_prompt}\nCalculate 3 + 5.", "8"),
-        (f"{sys_prompt}\nCalculate 5.3 + 2.4.", "7.7"),
-        (f"{sys_prompt}\nWhat's the sum of 100 and 201.", "301"),
+        (f"{question_prompt}: Compute (3 @ 3) @ 1 @ 7", "7"),
+        (f"{question_prompt}:\nCompute 4 @ 6 @ 4", "-8"),
+        (f"{question_prompt}:\nCompute 5 @ 3", "9"),
+        (f"{question_prompt}:\nCompute 8 @ 1", "22"),
     ]
 
     data = []
@@ -52,6 +54,7 @@ def get_dataproto(config, tokenizer):
     batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(batch))], dtype=object)
     batch.non_tensor_batch['rollout_id'] = np.array([str(uuid.uuid4()) for _ in range(len(batch))], dtype=object)
     batch.non_tensor_batch['reward_model'] = np.array(df['reward_model'].tolist(), dtype=object)
+    batch.non_tensor_batch['raw_prompt'] = np.array([[{"role": "user", "content": q}] for q in qa_list], dtype=object)
     batch.check_consistency()
     return batch
 
@@ -91,11 +94,6 @@ def get_common_config():
             "nnodes": 0,
             "n_gpus_per_node": 2,
         },
-        "misc": {
-            "aiomonitor": {
-                "enable": True,
-            },
-        },
     })
     return get_config(override_config)
 
@@ -123,6 +121,9 @@ def mock_save_dataproto(data: DataProto, prefix: str = ''):
     print(f"mock savedataproto prefix={prefix}")
 
 
+# python3 -m pytest /opt/tiger/alpha-seed/tests/rollout/test_rollout_manager_agent.py::test_train_generate\[4-False-ucx-True-1.0\] -x --pdb -s --pdbcls=IPython.terminal.debugger:TerminalPdb
+
+
 @pytest.mark.parametrize("complete_ratio", [1.0, 0.0, 0.5])
 @pytest.mark.parametrize("is_server", [True])
 @pytest.mark.parametrize("weights_communicator", ["nccl", "ucx"])
@@ -148,7 +149,31 @@ def test_train_generate(set_common_envs, gpu_allocator, ray_fixture, complete_ra
     config.streaming_rollout.nnodes = 1 if has_standalone else 0
     config.streaming_validator.nnodes = 0
 
+    # agent related config
+    config.actor_rollout_ref.model.path = 'hdfs://harunava/home/byte_data_seed_azure/alphaseed/daiweinan/models/qwen3_0.6b_p6d'
+    config.data.max_prompt_length = 8192
+    config.data.max_response_length = 8192
+    config.data.return_raw_chat = True
+    config.actor_rollout_ref.rollout.agent.max_turns = 10
+    config.actor_rollout_ref.rollout.agent.max_new_tokens_per_turn = 2048
+    config.data.chat_template = 'chatml_tool'
+    config.data.dataloader_raw_template = True
+    config.reward_model.last_characters = 300
+    config.rollout_server.handler = 'agent/tool/special_calculator'
+    config.algorithm.use_model_output_mask = True
+
     tokenizer = get_tokenizer(config)
+    if config.data.get('chat_template', None) == 'raw':
+        raw_template = """{% for message in messages %}{{ message['content'] }}{% endfor %}"""
+        tokenizer.chat_template = raw_template
+        if tokenizer.bos_token is None:
+            tokenizer.bos_token = ""
+    if config.data.get('chat_template', None) == 'chatml':
+        # chatml from https://huggingface.co/docs/transformers/v4.53.1/en/chat_templating
+        tokenizer.chat_template = "{% if not add_generation_prompt is defined %}{% set add_generation_prompt = false %}{% endif %}{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}"
+    if config.data.get('chat_template', None) == 'chatml_tool':
+        tokenizer.chat_template = """{% if not add_generation_prompt is defined %}{% set add_generation_prompt = false %}{% endif %}{% if tools %}{{ '<|im_start|>system\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>' }}{%- for tool in tools %}{{- '\n' }}{{ tool | tojson }}{%- endfor %}\n\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n{% endif %}{% for message in messages %}{% if message['role'] == 'tool' %}<|im_start|>user\n<tool_response>\n{{ message['content'] }}\n</tool_response><|im_end|>\n{% elif message['role'] == 'assistant' %}<|im_start|>{{ message['role'] }}\n{{ message['content'] }}\n{% else %}<|im_start|>{{ message['role'] }}\n{{ message['content'] }}<|im_end|>\n{% endif %}{% endfor %}{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}"""
+
     batch = get_dataproto(config, tokenizer)
     rollout_manager = create_rollout_manager(config)
 

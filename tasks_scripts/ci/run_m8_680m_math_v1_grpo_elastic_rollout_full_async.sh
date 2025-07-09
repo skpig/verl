@@ -1,6 +1,6 @@
 set -x
 
-NUM_STEPS="${NUM_STEPS:-200}"
+NUM_STEPS="${NUM_STEPS:-2}"
 echo $NUM_STEPS
 
 export NCCL_DEBUG=WARN
@@ -11,15 +11,15 @@ export UCX_LOG_LEVEL=WARN
 SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/M8_680m_SFT_hf
 RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/rm_p6_moe_400m_0716_sftv27_stage2_hf
 TRAIN_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/train_with_ref_ans.parquet
-TEST_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/test_with_ref_ans.parquet
+TEST_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/test_with_ref_ans_top_100.parquet
 default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/test/m8_680m_grpo
 
 # 训练长度
-max_prompt_length=2048
-max_response_length=4096
+max_prompt_length=1024
+max_response_length=2048
 # batch size && 训练epoch
-train_batch_size=32
-ppo_mini_batch_size=128 # train_batch_size * bon
+train_batch_size=8
+ppo_mini_batch_size=32 # train_batch_size * bon
 val_batch_size=2500
 total_epochs=100
 test_freq=-1

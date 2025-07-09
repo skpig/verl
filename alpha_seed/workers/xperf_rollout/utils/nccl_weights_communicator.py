@@ -10,10 +10,11 @@ from verl.utils.debug import log_gpu_memory_usage
 
 class NCCLWeightsCommunicator(WeightsCommunicator):
 
-    def __init__(self, inference_engine, standalone=False, device_mesh=None):
+    def __init__(self, inference_engine, standalone=False, device_mesh=None, enable_aiomonitor=False):
         self.inference_engine = inference_engine
         self.standalone = standalone
         self.device_mesh = device_mesh
+        self.enable_aiomonitor = enable_aiomonitor
         self._setup_completed = threading.Event()
 
     def wait_for_setup_completed(self):

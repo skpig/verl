@@ -12,12 +12,15 @@ import pandas as pd
 import uuid
 import time
 import threading
+
+from alpha_seed.utils.debug.aiomonitor import get_aiomonitor_cls
 from alpha_seed.workers.actors.rollout_pool import RolloutPool
 from contextlib import suppress, contextmanager, nullcontext
 from codetiming import Timer
 from omegaconf import OmegaConf, DictConfig
 from ray import ObjectRef
 
+from alpha_seed.workers.agents.executor import RayActorExecutor, ExecutorBase, LocalExecutor
 from alpha_seed.workers.streaming_service.elastic_rollout_manager import ElasticRolloutManager
 from alpha_seed.workers.streaming_service.rollout_proxy import FixedReplicatedRayWorkerGroupAdapter, \
     RolloutWorkerGroupProxy, BalancedRolloutWorkerGroupProxy
@@ -126,6 +129,7 @@ class RolloutManager:
         self.config_dict = OmegaConf.to_container(self.config, resolve=True)
         self.logger = logger
         self.tokenizer = tokenizer
+        self.client_executor: Optional[ExecutorBase] = None
 
         self._initialized = False
 
@@ -190,8 +194,9 @@ class RolloutManager:
         def start_server_thread():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            import aiomonitor
-            with aiomonitor.Monitor(loop, termui_port=11000, console_enabled=False):
+            use_aiomonitor = self.config.misc.aiomonitor.enable
+            Monitor = get_aiomonitor_cls(use_aiomonitor)
+            with Monitor(loop, termui_port=11000, console_enabled=False):
                 loop.run_until_complete(self._start_server())
 
         threading.Thread(target=start_server_thread, daemon=True, name='rollout-server-event-loop').start()
@@ -270,6 +275,29 @@ class RolloutManager:
             if self.val_standalone_wg is not None:
                 self.val_standalone_wg.set_eos_callback_fn(sandbox_callback_fn)
 
+    def _init_client_executor(self):
+        if not self._use_server:
+            return
+        max_workers = self.config.streaming_rollout.agent.max_workers
+        worker_max_concurrency = self.config.streaming_rollout.agent.worker_max_concurrency
+        use_standalone_only = self.config.actor_rollout_ref.rollout.complete_ratio == 0
+        executor_cls = self.config.streaming_rollout.agent.executor_class
+        self.rollout_server_started.wait()
+        server_host = self.standalone_rollout_server.host if use_standalone_only else self.hybrid_rollout_server.host
+        server_port = self.standalone_rollout_server.port if use_standalone_only else self.hybrid_rollout_server.port
+        ExecutorCls = None
+        if executor_cls == "LocalExecutor":
+            ExecutorCls = LocalExecutor
+        elif executor_cls == "RayActorExecutor":
+            ExecutorCls = RayActorExecutor
+        else:
+            raise ValueError(f"Unsupported executor class: {executor_cls}")
+        self.client_executor = ExecutorCls(self.tokenizer,
+                                           server_host,
+                                           server_port,
+                                           max_workers=max_workers,
+                                           worker_max_concurrency=worker_max_concurrency)
+
     def initialize(self, hybrid_wg, rollout_pool=None, train_standalone_wg=None, val_standalone_wg=None):
         assert not self._initialized
 
@@ -282,6 +310,7 @@ class RolloutManager:
         self._init_servers()
         self._init_standalone_comms()
         self._init_eos_callback()
+        self._init_client_executor()
         self._initialized = True
 
     def wait_nccl_comm_threadsafe(self):
@@ -609,10 +638,9 @@ class RolloutManager:
         ready_batch = []
         server_host = self.standalone_rollout_server.host if use_standalone_only else self.hybrid_rollout_server.host
         server_port = self.standalone_rollout_server.port if use_standalone_only else self.hybrid_rollout_server.port
-        handler_fn = select_handler_fn(self.config.rollout_server.handler,
-                                       external_lib=self.config.rollout_server.external_lib)
+        handler = select_handler_fn(self.config.rollout_server.handler,
+                                    external_lib=self.config.rollout_server.external_lib)
         context = TaskContext(config=self.config,
-                              tokenizer=self.tokenizer,
                               global_step=step,
                               server_host=server_host,
                               server_port=server_port,
@@ -622,9 +650,11 @@ class RolloutManager:
             # submit the training batch to the rollout server
             start = time.time()
             running_batch = []
+
             for item in gen_batch.chunk(len(gen_batch)):
-                task = asyncio.create_task(handler_fn(item, context))
+                task = asyncio.create_task(self.client_executor.submit(handler, item, context))
                 running_batch.append(task)
+
             print(f"[INFO] {step} train generate server[submit], batch size: {len(gen_batch)}, {time.time() - start}")
             start = time.time()
 
@@ -675,7 +705,13 @@ class RolloutManager:
             if task.exception():
                 raise task.exception()
             else:
-                results.append(task.result())
+                task_result = task.result()
+                if isinstance(task_result, DataProto):
+                    results.append(task_result)
+                elif isinstance(task_result, list):
+                    results.extend(task_result)
+                else:
+                    raise ValueError("AgentLoop only support DataProto or list[DataProto] at this moment")
 
         ready_batch = results
         finished_num = len(ready_batch)
@@ -736,11 +772,10 @@ class RolloutManager:
             metrics["timing/update_rollout_server"] = timer.last
 
         ready_batch = []
-        handler_fn = select_handler_fn(self.config.rollout_server.handler,
-                                       external_lib=self.config.rollout_server.external_lib)
+        handler = select_handler_fn(self.config.rollout_server.handler,
+                                    external_lib=self.config.rollout_server.external_lib)
         server = self.validation_rollout_server if is_standalone else self.hybrid_validation_rollout_server
         context = TaskContext(config=self.config,
-                              tokenizer=self.tokenizer,
                               global_step=step,
                               server_host=server.host,
                               server_port=server.port,
@@ -751,7 +786,7 @@ class RolloutManager:
             start = time.time()
             running_batch = []
             for item in gen_batch.chunk(len(gen_batch)):
-                task = asyncio.create_task(handler_fn(item, context))
+                task = asyncio.create_task(self.client_executor.submit(handler, item, context))
                 running_batch.append(task)
             print(f"[INFO] {step} val generate streaming[submit], batch size: {len(gen_batch)}, {time.time() - start}")
             start = time.time()

@@ -19,7 +19,7 @@ SFT_MODEL_CHAT_TPL=raw
 RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/ssd_wlcb/user/liuxin.ai/rl/M8_680m_RM/checkpoints/global_step_308/huggingface
 #TRAIN_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/train_with_ref_ans.parquet
 TRAIN_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/yueyu/data/rlhf/d62_rename_datasource.parquet  # 这个会生成很长！用来测试
-TEST_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/test_with_ref_ans.parquet
+TEST_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/test_with_ref_ans_top_100.parquet
 default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/x.lixiang/test/m8_680m_ppo_fsdp_async_nightly_ci
 
 # 训练长度

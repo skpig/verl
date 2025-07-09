@@ -103,6 +103,11 @@ def get_plugin_enabled_common_config():
             "nnodes": 0,
             "n_gpus_per_node": 2,
         },
+        "misc": {
+            "aiomonitor": {
+                "enable": True,
+            },
+        },
     })
     return get_config(override_config=override_config)
 

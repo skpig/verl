@@ -170,6 +170,16 @@ def create_rollout_manager(config):
 
     logger = get_logger(config)
     tokenizer = get_tokenizer(config)
+    if config.data.get('chat_template', None) == 'raw':
+        raw_template = """{% for message in messages %}{{ message['content'] }}{% endfor %}"""
+        tokenizer.chat_template = raw_template
+        if tokenizer.bos_token is None:
+            tokenizer.bos_token = ""
+    if config.data.get('chat_template', None) == 'chatml':
+        # chatml from https://huggingface.co/docs/transformers/v4.53.1/en/chat_templating
+        tokenizer.chat_template = "{% if not add_generation_prompt is defined %}{% set add_generation_prompt = false %}{% endif %}{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}"
+    if config.data.get('chat_template', None) == 'chatml_tool':
+        tokenizer.chat_template = """{% if not add_generation_prompt is defined %}{% set add_generation_prompt = false %}{% endif %}{% if tools %}{{ '<|im_start|>system\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>' }}{%- for tool in tools %}{{- '\n' }}{{ tool | tojson }}{%- endfor %}\n\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n{% endif %}{% for message in messages %}{% if message['role'] == 'tool' %}<|im_start|>user\n<tool_response>\n{{ message['content'] }}\n</tool_response><|im_end|>\n{% elif message['role'] == 'assistant' %}<|im_start|>{{ message['role'] }}\n{{ message['content'] }}\n{% else %}<|im_start|>{{ message['role'] }}\n{{ message['content'] }}<|im_end|>\n{% endif %}{% endfor %}{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}"""
 
     hybrid_wg = create_hybrid_wg(config)
     streaming_rollout_wg = create_streaming_rollout_wg(config)

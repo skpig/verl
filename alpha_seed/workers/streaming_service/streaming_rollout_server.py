@@ -30,7 +30,8 @@ from http import HTTPStatus
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from alpha_seed.workers.streaming_service.protocol import (ChatCompletionRequest, ChatCompletion,
-                                                           ChatCompletionMessageRollout, Choice, CompletionUsage,
+                                                           ChatCompletionMessageRollout, ChoiceRollout,
+                                                           ChatCompletionRollout, Choice, CompletionUsage,
                                                            ErrorResponse)
 from alpha_seed.workers.streaming_service.rollout_request_manager import RequestManagerRegisterCenter
 from alpha_seed.workers.streaming_service.streaming_utils import get_node_ip, get_free_port
@@ -50,6 +51,7 @@ class OpenAIProxy(ABC):
     def setup_routes(self):
 
         @self.app.post("/chat/completions")
+        @self.app.post("/v1/chat/completions")
         async def create_chat_completion(request: ChatCompletionRequest, raw_request: Request):
             response = await self.create_chat_completion(request, raw_request)
             if isinstance(response, ErrorResponse):
@@ -75,7 +77,7 @@ class OpenAIProxy(ABC):
         return Query.from_request(input_ids, input_prompt, request_id, request.to_sampling_params(), request.meta_info,
                                   **kwargs)
 
-    def create_response(self, query: Query) -> JSONResponse:
+    def create_response(self, query: Query) -> ChatCompletionRollout:
         message = ChatCompletionMessageRollout(
             role="assistant",
             prompt=query.input_prompt + query.output_prompt[0],
@@ -86,24 +88,24 @@ class OpenAIProxy(ABC):
             extra_data=query.extra_data,
             metrics=query.metrics,
         )
-        choices = []
-        choice_data = Choice(
+
+        # 使用自定义的ChoiceRollout类型，确保正确序列化
+        choice_data = ChoiceRollout(
             index=0,
             message=message,
             finish_reason="stop",
         )
-        choices.append(choice_data)
 
         usage = CompletionUsage(completion_tokens=query.new_token_len,
                                 prompt_tokens=query.original_input_len,
                                 total_tokens=query.original_input_len + query.new_token_len)
 
-        response = ChatCompletion(id=query.id,
-                                  choices=choices,
-                                  created=int(time.time()),
-                                  model="rollout",
-                                  object="chat.completion",
-                                  usage=usage)
+        # 使用自定义的ChatCompletionRollout类型，确保完整序列化
+        response = ChatCompletionRollout(id=query.id,
+                                         choices=[choice_data],
+                                         created=int(time.time()),
+                                         model="rollout",
+                                         usage=usage)
         return response
 
     def create_error_response(self,

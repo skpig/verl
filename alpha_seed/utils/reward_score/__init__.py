@@ -32,7 +32,7 @@ def _select_rm_score_fn(reward_style, external_lib: str = None):
     elif reward_style == 'rule-openai/gsm8k':
         from . import gsm8k
         return gsm8k.compute_score
-    elif reward_style == 'rule-lighteval/MATH':
+    elif reward_style in ('rule-lighteval/MATH', 'lighteval/MATH'):
         from . import math_v1
         return math_v1.compute_score
     elif reward_style == 'rule-lighteval/MATH_v2':

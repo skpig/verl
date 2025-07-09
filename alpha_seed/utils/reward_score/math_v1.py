@@ -17,6 +17,8 @@ Copied from https://github.com/EleutherAI/lm-evaluation-harness/blob/main/lm_eva
 
 
 def compute_score(solution_str, ground_truth, **argv) -> float:
+    if argv['config']['reward_model']['last_characters'] != -1:
+        solution_str = solution_str[-argv['config']['reward_model']['last_characters']:]
     retval = -1.
     try:
         string_in_last_boxed = last_boxed_only_string(solution_str)

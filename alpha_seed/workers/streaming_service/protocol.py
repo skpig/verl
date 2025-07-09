@@ -147,6 +147,9 @@ class ChatCompletionRequest(BaseModel):
 
 
 class ChatCompletionMessageRollout(ChatCompletionMessage):
+
+    prompt: Optional[str] = None
+    """input+output prompt"""
     raw_output_ids: Optional[List[int]] = None
     """The raw token ids of the message."""
     response_log_probs: Optional[List[float]] = None
@@ -159,6 +162,31 @@ class ChatCompletionMessageRollout(ChatCompletionMessage):
     """Extra info required for trainer"""
     metrics: Optional[dict] = {}
     """Query level metrics"""
+
+    def to_dict(self):
+        return self.model_dump()
+
+
+class ChoiceRollout(BaseModel):
+
+    finish_reason: Optional[Literal["stop", "length", "tool_calls", "content_filter", "function_call"]] = None
+    index: int
+    message: ChatCompletionMessageRollout  # 关键：期望我们的自定义消息类型
+    logprobs: Optional[Any] = None
+
+    def to_dict(self):
+        return self.model_dump()
+
+
+class ChatCompletionRollout(BaseModel):
+
+    id: str
+    choices: List[ChoiceRollout]  # 关键：使用我们的自定义Choice类型
+    created: int
+    model: str
+    object: Literal["chat.completion"] = "chat.completion"
+    system_fingerprint: Optional[str] = None
+    usage: Optional[CompletionUsage] = None
 
     def to_dict(self):
         return self.model_dump()

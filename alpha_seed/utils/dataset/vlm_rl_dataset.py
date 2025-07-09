@@ -39,7 +39,7 @@ from transformers.utils import TensorType
 def load_image_data_dist(non_tensor_batch):
     if not 'pixel_values' in non_tensor_batch:
         return
-    image_manager = ray.get_actor("ImageManager")
+    image_manager = get_image_manager()
     data_indices = []
     for i, pixel_values in enumerate(non_tensor_batch['pixel_values']):
         if pixel_values is not None:
@@ -163,7 +163,7 @@ class DistImageLoader:
         self.offset = 0
         for i in range(node_rank):
             self.offset += self.partition_counts[i]
-        self.image_manager = ray.get_actor("ImageManager")
+        self.image_manager = get_image_manager()
 
     def get_offset(self):
         return self.offset

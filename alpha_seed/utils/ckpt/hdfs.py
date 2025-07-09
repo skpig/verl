@@ -21,7 +21,8 @@ def download_limited_chunks(model_path, rank, world_size):
 
 def download_config_and_tokenizer(model_path):
     download_files = [
-        'config.json', 'tokenizer.json', 'special_tokens_map.json', 'tokenizer_config.json', 'preprocessor_config.json'
+        'config.json', 'tokenizer.json', 'special_tokens_map.json', 'tokenizer_config.json', 'preprocessor_config.json',
+        'vocab.json', 'merges.txt'
     ]
     local_path = copy_local_path_from_hdfs_files(model_path, download_files, cache_dir)
     return local_path

@@ -14,14 +14,8 @@
 """
 Create a XPerfGPT Rollout
 """
-import itertools
-import uuid
-from asyncio import CancelledError
 
-from distlib.locators import Locator
-from pydantic import UUID4
-from transformers import PreTrainedTokenizer
-
+from alpha_seed.utils.dataset.vlm_rl_dataset import get_image_manager
 from alpha_seed.workers.xperf_rollout.utils.base_weights_communicator import WeightsCommunicator
 from mono_rl import DataProto
 import copy
@@ -33,9 +27,6 @@ import tempfile
 import json
 import queue
 import threading
-from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse
-import uvicorn
 from typing import AsyncGenerator, List, Type
 import asyncio
 import xperf_gpt
@@ -767,7 +758,6 @@ class ElasticAsyncXPerfGPTRollout(_unwrap_ray_remote(RemoteAsyncXPerfGPTRollout)
         super().__init__(config, role)
         self.hybrid_rollout_addrs = hybrid_rollout_addrs
         self._elastic_has_setup = threading.Event()
-        self.image_manager = get_image_manager()
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def init_and_setup(self,

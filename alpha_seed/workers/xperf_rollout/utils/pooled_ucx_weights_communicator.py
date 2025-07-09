@@ -7,10 +7,8 @@ import threading
 import asyncio
 import socket
 import logging
-import aiomonitor
 from collections import defaultdict
 from queue import Queue
-from contextlib import contextmanager
 
 import ucxx
 import cupy as cp
@@ -19,6 +17,7 @@ import torch
 import torch.distributed as dist
 from ucxx.exceptions import UCXConnectionResetError, UCXCanceledError
 
+from alpha_seed.utils.debug.aiomonitor import get_aiomonitor_cls
 from alpha_seed.workers.xperf_rollout.utils.base_weights_communicator import WeightsCommunicator
 from verl.utils.debug import log_gpu_memory_usage
 
@@ -145,10 +144,11 @@ class WeightUpdateRWLock:
 
 class UCXWeightsCommunicator(WeightsCommunicator):
 
-    def __init__(self, inference_engine, standalone: bool, device_mesh):
+    def __init__(self, inference_engine, standalone: bool, device_mesh, enable_aiomonitor: bool = False):
         self.inference_engine = inference_engine
         self.standalone = standalone
         self.device_mesh = device_mesh  # 注意不开tp时这个是None
+        self.enable_aiomonitor = enable_aiomonitor
 
         self.source_address = ""  # 作为client时，默认要连到server的地址 ip:port 格式
         self.server_up = False  # 是否作为server启动
@@ -326,9 +326,11 @@ class UCXWeightsCommunicator(WeightsCommunicator):
         base_port = 21000
         if self.standalone:
             base_port = 22000
-        print(f"aiomonitor started on rank={self.rank}, "
-              f"use `telnet 127.0.0.1 {base_port + self.rank}` to connect to the monitor")
-        with aiomonitor.Monitor(self.loop, termui_port=base_port + self.rank, console_enabled=False):
+        if self.enable_aiomonitor:
+            print(f"aiomonitor started on rank={self.rank}, "
+                  f"use `telnet 127.0.0.1 {base_port + self.rank}` to connect to the monitor")
+        Monitor = get_aiomonitor_cls(self.enable_aiomonitor)
+        with Monitor(self.loop, termui_port=base_port + self.rank, console_enabled=False):
             self.loop.run_until_complete(self._server(port_queue))
         self.loop.close()
 
@@ -448,9 +450,11 @@ class UCXWeightsCommunicator(WeightsCommunicator):
             asyncio.set_event_loop(loop)
             # monitor asyncio tasks, use `telnet 127.0.0.1 <port>` to connect to the monitor
             port = get_free_port_v4()
-            print(f"aiomonitor of client_transfer_weights started on rank={self.rank}, "
-                  f"use `telnet 127.0.0.1 {port}` to connect to the monitor")
-            with aiomonitor.Monitor(loop, termui_port=port, console_enabled=False):
+            if self.enable_aiomonitor:
+                print(f"aiomonitor of client_transfer_weights started on rank={self.rank}, "
+                      f"use `telnet 127.0.0.1 {port}` to connect to the monitor")
+            Monitor = get_aiomonitor_cls(self.enable_aiomonitor)
+            with Monitor(loop, termui_port=port, console_enabled=False):
                 try:
                     # step 1: 通知server，client即将拉取参数，server若还没准备好，可以在这个时候先处理好了再返回
                     #   如果server是hybrid rollout：则等待参数就绪

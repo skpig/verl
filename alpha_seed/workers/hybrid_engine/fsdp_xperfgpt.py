@@ -95,7 +95,8 @@ class ActorXPerfGPTShardingManager(BaseShardingManager):
         CommunicatorCls = UCXWeightsCommunicator if self.weights_communicator == "ucx" else NCCLWeightsCommunicator
         self.weights_communicator = CommunicatorCls(inference_engine=self.inference_engine,
                                                     standalone=self.standalone,
-                                                    device_mesh=self.device_mesh)
+                                                    device_mesh=self.device_mesh,
+                                                    enable_aiomonitor=False)  # 外面config不方便传集哪里，这里先默认False
 
     def release_param_and_cache(self):
         """Release the GPU memory occupied by xperf parameter and cache"""

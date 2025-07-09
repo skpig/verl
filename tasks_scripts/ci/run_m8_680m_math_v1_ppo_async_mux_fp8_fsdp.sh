@@ -16,7 +16,7 @@ SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/see
 # RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/ssd_wlcb/user/liuxin.ai/rl/M8_680m_RM/checkpoints/global_step_308/huggingface
 RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/M8_680m_SFT_hf_new
 TRAIN_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/train_with_ref_ans.parquet
-TEST_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/test_with_ref_ans.parquet
+TEST_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/test_with_ref_ans_top_100.parquet
 default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/mabole/as_test/m8_680m_ppo_mux
 # recipe=tasks_scripts/recipes/h20/m8_680m_grpo_megatron.yaml
 

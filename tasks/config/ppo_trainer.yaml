@@ -202,6 +202,9 @@ actor_rollout_ref:
     enable_cuda_graph: False
     enable_paged_attention: False
     rollout_server_args: ${rollout_server}
+    agent:
+      max_turns: 10
+      max_new_tokens_per_turn: ${data.max_response_length}
   streaming_rollout_args: ${streaming_rollout}
   streaming_validator_args: ${streaming_validator}
   use_cuda_timer: False # doesn't take effect; only for backward-compatibility
@@ -317,6 +320,7 @@ reward_model:
   format_punish_score: -5
   use_cuda_timer: False # doesn't take effect; only for backward-compatibility
   length_ema_method: mean
+  last_characters: -1 # number of last characters
 
 algorithm:
   group_shuffle: False
@@ -448,6 +452,11 @@ streaming_rollout:
     lb_mode: dynamic-balancing  # ["dynamic-balancing", "even-distribution"]
     poll_internal_seconds: 2.
     rebalance_threshold: 2  # 最小溢出x个才重新分发给其他
+  agent:
+    executor_class: LocalExecutor  # ["RayActorExecutor", "LocalExecutor"]
+    # max_workers * worker_max_concurrency 就是同时运行的task的最大并发数
+    max_workers: 32 # 有多少worker
+    worker_max_concurrency: 1024  # 每个worker的并发数，对所有executor类型都生效
 
 streaming_validator:
   n_gpus_per_node: 0
@@ -478,6 +487,9 @@ server_client:
   ray_address: null
   reset_server: False # for client
 
+misc:
+  aiomonitor:
+    enable: False
 
 mariana:
 # Note that the current megatron config has to be global as it has to be identical for every model
