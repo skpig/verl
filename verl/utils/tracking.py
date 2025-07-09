@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Union
 
 
 class Tracking:
-    supported_backend = ["wandb", "mlflow", "swanlab", "vemlp_wandb", "tensorboard", "console"]
+    supported_backend = ["wandb", "mlflow", "swanlab", "vemlp_wandb", "tensorboard", "console", "bwandb"]
 
     def __init__(self, project_name, experiment_name, default_backend: Union[str, List[str]] = "console", config=None, resume_step=0):
         if isinstance(default_backend, str):
@@ -38,7 +38,11 @@ class Tracking:
 
         self.logger = {}
 
-        if "tracking" in default_backend or "wandb" in default_backend:
+        if "bwandb" in default_backend:
+            import wandb
+            wandb.init(project=project_name, name=experiment_name, config=config)
+            self.logger["wandb"] = wandb
+        elif "tracking" in default_backend or "wandb" in default_backend:
             from wandb.apis.public import Api
 
             import wandb
@@ -152,7 +156,7 @@ class Tracking:
                 logger_instance.log(data=data, step=step)
 
     def __del__(self):
-        if "wandb" in self.logger:
+        if "wandb" in self.logger or "bwandb" in self.logger:
             self.logger["wandb"].finish(exit_code=0)
         if "swanlab" in self.logger:
             self.logger["swanlab"].finish()
@@ -228,7 +232,7 @@ def _flatten_dict(raw: Dict[str, Any], *, sep: str) -> Dict[str, Any]:
 class ValidationGenerationsLogger:
 
     def log(self, loggers, tag, samples, step):
-        if 'wandb' in loggers:
+        if 'wandb' in loggers or 'bwandb' in loggers:
             self.log_generations_to_wandb(tag, samples, step)
         if 'swanlab' in loggers:
             self.log_generations_to_swanlab(samples, step)

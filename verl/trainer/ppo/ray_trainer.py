@@ -916,6 +916,7 @@ class RayPPOTrainer:
 
         # create async rollout manager and request scheduler
         self.async_rollout_mode = False
+        assert self.config.actor_rollout_ref.rollout.mode != "async", "Not support async rollout, because of env dependency"
         if self.config.actor_rollout_ref.rollout.mode == "async":
             self.async_rollout_mode = True
             self.async_rollout_manager = AsyncLLMServerManager(

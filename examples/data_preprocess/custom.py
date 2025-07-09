@@ -269,7 +269,8 @@ def process_dapomath_dataset():
 
     golden_extraction_target=(ExprExtractionConfig(),)
     filtered_dataset_path = os.path.join(MY_DATA_DIR, local_dir, "filtered_dataset.parquet")
-    if os.path.exists(filtered_dataset_path):
+    # if os.path.exists(filtered_dataset_path):
+    if False:
         print(f"Loading the filtered dataset from {filtered_dataset_path}...", flush=True)
         dataset = datasets.load_dataset("parquet", data_files=filtered_dataset_path)
     else:
@@ -335,6 +336,6 @@ if __name__ == "__main__":
     # process_math500_dataset()
     # process_amc_dataset()
     # process_dapomath_dataset()
-    process_math_dataset()
+    # process_math_dataset()
 
     print("Done Preprocessing!")
