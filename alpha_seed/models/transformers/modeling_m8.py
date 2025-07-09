@@ -93,7 +93,7 @@ def flash_attn2_rmpad_forward(
         # this leads to raise TypeError('TypedDict does not support instance and class checks')
         if 'max_seqlen_q' not in flash_attn_kwargs:
             # this means that the sequence is just a single seq
-            max_seqlen = hidden_states.size(1)
+            max_seqlen = position_ids.max() + 1
         else:
             max_seqlen = flash_attn_kwargs['max_seqlen_q']
 
