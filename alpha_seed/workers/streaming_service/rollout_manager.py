@@ -364,11 +364,8 @@ class RolloutManager:
         if is_warmup_step:
             print(f"warmup gen step #{step}, elapsed: {time.time() - step_start}")
             return None
-        num_bon = self.config.actor_rollout_ref.rollout.get("num_bon", 1)
         # get the training batch
-        return_batch_size = (self.config.data.train_batch_size *
-                             self.config.trainer.league_training_config.buffer_size * num_bon)
-        train_batch = RolloutPool.dynamic_call(self.rollout_pool, "get_train_batch", return_batch_size)
+        train_batch = RolloutPool.dynamic_call(self.rollout_pool, "get_train_batch")
         batch = DataProto.concat(train_batch)
 
         if (key := 'model_output_mask') in batch.batch:
@@ -614,13 +611,12 @@ class RolloutManager:
         server_port = self.standalone_rollout_server.port if use_standalone_only else self.hybrid_rollout_server.port
         handler_fn = select_handler_fn(self.config.rollout_server.handler,
                                        external_lib=self.config.rollout_server.external_lib)
-        context = TaskContext(
-            config=self.config,
-            tokenizer=self.tokenizer,
-            global_step=step,
-            server_host=server_host,
-            server_port=server_port,
-        )
+        context = TaskContext(config=self.config,
+                              tokenizer=self.tokenizer,
+                              global_step=step,
+                              server_host=server_host,
+                              server_port=server_port,
+                              is_train=True)
 
         async def submit_and_wait():
             # submit the training batch to the rollout server
@@ -743,13 +739,12 @@ class RolloutManager:
         handler_fn = select_handler_fn(self.config.rollout_server.handler,
                                        external_lib=self.config.rollout_server.external_lib)
         server = self.validation_rollout_server if is_standalone else self.hybrid_validation_rollout_server
-        context = TaskContext(
-            config=self.config,
-            tokenizer=self.tokenizer,
-            global_step=step,
-            server_host=server.host,
-            server_port=server.port,
-        )
+        context = TaskContext(config=self.config,
+                              tokenizer=self.tokenizer,
+                              global_step=step,
+                              server_host=server.host,
+                              server_port=server.port,
+                              is_train=False)
 
         async def _submit_and_wait():
             # submit the training batch to the rollout server

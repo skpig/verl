@@ -14,6 +14,7 @@ class TaskContext:
     global_step: int
     server_host: str
     server_port: int
+    is_train: bool
 
 
 def auto_import_submodules(package_name: str):

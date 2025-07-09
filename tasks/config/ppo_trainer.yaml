@@ -43,6 +43,7 @@ actor_rollout_ref:
     logits_clamp: 0.0
     strategy: fsdp  # This is for backward-compatibility
     ppo_mini_batch_size: 512
+    max_ppo_mini_batch: -1
     ulysses_sequence_parallel_size: 1
     fsdp_size: -1
     tp_size: 1
@@ -186,6 +187,8 @@ actor_rollout_ref:
     rollout_pool:
       nnodes: 1
       warmup_step: 0
+      clear_rollout_pool: False
+      upsample_mode: batch # batch, mini_batch
     xperf_custom:
       enable: False
       backbone: null

@@ -5,6 +5,8 @@ import random
 import queue
 import logging
 
+from mono_rl import DataProto
+
 logger = logging.getLogger(__file__)
 '''
 The replay buffer backed by an in-mem dict.
@@ -68,23 +70,33 @@ class RolloutPool:
 
         self.pool_size = 0
         self.history_pool = dict()
+
+        # index of bon_ready_batch and rollout_id2uid should be poped out simutaneously
         self.bon_ready_batch = queue.Queue()
+        self.rollout_id2uid = defaultdict(set)
 
         self.pool_with_grad = queue.Queue()
         # self.pool_with_grad_ready_batch = queue.Queue()
 
-    def get_train_batch(self, return_batch_size):
-        return self.fn_map[self.strategy](return_batch_size)
+    def get_train_batch(self):
+        return self.fn_map[self.strategy]()
 
     def fill_rollout_pool(self, batch_lst):
-        for batch in batch_lst:
-            index = batch.non_tensor_batch['rollout_id'][0]
-            self.pool.push(index, batch)
-            self.pool_size += 1
 
-            batch_list = self.pool.get(index)
-            if len(batch_list) >= self.num_bon:
-                self.bon_ready_batch.put(index)
+        if len(batch_lst) != 0:
+            batch_lst = DataProto.concat(batch_lst)
+            batch_lst = batch_lst.chunk(len(batch_lst))
+
+            for batch in batch_lst:
+                rollout_id = batch.non_tensor_batch['rollout_id'][0]
+                uid = batch.non_tensor_batch['uid'][0]
+                self.pool.push(rollout_id, batch)
+                self.pool_size += 1
+
+                self.rollout_id2uid[rollout_id].add(uid)
+                if len(self.rollout_id2uid[rollout_id]) >= self.num_bon:
+                    self.bon_ready_batch.put(rollout_id)
+
         print("[fill_rollout_pool] fill_batch:", len(batch_lst), "bon_ready_batch:",
               self.bon_ready_batch.qsize() * self.num_bon, "pool_size:", self.pool_size)
 
@@ -128,17 +140,23 @@ class RolloutPool:
     def pool_with_grad_clear(self):
         self.pool_with_grad = queue.Queue()
 
-    def get_train_batch_default(self, return_batch_size):
+    def get_train_batch_default(self):
+        return_batch_size = self.config.data.train_batch_size * self.config.trainer.league_training_config.buffer_size * self.config.actor_rollout_ref.rollout.get(
+            "num_bon", 1)
         return_batch = []
-        while not self.bon_ready_batch.empty() and len(return_batch) < return_batch_size:
+        while not self.bon_ready_batch.empty() and (
+                self.config.actor_rollout_ref.rollout.rollout_pool.clear_rollout_pool or
+                len(return_batch) < return_batch_size):
             index = self.bon_ready_batch.get()
             ready_batch = self.pool.get(index)
             if ready_batch is None:
                 continue
-            if len(return_batch) + len(ready_batch) > return_batch_size:
+            if (len(return_batch) + len(ready_batch)
+                    > return_batch_size) and not self.config.actor_rollout_ref.rollout.rollout_pool.clear_rollout_pool:
                 self.bon_ready_batch.put(index)
                 break
             return_batch.extend(ready_batch)
+            uids = self.rollout_id2uid.pop(index)
             # self.history_pool[index] = ready_batch
             # currently ready_batch in history_pool is not used
             # ready_batch will occupy very large memory, especially in vlm tasks
@@ -148,26 +166,33 @@ class RolloutPool:
             self.pool_size -= self.num_bon
         complete_bon_bsz = len(return_batch)
 
-        if self.replay_buffer_type == "persistable":
-            sampler = self.samplers[0].sample()
-        else:  # default
-            sampler = self.pool.sample()
-        while len(return_batch) < return_batch_size:
-            try:
-                index = next(sampler)
-            except StopIteration:  # The pool is empty
-                break
+        # TODO(qiying): default behaviour should not have replay buffer sampling
+        # if self.replay_buffer_type == "persistable":
+        #     sampler = self.samplers[0].sample()
+        # else:  # default
+        #     sampler = self.pool.sample()
 
-            ready_batch = self.pool.get(index)
-            if len(return_batch) + len(ready_batch) > return_batch_size:
-                continue  # draw again to prevent return_batch being empty
-            return_batch.extend(ready_batch)
-
-        if len(return_batch) < return_batch_size and len(return_batch) > 0:
-            return_batch.extend([random.choice(return_batch) for _ in range(return_batch_size - len(return_batch))])
+        # upsample
+        mini_bsz = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
+        if self.config.actor_rollout_ref.rollout.rollout_pool.upsample_mode == 'batch':
+            if len(return_batch) < return_batch_size and len(return_batch) > 0:
+                return_batch.extend([random.choice(return_batch) for _ in range(return_batch_size - len(return_batch))])
+        elif self.config.actor_rollout_ref.rollout.rollout_pool.upsample_mode == 'mini_batch':
+            # upsample to multiple of mini_bsz
+            if len(return_batch) % mini_bsz != 0:
+                return_batch.extend(
+                    [random.choice(return_batch) for _ in range(mini_bsz - len(return_batch) % mini_bsz)])
+        else:
+            assert False
         incomplete_bon_bsz = len(return_batch) - complete_bon_bsz
 
-        print("[get_train_batch] total_train_bsz:", return_batch_size, "complete_bon_bsz:", complete_bon_bsz,
+        # drop to max = max_batch_size
+        if self.config.actor_rollout_ref.actor.max_ppo_mini_batch > 0 and len(
+                return_batch) > mini_bsz * self.config.actor_rollout_ref.actor.max_ppo_mini_batch:
+            random.shuffle(return_batch)
+            return_batch = return_batch[:mini_bsz * self.config.actor_rollout_ref.actor.max_ppo_mini_batch]
+
+        print("[get_train_batch] total_train_bsz:", len(return_batch), "complete_bon_bsz:", complete_bon_bsz,
               "incomplete_bon_bsz:", incomplete_bon_bsz, "pool size:", self.pool_size, "history_pool size:",
               len(self.history_pool) * self.num_bon)
         return return_batch
