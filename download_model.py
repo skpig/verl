@@ -58,7 +58,7 @@ def download_model(model_name: str, parent_dir: str | Path) -> Path:  # noqa: D4
         local_dir_use_symlinks=False,  # ✅ no symbolic links
         resume_download=True,          # resume if partially downloaded
         max_workers=8,                 # parallel workers for speed
-        token="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"
+        token=""
     )
 
     print("[SUCCESS] Download completed!")
