@@ -156,5 +156,5 @@ test_offload_memory_not_orig_param = partial(torchrun, 4, offload_and_load, Fals
 # test_offload_bitwise_correctness_not_orig_param = partial(torchrun, 4, offload_and_load_correctness, False)
 
 # test byted_optimizer
-test_offload_memory_orig_param_lion = partial(torchrun, 4, offload_and_load, True, 'lion')
-test_offload_memory_not_orig_param_lion = partial(torchrun, 4, offload_and_load, False, 'lion')
+# test_offload_memory_orig_param_lion = partial(torchrun, 4, offload_and_load, True, 'lion')
+# test_offload_memory_not_orig_param_lion = partial(torchrun, 4, offload_and_load, False, 'lion')

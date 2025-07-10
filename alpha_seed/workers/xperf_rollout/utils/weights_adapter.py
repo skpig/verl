@@ -54,7 +54,7 @@ class WeightsAdapter:
         self.adapter.setup_device_mesh(device_mesh)
         self.adapter.get_model_info(xperf_llm)
         self.adapter.load_from_state_dict(state_dict,
-                                          prefix=prefix or "language_model." if xperf_vit is not None else "")
+                                          prefix=prefix or ("language_model." if xperf_vit is not None else ""))
         self.adapter.process_and_assign_weights(xperf_llm)
         torch.cuda.empty_cache()
 

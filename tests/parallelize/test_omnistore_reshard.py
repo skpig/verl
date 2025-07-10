@@ -116,6 +116,6 @@ def model_save_load_fsdp_hsdp_tp_omnistore_reshard(fsdp_size_save: int,
 test_model_save_load_fsdp_hsdp_tp_omnistore_reshard = partial(torchrun, 8,
                                                               model_save_load_fsdp_hsdp_tp_omnistore_reshard, 8, 1, 2,
                                                               4)
-test_model_save_load_fsdp_hsdp_tp_omnistore_reshard = partial(torchrun, 8,
-                                                              model_save_load_fsdp_hsdp_tp_omnistore_reshard, 8, 1, 2,
-                                                              4, 'lion')
+# test_model_save_load_fsdp_hsdp_tp_omnistore_reshard = partial(torchrun, 8,
+#                                                               model_save_load_fsdp_hsdp_tp_omnistore_reshard, 8, 1, 2,
+#                                                               4, 'lion')

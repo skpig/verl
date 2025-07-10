@@ -3,71 +3,56 @@ trigger:
   change
 jobs:
   gen_ut:
-    # Merlin - data.aml.verl:v203 
-    image: hub.byted.org/reckon/data.reckon.mlx.image_5940:c496dbfa4ce55747428f630c008cba06
+    image: hub.byted.org/reckon/data.reckon.mlx.image_5940:26def500fbbd577bdfd57f100f6aa993
     if: ${{ !contains(Event.Change.Title, "WIP") }}
     runs-on:
-      cluster: gpu-l20-16
-      docker:
-        shared-memory: 1024
+      cluster: NVIDIA_L20_16|hub.byted.org/reckon/data.reckon.mlx.image_5940:26def500fbbd577bdfd57f100f6aa993
     envs:
       LIBHDFS_OPTS: -Dhadoop.root.logger=warn,console
-    timeout: 60  # timeout 10min
+      SEC_TOKEN_PATH: ${{SEC_TOKEN_PATH}}
+    timeout: 60
     retry: 2
     steps:
       - name: check env
         commands:
-        - nvidia-smi
-      - &step_setup_bvc
-        name: setup bvc
-        commands:
-          - curl -s bvc-cdn.byted.org/non_ttp_tao_deploy.sh | sudo bash
-          - sudo ln -sf /usr/local/tao/agent/modules/bvc/bin/bvc /usr/bin/bvc
-          - mkdir -p /opt/tiger/bvc/bin/; ln -sf /usr/local/tao/agent/modules/bvc/bin/bvc /opt/tiger/bvc/bin/bvc
-      - &step_hadoop
-        name: setup hadoop
-        commands:
-          - bash ./tests/tools/setup_hdfs.sh
-      - &step_doas
-        name: setup doas
-        id: doas
-        uses: actions/doas
-      - &step_dependency
-        name: setup dependency
+          - nvidia-smi
+
+      - name: setup dependency
         commands:
           - cd /opt/tiger
           - git clone -b v1.3.0 --single-branch git@code.byted.org:seed/seed_models.git
-          - cd seed_models
-          - pip3 install -e . --user
-          - cd /opt/tiger
           - git clone git@code.byted.org:seed/mono_rl.git
-          - pip3 install --upgrade byted-wandb
-          - pip3 install bytedance.ndtimeline --upgrade
-          - pip3 install byted-omnistore==0.7.14
-          - pip3 install pylatexenc
-          - pip3 install openai
-          - pip3 install pydantic==1.10.15
-          - pip3 install pytest-xdist
+          - sudo pip3 install --upgrade byted-wandb
+          - sudo pip3 install --upgrade bytedance.ndtimeline
+          - sudo pip3 install byted-omnistore==0.7.14
+          - sudo pip3 install pylatexenc
+          - sudo pip3 install openai
+          - sudo pip3 install pydantic==1.10.15
+          - sudo pip3 install pytest-xdist
+
       - name: agents
         commands:
           - export NCCL_SHM_DISABLE=1
-          - export PYTHONPATH=$PYTHONPATH:/opt/tiger/mono_rl
+          - export PYTHONPATH=$PYTHONPATH:/opt/tiger/mono_rl:/opt/tiger/seed_models
           - export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-          - cd -
-          - pytest -n 4 -v tests/agents/test_example_env.py tests/agents/test_example_plugin.py tests/agents/test_query_plugin.py tests/agents/test_plugin_manager.py  tests/agents/test_tag_matcher.py
+          - cd /home/code
+          - pytest -n 4 -v tests/agents/test_example_env.py tests/agents/test_example_plugin.py tests/agents/test_query_plugin.py tests/agents/test_plugin_manager.py tests/agents/test_tag_matcher.py
           - ray stop --force
           - ray start --num-cpus=100 --head
           - pytest -n 4 -v tests/agents/test_e2e_gen.py tests/agents/test_call_server_in_rollout_actor.py tests/agents/test_reward_plugin.py
           - ray stop --force
+
       - name: rollout
         commands:
           - export NCCL_SHM_DISABLE=1
-          - export PYTHONPATH=$PYTHONPATH:/opt/tiger/mono_rl
+          - export PYTHONPATH=$PYTHONPATH:/opt/tiger/mono_rl:/opt/tiger/seed_models
           - export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-          - cd -
+          - cd /home/code
           - pytest -n 4 -v tests/rollout/test_cache_manager.py
           - ray stop --force
           - ray start --num-cpus=100 --head
-          - pytest -n 4 -v tests/rollout/test_rollout_manager.py
-          - pytest -n 2 -v tests/rollout/test_elastic_rollout.py
+          - |
+            pytest -n 2 -v tests/rollout/test_rollout_manager.py
+            pytest -n 2 -v tests/rollout/test_elastic_rollout.py
           - ray stop --force
+

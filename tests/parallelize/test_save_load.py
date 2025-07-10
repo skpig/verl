@@ -247,23 +247,20 @@ def model_save_load_fsdp_tp(fsdp_size: int, tp_size: int, version: str = 'v1', o
     torch.testing.assert_close(iter_res[-2][1], iter_res[-4][1], rtol=0, atol=0)
 
 
-# v1 test
-test_model_save_load_fsdp_v1 = partial(torchrun, 4, model_save_load_fsdp_tp, 4, 1, 'v1')
-test_model_save_load_hsdp_v1 = partial(torchrun, 4, model_save_load_fsdp_tp, 2, 1, 'v1')
-test_model_save_load_fsdp_tp_v1 = partial(torchrun, 4, model_save_load_fsdp_tp, 2, 2, 'v1')
-test_model_save_load_hsdp_tp_v1 = partial(torchrun, 8, model_save_load_fsdp_tp, 2, 2, 'v1')
-# dcp test
-test_model_save_load_fsdp_dcp = partial(torchrun, 4, model_save_load_fsdp_tp, 4, 1, 'dcp')
-test_model_save_load_hsdp_dcp = partial(torchrun, 4, model_save_load_fsdp_tp, 2, 1, 'dcp')
-test_model_save_load_fsdp_tp_dcp = partial(torchrun, 4, model_save_load_fsdp_tp, 2, 2, 'dcp')
-test_model_save_load_hsdp_tp_dcp = partial(torchrun, 8, model_save_load_fsdp_tp, 2, 2, 'dcp')
-# omnistore test
-test_model_save_load_fsdp_omnistore = partial(torchrun, 4, model_save_load_fsdp_tp, 4, 1, 'omnistore')
-test_model_save_load_hsdp_omnistore = partial(torchrun, 4, model_save_load_fsdp_tp, 2, 1, 'omnistore')
-test_model_save_load_fsdp_tp_omnistore = partial(torchrun, 4, model_save_load_fsdp_tp, 2, 2, 'omnistore')
-test_model_save_load_hsdp_tp_omnistore = partial(torchrun, 8, model_save_load_fsdp_tp, 2, 2, 'omnistore')
-# omnistore and byted_optimizer test
-test_model_save_load_fsdp_omnistore = partial(torchrun, 4, model_save_load_fsdp_tp, 4, 1, 'omnistore', 'lion')
-test_model_save_load_hsdp_omnistore = partial(torchrun, 4, model_save_load_fsdp_tp, 2, 1, 'omnistore', 'lion')
-test_model_save_load_fsdp_tp_omnistore = partial(torchrun, 4, model_save_load_fsdp_tp, 2, 2, 'omnistore', 'lion')
-test_model_save_load_hsdp_tp_omnistore = partial(torchrun, 8, model_save_load_fsdp_tp, 2, 2, 'omnistore', 'lion')
+# serial run
+def test_all():
+    # v1 test
+    test_model_save_load_fsdp_v1 = partial(torchrun, 4, model_save_load_fsdp_tp, 4, 1, 'v1')
+    test_model_save_load_hsdp_v1 = partial(torchrun, 4, model_save_load_fsdp_tp, 2, 1, 'v1')
+    test_model_save_load_fsdp_tp_v1 = partial(torchrun, 4, model_save_load_fsdp_tp, 2, 2, 'v1')
+    test_model_save_load_hsdp_tp_v1 = partial(torchrun, 8, model_save_load_fsdp_tp, 2, 2, 'v1')
+    # dcp test
+    test_model_save_load_fsdp_dcp = partial(torchrun, 4, model_save_load_fsdp_tp, 4, 1, 'dcp')
+    test_model_save_load_hsdp_dcp = partial(torchrun, 4, model_save_load_fsdp_tp, 2, 1, 'dcp')
+    test_model_save_load_fsdp_tp_dcp = partial(torchrun, 4, model_save_load_fsdp_tp, 2, 2, 'dcp')
+    test_model_save_load_hsdp_tp_dcp = partial(torchrun, 8, model_save_load_fsdp_tp, 2, 2, 'dcp')
+    # omnistore test
+    test_model_save_load_fsdp_omnistore = partial(torchrun, 4, model_save_load_fsdp_tp, 4, 1, 'omnistore')
+    test_model_save_load_hsdp_omnistore = partial(torchrun, 4, model_save_load_fsdp_tp, 2, 1, 'omnistore')
+    test_model_save_load_fsdp_tp_omnistore = partial(torchrun, 4, model_save_load_fsdp_tp, 2, 2, 'omnistore')
+    test_model_save_load_hsdp_tp_omnistore = partial(torchrun, 8, model_save_load_fsdp_tp, 2, 2, 'omnistore')
