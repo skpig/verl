@@ -233,7 +233,6 @@ class RayWorkerGroup(WorkerGroup):
     def _init_with_resource_pool(self, resource_pool, ray_cls_with_init, bin_pack, detached):
         use_gpu = resource_pool.use_gpu
         print("before _init_with_resource_pool")
-        breakpoint()
 
         strategy = "PACK"
         if bin_pack:

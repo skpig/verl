@@ -1,3 +1,4 @@
+MY_CKPT_DIR=/mnt/hdfs/huangbaizhou/tmp/ckpt/
 BASE_MODEL=${MY_MODEL_DIR}Qwen/Qwen2.5-3B-Instruct
 TEMPLATE_TYPE=chat
 TRAIN_FILE="${MY_DATA_DIR}DAPO-Math-17k/train.parquet"
@@ -16,9 +17,9 @@ WANDB_VERSION=bwandb
 # Model settings
 PROMPT_ID=$2
 ROLLOUT_N=16
-OVERLONG_BUFFER_LEN=$((1024 * 2))
+OVERLONG_BUFFER_LEN=$((1024 * 1))
 MAX_PROMPT_LEN=$((1024 * 1))
-MAX_RESPONSE_LEN=$((1024 * 6 + OVERLONG_BUFFER_LEN))
+MAX_RESPONSE_LEN=$((1024 * 5 + OVERLONG_BUFFER_LEN))
 BATCH_SIZE=512
 MINI_BSZ=32
 
@@ -26,7 +27,7 @@ MINI_BSZ=32
 N_NODES=${ARNOLD_WORKER_NUM:-1}
 N_GPUS=${ARNOLD_WORKER_GPU:-16}
 FORWARD_RATIO=16
-BACKWARD_RATIO=4
+BACKWARD_RATIO=2
 ROLLOUT_TP_SIZE=1
 OFFLOAD=True
 # SP_SIZE=4 # TODO:
@@ -99,7 +100,8 @@ CMD="python3 -m verl.trainer.main_ppo \
     trainer.test_freq=5 \
     trainer.project_name=$PROJ_NAME \
     trainer.experiment_name=$EXPERIMENT_NAME \
-    trainer.total_epochs=$TOTAL_EPOCHS"
+    trainer.total_epochs=$TOTAL_EPOCHS \
+    trainer.default_local_dir=$MY_CKPT_DIR/$PROJ_NAME/$EXPERIMENT_NAME"
 
 # 获取vllm版本号
 verl_version=$(conda list | grep 'vllm' | awk '{print $2}')
