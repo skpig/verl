@@ -262,19 +262,19 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None, is_v
         format_correctness, num_steps = verify_format_w_timeout(solution_str, prompt_id)
     except TimeoutException:
         print("Timeout detected in format verification, returning 0 score.")
-        os.makedirs('/home/huangbz/verl/.cache/reward_error', exist_ok=True)
-        with open(f'/home/huangbz/verl/.cache/reward_error/format_error_{os.getpid()}.log', 'w') as f:
-            f.write(f"Timeout detected in format verification\n==Solution==\n{solution_str}\n==Ground==\n{ground_truth}\n====\n")
-            traceback.print_exc(file=f)
-            f.write('\n')
+        # os.makedirs('.cache/reward_error', exist_ok=True)
+        # with open(f'.cache/reward_error/format_error_{os.getpid()}.log', 'w') as f:
+        #     f.write(f"Timeout detected in format verification\n==Solution==\n{solution_str}\n==Ground==\n{ground_truth}\n====\n")
+        #     traceback.print_exc(file=f)
+        #     f.write('\n')
         format_correctness, num_steps = 0, 0
     except Exception:
         print("Error detected in format verification, returning 0 score.")
-        os.makedirs('/home/huangbz/verl/.cache/reward_error', exist_ok=True)
-        with open(f'/home/huangbz/verl/.cache/reward_error/format_error_{os.getpid()}.log', 'w') as f:
-            f.write(f"Error detected in format verification\n==Solution==\n{solution_str}\n==Ground==\n{ground_truth}\n====\n")
-            traceback.print_exc(file=f)
-            f.write('\n')
+        # os.makedirs('.cache/reward_error', exist_ok=True)
+        # with open(f'.cache/reward_error/format_error_{os.getpid()}.log', 'w') as f:
+        #     f.write(f"Error detected in format verification\n==Solution==\n{solution_str}\n==Ground==\n{ground_truth}\n====\n")
+        #     traceback.print_exc(file=f)
+        #     f.write('\n')
         format_correctness, num_steps = 0, 0
 
     try:

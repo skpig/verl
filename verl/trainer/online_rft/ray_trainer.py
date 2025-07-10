@@ -238,7 +238,7 @@ class RayOnlineRFTTrainer(RayPPOTrainer):
         self._validate_config()
         self._create_dataloader()
 
-        self.cache_file_path = os.path.join('/home/huangbz/verl/.cache', self.config.trainer.experiment_name, 'train_generations.parquet')
+        # self.cache_file_path = os.path.join('/home/huangbz/verl/.cache', self.config.trainer.experiment_name, 'train_generations.parquet')
 
     # # NO NEED
     # def _validate_config(self):
@@ -976,7 +976,7 @@ class RayOnlineRFTTrainer(RayPPOTrainer):
                 # collect metrics
                 with _timer('log', timing_raw):
                     metrics.update(ray.get(rollout_metrics))
-                    self._maybe_log_train_generations(batch)
+                    # self._maybe_log_train_generations(batch)
                     metrics.update(compute_data_metrics(batch=batch))
                     # TODO: implement actual tflpo and theoretical tflpo
                     n_gpus = self.resource_pool_manager.get_n_gpus()
@@ -989,13 +989,13 @@ class RayOnlineRFTTrainer(RayPPOTrainer):
 
                 if is_last_step:
                     pprint(f'Final validation metrics: {last_val_metrics}')
-                    # save train result to local file
-                    data_path = '/home/huangbz/verl/train_result.parquet'
-                    df = pd.read_parquet(self.cache_file_path, engine='pyarrow')
-                    if os.path.exists(data_path):
-                        old_df = pd.read_parquet(data_path, engine='pyarrow')
-                        df = pd.concat([old_df, df], ignore_index=True)
-                    df.to_parquet(data_path, engine='pyarrow')
+                    # # save train result to local file
+                    # data_path = '/home/huangbz/verl/train_result.parquet'
+                    # df = pd.read_parquet(self.cache_file_path, engine='pyarrow')
+                    # if os.path.exists(data_path):
+                    #     old_df = pd.read_parquet(data_path, engine='pyarrow')
+                    #     df = pd.concat([old_df, df], ignore_index=True)
+                    # df.to_parquet(data_path, engine='pyarrow')
                     return
 
                 progress_bar.update(1)

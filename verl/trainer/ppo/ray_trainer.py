@@ -355,7 +355,7 @@ class RayPPOTrainer:
         self._validate_config()
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
-        self.cache_file_path = os.path.join('/home/huangbz/verl/.cache', self.config.trainer.project_name, self.config.trainer.experiment_name, 'train_generations.parquet')
+        self.cache_file_path = os.path.join(self.config.trainer.default_local_dir, self.config.trainer.project_name, self.config.trainer.experiment_name, 'train_generations.parquet')
         self.global_metrics = {
             "perf/global_cumsum_total_dedup_num_prompt_tokens": 0,
             "perf/global_cumsum_total_dedup_num_response_tokens": 0,
@@ -1317,13 +1317,13 @@ class RayPPOTrainer:
                         logger.log(data=prev_metric, step=prev_step)
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
-                    # save train result to local file
-                    data_path = '/home/huangbz/verl/train_result.parquet'
-                    df = pd.read_parquet(self.cache_file_path, engine='pyarrow')
-                    if os.path.exists(data_path):
-                        old_df = pd.read_parquet(data_path, engine='pyarrow')
-                        df = pd.concat([old_df, df], ignore_index=True)
-                    df.to_parquet(data_path, engine='pyarrow')
+                    # # save train result to local file
+                    # data_path = '/home/huangbz/verl/train_result.parquet'
+                    # df = pd.read_parquet(self.cache_file_path, engine='pyarrow')
+                    # if os.path.exists(data_path):
+                    #     old_df = pd.read_parquet(data_path, engine='pyarrow')
+                    #     df = pd.concat([old_df, df], ignore_index=True)
+                    # df.to_parquet(data_path, engine='pyarrow')
                     return
                 progress_bar.update(1)
                 self.global_steps += 1
