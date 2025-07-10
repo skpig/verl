@@ -106,8 +106,8 @@ class ResourcePoolManager:
     Define a resource pool specification. Resource pool will be initialized first.
     """
 
-    resource_pool_spec: dict[str, list[int]]
-    mapping: dict[Role, str]
+    resource_pool_spec: dict[str, list[int]]  # 都是 {'global_pool': [n_gpus_per_node, ..., n_gpus_per_node]}
+    mapping: dict[Role, str] # 都是 {Role1: 'global_pool', ..., Role2: 'global_pool'}
     resource_pool_dict: dict[str, RayResourcePool] = field(default_factory=dict)
 
     def create_resource_pool(self):
@@ -118,6 +118,14 @@ class ResourcePoolManager:
             # that can utilize different WorkerGroup for differnt models
             resource_pool = RayResourcePool(process_on_nodes=process_on_nodes, use_gpu=True, max_colocate_count=1, name_prefix=resource_pool_name)
             self.resource_pool_dict[resource_pool_name] = resource_pool
+        
+        print("** Create resource pools **")
+        print("Resource pool specification:")
+        pprint(self.resource_pool_spec)
+        print("Resource pool dict:")
+        pprint(self.resource_pool_dict)
+        print("Mapping of roles to resource pools:")
+        pprint(self.mapping)
 
         self._check_resource_available()
 
@@ -133,6 +141,8 @@ class ResourcePoolManager:
         """Check if the resource pool can be satisfied in this ray cluster."""
         node_available_resources = ray.state.available_resources_per_node()
         node_available_gpus = {node: node_info.get("GPU", 0) for node, node_info in node_available_resources.items()}
+        print(f"Available GPUs per node: {node_available_gpus}"
+              f"Total available GPUs: {sum(node_available_gpus.values())}")
 
         # check total required gpus can be satisfied
         total_available_gpus = sum(node_available_gpus.values())
@@ -895,6 +905,7 @@ class RayPPOTrainer:
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
             wg_dict = self.ray_worker_group_cls(resource_pool=resource_pool, ray_cls_with_init=worker_dict_cls, **wg_kwargs)
+            print("After init WorkerGroup")
             spawn_wg = wg_dict.spawn(prefix_set=class_dict.keys())
             all_wg.update(spawn_wg)
 
