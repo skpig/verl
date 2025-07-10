@@ -27,8 +27,7 @@ jobs:
           - sudo pip3 install byted-omnistore==0.7.14
           - sudo pip3 install pylatexenc
           - sudo pip3 install openai
-          - sudo pip3 install pydantic==1.10.15
-          - sudo pip3 install pytest-xdist
+          - sudo pip3 install pytest-xdist pytest-timeout
 
       - name: agents
         commands:
@@ -39,7 +38,7 @@ jobs:
           - pytest -n 4 -v tests/agents/test_example_env.py tests/agents/test_example_plugin.py tests/agents/test_query_plugin.py tests/agents/test_plugin_manager.py tests/agents/test_tag_matcher.py
           - ray stop --force
           - ray start --num-cpus=100 --head
-          - pytest -n 4 -v tests/agents/test_e2e_gen.py tests/agents/test_call_server_in_rollout_actor.py tests/agents/test_reward_plugin.py
+          - pytest -n 4 -v -x --timeout=600 tests/agents/test_e2e_gen.py tests/agents/test_call_server_in_rollout_actor.py tests/agents/test_reward_plugin.py
           - ray stop --force
 
       - name: rollout
@@ -52,7 +51,6 @@ jobs:
           - ray stop --force
           - ray start --num-cpus=100 --head
           - |
-            pytest -n 2 -v tests/rollout/test_rollout_manager.py
-            pytest -n 2 -v tests/rollout/test_elastic_rollout.py
+            pytest -n 2 -v --timeout=600 tests/rollout/test_rollout_manager.py
+            pytest -n 2 -v --timeout=600 tests/rollout/test_elastic_rollout.py
           - ray stop --force
-

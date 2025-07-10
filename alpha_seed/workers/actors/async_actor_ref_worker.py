@@ -16,6 +16,7 @@ The main entry point to run the PPO algorithm
 """
 
 import copy
+import time
 from typing import Union, List
 import json
 from contextlib import nullcontext
@@ -1376,6 +1377,8 @@ class AsyncActorRolloutRefWorker(Worker):
             return
         if sleep:
             # 让engine停下来
+            while (self.rollout.gen_loop_exited.is_set()):
+                time.sleep(1)
             with self.rollout.inference_engine.update_weights_lock:
                 self.rollout.stop_event.set()
             # 让engine等待下一次weights loaded

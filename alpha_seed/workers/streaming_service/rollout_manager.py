@@ -23,7 +23,7 @@ from ray import ObjectRef
 from alpha_seed.workers.agents.executor import RayActorExecutor, ExecutorBase, LocalExecutor
 from alpha_seed.workers.streaming_service.elastic_rollout_manager import ElasticRolloutManager
 from alpha_seed.workers.streaming_service.rollout_proxy import FixedReplicatedRayWorkerGroupAdapter, \
-    RolloutWorkerGroupProxy, BalancedRolloutWorkerGroupProxy
+    RolloutWorkerGroupProxy, BalancedRolloutWorkerGroupProxy, CombinedRayWorkerGroupAdapter
 from alpha_seed.workers.streaming_service.streaming_rollout import RemoteAsyncXPerfGPTRollout
 from mono_rl import DataProto
 from mono_rl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, RayResourcePool
@@ -87,34 +87,18 @@ def _update_standalone_weights(hybrid_wg,
     hybrid_wg.release_param_and_cache()
 
 
-def update_standalone_from_hybrid_with_lock(hybrid_wg_lock, hybrid_wg, standalone_wg):
-    with server_update_weights_ctx(standalone_wg):
-        with hybrid_wg_lock:
-            _update_standalone_weights(hybrid_wg, standalone_wg, "standalone_rollout")
-
-
 @contextmanager
 def server_update_weights_ctx(server_wg):
-    toggled = False
-    try:
-        server_wg.stop_server_before_weights_update()
-        toggled = True
-        yield
-    finally:
-        if toggled:
-            server_wg.restart_server_after_weights_update()
+    server_wg.stop_server_before_weights_update()
+    yield
+    server_wg.restart_server_after_weights_update()
 
 
 @contextmanager
 def hybrid_enable_server_ctx(hybrid_wg):
-    toggled = False
-    try:
-        hybrid_wg.toggle_inference_server_state(sleep=False)
-        toggled = True
-        yield
-    finally:
-        if toggled:
-            hybrid_wg.toggle_inference_server_state(sleep=True)
+    hybrid_wg.toggle_inference_server_state(sleep=False)
+    yield
+    hybrid_wg.toggle_inference_server_state(sleep=True)
 
 
 class RolloutManager:
@@ -157,20 +141,14 @@ class RolloutManager:
         self.rollout_pool = None
         self.train_standalone_wg = None
         self.val_standalone_wg = None
-        self.hybrid_wg_proxy = None
-        self.train_standalone_wg_proxy = None
-        self.hybrid_val_wg_proxy = None
-        self.val_wg_proxy = None
+        self.train_rollout_proxy = None
+        self.val_rollout_proxy = None
+        self.train_replicas: CombinedRayWorkerGroupAdapter = None
+        self.val_replicas: CombinedRayWorkerGroupAdapter = None
 
         # xperf openai servers
-        self.hybrid_rollout_server = None
-        self.standalone_rollout_server = None
-        self.hybrid_validation_rollout_server = None
-        self.validation_rollout_server = None
-        if self.config.actor_rollout_ref.rollout.mode == "server":
-            self.request_manager_router = ray.get_actor(f'RequestManagerRouter')
-        else:
-            self.request_manager_router = None
+        self.train_rollout_server = None
+        self.val_rollout_server = None
         self._hybrid_wg_lock = threading.Lock()
 
     def _init_servers(self):
@@ -205,14 +183,10 @@ class RolloutManager:
         if not self._use_server:
             return
 
-        if self.hybrid_wg_proxy is not None:
-            self.hybrid_wg_proxy.stop()
-        if self.train_standalone_wg_proxy is not None:
-            self.train_standalone_wg_proxy.stop()
-        if self.hybrid_val_wg_proxy is not None:
-            self.hybrid_val_wg_proxy.stop()
-        if self.val_wg_proxy is not None:
-            self.val_wg_proxy.stop()
+        if self.train_rollout_proxy is not None:
+            self.train_rollout_proxy.stop()
+        if self.val_rollout_proxy is not None:
+            self.val_rollout_proxy.stop()
 
     def _init_standalone_comms(self):
         # 初始化参数更新的方式，其中elastic rollout必须只能用ucx
@@ -280,11 +254,10 @@ class RolloutManager:
             return
         max_workers = self.config.streaming_rollout.agent.max_workers
         worker_max_concurrency = self.config.streaming_rollout.agent.worker_max_concurrency
-        use_standalone_only = self.config.actor_rollout_ref.rollout.complete_ratio == 0
         executor_cls = self.config.streaming_rollout.agent.executor_class
         self.rollout_server_started.wait()
-        server_host = self.standalone_rollout_server.host if use_standalone_only else self.hybrid_rollout_server.host
-        server_port = self.standalone_rollout_server.port if use_standalone_only else self.hybrid_rollout_server.port
+        server_host = self.train_rollout_server.host
+        server_port = self.train_rollout_server.port
         ExecutorCls = None
         if executor_cls == "LocalExecutor":
             ExecutorCls = LocalExecutor
@@ -340,7 +313,7 @@ class RolloutManager:
         :param batch: current training input batch
         :param step: current training step
         :param save_dataproto_fn: function for saving dataproto in hdfs for resuming
-        :param is_warmup_step: if True, wait all running batch to finish
+        :param is_warmup_step: if True, batch is used to warmup rollout pool
         :param metrics: metrics dict
         :return: batch to be train after generation
         """
@@ -353,22 +326,20 @@ class RolloutManager:
 
         gen_batch, batch = self._prepare_gen_batch(batch, step, is_train=True)
         metrics = {} if metrics is None else metrics
-        complete_ratio = (1.0 if is_warmup_step else self.config.actor_rollout_ref.rollout.get("complete_ratio", 1.0))
+        complete_ratio = self.config.actor_rollout_ref.rollout.get("complete_ratio", 1.0)
+        if is_warmup_step:
+            assert complete_ratio == 0.0, 'warmup_step should only be used for fully async, you should set rollout_pool.warmup_step=0 with complete_ratio>0!'
         gen_batch.meta_info.update({"complete_ratio": complete_ratio})
 
         if self._use_server:
             self.rollout_server_started.wait()
-            self.hybrid_wg_proxy.step(step)
-            if self.train_standalone_wg_proxy is not None:
-                self.train_standalone_wg_proxy.step(step)
-            # assert complete_ratio in (0.0, 1.0), "complete_ratio must be 1.0 or 0.0 for server mode"
+            self.train_rollout_proxy.step(step)
             # hybrid server mode
             gen_batch.union(batch)
             ready_batch, self.pending_batch = self._train_server_gen(gen_batch,
                                                                      step=step,
                                                                      metrics=metrics,
                                                                      pending_batch=copy.copy(self.pending_batch),
-                                                                     use_standalone_only=(complete_ratio == 0.0),
                                                                      is_warmup_step=is_warmup_step,
                                                                      complete_ratio=complete_ratio)
         else:
@@ -388,7 +359,8 @@ class RolloutManager:
         pprint(
             f"train step #{step} gen complete {finished_num}, incomplete {incomplete_num}, pending {len(self.pending_batch)}"
         )
-        RolloutPool.dynamic_call(self.rollout_pool, "fill_rollout_pool", ready_batch)
+        if len(ready_batch) > 0:
+            RolloutPool.dynamic_call(self.rollout_pool, "fill_rollout_pool", ready_batch)
 
         if is_warmup_step:
             print(f"warmup gen step #{step}, elapsed: {time.time() - step_start}")
@@ -424,8 +396,8 @@ class RolloutManager:
         metrics["rollout/training_batch"] = len(batch)
 
         # collect metrics from proxy on server mode
-        if self._use_server and self.train_standalone_wg_proxy is not None:
-            proxy_metrics = self.train_standalone_wg_proxy.get_step_metrics()
+        if self._use_server:
+            proxy_metrics = self.train_rollout_proxy.get_step_metrics()
             metrics.update(proxy_metrics)
 
         pprint(f"training batches {len(batch)}.")
@@ -618,33 +590,25 @@ class RolloutManager:
         return ready_batch, standalone_batch, pending_batch
 
     def _train_server_gen(self, gen_batch: DataProto, step: int, metrics: Dict, pending_batch: List[DataProto],
-                          use_standalone_only: bool, is_warmup_step: bool,
-                          complete_ratio: float) -> Tuple[List[DataProto], List[DataProto]]:
+                          is_warmup_step: bool, complete_ratio: float) -> Tuple[List[DataProto], List[DataProto]]:
         """streaming gen with server, only for train"""
-        # choose rollout destination
-        if use_standalone_only:
-            ray.get(self.request_manager_router.set_dest_req_manager_name.remote(f"standalone_rollout"))
-        else:
-            ray.get(self.request_manager_router.set_dest_req_manager_name.remote(f"hybrid_rollout"))
-
-        if use_standalone_only:
+        if self.train_standalone_wg is not None:
             with Timer(name="update_rollout_server", logger=None) as timer:
-                update_standalone_from_hybrid_with_lock(hybrid_wg_lock=self._hybrid_wg_lock,
-                                                        hybrid_wg=self.hybrid_wg,
-                                                        standalone_wg=self.train_standalone_wg)
+                self.update_standalone_server_weights(is_train=True)
             print(f"[INFO] {step} generate streaming[update weights and restart] {timer.last}")
             metrics["timing/update_rollout_server"] = timer.last
 
         ready_batch = []
-        server_host = self.standalone_rollout_server.host if use_standalone_only else self.hybrid_rollout_server.host
-        server_port = self.standalone_rollout_server.port if use_standalone_only else self.hybrid_rollout_server.port
         handler = select_handler_fn(self.config.rollout_server.handler,
                                     external_lib=self.config.rollout_server.external_lib)
-        context = TaskContext(config=self.config,
-                              global_step=step,
-                              server_host=server_host,
-                              server_port=server_port,
-                              is_train=True)
+        context = TaskContext(
+            config=self.config,
+            tokenizer=self.tokenizer,
+            global_step=step,
+            server_host=self.train_rollout_server.host,
+            server_port=self.train_rollout_server.port,
+            is_train=True,
+        )
 
         async def submit_and_wait():
             # submit the training batch to the rollout server
@@ -658,46 +622,60 @@ class RolloutManager:
             print(f"[INFO] {step} train generate server[submit], batch size: {len(gen_batch)}, {time.time() - start}")
             start = time.time()
 
-            if is_warmup_step or complete_ratio == 1.0:
-                # for warmup, wait all ready
-                await asyncio.gather(*running_batch)
+            if complete_ratio > 0:
+                # for warmup, if fully_async, waiting for pool is handled in train_generate,
+                # for non-fully_async, wait all ready and fill the pool here
+                if is_warmup_step:
+                    await asyncio.gather(*running_batch)
 
-            print(
-                f"[INFO] {step} train generate server[as_completed], batch size: {len(gen_batch)}, {time.time() - start}"
-            )
-            start = time.time()
+                print(
+                    f"[INFO] {step} train generate server[as_completed], batch size: {len(gen_batch)}, {time.time() - start}"
+                )
+                start = time.time()
 
-            finished = 0
-            for future in asyncio.as_completed(running_batch):
-                # 获取已完成结果
-                await future
-                finished += 1
+                finished = 0
+                for future in asyncio.as_completed(running_batch):
+                    # 获取已完成结果
+                    await future
+                    finished += 1
 
-                # 计算完成比例
-                if finished / len(running_batch) >= complete_ratio:
-                    print(f"达到{complete_ratio*100}%完成率，提前退出")
-                    break
-                # 未完成的先不cancel
-            done, pending = await asyncio.wait(running_batch + pending_batch,
-                                               timeout=0,
-                                               return_when=asyncio.ALL_COMPLETED)
-            print(f"{len(done)=}, {len(pending)=}")
+                    # 计算完成比例
+                    if finished / len(running_batch) >= complete_ratio:
+                        print(f"达到{complete_ratio*100}%完成率，提前退出")
+                        break
+                done, pending = await asyncio.wait(running_batch + pending_batch,
+                                                   timeout=0,
+                                                   return_when=asyncio.ALL_COMPLETED)
+                print(f"[INFO] {len(done)=}, {len(pending)=}")
+            else:
+                all_batch = running_batch + pending_batch
+                if is_warmup_step:
+                    done, pending = [], all_batch
+                else:
+                    done, pending = await asyncio.wait(all_batch, timeout=0, return_when=asyncio.ALL_COMPLETED)
+                    while len(done) < len(gen_batch) and len(pending) > 0:
+                        new_done, pending = await asyncio.wait(list(pending), return_when=asyncio.FIRST_COMPLETED)
+                        done.update(new_done)
+
+                    done, pending = list(done), list(pending)
+                    # For fully async, each step only fill the pool with the same batch size of gen_batch,
+                    # If more than len(gen_batch) items are done, append them to pending and they can be used in next steps
+                    prev_done_cnt = len(done)
+                    prev_pending_cnt = len(pending)
+                    if len(done) > len(gen_batch):
+                        pending.extend(done[len(gen_batch):])
+                        done = done[:len(gen_batch)]
+                    print(
+                        f"[INFO] fully async #{step} real_done:{prev_done_cnt} -> done:{len(done)}, real_pending:{prev_pending_cnt} -> {len(pending)}"
+                    )
+
+            done, pending = list(done), list(pending)
             return done, pending
 
-        with nullcontext() if use_standalone_only else self._hybrid_wg_lock:
-            with nullcontext() if use_standalone_only else hybrid_enable_server_ctx(self.hybrid_wg):
-                done, pending = asyncio.run_coroutine_threadsafe(submit_and_wait(), self.loop).result()
-
-        if complete_ratio > 0.0 and complete_ratio < 1.0:
-            # 如果是semi-sync，在这里才会update standalone，保持跟batch mode行为一致
-            with Timer(name="update_rollout_server", logger=None) as timer:
-                update_standalone_from_hybrid_with_lock(hybrid_wg_lock=self._hybrid_wg_lock,
-                                                        hybrid_wg=self.hybrid_wg,
-                                                        standalone_wg=self.train_standalone_wg)
-            print(f"[INFO] {step} generate streaming[update weights and restart] {timer.last}")
-            metrics["timing/update_rollout_server"] = timer.last
-
-            self.transfer_unfinished_request("standalone_rollout")
+        with self.enable_hybrid_server_gen_ctx(is_train=True):
+            # print(f"[INFO] {step} generate streaming[update weights and restart] {timer.last}")
+            # metrics["timing/update_rollout_server"] = timer.last
+            done, pending = asyncio.run_coroutine_threadsafe(submit_and_wait(), self.loop).result()
 
         pending = list(pending)
         results = []
@@ -721,17 +699,10 @@ class RolloutManager:
                              metrics,
                              self.logger,
                              step,
-                             prefix="standalone" if use_standalone_only else "hybrid")
+                             prefix="standalone" if complete_ratio == 0.0 else "hybrid")
         metrics["rollout/standalone_completed_batch"] = finished_num
         metrics["rollout/standalone_incompleted_batch"] = len(pending_batch) + len(gen_batch) - finished_num
         return ready_batch, pending
-
-    def transfer_unfinished_request(self, dest_request_manager: str):
-        print(f"[INFO] Transfer unfinished requests from hybrid_rollout to {dest_request_manager}")
-        ray.get(self.request_manager_router.set_dest_req_manager_name.remote(dest_request_manager))
-        self.hybrid_wg_proxy.pause_loop()
-        self.hybrid_wg_proxy.release_running_queris()
-        self.hybrid_wg_proxy.continue_loop()
 
     def _val_batch_gen(self, gen_batch: DataProto, step: int, metrics: Dict, is_standalone: bool) -> DataProto:
         if is_standalone:
@@ -762,24 +733,23 @@ class RolloutManager:
 
     def _val_server_gen(self, gen_batch: DataProto, step: int, metrics: Dict, is_standalone: bool) -> DataProto:
         self.rollout_server_started.wait()
-        if is_standalone:
+        if self.val_standalone_wg is not None:
             with Timer(name="update_rollout_server", logger=None) as timer:
-                with server_update_weights_ctx(self.val_standalone_wg):
-                    with self._hybrid_wg_lock:
-                        _update_standalone_weights(self.hybrid_wg, self.val_standalone_wg, "standalone_validator",
-                                                   self.threadsafe_nccl_comm)
+                self.update_standalone_server_weights(is_train=False)
             print(f"[INFO] {step} val generate server[update weights and restart] {timer.last}")
             metrics["timing/update_rollout_server"] = timer.last
 
         ready_batch = []
         handler = select_handler_fn(self.config.rollout_server.handler,
                                     external_lib=self.config.rollout_server.external_lib)
-        server = self.validation_rollout_server if is_standalone else self.hybrid_validation_rollout_server
-        context = TaskContext(config=self.config,
-                              global_step=step,
-                              server_host=server.host,
-                              server_port=server.port,
-                              is_train=False)
+        context = TaskContext(
+            config=self.config,
+            tokenizer=self.tokenizer,
+            global_step=step,
+            server_host=self.val_rollout_server.host,
+            server_port=self.val_rollout_server.port,
+            is_train=False,
+        )
 
         async def _submit_and_wait():
             # submit the training batch to the rollout server
@@ -795,9 +765,8 @@ class RolloutManager:
             print(f"[INFO] {step} val gen server[as_completed], batch size: {len(gen_batch)}")
             return ready_batch
 
-        with nullcontext() if is_standalone else self._hybrid_wg_lock:
-            with nullcontext() if is_standalone else hybrid_enable_server_ctx(self.hybrid_wg):
-                ready_batch = asyncio.run_coroutine_threadsafe(_submit_and_wait(), self.loop).result()
+        with nullcontext() if is_standalone else self.enable_hybrid_server_gen_ctx(is_train=False):
+            ready_batch = asyncio.run_coroutine_threadsafe(_submit_and_wait(), self.loop).result()
 
         for res in ready_batch:
             if isinstance(res, Exception):
@@ -908,40 +877,67 @@ class RolloutManager:
 
         # train
         # create replicated worker group and rollout proxy
-        self.hybrid_wg_proxy = ProxyClass(
-            FixedReplicatedRayWorkerGroupAdapter(self.hybrid_wg, gen_tp_size, 'actor_rollout_ref'), [],
-            'hybrid_rollout', poll_interval)
-        self.hybrid_rollout_server = await listen('hybrid_rollout')
-
-        if self.train_standalone_wg is not None:
-            self.train_standalone_wg_proxy = ProxyClass(
-                FixedReplicatedRayWorkerGroupAdapter(self.train_standalone_wg, gen_tp_size, 'standalone_rollout'), [],
-                'standalone_rollout', poll_interval)
-            self.standalone_rollout_server = await listen('standalone_rollout')
+        train_replicas_dict = {}
+        train_replicas_dict['hybrid'] = FixedReplicatedRayWorkerGroupAdapter(self.hybrid_wg, gen_tp_size,
+                                                                             'actor_rollout_ref')
 
         if self._rollout_elastic_enabled:
             assert self.weights_communicator == 'ucx', 'weights_communicator must be "ucx" when using elastic rollout'
             assert self.train_standalone_wg is None, 'should not initialize train standalone when using elastic rollout'
-            # 替换掉train_standalone_wg，接口一致
-            self.train_standalone_wg = self.elastic_rollout_mgr.init_elastic_rollout()
-            self.train_standalone_wg_proxy = self.train_standalone_wg
-            self.standalone_rollout_server = await listen('standalone_rollout')
+            self.train_replicas = CombinedRayWorkerGroupAdapter(train_replicas_dict)
+            self.train_rollout_proxy, self.train_standalone_wg = self.elastic_rollout_mgr.init_elastic_rollout(
+                hybrid_replica=self.train_replicas)
+        else:
+            if self.train_standalone_wg is not None:
+                train_replicas_dict['standalone'] = FixedReplicatedRayWorkerGroupAdapter(
+                    self.train_standalone_wg, gen_tp_size, 'standalone_rollout')
+            self.train_replicas = CombinedRayWorkerGroupAdapter(train_replicas_dict)
+            self.train_rollout_proxy = ProxyClass(self.train_replicas, [], 'train_rollout', poll_interval)
+
+        # Turn off hybrid for gen by default (i.e. train mode initially)
+        self.train_replicas.set_replica_ready_state(name='hybrid', ready=False)
+
+        self.train_rollout_server = await listen('train_rollout')
 
         # validation on hybrid engine
-        self.hybrid_val_wg_proxy = ProxyClass(
-            FixedReplicatedRayWorkerGroupAdapter(self.hybrid_wg, gen_tp_size, 'actor_rollout_ref'), [],
-            'hybrid_validation', poll_interval)
-        self.hybrid_validation_rollout_server = await listen('hybrid_validation')
+        val_replicas_dict = {}
+        val_replicas_dict['hybrid'] = FixedReplicatedRayWorkerGroupAdapter(self.hybrid_wg, gen_tp_size,
+                                                                           'actor_rollout_ref')
 
         # standalone validation
         if self.val_standalone_wg is not None:
-            self.val_wg_proxy = ProxyClass(
-                FixedReplicatedRayWorkerGroupAdapter(self.val_standalone_wg, gen_tp_size, 'standalone_validator'), [],
-                'validation', poll_interval)
-            self.validation_rollout_server = await listen('validation')
+            val_replicas_dict['standalone'] = FixedReplicatedRayWorkerGroupAdapter(self.val_standalone_wg, gen_tp_size,
+                                                                                   'standalone_validator')
+
+        self.val_replicas = CombinedRayWorkerGroupAdapter(val_replicas_dict)
+        # Turn off hybrid for gen by default (i.e. train mode initially)
+        self.val_replicas.set_replica_ready_state(name='hybrid', ready=False)
+
+        self.val_rollout_proxy = ProxyClass(self.val_replicas, [], 'val_rollout', poll_interval)
+        self.val_rollout_server = await listen('val_rollout')
 
         self.rollout_server_started.set()
         print("[rollout manager] servers started.")
 
         # 不能让这个event loop结束，因为每个oai server里面还有一个自己的server_task
         await asyncio.Future()
+
+    @contextmanager
+    def enable_hybrid_server_gen_ctx(self, is_train: bool):
+        """Set hybrid server to be ready for gen"""
+        replicas = self.train_replicas if is_train else self.val_replicas
+        replicas.set_replica_ready_state(name='hybrid', ready=True)
+        with self._hybrid_wg_lock:
+            with hybrid_enable_server_ctx(self.hybrid_wg):
+                yield
+        replicas.set_replica_ready_state(name='hybrid', ready=False)
+        self.hybrid_wg.release_running_queries()
+
+    def update_standalone_server_weights(self, is_train: bool):
+        standalone_wg = self.train_standalone_wg if is_train else self.val_standalone_wg
+        standalone_role = "standalone_rollout" if is_train else "standalone_validator"
+
+        with server_update_weights_ctx(standalone_wg):
+            with self._hybrid_wg_lock:
+                _update_standalone_weights(self.hybrid_wg, standalone_wg, standalone_role,
+                                           self.threadsafe_nccl_comm if not is_train else None)

@@ -125,7 +125,7 @@ class AsyncXPerfGPTRolloutServer(OpenAIProxy):
         self.server_task = None
         self.host = None
         self.port = None
-        self.request_manager = RequestManagerRegisterCenter.get_router(request_manager_name)
+        self.request_manager = RequestManagerRegisterCenter.get(request_manager_name)
 
     async def create_chat_completion(self, request: ChatCompletionRequest, raw_request: Request):
         """

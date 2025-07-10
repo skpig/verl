@@ -6,7 +6,7 @@ import time
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import List, Optional, Dict, Union, Tuple
+from typing import List, Optional, Dict, Union, Tuple, Set
 
 import ray
 import torch
@@ -163,6 +163,206 @@ class FixedReplicatedRayWorkerGroupAdapter(ReplicatedRayWorkerGroup):
         return len(self.wgs)
 
 
+class CombinedRayWorkerGroupAdapter(ReplicatedRayWorkerGroup):
+
+    def __init__(self, replicas: Dict[str, ReplicatedRayWorkerGroup]):
+        assert all([isinstance(val, (ReplicatedRayWorkerGroup, ScalingRayWorkerGroup)) for val in replicas.values()])
+        self.replicas = replicas
+        self._replica_ready = {name: True for name in self.replicas}
+
+    @property
+    def guaranteed(self):
+        return self
+
+    def set_dead_callback(self, fn):
+        pass
+
+    def get_alive_worker_groups(self):
+        ret = {}
+        for replica in self.replicas.values():
+            ret.update(replica.get_alive_worker_groups())
+        return ret
+
+    def get_initialized_worker_groups(self):
+        ret = {}
+        for replica in self.replicas.values():
+            ret.update(replica.get_initialized_worker_groups())
+        return ret
+
+    def get_ready_worker_groups(self):
+        ret = {}
+        for name, replica in self.replicas.items():
+            if self._replica_ready[name]:
+                ret.update(replica.get_ready_worker_groups())
+        return ret
+
+    @property
+    def target_num_replicas(self) -> int:
+        return sum(
+            [replica.target_num_replicas for name, replica in self.replicas.items() if self._replica_ready[name]])
+
+    def set_replica_ready_state(self, name: str, ready: bool):
+        self._replica_ready[name] = ready
+
+    @property
+    def alive_worker_group_ids(self) -> Set[str]:
+        return set(self.get_alive_worker_groups().keys())
+
+    @property
+    def initialized_worker_group_ids(self) -> Set[str]:
+        return set(self.get_initialized_worker_groups().keys())
+
+    @property
+    def ready_worker_group_ids(self) -> Set[str]:
+        return set(self.get_ready_worker_groups().keys())
+
+
+class StandaloneRolloutWGAdapter:
+    """Provide the same api as standalone rollout worker group"""
+
+    def __init__(self, replicas):
+        self.replicas = replicas
+
+    def update_standalone_worker(self, role) -> List[ObjectRef]:
+        # update转发给所有initialized的worker，不用管其是否ready，一开始肯定不ready，需要update weights后才会ready
+        self._update_worker_start_ts = time.time() * 1e6
+        futs = []
+        for wg in self.replicas.get_initialized_worker_groups().values():
+            wg: Union[RayWorkerGroup, RemoteAsyncXPerfGPTRollout, AsyncActorRolloutRefWorker]
+            refs = wg.update_standalone_worker(role)
+            futs.append((wg, refs))
+        self.wait_ignore_actor_died(futs)
+        # 返回一个占位符即可
+        return [ray.put(None)]
+
+    def get_master_addr(self) -> List[DataProto]:
+        # 获取每个workergroup的每个rank的address
+        ret = []
+        key = "standalone_master_addr"
+        for wg in self.replicas.get_alive_worker_groups().values():
+            out = DataProto.from_dict(tensors={'mock': torch.tensor([[0]])}, meta_info={key: wg.master_address})
+            ret.extend([out] * wg.world_size)  # 先保证外部调用接口一致，给每个rank都返回一个master_addr，即使他们应该是相同的
+        return ret
+
+    def get_master_free_port(self) -> int:
+        for wg in self.replicas.get_alive_worker_groups().values():
+            # 返回任意一个即可
+            return wg.get_master_free_port()
+        assert False, "should have at least 1 alive worker group"
+
+    def update_standalone_worker(self, role) -> List[ObjectRef]:
+        # update转发给所有initialized的worker，不用管其是否ready，一开始肯定不ready，需要update weights后才会ready
+        self._update_worker_start_ts = time.time() * 1e6
+        futs = []
+        for wg in self.replicas.get_initialized_worker_groups().values():
+            wg: Union[RayWorkerGroup, RemoteAsyncXPerfGPTRollout, AsyncActorRolloutRefWorker]
+            refs = wg.update_standalone_worker(role)
+            futs.append((wg, refs))
+        self.wait_ignore_actor_died(futs)
+        # 返回一个占位符即可
+        return [ray.put(None)]
+
+    def update_standalone_worker_end(self):
+        # 通知server侧结束参数拉取
+        # 任意一个client通知即可，调用此方法时需要确保所有standalone rollout worker已经同步完参数
+        no_available_worker_retry = 0
+        max_no_available_worker_retry = 15
+        while True:
+            try:
+                # 注意这里必须用guaranteed去广播，因为其他best effort可能在广播过程中死掉，导致caller task runner那边 hang
+                all_initialized_workers = list(self.replicas.guaranteed.get_initialized_worker_groups().values())
+                if len(all_initialized_workers) == 0:
+                    raise NoAvailableWorker("no initialized workers during weights update or all actors died")
+                # any worker group sending will be ok
+                wg = random.choice(all_initialized_workers)
+                wg.update_standalone_worker_end()
+            except ActorDiedError:
+                # do nothing when actor dies unfortunately, try next run
+                time.sleep(0.1)
+            except NoAvailableWorker:
+                # underlying workers are still in liveness/readiness probe gap, wait for a bit more seconds
+                no_available_worker_retry += 1
+                if no_available_worker_retry > max_no_available_worker_retry:
+                    raise
+                time.sleep(1)
+                continue
+            else:
+                break
+        # evt = CompleteEvent(
+        #     pid='RolloutProxy',
+        #     tid='update',
+        #     cat='update weights',
+        #     name='update weights',
+        #     ts=self._update_worker_start_ts,
+        #     dur=time.time() * 1e6 - self._update_worker_start_ts,
+        # )
+        # self._tracer.trace(evt)
+
+    def stop_server_before_weights_update(self):
+        self._stop_server_ts = time.time() * 1e6
+        futs = []
+        for wg in self.replicas.get_initialized_worker_groups().values():
+            wg: RemoteAsyncXPerfGPTRollout
+            ref = wg.stop_server_before_weights_update_non_blocking()
+            futs.append((wg, ref))
+        self.wait_ignore_actor_died(futs)
+
+    def restart_server_after_weights_update(self):
+        futs = []
+        for wg in self.replicas.get_initialized_worker_groups().values():
+            wg: RemoteAsyncXPerfGPTRollout
+            ref = wg.restart_server_after_weights_update_non_blocking()
+            futs.append((wg, ref))
+        self.wait_ignore_actor_died(futs)
+
+        # evt = CompleteEvent(
+        #     pid='RolloutProxy',
+        #     tid='update',
+        #     cat='stop/start server',
+        #     name='stop/start server',
+        #     ts=self._stop_server_ts,
+        #     dur=time.time() * 1e6 - self._stop_server_ts,
+        # )
+        # self._tracer.trace(evt)
+
+    def wait_ignore_actor_died(self, refs: List[Tuple[RayWorkerGroup, List[ray.ObjectRef]]]):
+        obj_wg_map = {}
+        remaining = set()
+        ready = set()
+        for (wg, ref_list) in refs:
+            for obj in ref_list:
+                obj_wg_map[obj] = wg
+                remaining.add(obj)
+        total_count = len(remaining)  # noqa: py-spy
+
+        while remaining:
+            done, not_done = ray.wait(list(remaining), num_returns=len(remaining), timeout=1.0)
+            for obj in done:
+                try:
+                    ray.get(obj)
+                    ready.add(obj)
+                except ActorDiedError as e:
+                    caller = inspect.stack()[1].frame.f_code.co_name
+                    print(f"actor({e.actor_id}) died at function({caller}). ignore this as this is expected.")
+                except Exception as e:
+                    # for other exceptions, carefully check whether it's caused by actor recycling by auto-scaling
+                    # if the wg is scheduled to destroy, ignore all errors on it
+                    wg = obj_wg_map[obj]
+                    if not wg.is_destroying:
+                        raise
+                finally:
+                    remaining.discard(obj)
+
+            not_ready_wgs = set()
+            for obj in remaining:
+                not_ready_wgs.add(obj_wg_map[obj])
+            not_ready_wg_names_list = [wg.worker_names for wg in not_ready_wgs]  # noqa: py-spy
+            not_ready_count = len(not_ready_wg_names_list)  # noqa: py-spy
+
+            # Optional: avoid tight loop
+            time.sleep(0.1)
+
+
 class DebounceAccumulatedLogger:
 
     def __init__(self, log_interval_seconds=15., accumulated_type=int):
@@ -253,21 +453,6 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
         alive_worker_groups: Dict[str, RayWorkerGroup] = self.replicas.get_alive_worker_groups()
         return sum(w.world_size for w in alive_worker_groups.values())
 
-    def get_master_addr(self) -> List[DataProto]:
-        # 获取每个workergroup的每个rank的address
-        ret = []
-        key = "standalone_master_addr"
-        for wg in self.replicas.get_alive_worker_groups().values():
-            out = DataProto.from_dict(tensors={'mock': torch.tensor([[0]])}, meta_info={key: wg.master_address})
-            ret.extend([out] * wg.world_size)  # 先保证外部调用接口一致，给每个rank都返回一个master_addr，即使他们应该是相同的
-        return ret
-
-    def get_master_free_port(self) -> int:
-        for wg in self.replicas.get_alive_worker_groups().values():
-            # 返回任意一个即可
-            return wg.get_master_free_port()
-        assert False, "should have at least 1 alive worker group"
-
     def _worker_group_dead_callback(self, worker_group_ids: List[str]):
         # worker group任意死了之后，通知request manager将运行中的请求释放掉
         ready_worker_group_ids = self.replicas.ready_worker_group_ids
@@ -356,118 +541,6 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
 
             loop_cost = time.time() - t0  # noqa: for py-spy
             sleep_interval = max(0., self.poll_interval - loop_cost)
-
-    def update_standalone_worker(self, role) -> List[ObjectRef]:
-        # update转发给所有initialized的worker，不用管其是否ready，一开始肯定不ready，需要update weights后才会ready
-        self._update_worker_start_ts = time.time() * 1e6
-        futs = []
-        for wg in self.replicas.get_initialized_worker_groups().values():
-            wg: Union[RayWorkerGroup, RemoteAsyncXPerfGPTRollout, AsyncActorRolloutRefWorker]
-            refs = wg.update_standalone_worker(role)
-            futs.append((wg, refs))
-        self.wait_ignore_actor_died(futs)
-        # 返回一个占位符即可
-        return [ray.put(None)]
-
-    def update_standalone_worker_end(self):
-        # 通知server侧结束参数拉取
-        # 任意一个client通知即可，调用此方法时需要确保所有standalone rollout worker已经同步完参数
-        no_available_worker_retry = 0
-        max_no_available_worker_retry = 15
-        while True:
-            try:
-                # 注意这里必须用guaranteed去广播，因为其他best effort可能在广播过程中死掉，导致caller task runner那边 hang
-                all_initialized_workers = list(self.replicas.guaranteed.get_initialized_worker_groups().values())
-                if len(all_initialized_workers) == 0:
-                    raise NoAvailableWorker("no initialized workers during weights update or all actors died")
-                # any worker group sending will be ok
-                wg = random.choice(all_initialized_workers)
-                wg.update_standalone_worker_end()
-            except ActorDiedError:
-                # do nothing when actor dies unfortunately, try next run
-                time.sleep(0.1)
-            except NoAvailableWorker:
-                # underlying workers are still in liveness/readiness probe gap, wait for a bit more seconds
-                no_available_worker_retry += 1
-                if no_available_worker_retry > max_no_available_worker_retry:
-                    raise
-                time.sleep(1)
-                continue
-            else:
-                break
-        evt = CompleteEvent(
-            pid='RolloutProxy',
-            tid='update',
-            cat='update weights',
-            name='update weights',
-            ts=self._update_worker_start_ts,
-            dur=time.time() * 1e6 - self._update_worker_start_ts,
-        )
-        self._tracer.trace(evt)
-
-    def stop_server_before_weights_update(self):
-        self._stop_server_ts = time.time() * 1e6
-        futs = []
-        for wg in self.replicas.get_initialized_worker_groups().values():
-            wg: RemoteAsyncXPerfGPTRollout
-            ref = wg.stop_server_before_weights_update_non_blocking()
-            futs.append((wg, ref))
-        self.wait_ignore_actor_died(futs)
-
-    def restart_server_after_weights_update(self):
-        futs = []
-        for wg in self.replicas.get_initialized_worker_groups().values():
-            wg: RemoteAsyncXPerfGPTRollout
-            ref = wg.restart_server_after_weights_update_non_blocking()
-            futs.append((wg, ref))
-        self.wait_ignore_actor_died(futs)
-
-        evt = CompleteEvent(
-            pid='RolloutProxy',
-            tid='update',
-            cat='stop/start server',
-            name='stop/start server',
-            ts=self._stop_server_ts,
-            dur=time.time() * 1e6 - self._stop_server_ts,
-        )
-        self._tracer.trace(evt)
-
-    def wait_ignore_actor_died(self, refs: List[Tuple[RayWorkerGroup, List[ray.ObjectRef]]]):
-        obj_wg_map = {}
-        remaining = set()
-        ready = set()
-        for (wg, ref_list) in refs:
-            for obj in ref_list:
-                obj_wg_map[obj] = wg
-                remaining.add(obj)
-        total_count = len(remaining)  # noqa: py-spy
-
-        while remaining:
-            done, not_done = ray.wait(list(remaining), num_returns=len(remaining), timeout=1.0)
-            for obj in done:
-                try:
-                    ray.get(obj)
-                    ready.add(obj)
-                except ActorDiedError as e:
-                    caller = inspect.stack()[1].frame.f_code.co_name
-                    print(f"actor({e.actor_id}) died at function({caller}). ignore this as this is expected.")
-                except Exception as e:
-                    # for other exceptions, carefully check whether it's caused by actor recycling by auto-scaling
-                    # if the wg is scheduled to destroy, ignore all errors on it
-                    wg = obj_wg_map[obj]
-                    if not wg.is_destroying:
-                        raise
-                finally:
-                    remaining.discard(obj)
-
-            not_ready_wgs = set()
-            for obj in remaining:
-                not_ready_wgs.add(obj_wg_map[obj])
-            not_ready_wg_names_list = [wg.worker_names for wg in not_ready_wgs]  # noqa: py-spy
-            not_ready_count = len(not_ready_wg_names_list)  # noqa: py-spy
-
-            # Optional: avoid tight loop
-            time.sleep(0.1)
 
     def stop(self):
         self._loop_should_stop.set()

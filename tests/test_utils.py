@@ -4,7 +4,7 @@ import subprocess
 from pathlib import Path
 from omegaconf import OmegaConf
 
-from alpha_seed.workers.streaming_service.rollout_request_manager import RequestManager, RequestManagerRegisterCenter, RequestManagerRouter
+from alpha_seed.workers.streaming_service.rollout_request_manager import RequestManager, RequestManagerRegisterCenter
 from verl.utils.tracking import Tracking
 from verl.utils.fs import copy_local_path_from_hdfs
 from mono_rl.single_controller.ray import RayResourcePool, RayClassWithInitArgs, RayWorkerGroup
@@ -160,13 +160,9 @@ def create_rollout_manager(config):
     # server 模式下，gen的架构均为RequestManager+Proxy+ReplicatedWorker，所以这里把RequestManager启动起来
     if config.actor_rollout_ref.rollout.mode == "server":
         ray.get([
-            rm_reg.create.remote('hybrid_rollout'),
-            rm_reg.create.remote('standalone_rollout'),
-            rm_reg.create.remote('validation'),
-            rm_reg.create.remote('hybrid_validation'),
+            rm_reg.create.remote('train_rollout'),
+            rm_reg.create.remote('val_rollout'),
         ])
-        complete_ratio = config.actor_rollout_ref.rollout.get('complete_ratio', 1.0)
-        ray.get(rm_reg.create_router.remote(complete_ratio))
 
     logger = get_logger(config)
     tokenizer = get_tokenizer(config)

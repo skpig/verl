@@ -158,7 +158,7 @@ def test_train_generate(set_common_envs, gpu_allocator, ray_fixture, complete_ra
         for i in range(3):
             start = time.time()
             batch = copy.deepcopy(input_batch)
-            is_warmup_step = i == 0
+            is_warmup_step = i == 0 and complete_ratio == 0.0
             batch = rollout_manager.train_generate(batch,
                                                    step=i,
                                                    save_dataproto_fn=mock_save_dataproto,
@@ -233,7 +233,7 @@ def test_streaming_train_val(set_common_envs, gpu_allocator, ray_fixture, is_ser
     _ = rollout_manager.train_generate(copy.deepcopy(input_batch),
                                        step=0,
                                        save_dataproto_fn=mock_save_dataproto,
-                                       is_warmup_step=True)
+                                       is_warmup_step=config.actor_rollout_ref.rollout.complete_ratio == 0.0)
     warmup_time = time.time() - start
 
     def val_thread_fn():

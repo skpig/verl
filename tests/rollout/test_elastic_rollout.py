@@ -147,8 +147,7 @@ def test_train_elastic_generate(set_common_envs, gpu_allocator, ray_fixture, com
                                                save_dataproto_fn=mock_save_dataproto,
                                                is_warmup_step=True)
         # scale up
-        proxy: RolloutWorkerGroupProxy = rollout_manager.train_standalone_wg
-        refs = proxy.replicas.scale_up(2)
+        elastic_replica = rollout_manager.train_standalone_wg.replicas
 
         # step 2
         batch = copy.deepcopy(input_batch)
@@ -157,13 +156,11 @@ def test_train_elastic_generate(set_common_envs, gpu_allocator, ray_fixture, com
                                                save_dataproto_fn=mock_save_dataproto,
                                                is_warmup_step=False)
 
-        # wait for previous scaling
-        ray.get(refs)
         # wait for gen a bit
         time.sleep(4)
 
         # scale down
-        ray.get(proxy.replicas.scale_down(1))
+        ray.get(elastic_replica.scale_down(1))
         time.sleep(4)
 
         # step 3

@@ -6,7 +6,7 @@ from ray import ObjectRef
 
 from alpha_seed.utils.server_client import is_local_ray_instance
 from alpha_seed.workers.streaming_service.auto_scaling import ScalePolicyConfig, HorizontalAutoScaling
-from alpha_seed.workers.streaming_service.rollout_proxy import BalancedRolloutWorkerGroupProxy
+from alpha_seed.workers.streaming_service.rollout_proxy import BalancedRolloutWorkerGroupProxy, CombinedRayWorkerGroupAdapter, StandaloneRolloutWGAdapter
 from alpha_seed.workers.streaming_service.streaming_rollout import ElasticAsyncXPerfGPTRollout
 from mono_rl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, RayResourcePool
 from mono_rl.single_controller.ray.replicated_worker_group import ReplicatedRayWorkerGroup, ScalingRayWorkerGroup
@@ -23,7 +23,7 @@ class ElasticRolloutManager:
     def set_hybrid_rollout_address(self, hybrid_rollout_address):
         self._hybrid_rollout_addresses_fut = hybrid_rollout_address
 
-    def init_elastic_rollout(self):
+    def init_elastic_rollout(self, hybrid_replica: CombinedRayWorkerGroupAdapter):
         poll_interval = self.config.streaming_rollout.proxy.poll_internal_seconds
         rebalance_threshold = self.config.streaming_rollout.proxy.rebalance_threshold
         # 每个rollout_worker用1个gpu，每个gpu对应1个rank
@@ -106,10 +106,15 @@ class ElasticRolloutManager:
             name_prefix=f'sr_elastic_')
         best_effort_replicas = ReplicatedRayWorkerGroup(rollout_cls, elastic_res_pool, elastic_model_setup_comm)
         # 两个副本组合并一起组成伸缩组
-        replicas = ScalingRayWorkerGroup(min_guaranteed_replicas, best_effort_replicas)
+        elastic_replicas = ScalingRayWorkerGroup(min_guaranteed_replicas, best_effort_replicas)
+        # 组合 hybrid replica
+        replicas = CombinedRayWorkerGroupAdapter({
+            'hybrid': hybrid_replica,
+            'elastic': elastic_replicas,
+        })
         # 封装给worker group的接口代理
-        rollout_proxy = BalancedRolloutWorkerGroupProxy(replicas, hybrid_rollout_addrs, 'standalone_rollout',
-                                                        poll_interval, rebalance_threshold)
+        rollout_proxy = BalancedRolloutWorkerGroupProxy(replicas, hybrid_rollout_addrs, 'train_rollout', poll_interval,
+                                                        rebalance_threshold)
 
         # initialize rollout horizontal auto scaling control handle
         elastic_pool_name = self.config.streaming_rollout.elastic.elastic_pool_name
@@ -122,8 +127,9 @@ class ElasticRolloutManager:
             min_replicas=self.config.streaming_rollout.elastic.min_replicas,
             max_replicas=self.config.streaming_rollout.elastic.max_replicas,
         )
-        self.standalone_rollout_ha = HorizontalAutoScaling(replicas,
+        self.standalone_rollout_ha = HorizontalAutoScaling(elastic_replicas,
                                                            elastic_pool_name,
                                                            policy,
                                                            metric_source=rollout_proxy)
-        return rollout_proxy
+        self.standalone_rollout_wg = StandaloneRolloutWGAdapter(elastic_replicas)
+        return rollout_proxy, self.standalone_rollout_wg
