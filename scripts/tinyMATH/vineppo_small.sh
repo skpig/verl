@@ -1,17 +1,20 @@
-# BASE_MODEL=${MY_MODEL_DIR}Qwen/Qwen2.5-3B
-# TEMPLATE_TYPE=base # or chat
-BASE_MODEL=${MY_MODEL_DIR}Qwen/Qwen2.5-1.5B-Instruct
-TEMPLATE_TYPE=chat # or chat
-# TRAIN_FILE="${MY_DATA_DIR}Eurus-2-RL-Data/train.parquet"
-# TEST_FILES="['${MY_DATA_DIR}Eurus-2-RL-Data/test.parquet', '${MY_DATA_DIR}MATH-500/test.parquet', '${MY_DATA_DIR}aimo-validation-amc/test.parquet']"
+MY_CKPT_DIR=/mnt/hdfs/huangbaizhou/tmp/ckpt/
+BASE_MODEL=${MY_MODEL_DIR}Qwen/Qwen2.5-3B-Instruct
+TEMPLATE_TYPE=chat
 TRAIN_FILE="${MY_DATA_DIR}DAPO-Math-17k/train.parquet"
 TEST_FILES="['${MY_DATA_DIR}DAPO-Math-17k/test.parquet', '${MY_DATA_DIR}MATH-500/test.parquet', '${MY_DATA_DIR}aimo-validation-amc/test.parquet']"
 
+# BASE_MODEL=/tmp/pretrain/Qwen/Qwen2.5-3B-Instruct
+# TEMPLATE_TYPE=chat # or chat# TRAIN_FILE="${MY_DATA_DIR}Eurus-2-RL-Data/train.parquet"
+# gsm8k_train_path=$HOME/data/gsm8k/train.parquet
+# gsm8k_test_path=$HOME/data/gsm8k/test.parquet
+# train_files="['$gsm8k_train_path']"
+# test_files="['$gsm8k_test_path']"
+
 RUN_ID=$1
+WANDB_VERSION=bwandb
 
 # Model settings
-# total rollouts: ROLLOUT_N * BATCH_SIZE * REASONING_STEPS * MC_ROLLOUT_N = 8 * 64 * 4 * 6 ~= 16 * 512
-# total updates: ROLLOUT_N * BATCH_SIZE * INNER_EPOCHS // MINI_BSZ = 16
 PROMPT_ID=$2
 STEP_SEGMENT=$3
 ROLLOUT_N=8
@@ -19,29 +22,26 @@ INNER_EPOCHS=3 # original setup is 2
 MC_ROLLOUT_N=6 # under the assumption of an average of 4 reasoning steps
 OVERLONG_BUFFER_LEN=1024
 MAX_PROMPT_LEN=$((1024 * 1))
-MAX_RESPONSE_LEN=$((1024 * 3 + OVERLONG_BUFFER_LEN))
+MAX_RESPONSE_LEN=$((1024 * 5 + OVERLONG_BUFFER_LEN))
 BATCH_SIZE=64
-MINI_BSZ=64
-# ROLLOUT_N=4
-# MC_ROLLOUT_N=3 # under the assumption of an average of 4 reasoning steps
-# OVERLONG_BUFFER_LEN=1024
-# MAX_PROMPT_LEN=$((1024 * 1))
-# MAX_RESPONSE_LEN=$((1024 * 3 + OVERLONG_BUFFER_LEN))
-# BATCH_SIZE=6
-# MINI_BSZ=64
+MINI_BSZ=32
 
 # Performance tuning
-N_GPUS=4
+N_NODES=${ARNOLD_WORKER_NUM:-1}
+N_GPUS=${ARNOLD_WORKER_GPU:-16}
+# one node
+FORWARD_RATIO=16
+BACKWARD_RATIO=2
 ROLLOUT_TP_SIZE=1
 OFFLOAD=True
 # SP_SIZE=4 # TODO:
-FORWARD_BSZ=16
-BACKWARD_BSZ=8
+FORWARD_BSZ=16 # no use
+BACKWARD_BSZ=2 # no use
 TOTAL_EPOCHS=1
-FORWARD_MAX_TOKEN_LEN=$((12 * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN))) # 12 for 40GB
-BACKWARD_MAX_TOKEN_LEN=$((3 * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN)))  # 3 for 40GB
+FORWARD_MAX_TOKEN_LEN=$((FORWARD_RATIO * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN))) # 12 for 40GB
+BACKWARD_MAX_TOKEN_LEN=$((BACKWARD_RATIO * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN)))  # 4 for 40GB
 
-PROJ_NAME="TinyMATH"
+PROJ_NAME="debug_hbz"
 MODEL_NAME=$(basename $BASE_MODEL)
 DATA_NAME=DAPOMATH
 EXPERIMENT_NAME="ID${RUN_ID}_${DATA_NAME}_vineppo_${MODEL_NAME}_prompt${PROMPT_ID}_n${ROLLOUT_N}_resplen${MAX_RESPONSE_LEN}_bsz${BATCH_SIZE}-${MINI_BSZ}"
@@ -78,7 +78,7 @@ CMD="python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=$BACKWARD_MAX_TOKEN_LEN \
     actor_rollout_ref.actor.ppo_epochs=$INNER_EPOCHS \
     actor_rollout_ref.actor.use_kl_loss=True \
-    actor_rollout_ref.actor.kl_loss_coef=0.0001 \
+    actor_rollout_ref.actor.kl_loss_coef=0.001 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.actor.clip_ratio_high=0.28 \
@@ -91,40 +91,23 @@ CMD="python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=$FORWARD_MAX_TOKEN_LEN \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP_SIZE \
     actor_rollout_ref.rollout.name=sglang_async \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.2 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.3 \
     actor_rollout_ref.rollout.n=$ROLLOUT_N \
     reward_model.launch_reward_fn_async=True \
     reward_model.overlong_buffer.enable=True \
     reward_model.overlong_buffer.len=$OVERLONG_BUFFER_LEN \
     trainer.critic_warmup=0 \
-    trainer.logger=['console','wandb'] \
+    trainer.logger=['console','$WANDB_VERSION'] \
     trainer.val_before_train=False \
     trainer.n_gpus_per_node=$N_GPUS \
-    trainer.nnodes=1 \
-    trainer.save_freq=5 \
+    trainer.nnodes=$N_NODES \
+    trainer.save_freq=10 \
     trainer.test_freq=5 \
     trainer.project_name=$PROJ_NAME \
     trainer.experiment_name=$EXPERIMENT_NAME \
-    trainer.total_epochs=$TOTAL_EPOCHS"
+    trainer.total_epochs=$TOTAL_EPOCHS \
+    trainer.default_local_dir=$MY_CKPT_DIR/$PROJ_NAME/$EXPERIMENT_NAME"
 
-# # 获取vllm版本号
-# verl_version=$(conda list | grep 'vllm' | awk '{print $2}')
-
-# # 定义比较函数
-# function version_gt() {
-#     dpkg --compare-versions "$1" gt "$2"
-# }
-
-# # 条件判断分支语句
-# if version_gt "$verl_version" "0.8"; then
-#     echo "vllm版本${verl_version}大于0.8"
-#     CMD="${CMD} \
-#         actor_rollout_ref.rollout.enforce_eager=False \
-#         actor_rollout_ref.rollout.free_cache_engine=False "
-# else
-#     echo "vllm版本小于等于0.8"
-#     export VLLM_ATTENTION_BACKEND=XFORMERS
-# fi
 
 
 # 打印要执行的命令
