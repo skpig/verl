@@ -118,6 +118,7 @@ class ToolAgent(AsyncAgent):
         """Main agent loop with tool calling capability"""
         max_prompt_length = context.config.data.max_prompt_length
         max_response_length = context.config.data.max_response_length
+        max_length = max_prompt_length + max_response_length
         max_turns = context.config.actor_rollout_ref.rollout.agent.max_turns
         max_new_tokens_per_turn = context.config.actor_rollout_ref.rollout.agent.max_new_tokens_per_turn
 
@@ -143,8 +144,9 @@ class ToolAgent(AsyncAgent):
 
         while num_turns <= max_turns:
             # Generate response using LLM
-            item.meta_info['generation_kwargs']['max_new_tokens'] = max_new_tokens_per_turn
-            completion, prompt = await self._generate_with_tools(messages, item, context)
+            completion, prompt = await self._generate_with_tools(messages, item, context, max_length, max_prompt_length,
+                                                                 max_response_length, max_new_tokens_per_turn,
+                                                                 num_turns)
             # pack_to_dataproto will use max_length to pad
             item.meta_info['generation_kwargs']['max_new_tokens'] = max_response_length
 
@@ -188,13 +190,10 @@ class ToolAgent(AsyncAgent):
                     "messages": messages,
                     "raw_output_ids": raw_output_ids
                 }
-                with open("special_calculator_error.json", "w") as f:
+                with open("incremental_input_length_error.json", "w") as f:
                     json.dump(save_info, f)
                 from hdfs_io.hdfs_io import hcopy, hmkdir
-                hcopy(
-                    f"special_calculator_error.json",
-                    "hdfs://haruna/home/byte_data_seed/lf_lq/user/qiying.01/projects/alphaseed/experiments/tool_use_demo2"
-                )
+                hcopy(f"incremental_input_length_error.json", context.config.trainer.default_hdfs_dir)
                 raise
 
             model_out_mask_list.append((False, incremental_input_length))
@@ -295,7 +294,8 @@ class ToolAgent(AsyncAgent):
         messages = [{"role": "user", "content": item.non_tensor_batch['raw_prompt'][0][0]['content']}]
         return messages
 
-    async def _generate_with_tools(self, messages: List[Dict], item: DataProto, context):
+    async def _generate_with_tools(self, messages: List[Dict], item: DataProto, context, max_length, max_prompt_length,
+                                   max_response_length, max_new_tokens_per_turn, num_turns):
         """Generate response with tool schemas included"""
         # Apply chat template with tools
         prompt_with_tools = self.tokenizer.apply_chat_template(messages,
@@ -305,7 +305,14 @@ class ToolAgent(AsyncAgent):
 
         # Tokenize the prompt and set it in item.batch
         # does not require padding when doing inference
-        prompt_data = await self.tokenizer.batch_encode_plus_async([prompt_with_tools], add_special_tokens=False)
+        if num_turns == 1:
+            max_tokenize_length = max_prompt_length
+        else:
+            max_tokenize_length = max_length
+        prompt_data = await self.tokenizer.batch_encode_plus_async([prompt_with_tools],
+                                                                   add_special_tokens=False,
+                                                                   max_length=max_tokenize_length,
+                                                                   truncation=True)
 
         # set input and attn mask
         item.batch['input_ids'] = torch.tensor(prompt_data.input_ids, dtype=torch.int32)
@@ -315,7 +322,11 @@ class ToolAgent(AsyncAgent):
 
         # Call LLM with the enhanced prompt
         rollout_config = context.config.actor_rollout_ref.rollout
+        max_new_tokens_this_turn = min(max_new_tokens_per_turn, max_length - prompt_length_before_generate)
+        item.meta_info['generation_kwargs']['max_new_tokens'] = max_new_tokens_this_turn
         completion = await self.llm.complete(item, rollout_config)
+        # pack_to_dataproto will use max_length to pad
+        item.meta_info['generation_kwargs']['max_new_tokens'] = max_response_length
 
         prompt_length_after_generate = len(item.batch['input_ids'][0])
 
