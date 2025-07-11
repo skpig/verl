@@ -69,12 +69,12 @@ def run_ppo(config) -> None:
     if not ray.is_initialized():
         # this is for local ray cluster
         ray.init(
-            runtime_env={
-                "env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_LOGGING_LEVEL": "WARN", 'CUDA_VISIBLE_DEVICES': os.environ.get("CUDA_VISIBLE_DEVICES", "0")}
-            },
-            num_cpus=config.ray_init.num_cpus,
-            _temp_dir="/dev/shm/tmp",
-            object_spilling_directory="/dev/shm/spill",
+            # runtime_env={
+            #     "env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_LOGGING_LEVEL": "WARN", 'CUDA_VISIBLE_DEVICES': os.environ.get("CUDA_VISIBLE_DEVICES", "0")}
+            # },
+            # num_cpus=config.ray_init.num_cpus,
+            # _temp_dir="/dev/shm/tmp",
+            # object_spilling_directory="/dev/shm/spill",
         )
 
     runner = TaskRunner.remote()
@@ -85,6 +85,7 @@ def run_ppo(config) -> None:
 class TaskRunner:
     def run(self, config):
         # print initial config
+        import traceback
         from pprint import pprint
 
         from omegaconf import OmegaConf
@@ -189,7 +190,16 @@ class TaskRunner:
             train_sampler=train_sampler,
         )
         trainer.init_workers()
-        trainer.fit()
+        try:
+            trainer.fit()
+        except KeyboardInterrupt:
+            print("Training interrupted by user. Shutting down workers...")
+            for task in trainer.ray_validate_task_list:
+                prev_metric, prev_step = ray.get(task)
+                self.fit_logger.log(data=prev_metric, step=prev_step)
+            traceback.print_exc()
+
+            
 
 
 def create_rl_dataset(data_paths, data_config, tokenizer, processor):

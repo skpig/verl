@@ -101,7 +101,7 @@ class RayResourcePool(ResourcePool):
 
         pg_name_prefix = name if name else f"{self.name_prefix}verl_group_{'_'.join([str(count) for count in self._store])}:"
         # print(f"pg_name_prefix = {pg_name_prefix}")
-        pg_scheme = [[{"CPU": self.max_colocate_count, "GPU": 1} if self.use_gpu else {"CPU": self.max_colocate_count} for _ in range(process_count)] for process_count in self._store]
+        pg_scheme = [[{"CPU": self.max_colocate_count, "GPU": 1} if self.use_gpu else {"CPU": self.max_colocate_count} for _ in range(process_count)] for process_count in self._store] # 每个node上创建一个placement group，每个placement group包含n_gpus_per_node bundles, each bundle has max_colocate_count CPUs and 1 GPU if use_gpu is True.
 
         lifetime = "detached" if self.detached else None
 
@@ -178,7 +178,7 @@ class RayClassWithInitArgs(ClassWithInitArgs):
         # print("args: ", self.args)
         # print("kwargs: ", self.kwargs)
         return self.cls.options(**options).remote(*self.args, **self.kwargs)
-
+# 
 
 class RayWorkerGroup(WorkerGroup):
     def __init__(
@@ -232,6 +232,7 @@ class RayWorkerGroup(WorkerGroup):
 
     def _init_with_resource_pool(self, resource_pool, ray_cls_with_init, bin_pack, detached):
         use_gpu = resource_pool.use_gpu
+        print("before _init_with_resource_pool")
 
         strategy = "PACK"
         if bin_pack:
@@ -243,9 +244,11 @@ class RayWorkerGroup(WorkerGroup):
         num_gpus = 1 / resource_pool.max_colocate_count
 
         rank = -1
-        local_world_size = resource_pool.store[0]
+        local_world_size = resource_pool.store[0] # n_gpus_per_node
+        # 遍历每一个placement_group，也即me每一个node
         for pg_idx, pg in enumerate(sort_placement_group_by_node_ip(pgs)):
             assert local_world_size <= pg.bundle_count, f"when generating for {self.name_prefix}, for the "
+            # 遍历每一个gpu
             for local_rank in range(local_world_size):
                 rank += 1
 
@@ -539,8 +542,10 @@ def create_colocated_worker_cls(class_dict: dict[str, RayClassWithInitArgs]):
         user_defined_cls = _unwrap_ray_remote(user_defined_cls)
         _bind_workers_method_to_parent(WorkerDict, key, user_defined_cls)
 
+    print("after bind workers")
     remote_cls = ray.remote(WorkerDict)
     remote_cls = RayClassWithInitArgs(cls=remote_cls)
+    print("after wrap remote WorkerDictwithArgs cls")
     return remote_cls
 
 

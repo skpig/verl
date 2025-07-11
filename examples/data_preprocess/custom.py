@@ -28,6 +28,7 @@ from numpy import argsort
 
 from verl.utils.hdfs_io import copy, makedirs
 from verl.utils.reward_score.math import last_boxed_only_string, remove_boxed
+import re
 
 
 def extract_solution(solution_str):
@@ -172,6 +173,87 @@ def process_amc_dataset():
     test_dataset.to_parquet(test_path)
     print("Size of AMC-12 test dataset:", len(test_dataset))
 
+
+def process_math_dataset():
+    data_source = "HuggingFaceH4/MATH"
+    local_dir = os.path.basename(data_source)
+    # test_path = os.path.join(MY_DATA_DIR, local_dir, "test.parquet")
+    train_path = os.path.join(MY_DATA_DIR, local_dir, "train.parquet")
+    filtered_dataset_path = os.path.join(MY_DATA_DIR, local_dir, "filtered_dataset.parquet")
+
+    # Skip processing if resumed and file exists
+    if RESUME and os.path.exists(train_path):
+        return
+
+    print(f"Loading the {data_source} dataset from huggingface...", flush=True)
+    # Load the entire dataset (assuming it is provided as a 'train' split)
+    configs = datasets.get_dataset_config_names(data_source)
+    all_ds = []
+    for config in configs:
+        print(config)
+        ds = datasets.load_dataset(data_source, config, trust_remote_code=True, split="train")
+        all_ds.append(ds)
+    dataset = datasets.concatenate_datasets(all_ds)
+    print("Size of MATH dataset before filtering:", len(dataset))
+    exit(0)
+
+    extraction_target = (ExprExtractionConfig(),)
+    # Filtering function: ensure a non-empty ground truth and valid extraction
+    def extract_solution(example):
+        solution = example.get("solution", "")
+        match = re.search(r'\\boxed\{(.+?)\}', solution)
+        if match:
+            return match.group(1)
+        return None
+
+    def filter_fn(example):
+        if not example.get("ground_truth"):
+            return False
+        golden_answer = example["ground_truth"]
+        if golden_answer is None:
+            return False
+        extracted = parse(golden_answer, extraction_target, parsing_timeout=5)
+        return len(extracted) > 0
+
+    if os.path.exists(filtered_dataset_path):
+        print(f"Loading the filtered dataset from {filtered_dataset_path}...", flush=True)
+        dataset = datasets.load_dataset("parquet", data_files=filtered_dataset_path)
+    else:
+        dataset = dataset.map(lambda example: {**example, "ground_truth": extract_solution(example)})
+        dataset = dataset.filter(filter_fn)
+        if not os.path.exists(os.path.dirname(filtered_dataset_path)):
+            makedirs(os.path.dirname(filtered_dataset_path))
+        dataset.to_parquet(filtered_dataset_path)
+    print("Size of MATH dataset after filtering:", len(dataset))
+
+    # Split the dataset into training and testing splits
+    splits = dataset.train_test_split(test_size=1000, seed=42)
+    train_dataset, test_dataset = splits["train"], splits["test"]
+    test_dataset = test_dataset.shuffle(42).select(range(100))  # Select only the first 100 samples for testing
+
+    # Create a mapping function to format each sample
+    def make_map_fn(split):
+        def process_fn(example, idx):
+            # Assume each example contains 'problem' and 'answer'
+            question = example.pop("problem")
+            # For consistency, directly format the question into a prompt
+            example["data_source"] = "math"
+            example["prompt"] = format_question_to_prompt(question)
+            example["ability"] = "math"
+            answer = example.pop("answer")
+            example["reward_model"] = {"style": "rule", "ground_truth": str(answer)}
+            example["extra_info"] = {"split": split, "index": idx}
+            return example
+        return process_fn
+
+    train_dataset = train_dataset.map(function=make_map_fn("train"), with_indices=True)
+    test_dataset = test_dataset.map(function=make_map_fn("test"), with_indices=True)
+
+    train_dataset.to_parquet(train_path)
+    test_dataset.to_parquet(test_path)
+    print("Size of MATH train dataset:", len(train_dataset))
+    print("Size of MATH test dataset:", len(test_dataset))
+
 def process_dapomath_dataset():
     # 数据源为 dapomath/dapomath
     data_source = "BytedTsinghua-SIA/DAPO-Math-17k"
@@ -185,7 +267,8 @@ def process_dapomath_dataset():
 
     golden_extraction_target=(ExprExtractionConfig(),)
     filtered_dataset_path = os.path.join(MY_DATA_DIR, local_dir, "filtered_dataset.parquet")
-    if os.path.exists(filtered_dataset_path):
+    # if os.path.exists(filtered_dataset_path):
+    if False:
         print(f"Loading the filtered dataset from {filtered_dataset_path}...", flush=True)
         dataset = datasets.load_dataset("parquet", data_files=filtered_dataset_path)
     else:
@@ -208,8 +291,7 @@ def process_dapomath_dataset():
             # 过滤掉code data
             return example['ability'] == "MATH" and len(extracted_golds) > 0
             return False
-        dataset = dataset.filter(filter_fn)
-        # 保存过滤后的数据集到 parquet 文件
+        dataset = dataset.filter(filter_fn)        # 保存过滤后的数据集到 parquet 文件
         if not os.path.exists(os.path.dirname(filtered_dataset_path)):
             makedirs(os.path.dirname(filtered_dataset_path))
         dataset.to_parquet(filtered_dataset_path)
@@ -251,8 +333,9 @@ if __name__ == "__main__":
     MY_DATA_DIR = os.getenv("MY_DATA_DIR")
 
     # process_numinamath_dataset()
-    process_math500_dataset()
-    process_amc_dataset()
-    process_dapomath_dataset()
+    # process_math500_dataset()
+    # process_amc_dataset()
+    # process_dapomath_dataset()
+    # process_math_dataset()
 
     print("Done Preprocessing!")

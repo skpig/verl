@@ -112,8 +112,8 @@ class ResourcePoolManager:
     Define a resource pool specification. Resource pool will be initialized first.
     """
 
-    resource_pool_spec: dict[str, list[int]]
-    mapping: dict[Role, str]
+    resource_pool_spec: dict[str, list[int]]  # 都是 {'global_pool': [n_gpus_per_node, ..., n_gpus_per_node]}
+    mapping: dict[Role, str] # 都是 {Role1: 'global_pool', ..., Role2: 'global_pool'}
     resource_pool_dict: dict[str, RayResourcePool] = field(default_factory=dict)
 
     def create_resource_pool(self):
@@ -124,6 +124,14 @@ class ResourcePoolManager:
             # that can utilize different WorkerGroup for differnt models
             resource_pool = RayResourcePool(process_on_nodes=process_on_nodes, use_gpu=True, max_colocate_count=1, name_prefix=resource_pool_name)
             self.resource_pool_dict[resource_pool_name] = resource_pool
+        
+        print("** Create resource pools **")
+        print("Resource pool specification:")
+        pprint(self.resource_pool_spec)
+        print("Resource pool dict:")
+        pprint(self.resource_pool_dict)
+        print("Mapping of roles to resource pools:")
+        pprint(self.mapping)
 
         self._check_resource_available()
 
@@ -139,6 +147,8 @@ class ResourcePoolManager:
         """Check if the resource pool can be satisfied in this ray cluster."""
         node_available_resources = ray.state.available_resources_per_node()
         node_available_gpus = {node: node_info.get("GPU", 0) for node, node_info in node_available_resources.items()}
+        print(f"Available GPUs per node: {node_available_gpus}"
+              f"Total available GPUs: {sum(node_available_gpus.values())}")
 
         # check total required gpus can be satisfied
         total_available_gpus = sum(node_available_gpus.values())
@@ -380,7 +390,7 @@ class RayPPOTrainer:
         self._validate_config()
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
-        self.cache_file_path = os.path.join('/home/huangbz/verl/.cache', self.config.trainer.project_name, self.config.trainer.experiment_name, 'train_generations.parquet')
+        self.cache_file_path = os.path.join(self.config.trainer.default_local_dir, self.config.trainer.project_name, self.config.trainer.experiment_name, 'train_generations.parquet')
         self.global_metrics = {
             "perf/global_cumsum_total_dedup_num_prompt_tokens": 0,
             "perf/global_cumsum_total_dedup_num_response_tokens": 0,
@@ -983,6 +993,7 @@ class RayPPOTrainer:
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
             wg_dict = self.ray_worker_group_cls(resource_pool=resource_pool, ray_cls_with_init=worker_dict_cls, **wg_kwargs)
+            print("After init WorkerGroup")
             spawn_wg = wg_dict.spawn(prefix_set=class_dict.keys())
             all_wg.update(spawn_wg)
 
@@ -1004,6 +1015,7 @@ class RayPPOTrainer:
 
         # create async rollout manager and request scheduler
         self.async_rollout_mode = False
+        assert self.config.actor_rollout_ref.rollout.mode != "async", "Not support vllm async rollout, because of env dependency"
         if self.config.actor_rollout_ref.rollout.mode == "async":
             self.async_rollout_mode = True
             self.async_rollout_manager = AsyncLLMServerManager(
@@ -1515,13 +1527,13 @@ class RayPPOTrainer:
                         logger.log(data=prev_metric, step=prev_step)
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
-                    # save train result to local file
-                    data_path = '/home/huangbz/verl/train_result.parquet'
-                    df = pd.read_parquet(self.cache_file_path, engine='pyarrow')
-                    if os.path.exists(data_path):
-                        old_df = pd.read_parquet(data_path, engine='pyarrow')
-                        df = pd.concat([old_df, df], ignore_index=True)
-                    df.to_parquet(data_path, engine='pyarrow')
+                    # # save train result to local file
+                    # data_path = '/home/huangbz/verl/train_result.parquet'
+                    # df = pd.read_parquet(self.cache_file_path, engine='pyarrow')
+                    # if os.path.exists(data_path):
+                    #     old_df = pd.read_parquet(data_path, engine='pyarrow')
+                    #     df = pd.concat([old_df, df], ignore_index=True)
+                    # df.to_parquet(data_path, engine='pyarrow')
                     return
                 progress_bar.update(1)
                 self.global_steps += 1
