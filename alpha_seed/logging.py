@@ -1,5 +1,6 @@
 import warnings
 import logging
+import os
 
 
 class LogFilter(logging.Filter):
@@ -56,3 +57,9 @@ def refine_log():
     # - bumi
     log_filter.add_pattern("Bumi is running")
     log_filter.add_pattern("byted-triton is not installed properly")
+
+    # - set logging level
+    try:
+        logging.getLogger().setLevel(os.getenv("LOGGING_LEVEL", logging.getLogger().getEffectiveLevel()))
+    except:
+        pass

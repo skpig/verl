@@ -101,7 +101,7 @@ def send_to_kafka(message):
 @ray.remote(num_cpus=1)
 class RemoteClient:
     """
-    A centralized remote client that pipelines any function with generation at [EOS] 
+    A centralized remote client that pipelines any function with generation at [EOS]
     """
 
     def __init__(self, config, tokenizer_path) -> None:
@@ -799,7 +799,7 @@ def main(config):
             stable_res = {}
             if not is_local_ray_instance():
                 stable_res = {
-                    "worker": 1,
+                    os.getenv('TASK_RUNNER_NODE', 'worker'): 1,
                 }
             runner = TaskRunner.options(name=TaskRunner.name, resources=stable_res).remote()
         ray.get(runner.main.remote(main_task, config=config))

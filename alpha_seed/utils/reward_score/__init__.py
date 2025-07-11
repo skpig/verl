@@ -89,6 +89,9 @@ def _select_rm_score_fn(reward_style, external_lib: str = None):
     elif reward_style == "verifier_matching_game":
         from . import matching_game_verifier
         return matching_game_verifier.compute_score
+    elif reward_style == "agentbench":
+        from . import agentbench
+        return agentbench.agentbench_score
     elif reward_style.startswith("rule-logic_puzzle"):
         from . import logic_puzzle
         return logic_puzzle.compute_score
