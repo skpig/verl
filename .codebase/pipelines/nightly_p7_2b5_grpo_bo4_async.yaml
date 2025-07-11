@@ -44,7 +44,7 @@ jobs:
   merline_ci:
     name: Merlin ci
     manual: false
-    # Merlin - data.aml.verl:v203 
+    # Merlin - data.aml.verl:v205 
     image: hub.byted.org/reckon/data.reckon.mlx.image_5940:26def500fbbd577bdfd57f100f6aa993
     runs-on:
       cluster: gpu-l20

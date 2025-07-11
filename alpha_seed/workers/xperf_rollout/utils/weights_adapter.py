@@ -300,7 +300,7 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
             assign_weights(binding_weights, layer_idx)
 
         xperf_weights.prepare_infer_weights()
-        xperf_model.layer_weight = xperf_weights.layers_weight
+        xperf_model.layers_weight = xperf_weights.layers_weight
         xperf_model.layernorm_weight = xperf_weights.layernorm_weight
         xperf_model.lm_head_weight = xperf_weights.lm_head_weight
         xperf_model.wte_weight = xperf_weights.wte_weight
@@ -310,16 +310,17 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
 
         wte = self._cast_to(self._get_full_tensor(self.source_weights['wte']), torch.bfloat16)
         ln_f = self._cast_to(self._get_full_tensor(self.source_weights['ln_f']), torch.bfloat16)
+        lm_head = self._cast_to(self._get_full_tensor(self.source_weights['lm_head']), torch.bfloat16)
 
         ln_f_weight = ln_f.view(-1, self.hidden_size).contiguous()
 
         if self.device_mesh is not None and self.vocab_tp:
             wte = DTensor.from_local(wte, self.device_mesh, [Replicate(), Replicate()])
             wte_weight = self._redistribute_dtensor(wte, [Replicate(), Shard(1)])
-            lm_head_weight = self._redistribute_dtensor(wte, [Replicate(), Shard(0)])
+            lm_head_weight = self._redistribute_dtensor(lm_head, [Replicate(), Shard(0)])
         else:
             wte_weight = wte.contiguous()
-            lm_head_weight = wte.contiguous()
+            lm_head_weight = lm_head.contiguous()
 
         return wte_weight, lm_head_weight, ln_f_weight
 
