@@ -21,6 +21,8 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Dict, List, Union
 
+from verl import DataProto
+
 
 class Tracking:
     supported_backend = ["wandb", "mlflow", "swanlab", "vemlp_wandb", "tensorboard", "console", "bwandb"]
@@ -42,6 +44,9 @@ class Tracking:
             import wandb
             wandb.init(project=project_name, name=experiment_name, config=config)
             self.logger["wandb"] = wandb
+
+            wandb.define_metric("val-core/*", step_metric="val_step")
+            wandb.define_metric("val-aux/*", step_metric="val_step")
         elif "tracking" in default_backend or "wandb" in default_backend:
             from wandb.apis.public import Api
 
@@ -82,6 +87,9 @@ class Tracking:
                 print(f"Resuming wandb run {resume_id} from step {resume_step}")
             run.mark_preempting()
             self.logger["wandb"] = wandb
+
+            wandb.define_metric("val-core/*", step_metric="val_step")
+            wandb.define_metric("val-aux/*", step_metric="val_step")
 
         if "mlflow" in default_backend:
             import os
@@ -231,15 +239,30 @@ def _flatten_dict(raw: Dict[str, Any], *, sep: str) -> Dict[str, Any]:
 @dataclasses.dataclass
 class ValidationGenerationsLogger:
 
-    def log(self, loggers, tag, samples, step):
-        if 'wandb' in loggers or 'bwandb' in loggers:
-            self.log_generations_to_wandb(tag, samples, step)
-        if 'swanlab' in loggers:
-            self.log_generations_to_swanlab(samples, step)
-        if "mlflow" in loggers:
-            self.log_generations_to_mlflow(samples, step)
+    def log(self, loggers, data: DataProto, inputs, outputs, tag, step):
+        if 'wandb' in loggers:
+            self.log_generations_to_wandb(tag, data, inputs, outputs, step)
+        if 'bwandb' in loggers:
+            self.log_generations_to_bwandb(tag, data, inputs, outputs, step)
+        # if 'swanlab' in loggers:
+        #     self.log_generations_to_swanlab(samples, step)
+        # if "mlflow" in loggers:
+        #     self.log_generations_to_mlflow(samples, step)
 
-    def log_generations_to_wandb(self, tag, samples, step):
+    def log_generations_to_bwandb(self, tag, data: DataProto, inputs, outputs, step):
+
+
+        selected_keys_for_token_level_metrics = [
+            'token_level_scores',
+            'token_level_rewards',
+            'advantages',
+            'old_log_probs',
+        ]
+
+        raise NotImplementedError
+
+
+    def log_generations_to_wandb(self, tag, data: DataProto, inputs, outputs, step):
         """Log samples to wandb as a table
         Args:
             tag (str): tag to identify the table
@@ -249,15 +272,18 @@ class ValidationGenerationsLogger:
         import wandb
 
         # Create column names for all samples
-        columns = ['id', 'input', 'output', 'score', 'format_score']
+        columns = ['id', 'input', 'output', 'score']
 
         # Create a new table with same columns and existing data
         # Workaround for https://github.com/wandb/wandb/issues/2981#issuecomment-1997445737
         new_table = wandb.Table(columns=columns, data=[])
 
         # Add new samples to the table
-        for i, sample in enumerate(samples):
-            new_table.add_data(i, sample[0], sample[1], sample[2], sample[3])
+        for i in range(len(inputs)):
+            input_text = inputs[i]
+            output_text = outputs[i]
+            score = data.batch["token_level_scores"][i].sum().item()
+            new_table.add_data(i, input_text, output_text, score)
 
         # Update reference and log
         wandb.log({f"{tag}/generations": new_table}, step=step)

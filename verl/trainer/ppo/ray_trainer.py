@@ -324,6 +324,62 @@ def vineppo_reward_calculation_async(new_data_proto, reqId_to_respId_seqRange_ma
     return value_tensor
 
 
+
+@ray.remote
+def compute_validation_metrics(test_batch, step, val_reward_fn, tokenizer):
+    # sample_inputs
+    sample_inputs = tokenizer.batch_decode(test_batch.batch['prompts'], skip_special_tokens=True)
+
+    # evaluate using reward_function
+    result = val_reward_fn(test_batch, return_dict=True)
+    reward_tensor = result["reward_tensor"]
+    test_batch.batch["token_level_scores"] = reward_tensor
+    scores = reward_tensor.sum(-1).cpu().tolist()
+    reward_extra_infos_dict: dict[str, list] = defaultdict(list)
+    reward_extra_infos_dict["reward"].extend(scores)
+    if "reward_extra_info" in result:
+        for key, lst in result["reward_extra_info"].items():
+            reward_extra_infos_dict[key].extend(lst)
+    
+    data_sources = test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0])
+
+    # # log generation
+    # self._maybe_log_val_generations(test_batch)
+
+    # # dump generations
+    # val_data_dir = self.config.trainer.get("validation_data_dir", None)
+    # if val_data_dir:
+    #     self._dump_generations(
+    #         inputs=sample_inputs,
+    #         outputs=sample_outputs,
+    #         scores=sample_scores,
+    #         reward_extra_infos_dict=reward_extra_infos_dict,
+    #         dump_path=val_data_dir,
+    #     )
+
+
+    # calculate metric
+    # breakpoint()
+    # data_src2var2metric2val = process_validation_metrics(data_sources, test_batch.batch['index'].tolist(), reward_extra_infos_dict)
+    data_src2var2metric2val = process_validation_metrics(data_sources, sample_inputs, reward_extra_infos_dict)
+    metric_dict = {}
+    for data_source, var2metric2val in data_src2var2metric2val.items():
+        core_var = "acc" if "acc" in var2metric2val else "reward"
+        for var_name, metric2val in var2metric2val.items():
+            n_max = max([int(name.split("@")[-1].split("/")[0]) for name in metric2val.keys()])
+            for metric_name, metric_val in metric2val.items():
+                if (var_name == core_var) and any(metric_name.startswith(pfx) for pfx in ["mean", "maj", "best"]) and (f"@{n_max}" in metric_name):
+                    metric_sec = "val-core"
+                else:
+                    metric_sec = "val-aux"
+                pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"
+                metric_dict[pfx] = metric_val
+
+    metric_dict['val_step'] = step
+    return metric_dict, step
+
+
+
 class RayPPOTrainer:
     """
     Note that this trainer runs on the driver process on a single CPU/GPU node.
@@ -653,7 +709,7 @@ class RayPPOTrainer:
 
         print(f"Dumped generations to {filename}")
 
-    def _maybe_log_val_generations(self, inputs, outputs, scores, format_scores):
+    def _maybe_log_val_generations(self, data: DataProto):
         """Log a table of validation samples to the configured logger (wandb or swanlab)"""
 
         print("[maybe_log_val_generations] Logging validation generations...")
@@ -664,21 +720,15 @@ class RayPPOTrainer:
 
         import numpy as np
 
-        # Create tuples of (input, output, score) and sort by input text
-        samples = list(zip(inputs, outputs, scores, format_scores))
-        samples.sort(key=lambda x: x[0])  # Sort by input text
+        indices = np.random.choice(len(data), size=generations_to_log, replace=False)
+        data = data.select_idxs(indices)
 
-        # Use fixed random seed for deterministic shuffling
-        rng = np.random.RandomState(42)
-        rng.shuffle(samples)
-
-        # Take first N samples after shuffling
-        samples = samples[:generations_to_log]
+        inputs = self.tokenizer.batch_decode(data.batch["prompts"], skip_special_tokens=True)
+        outputs = self.tokenizer.batch_decode(data.batch["responses"], skip_special_tokens=True)
 
         # Log to each configured logger
-        self.validation_generations_logger.log(self.config.trainer.logger, 'val', samples, self.global_steps)
+        self.validation_generations_logger.log(self.config.trainer.logger, 'val', inputs, outputs, self.global_steps)
 
-        print("[maybe_log_val_generations] Validation generations logged successfully.")
 
     def map_token_scores_to_chars(self, batch_input_ids, batch_scores, batch_attention_mask):
         tokenizer = self.tokenizer
@@ -742,8 +792,8 @@ class RayPPOTrainer:
         if self.global_steps % LOG_FREQ != 0:
             return
 
-        input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in batch.batch['prompts']] # (bsz,)
-        response_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in batch.batch['responses']] # (bsz,)
+        # input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in batch.batch['prompts']] # (bsz,)
+        # response_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in batch.batch['responses']] # (bsz,)
 
         """ Save in local file """
         df = pd.DataFrame({
@@ -761,23 +811,23 @@ class RayPPOTrainer:
             # 'log_probs': TODO:
             # 'clip_frac': TODO:
         })
-        df['step_num'] = self.global_steps
-        df['run_name'] = self.config.trainer.experiment_name
+        # df['step_num'] = self.global_steps
+        # df['run_name'] = self.config.trainer.experiment_name
 
-        df = df.sort_values(by=['query_index', 'rollout_index'])
+        # df = df.sort_values(by=['query_index', 'rollout_index'])
 
 
-        # load old df on the next few steps
-        if os.path.exists(self.cache_file_path) and self.global_steps // LOG_FREQ != 1:
-            old_df = pd.read_parquet(self.cache_file_path, engine='pyarrow')
-            # remove old df with the same step_num
-            old_df = old_df[old_df['step_num'] != self.global_steps]
-            df = pd.concat([old_df, df], ignore_index=True)
-        # save new df
-        dir_name = os.path.dirname(self.cache_file_path)
-        if not os.path.exists(dir_name):
-            os.makedirs(dir_name, exist_ok=False)
-        df.to_parquet(self.cache_file_path, engine='pyarrow')
+        # # load old df on the next few steps
+        # if os.path.exists(self.cache_file_path) and self.global_steps // LOG_FREQ != 1:
+        #     old_df = pd.read_parquet(self.cache_file_path, engine='pyarrow')
+        #     # remove old df with the same step_num
+        #     old_df = old_df[old_df['step_num'] != self.global_steps]
+        #     df = pd.concat([old_df, df], ignore_index=True)
+        # # save new df
+        # dir_name = os.path.dirname(self.cache_file_path)
+        # if not os.path.exists(dir_name):
+        #     os.makedirs(dir_name, exist_ok=False)
+        # df.to_parquet(self.cache_file_path, engine='pyarrow')
         
 
 
@@ -823,17 +873,8 @@ class RayPPOTrainer:
 
 
     def _validate(self, logger):
-        data_source_lst = []
-        reward_extra_infos_dict: dict[str, list] = defaultdict(list)
 
-        # Lists to collect samples for the table
-        sample_inputs = []
-        sample_outputs = []
-        sample_scores = []
-
-
-        reward_meta = Counter()
-        assert len(self.val_dataloader) == 1
+        assert len(self.val_dataloader) == 1, "Validation dataloader should have only one batch for validation."
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
 
@@ -843,12 +884,6 @@ class RayPPOTrainer:
             # we only do validation on rule-based rm
             if self.config.reward_model.enable and test_batch[0].non_tensor_batch["reward_model"]["style"] == "model":
                 return {}
-
-            # Store original inputs
-            input_ids = test_batch.batch["input_ids"]
-            # TODO: Can we keep special tokens except for padding tokens?
-            input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in input_ids]
-            sample_inputs.extend(input_texts)
 
             batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
             non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
@@ -885,63 +920,11 @@ class RayPPOTrainer:
             test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
             print("validation generation end")
 
-            # Store generated outputs
-            output_ids = test_output_gen_batch.batch["responses"]
-            output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
-            sample_outputs.extend(output_texts)
             test_batch = test_batch.union(test_output_gen_batch)
 
-            # evaluate using reward_function
-            result = self.val_reward_fn(test_batch, return_dict=True)
-            reward_tensor = result["reward_tensor"]
-            scores = reward_tensor.sum(-1).cpu().tolist()
-            sample_scores.extend(scores)
-
-            # breakpoint()
-            reward_extra_infos_dict["reward"].extend(scores)
-            if "reward_extra_info" in result:
-                for key, lst in result["reward_extra_info"].items():
-                    reward_extra_infos_dict[key].extend(lst)
-
-            data_source_lst.append(test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0]))
-
-        self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores, format_scores=reward_extra_infos_dict['format'])
-
-        # dump generations
-        val_data_dir = self.config.trainer.get("validation_data_dir", None)
-        if val_data_dir:
-            self._dump_generations(
-                inputs=sample_inputs,
-                outputs=sample_outputs,
-                scores=sample_scores,
-                reward_extra_infos_dict=reward_extra_infos_dict,
-                dump_path=val_data_dir,
-            )
-
-        for key_info, lst in reward_extra_infos_dict.items():
-            assert len(lst) == 0 or len(lst) == len(sample_scores), f"{key_info}: {len(lst)=}, {len(sample_scores)=}"
-
-        data_sources = np.concatenate(data_source_lst, axis=0)
-
-        @ray.remote
-        def compute_validation_metrics(step, data_sources, sample_inputs, reward_extra_infos_dict):
-            data_src2var2metric2val = process_validation_metrics(data_sources, sample_inputs, reward_extra_infos_dict)
-            metric_dict = {}
-            for data_source, var2metric2val in data_src2var2metric2val.items():
-                core_var = "acc" if "acc" in var2metric2val else "reward"
-                for var_name, metric2val in var2metric2val.items():
-                    n_max = max([int(name.split("@")[-1].split("/")[0]) for name in metric2val.keys()])
-                    for metric_name, metric_val in metric2val.items():
-                        if (var_name == core_var) and any(metric_name.startswith(pfx) for pfx in ["mean", "maj", "best"]) and (f"@{n_max}" in metric_name):
-                            metric_sec = "val-core"
-                        else:
-                            metric_sec = "val-aux"
-                        pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"
-                        metric_dict[pfx] = metric_val
-
-            return metric_dict, step
-
-        return compute_validation_metrics.remote(self.global_steps, data_sources, sample_inputs, reward_extra_infos_dict)
+        # ray.get(compute_validation_metrics.remote(test_batch, self.global_steps, self.val_reward_fn))
+        return compute_validation_metrics.remote(test_batch, self.global_steps, self.val_reward_fn, self.tokenizer)
+        return None
 
     def init_workers(self):
         """Init resource pool and worker group"""

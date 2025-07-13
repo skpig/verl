@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import random
 import time
 import traceback
 import os
@@ -288,17 +289,21 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None, is_v
         # print(f"Total time for verify3: {total_time3:.2f}s, pred_extract_num3: {pred_extract_num3}, gold_extract_num3: {gold_extract_num3}")
         # ret_score = 0
 
+
         # during training
-        if not is_valid:
+        if not is_valid and data_source == "dapomath":
             extracted_predictions = extract_answer(solution_str, prompt_id) # only verify the answer part wrapped in <answer>...</answer>
-            gold_extraction_target=(ExprExtractionConfig(),)# reduce computation time for training, since DAPOmath only requires ExprExtractionConfig
+            gold_extraction_target=(ExprExtractionConfig(),) # reduce computation time for training, since DAPOmath only requires ExprExtractionConfig
         # during validation
         else:
             # Wrap the ground truth in \boxed{} format for verification
             ground_truth = "\\boxed{" + ground_truth + "}"
             extracted_predictions = solution_str
             gold_extraction_target = (LatexExtractionConfig(), ExprExtractionConfig()) 
-        pred_extraction_target=(ExprExtractionConfig(), LatexExtractionConfig())
+        pred_extraction_target=(
+            ExprExtractionConfig(), 
+            LatexExtractionConfig(),
+            )
 
         # reduce computation time for training
         with open(".cache/current_solution.log", 'w') as f:
@@ -314,7 +319,8 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None, is_v
         # print("====== Parse Solution ======")
         extracted_golds = parse(ground_truth, gold_extraction_target, parsing_timeout=3)
         
-        # print(f"====== Verify {len(extracted_golds)} golds and {len(extracted_predictions)} predictions ======")
+        if random.random() < 0.01:
+            print(f"====== [Random Sample] Verify {len(extracted_golds)} golds and {len(extracted_predictions)} predictions ======")
         ret_score = verify(extracted_golds, extracted_predictions, timeout_seconds=3)
 
         if len(extracted_predictions) == 0:
