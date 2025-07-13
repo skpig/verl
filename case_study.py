@@ -68,7 +68,9 @@ The reasoning process is enclosed within <think> </think> and answer is enclosed
 
 <think> reasoning process here </think> <answer> answer here </answer>.
 """
-# system_prompt3 = """Please reason step by step.  Put your final answer within <answer> </answer> tags, i.e., <answer> your answer here </answer>"""
+system_prompt3 = """Please reason step by step, put your reasoning process within <think> </think> tags, and put your final answer within <answer> </answer> tags, respectively, i.e., 
+<think> reasoning process here </think> <answer> answer here </answer>.
+"""
 all_prompts = [
     system_prompt0,
     system_prompt1,
