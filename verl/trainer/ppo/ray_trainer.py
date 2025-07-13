@@ -291,6 +291,60 @@ def _timer(name: str, timing_raw: Dict[str, float]):
     print("Duration of {}: {:.2f} seconds".format(name, timer.last), _time_stamp())
 
 
+
+@ray.remote
+def compute_validation_metrics(test_batch, step, val_reward_fn):
+    # sample_inputs
+    # sample_inputs = self.tokenizer.batch_decode(test_batch.batch['prompts'], skip_special_tokens=True)
+
+    # evaluate using reward_function
+    result = val_reward_fn(test_batch, return_dict=True)
+    reward_tensor = result["reward_tensor"]
+    test_batch.batch["token_level_scores"] = reward_tensor
+    scores = reward_tensor.sum(-1).cpu().tolist()
+    reward_extra_infos_dict: dict[str, list] = defaultdict(list)
+    reward_extra_infos_dict["reward"].extend(scores)
+    if "reward_extra_info" in result:
+        for key, lst in result["reward_extra_info"].items():
+            reward_extra_infos_dict[key].extend(lst)
+    
+    data_sources = test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0])
+
+    # # log generation
+    # self._maybe_log_val_generations(test_batch)
+
+    # # dump generations
+    # val_data_dir = self.config.trainer.get("validation_data_dir", None)
+    # if val_data_dir:
+    #     self._dump_generations(
+    #         inputs=sample_inputs,
+    #         outputs=sample_outputs,
+    #         scores=sample_scores,
+    #         reward_extra_infos_dict=reward_extra_infos_dict,
+    #         dump_path=val_data_dir,
+    #     )
+
+
+    # calculate metric
+    data_src2var2metric2val = process_validation_metrics(data_sources, test_batch.batch['index'], reward_extra_infos_dict)
+    metric_dict = {}
+    for data_source, var2metric2val in data_src2var2metric2val.items():
+        core_var = "acc" if "acc" in var2metric2val else "reward"
+        for var_name, metric2val in var2metric2val.items():
+            n_max = max([int(name.split("@")[-1].split("/")[0]) for name in metric2val.keys()])
+            for metric_name, metric_val in metric2val.items():
+                if (var_name == core_var) and any(metric_name.startswith(pfx) for pfx in ["mean", "maj", "best"]) and (f"@{n_max}" in metric_name):
+                    metric_sec = "val-core"
+                else:
+                    metric_sec = "val-aux"
+                pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"
+                metric_dict[pfx] = metric_val
+
+    metric_dict['val_step'] = step
+    return metric_dict, step
+
+
+
 class RayPPOTrainer:
     """
     Note that this trainer runs on the driver process on a single CPU/GPU node.
@@ -730,7 +784,6 @@ class RayPPOTrainer:
 
 
     def _validate(self, logger):
-        reward_extra_infos_dict: dict[str, list] = defaultdict(list)
 
         assert len(self.val_dataloader) == 1, "Validation dataloader should have only one batch for validation."
         for test_data in self.val_dataloader:
@@ -780,57 +833,7 @@ class RayPPOTrainer:
 
             test_batch = test_batch.union(test_output_gen_batch)
 
-        @ray.remote
-        def compute_validation_metrics(step):
-            # sample_inputs
-            # sample_inputs = self.tokenizer.batch_decode(test_batch.batch['prompts'], skip_special_tokens=True)
-
-            # evaluate using reward_function
-            result = self.val_reward_fn(test_batch, return_dict=True)
-            reward_tensor = result["reward_tensor"]
-            test_batch.batch["token_level_scores"] = reward_tensor
-            scores = reward_tensor.sum(-1).cpu().tolist()
-            reward_extra_infos_dict["reward"].extend(scores)
-            if "reward_extra_info" in result:
-                for key, lst in result["reward_extra_info"].items():
-                    reward_extra_infos_dict[key].extend(lst)
-            
-            data_sources = test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0])
-
-            # # log generation
-            # self._maybe_log_val_generations(test_batch)
-
-            # # dump generations
-            # val_data_dir = self.config.trainer.get("validation_data_dir", None)
-            # if val_data_dir:
-            #     self._dump_generations(
-            #         inputs=sample_inputs,
-            #         outputs=sample_outputs,
-            #         scores=sample_scores,
-            #         reward_extra_infos_dict=reward_extra_infos_dict,
-            #         dump_path=val_data_dir,
-            #     )
-
-
-            # calculate metric
-            data_src2var2metric2val = process_validation_metrics(data_sources, test_batch.batch['index'], reward_extra_infos_dict)
-            metric_dict = {}
-            for data_source, var2metric2val in data_src2var2metric2val.items():
-                core_var = "acc" if "acc" in var2metric2val else "reward"
-                for var_name, metric2val in var2metric2val.items():
-                    n_max = max([int(name.split("@")[-1].split("/")[0]) for name in metric2val.keys()])
-                    for metric_name, metric_val in metric2val.items():
-                        if (var_name == core_var) and any(metric_name.startswith(pfx) for pfx in ["mean", "maj", "best"]) and (f"@{n_max}" in metric_name):
-                            metric_sec = "val-core"
-                        else:
-                            metric_sec = "val-aux"
-                        pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"
-                        metric_dict[pfx] = metric_val
-
-            metric_dict['val_step'] = step
-            return metric_dict, step
-
-        return compute_validation_metrics.remote(self.global_steps)
+        return compute_validation_metrics.remote(test_batch, self.global_steps, self.val_reward_fn)
 
     def init_workers(self):
         """Init resource pool and worker group"""
