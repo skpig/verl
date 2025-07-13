@@ -210,6 +210,7 @@ class AsyncSGLangRollout(BaseRollout):
 
         load_format = "dummy" if config.load_format.startswith("dummy") else config.load_format
         self._device_mesh_cpu = device_mesh_cpu
+        self._rank = device_mesh_cpu.get_rank()
         self._tp_rank = device_mesh_cpu["tp"].get_local_rank()
         self._tp_size = device_mesh_cpu["tp"].size()
         tp_size_per_node = self._tp_size // nnodes
@@ -423,17 +424,20 @@ class AsyncSGLangRollout(BaseRollout):
                     )
                     print(f"Output shape: {len(output)} of {len(output[0])} sequences")
                     output = [i for sub in output for i in sub]  # flatten the list of lists
-                    # breakpoint()
             else:
                 output = None
             # Most naive implementation, can extract tensor and send via gloo if too slow
+            dist.barrier(group=self._device_mesh_cpu["tp"].get_group())
             [output] = broadcast_pyobj(
                 data=[output],
-                rank=self._tp_rank,
+                rank=self._rank,
                 dist_group=self._device_mesh_cpu["tp"].get_group(),
                 src=self._device_mesh_cpu["tp"].mesh[0].item(),
                 force_cpu_device=False,
             )
+            # if self._tp_rank == 0:
+            #     breakpoint()
+            # dist.barrier(group=self._device_mesh_cpu["tp"].get_group())
             out = _post_process_outputs(self.tokenizer, output)
 
             response = out[0].to(idx.device)
