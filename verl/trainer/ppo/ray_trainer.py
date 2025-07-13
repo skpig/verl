@@ -293,9 +293,9 @@ def _timer(name: str, timing_raw: Dict[str, float]):
 
 
 @ray.remote
-def compute_validation_metrics(test_batch, step, val_reward_fn):
+def compute_validation_metrics(test_batch, step, val_reward_fn, tokenizer):
     # sample_inputs
-    # sample_inputs = self.tokenizer.batch_decode(test_batch.batch['prompts'], skip_special_tokens=True)
+    sample_inputs = tokenizer.batch_decode(test_batch.batch['prompts'], skip_special_tokens=True)
 
     # evaluate using reward_function
     result = val_reward_fn(test_batch, return_dict=True)
@@ -326,7 +326,9 @@ def compute_validation_metrics(test_batch, step, val_reward_fn):
 
 
     # calculate metric
-    data_src2var2metric2val = process_validation_metrics(data_sources, test_batch.batch['index'], reward_extra_infos_dict)
+    # breakpoint()
+    # data_src2var2metric2val = process_validation_metrics(data_sources, test_batch.batch['index'].tolist(), reward_extra_infos_dict)
+    data_src2var2metric2val = process_validation_metrics(data_sources, sample_inputs, reward_extra_infos_dict)
     metric_dict = {}
     for data_source, var2metric2val in data_src2var2metric2val.items():
         core_var = "acc" if "acc" in var2metric2val else "reward"
@@ -833,7 +835,9 @@ class RayPPOTrainer:
 
             test_batch = test_batch.union(test_output_gen_batch)
 
-        return compute_validation_metrics.remote(test_batch, self.global_steps, self.val_reward_fn)
+        # ray.get(compute_validation_metrics.remote(test_batch, self.global_steps, self.val_reward_fn))
+        return compute_validation_metrics.remote(test_batch, self.global_steps, self.val_reward_fn, self.tokenizer)
+        return None
 
     def init_workers(self):
         """Init resource pool and worker group"""
