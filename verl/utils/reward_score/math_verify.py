@@ -301,7 +301,7 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None, is_v
             gold_extraction_target = (LatexExtractionConfig(), ExprExtractionConfig()) 
         pred_extraction_target=(
             ExprExtractionConfig(), 
-            LatexExtractionConfig(basic_latex=True, units=True, malformed_operators=False, nits=False, boxed="all")
+            LatexExtractionConfig(),
             )
 
         # reduce computation time for training
