@@ -20,6 +20,7 @@ import os
 from contextlib import contextmanager
 from copy import deepcopy
 from json import JSONDecodeError
+import pprint
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -214,6 +215,7 @@ class AsyncSGLangRollout(BaseRollout):
                 force_cpu_device=False,
             )
             dist_init_addr = f"[{ip}]:{port}" if is_ipv6(ip) else f"{ip}:{port}"
+            print(f"!!! dist_init_addr: {dist_init_addr} !!!")
         else:
             dist_init_addr = None
 
@@ -221,10 +223,23 @@ class AsyncSGLangRollout(BaseRollout):
         tp_size_per_node = self._tp_size // nnodes
         node_rank = self._tp_rank // tp_size_per_node
         first_rank_in_node = self._tp_rank % tp_size_per_node == 0
+        print(f"!!! node_rank: {node_rank}, first_rank_in_node: {first_rank_in_node}, tp_size_per_node: {tp_size_per_node} !!!")
+
+        all_info = {
+            "rank": self._rank,
+            "rank2": dist.get_rank(),
+            "tp_rank": self._tp_rank,
+            "tp_size": self._tp_size,
+            "node_rank": node_rank,
+            "nnodes": nnodes,
+            "dist_init_addr": dist_init_addr,
+        }
+        pprint.pprint(all_info)
 
         print("!!! Begin Engine initialization !!!")
         if first_rank_in_node:
             rank = dist.get_rank()
+            print(f"!!! rank: {rank}, tp_rank: {self._tp_rank}, tp_size: {self._tp_size} !!!")
             os.environ["SGLANG_BLOo pK_NONZERO_RANK_CHILDREN"] = "0"
             self._engine = Engine(
                 model_path=actor_module,
