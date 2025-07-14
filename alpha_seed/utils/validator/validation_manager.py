@@ -71,9 +71,9 @@ class ValidateManager(object):
         self.val_thread = threading.Thread(target=self._validate,
                                            args=(val_epoch, need_log, log_file, is_async, global_step))
         self.val_thread.start()
+        self.rollout_manager.wait_nccl_comm_threadsafe()
 
         if is_async:
-            self.rollout_manager.wait_nccl_comm_threadsafe()
             return
         else:
             self.val_thread.join()

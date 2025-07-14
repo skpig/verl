@@ -291,8 +291,10 @@ class RolloutManager:
         self._initialized = True
 
     def wait_nccl_comm_threadsafe(self):
-        self.threadsafe_nccl_comm.wait()
-        self.threadsafe_nccl_comm.clear()
+        if self.val_standalone_wg is not None:
+            # wait for standalone validator weights updated before proceeding
+            self.threadsafe_nccl_comm.wait()
+            self.threadsafe_nccl_comm.clear()
 
     def resume(self, remote_global_step_folder: str, load_dataproto_fn: Callable):
         # async resume
@@ -713,6 +715,7 @@ class RolloutManager:
                                            self.threadsafe_nccl_comm)
             validator_wg = self.val_standalone_wg
         else:
+            self.threadsafe_nccl_comm.set()  # NOTE: let wait_nccl_comm_threadsafe at step 0 pass
             validator_wg = self.hybrid_wg
         gen_batch_padded, pad_size = pad_dataproto_to_divisor(gen_batch, validator_wg.world_size)
         # mark the paddig data uid to None
