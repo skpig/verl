@@ -841,9 +841,10 @@ class RolloutManager:
         if (key := "prompt") not in gen_batch.non_tensor_batch and self._use_server:
             input_ids_list = gen_batch.batch["input_ids"].tolist()
             decoded = []
+            pad_token_id = copy.deepcopy(self.tokenizer.pad_token_id)
             for ids in input_ids_list:
                 # Remove only padding tokens (usually tokenizer.pad_token_id)
-                filtered_ids = [id for id in ids if id != self.tokenizer.pad_token_id]
+                filtered_ids = [id for id in ids if id != pad_token_id]
                 text = self.tokenizer.decode(filtered_ids, skip_special_tokens=False)
                 decoded.append(text)
             gen_batch.non_tensor_batch[key] = np.array(decoded, dtype=object)
