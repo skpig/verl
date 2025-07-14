@@ -1483,7 +1483,7 @@ class RayPPOTrainer:
                 # collect metrics
                 with _timer('log', timing_raw):
                     metrics.update(ray.get(rollout_metrics))
-                    self._maybe_log_train_generations(batch)
+                    # self._maybe_log_train_generations(batch)
                     metrics.update(compute_data_metrics(batch=batch, report_value=self.use_critic or self.config.algorithm.adv_estimator == AdvantageEstimator.VINEPPO))
                     # TODO: implement actual tflpo and theoretical tflpo
                     n_gpus = self.resource_pool_manager.get_n_gpus()
