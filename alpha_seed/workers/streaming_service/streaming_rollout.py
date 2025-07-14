@@ -332,11 +332,11 @@ class AsyncXPerfGPTRollout(object):
         return aq.id
 
     # abort some queries that no longer necessary to run on this engine
-    def abort_queries(self, query_ids: List[str]):
+    def abort_queries(self, query_ids: List[str], not_after: float):
         # try to revoke from pending, running, paused and waiting list
         # 将要abort的放进去，后面等待engine自己内部的循环同步点abort
         with self.inference_engine.update_weights_lock:
-            self.inference_engine.abort(query_ids)
+            self.inference_engine.abort(query_ids, not_after)
 
     def get_all_queries(self, query_type: str) -> List[Query]:
         assert self.process_thread.is_alive(), "process thread is not alive, please check the traceback in log"
@@ -649,8 +649,9 @@ class RemoteAsyncXPerfGPTRollout(Worker):
         return ret
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
-    def abort_queries(self, query_ids: List[str]):
-        self.rollout_actor.abort_queries(query_ids)
+    def abort_queries(self, query_ids: List[str], not_after: float):
+        # 只abort那些在abort_before之前分到engine的
+        self.rollout_actor.abort_queries(query_ids, not_after)
 
     # 只在dp_size=1的情况下调用，所以这里rank0执行即可
     @register(execute_mode=Execute.RANK_ZERO, blocking=True)

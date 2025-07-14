@@ -1346,8 +1346,8 @@ class AsyncActorRolloutRefWorker(Worker):
         return ret
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
-    def abort_queries(self, query_ids: List[str]):
-        self.rollout.abort_queries(query_ids)
+    def abort_queries(self, query_ids: List[str], not_after: float):
+        self.rollout.abort_queries(query_ids, not_after)
 
     # 只在dp_size=1的情况下调用，所以这里rank0执行即可，DP_COMPUTE与此参数暂不兼容
     @register(execute_mode=Execute.RANK_ZERO, blocking=True)

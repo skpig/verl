@@ -46,8 +46,10 @@ class Query:
     output_prompt: Union[str, List[str]]
     prefix_already_computed_len: int
     system_ids_len: int
+    # 下面几个time的单位都是ms
     created_time: float  # 此对象在client侧创建时间
     enqueue_time: float  # 对象放入request pool的时间
+    dispatch_time: float  # 从request pool取出来分配给某个engine的时刻
     received_time: float  # 在engine侧第一次收到进入队列的时间
     first_scheduled_time: float  # 开始prefill的时间
     first_token_time: float  # prefill完的时间
@@ -365,14 +367,18 @@ class InflightQueue:
         with self.lock:
             self.queue = self.queue[length:]
 
-    def remove(self, query_ids: Set[str]):
+    def remove(self, to_remove: Dict[str, float]):
+        # to_remove: query_id -> ts (abort the query if before this ts)
         with self.lock:
             original_len = len(self.queue)
 
             # in-place remove and compact the list
             write_index = 0
             for read_index in range(original_len):
-                if self.queue[read_index].id not in query_ids:
+                q = self.queue[read_index]
+                not_after = to_remove.get(q.id)
+                if not_after is None or q.query.dispatch_time >= not_after:
+                    # keep this query
                     if write_index != read_index:
                         self.queue[write_index] = self.queue[read_index]
                     write_index += 1

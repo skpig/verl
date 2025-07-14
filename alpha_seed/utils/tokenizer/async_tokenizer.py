@@ -7,9 +7,10 @@ from transformers import PreTrainedTokenizer
 
 class AsyncTokenizer:
 
-    def __init__(self, tokenizer: PreTrainedTokenizer, executor: ThreadPoolExecutor):
+    def __init__(self, tokenizer: PreTrainedTokenizer):
         self.tokenizer = tokenizer
-        self.executor = executor
+        # tokenizer用自己的小线程池，避免local executor模式下把task runner线程数占满
+        self.executor = ThreadPoolExecutor(max_workers=32, thread_name_prefix='async-tokenizer')
 
     # 这两个方法改写成async模式，不占用asyncio loop
     async def encode_async(self, *args, **kwargs):

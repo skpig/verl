@@ -31,13 +31,19 @@ export RAY_BACKEND_LOG_LEVEL=error
 SCRIPT_DIR=$(dirname "${BASH_SOURCE[0]}")
 export SOCKET_PATH=/tmp/query_tool.sock
 
+python3 "$SCRIPT_DIR/query_tool.py" check-daemon
+if [ ! "$?" == "0" ]; then
+  rm -f "${SOCKET_PATH}"
+fi
+
 if [ ! -S "${SOCKET_PATH}" ]; then
+  pip install humanize
   ray job submit --no-wait \
-    --runtime-env="tasks/runtime_env/runtime_env.yaml" \
+    --runtime-env="tasks/runtime_env/runtime_env_headonly.yaml" \
     -- \
     python3 "$SCRIPT_DIR/query_tool.py" daemon
 
-  MAX_WAIT=30  # 最多等待时间（秒）
+  MAX_WAIT=60  # 最多等待时间（秒）
   WAITED=0
   while [ ! -S "${SOCKET_PATH}" ]; do
     if [ "$WAITED" -ge "$MAX_WAIT" ]; then

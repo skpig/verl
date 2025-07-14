@@ -10,6 +10,7 @@ from typing import List, Optional, Dict, Union, Tuple, Set
 
 import ray
 import torch
+from omegaconf import DictConfig
 from ray import ObjectRef
 from ray.exceptions import ActorDiedError, GetTimeoutError, RayActorError
 
@@ -39,6 +40,7 @@ class InternalDiagnosisMetrics:
     num_initialized_replicas: int
     num_alive_replicas: int
     gmem_insufficient_count: int
+    gmem_high_water_level_count: int
     total_standby_wgs: int  # 还有多少wg本轮可以接收请求
     total_overload_num_slots: int  # 多少请求在wg上溢出要分发给别的wg
     total_available_num_slots: int  # 本轮可接收请求的wg总共能接收多少
@@ -57,6 +59,7 @@ class InternalDiagnosisMetrics:
             '#initialized': self.num_initialized_replicas,
             '#alive': self.num_alive_replicas,
             '#gmem full': self.gmem_insufficient_count,
+            '#gmem high': self.gmem_high_water_level_count,
             '#standby': self.total_standby_wgs,
             '$overload': self.total_overload_num_slots,
             '$available': self.total_available_num_slots,
@@ -223,18 +226,6 @@ class StandaloneRolloutWGAdapter:
     def __init__(self, replicas):
         self.replicas = replicas
 
-    def update_standalone_worker(self, role) -> List[ObjectRef]:
-        # update转发给所有initialized的worker，不用管其是否ready，一开始肯定不ready，需要update weights后才会ready
-        self._update_worker_start_ts = time.time() * 1e6
-        futs = []
-        for wg in self.replicas.get_initialized_worker_groups().values():
-            wg: Union[RayWorkerGroup, RemoteAsyncXPerfGPTRollout, AsyncActorRolloutRefWorker]
-            refs = wg.update_standalone_worker(role)
-            futs.append((wg, refs))
-        self.wait_ignore_actor_died(futs)
-        # 返回一个占位符即可
-        return [ray.put(None)]
-
     def get_master_addr(self) -> List[DataProto]:
         # 获取每个workergroup的每个rank的address
         ret = []
@@ -369,6 +360,7 @@ class DebounceAccumulatedLogger:
         self.log_interval_seconds = log_interval_seconds
         self.wg_latest_log_ts = defaultdict(time.time)  # wg_name -> ts
         self.wg_accumulate_value = defaultdict(accumulated_type)  # wg_name -> val
+        self.zero_val = accumulated_type()
 
     def log(self, wg_name: str, val: int | float, fmt: str):
         last_ts = self.wg_latest_log_ts[wg_name]
@@ -377,6 +369,7 @@ class DebounceAccumulatedLogger:
         if now - last_ts >= self.log_interval_seconds:
             self.wg_latest_log_ts[wg_name] = now
             acc = self.wg_accumulate_value[wg_name]
+            self.wg_accumulate_value[wg_name] = self.zero_val
             content = fmt.format(accumulated_value=acc)
             print(content)
 
@@ -424,16 +417,17 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
     """
 
     def __init__(self, replicas: Union[ReplicatedRayWorkerGroup, ScalingRayWorkerGroup], actor_addresses: List[str],
-                 request_manager_name: str, poll_interval: float):
+                 request_manager_name: str, config: DictConfig):
         self.request_manager: RequestManager = RequestManagerRegisterCenter.get(request_manager_name)  # noqa
         super().__init__(self.request_manager)
         self.replicas = replicas
         self.actor_addresses = actor_addresses
+        self.config = config  # .streaming_rollout.proxy
         self._tracer = Tracer.get_instance()
         self._stop_server_ts = 0
         self._update_worker_start_ts = 0
         self._request_manager_name = request_manager_name
-        self.poll_interval = poll_interval
+        self.poll_interval = config.poll_internal_seconds
         self._progress_logger = DebounceAccumulatedLogger()
         self._metrics_logger = ProxyMetricsLogger()
 
@@ -507,7 +501,7 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
 
                     # 2. send new request to worker group (engine)
                     load: LoadMetric = wg.get_load_metrics()[0]  # noqa, dp_size always =1
-                    gmem_insufficient = load.kv_cache_util > 0.9
+                    gmem_insufficient = load.kv_cache_util > self.config.gmem_insufficient_threshold
 
                     # note(hongbin): 始终让engine处于一个固定满并发的状态即可，减少动态插入新的具体进行prefill打断decode的case
                     short = max_concurrency - load.num_prefilling - load.num_decoding - load.num_pending - load.num_waiting
@@ -608,9 +602,9 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
 class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
 
     def __init__(self, replicas: Union[ReplicatedRayWorkerGroup, ScalingRayWorkerGroup], actor_addresses: List[str],
-                 request_manager_name: str, poll_interval: float, rebalance_threshold: int):
-        super().__init__(replicas, actor_addresses, request_manager_name, poll_interval)
-        self._rebalance_threshold = rebalance_threshold
+                 request_manager_name: str, config: DictConfig):
+        super().__init__(replicas, actor_addresses, request_manager_name, config)
+        self._rebalance_threshold = config.rebalance_threshold
         self.abort_logger = DebounceAccumulatedLogger()
 
     def _dispatch_loop(self):
@@ -621,10 +615,12 @@ class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
         """
         print(f'start background dispatch loop with balanced mode for {self._request_manager_name}')
 
+        loop_start_ts_list = []  # 记录每个loop开始的时间
         sleep_interval = self.poll_interval
         while True:
             if self._loop_should_stop.is_set():
                 break
+            loop_start_ts_list.append(time.time())
             self.is_waiting = True
             self._loop_should_continue.wait()
             self.is_waiting = False
@@ -638,15 +634,18 @@ class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
             max_concurrency = total // max(1, num_ready_replicas)  # replicas可能还没ready
             max_concurrency = min(max(max_concurrency, 1), 512)  # 限制在1-512范围内
 
-            # 纪录负载指标
+            # 记录负载指标
             loads = {}
+            engine_concurrency_cap = defaultdict(int)  # engine_id -> 最大可并发数
 
             # internal metrics
             total_overload_num_slots = 0
             total_available_num_slots = 0
             total_standby_wgs = 0
             gmem_insufficient_count = 0
-            total_rebalanced = 0
+            gmem_high_water_level_count = 0
+            gmem_insufficient_relabenced_count = 0
+            load_rebalanced_count = 0
             dispatch_delay = 0
             enqueue_delay = 0
 
@@ -667,19 +666,27 @@ class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
 
                     # 2. send new request to worker group (engine)
                     load: LoadMetric = wg.get_load_metrics()[0]  # noqa, dp_size always =1
-                    gmem_insufficient = load.kv_cache_util > 0.9
+                    gmem_insufficient = load.kv_cache_util > self.config.gmem_insufficient_threshold
+                    gmem_high_water_level = load.kv_cache_util > self.config.gmem_high_water_level_threshold
+                    gmem_abundant = load.kv_cache_util < self.config.gmem_abundant_threshold
 
                     short = max_concurrency - load.num_prefilling - load.num_decoding - load.num_pending - load.num_waiting
+                    if gmem_high_water_level:
+                        # 统计engine可以同时运行的最大query数
+                        running_concurrency = load.num_prefilling + load.num_decoding
+                        engine_concurrency_cap[engine_id] = max(engine_concurrency_cap[engine_id], running_concurrency)
+                        # 限制最大分发不超过engine并发能力，额外补充固定10个余量，避免发过去过多然后又abort
+                        short = min(short, engine_concurrency_cap[engine_id] + 2)
 
                     # metrics
                     total_overload_num_slots += short if short < 0 else 0
                     total_available_num_slots += short if short > 0 else 0
                     total_standby_wgs += 1 if short > 0 and not gmem_insufficient else 0
                     gmem_insufficient_count += 1 if gmem_insufficient else 0
+                    gmem_high_water_level_count += 1 if gmem_high_water_level else 0
 
-                    # note(hongbin): 始终让engine处于一个固定满并发的状态即可，减少动态插入新的具体进行prefill打断decode的case
                     # 优先让各个wg都均匀得到相等的query，内存满了就不再放过去
-                    if short > 0 and not gmem_insufficient:
+                    if short > 0 and not gmem_high_water_level:
                         queries: List[Query] = ray.get(
                             self.request_manager.get_next_pending_requests.remote(short, engine_id))
                         if len(queries) > 0:
@@ -700,33 +707,43 @@ class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
                                 # 还没开始生成过的才考虑算上enqueue delay
                                 if q.new_token_len == 0:
                                     enqueue_delay += (q.enqueue_time - q.created_time) / 1e3
-                    else:
-                        # 满了之后再判断可以取出来哪些放过去的query，只驱逐，等下一轮循环时再分配
+
+                    elif pending_size < 128 or pending_size < 2 * len(ready_wg_items):
+                        # 仅当pending较少时才进行rebalance，否则优先将未分发出去的先分出去
+                        # 只驱逐，等下一轮循环时再分配
 
                         # gmem不够导致的waiting，可以将其驱逐给别的wg
                         waiting_query_ids = []
-                        futs = []
+                        release_due_to_gmem_insufficient_ref = None
                         if gmem_insufficient and not load.is_weights_updating:
                             waiting_query_ids = load.waiting_ids + load.pending_ids  # 在pending里的也释放掉
                             if len(waiting_query_ids) > 0:
-                                futs.append(
-                                    self.request_manager.release_by_ids.remote(waiting_query_ids, engine_id,
-                                                                               'memory insufficient'))
+                                release_due_to_gmem_insufficient_ref = self.request_manager.release_by_ids.remote(
+                                    waiting_query_ids, engine_id, 'memory insufficient')
 
                         # 驱逐了waiting仍然超了，再去除掉一些 (short/still_short是一个negative number)
                         # rebalance_threshold的目的：不平衡只超出一点点就不管，让他继续跑，避免来回震荡调整
+                        release_due_to_lb = None
                         still_short = short + len(waiting_query_ids)
-                        if still_short < -self._rebalance_threshold:
-                            futs.append(
-                                self.request_manager.release_shortest_n.remote(-still_short, engine_id, 'rebalance'))
+                        if not gmem_abundant and still_short < -self._rebalance_threshold:
+                            release_due_to_lb = self.request_manager.release_shortest_n.remote(
+                                -still_short, engine_id, 'rebalance')
 
+                        # 汇总要abort的所有query_ids
                         to_abort = []
-                        for released_ids in ray.get(futs):
+                        if release_due_to_gmem_insufficient_ref is not None:
+                            released_ids = ray.get(release_due_to_gmem_insufficient_ref)
                             to_abort.extend(released_ids)
+                            gmem_insufficient_relabenced_count += len(released_ids)
+                        if release_due_to_lb is not None:
+                            released_ids = ray.get(release_due_to_lb)
+                            to_abort.extend(released_ids)
+                            load_rebalanced_count += len(released_ids)
+
+                        # 从engine abort掉
                         if len(to_abort) > 0:
-                            total_rebalanced += len(to_abort)
                             pending_size += len(to_abort)
-                            wg.abort_queries(to_abort)
+                            wg.abort_queries(to_abort, time.time())
                             fmt = (
                                 'aborting {accumulated_value}x queries from ' +
                                 f'engine({wg_name}) W={load.num_waiting}/P={load.num_prefilling}/D={load.num_decoding}')
@@ -751,7 +768,7 @@ class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
             throughput = ray.get(self.request_manager.get_estimated_throughput.remote())
             self._trace_load_metrics(loads, throughput, total, pending_size)
 
-            loop_cost = time.time() - t0  # noqa: for py-spy
+            loop_cost = time.time() - t0
             sleep_interval = max(0., self.poll_interval - loop_cost)
             num_target_replicas = self.replicas.target_num_replicas
             num_alive_replicas = len(self.replicas.alive_worker_group_ids)
@@ -763,10 +780,11 @@ class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
                 num_initialized_replicas=num_initialized_replicas,
                 num_alive_replicas=num_alive_replicas,
                 gmem_insufficient_count=gmem_insufficient_count,
+                gmem_high_water_level_count=gmem_high_water_level_count,
                 total_standby_wgs=total_standby_wgs,
                 total_overload_num_slots=total_overload_num_slots,
                 total_available_num_slots=total_available_num_slots,
-                total_rebalanced=total_rebalanced,
+                total_rebalanced=gmem_insufficient_relabenced_count,
                 max_concurrency=max_concurrency,
                 dispatch_delay_acc=dispatch_delay,
                 enqueue_delay_acc=enqueue_delay,
@@ -776,7 +794,8 @@ class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
             self._metrics_logger.log({
                 'num_ready_replicas': num_ready_replicas,
                 'loop_cost': loop_cost,
-                'rebalanced_count': total_rebalanced,
+                'gmem_insufficient_rebalanced_count': gmem_insufficient_relabenced_count,
+                'load_rebalanced_count': load_rebalanced_count,
             })
 
     def get_step_metrics(self) -> dict:
@@ -784,13 +803,15 @@ class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
         try:
             num_ready_replicas = metrics['num_ready_replicas']
             loop_cost = metrics['loop_cost']
-            rebalanced_count = metrics['rebalanced_count']
+            gmem_insufficient_rebalanced_count = metrics['gmem_insufficient_rebalanced_count']
+            load_rebalanced_count = metrics['load_rebalanced_count']
             return {
                 'rollout/elastic/num_ready_replicas_mean': num_ready_replicas.mean,
                 'rollout/elastic/num_ready_replicas_min': num_ready_replicas.minimum,
                 'rollout/elastic/num_ready_replicas_max': num_ready_replicas.maximum,
                 'rollout/proxy/loop_cost': loop_cost.mean,
-                'rollout/proxy/rebalanced_count_total': rebalanced_count.sum,
+                'rollout/proxy/gmem_insufficient_rebalanced_count_total': gmem_insufficient_rebalanced_count.sum,
+                'rollout/proxy/load_rebalanced_count_total': load_rebalanced_count.sum,
             }
         except KeyError as e:
             return {}

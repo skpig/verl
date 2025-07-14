@@ -13,6 +13,8 @@ from dataclasses import asdict
 from typing import Optional, Any, List
 from rich.console import Console
 from rich.live import Live
+from rich.table import Table
+from rich import box
 
 import yaml
 import ray
@@ -65,20 +67,85 @@ def _render_progress_bar(done: int, total: int, width=40):
 
 def _render_progress_lines(stats: List[dict]) -> str:
     lines = []
+    now = time.time()
     for stat in stats:
+        # 处理时间戳为0的情况（表示没有相关查询）
+        if stat["oldest_query_time"] == 0:
+            oldest = "N/A"
+        else:
+            oldest = int(now - stat['oldest_query_time'])
+
+        if stat["latest_query_time"] == 0:
+            latest = "N/A"
+        else:
+            latest = int(now - stat['latest_query_time'])
+
+        if stat["oldest_updated_time"] == 0:
+            least_recent_update = "N/A"
+        else:
+            least_recent_update = int(now - stat['oldest_updated_time'])
+
         bar = _render_progress_bar(stat['finished'], stat['total'], width=40)
         line = (f"Step {stat['step']}: {bar} | "
                 f"done {stat['finished']} / {stat['total']} | "
-                f"{stat['token_throughput']:.1f} TPS")
+                f"{stat['token_throughput']:.1f} TPS | "
+                f"running {stat['running_queries']} pending {stat['pending_queries']} | "
+                f"old {oldest} LRU {least_recent_update} new {latest} (sec ago) | "
+                f"Engine: active {stat['active_engines']}")
         lines.append(line)
+    lines.append("")
+    lines.append("Notes:")
+    lines.append("  old: the earliest query in the running queue")
+    lines.append("  LRU: least recent updated: the most staled query in the running queue")
+    lines.append("  new: the latest query in the running queue")
+    lines.append("")
     return "\n".join(lines)
 
 
 def list_running_queries_str(request_manager):
-    running_query_ids = ray.get(request_manager.get_inflight_query_ids.remote())
-    output = _print_list(running_query_ids)
-    output += [f"total inflight queries: {len(running_query_ids)}"]
-    return '\n'.join(output)
+    from alpha_seed.workers.streaming_service.rollout_request_manager import RequestDigest
+    running_query_digest: List[RequestDigest] = ray.get(request_manager.get_inflight_query_digest.remote())
+
+    if not running_query_digest:
+        return "No inflight queries found."
+
+    # Create rich table (3-line table style: no vertical lines)
+    table = Table(show_header=True, header_style="bold magenta", box=box.SIMPLE_HEAD, width=200)
+    table.add_column("Query ID", style="cyan", no_wrap=True, width=26)
+    table.add_column("Engine ID", style="green", no_wrap=True, width=26)
+    table.add_column("Input", style="blue", justify="right", no_wrap=True)
+    table.add_column("Output", style="blue", justify="right", no_wrap=True)
+    table.add_column("Aborted", style="red", justify="right", no_wrap=True)
+    table.add_column("Stale", style="red", justify="right", no_wrap=True)
+    table.add_column("Assigned", style="yellow", no_wrap=True)
+    table.add_column("Updated", style="yellow", no_wrap=True)
+
+    # Helper function to format relative time using humanize library if available
+    def format_relative_time(timestamp):
+        if not timestamp:
+            return 'N/A'
+
+        import humanize
+        import datetime
+        dt = datetime.datetime.fromtimestamp(timestamp)
+        return humanize.naturaltime(dt)
+
+    for digest in running_query_digest:
+        assigned_time = format_relative_time(digest.assigned_at)
+        updated_time = format_relative_time(digest.updated_at)
+
+        # Use original content without truncation - let rich handle overflow
+        table.add_row(digest.query_id, digest.assigned_engine_id or 'N/A', str(digest.input_length),
+                      str(digest.output_length), str(digest.aborted_count), str(digest.stale_count), assigned_time,
+                      updated_time)
+
+    # Render table to string with wide console
+    console = Console(width=200)
+    with console.capture() as capture:
+        console.print(table)
+        console.print(f"\nTotal inflight queries: {len(running_query_digest)}")
+
+    return capture.get()
 
 
 def list_finished_queries_str(request_manager):
@@ -98,6 +165,22 @@ def get_query_details_str(request_manager, query_id):
         return f"---\n{yaml_str}\n"
     else:
         return f"Query with ID {query_id} not found."
+
+
+def evict_query(request_manager, query_id):
+    from alpha_seed.workers.streaming_service.rollout_request_manager import Request
+    req: Optional[Request] = ray.get(request_manager.get_by_id.remote(query_id))
+    if not req:
+        return f"Query with ID {query_id} not found."
+
+    engine_id = req.assigned_engine_id
+    if engine_id is None:
+        return f"Query({query_id}) has not been assigned."
+
+    released_query_ids = ray.get(
+        request_manager.release_by_ids.remote([query_id], engine_id, "manually trigger by query_tool"))
+    if released_query_ids:
+        return f"Queries({released_query_ids}) has been evicted from engine({engine_id})."
 
 
 def list_all_pools_str():
@@ -134,6 +217,8 @@ def handle_client(conn, server):
             response = list_finished_queries_str(rm)
         elif cmd == "get":
             response = get_query_details_str(rm, args["query_id"])
+        elif cmd == "evict":
+            response = evict_query(rm, args["query_id"])
         elif cmd == "show-stats":
             response = get_statistics_str(rm)
         elif cmd == "list-pools":
@@ -150,6 +235,7 @@ def handle_client(conn, server):
                     break
         elif cmd == "stop-daemon":
             print("Stopping daemon ...")
+            conn.sendall("daemon stopped".encode())
             server.close()
             os.kill(os.getpid(), signal.SIGTERM)
         else:
@@ -164,10 +250,20 @@ def handle_client(conn, server):
         conn.close()
 
 
-def start_server():
-    if ray.is_initialized() is False:
-        ray.init(namespace="alphaseed")
+def check_server_alive() -> bool:
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        try:
+            client.connect(SOCKET_PATH)
+        except (FileNotFoundError, ConnectionRefusedError):
+            return False
+        except Exception as e:
+            print("another error occurred:", e, "will restart the daemon")
+            return False
+    return True
 
+
+@ray.remote
+def start_server():
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         server.bind(SOCKET_PATH)
@@ -248,6 +344,7 @@ def main():
 
     subparsers.add_parser('daemon', help='start the daemon')
     subparsers.add_parser('stop-daemon', help='start the daemon')
+    subparsers.add_parser('check-daemon', help='check the daemon liveness')
 
     # list-pools (does not require pool)
     subparsers.add_parser('list-pools', help='List all available pools')
@@ -265,12 +362,27 @@ def main():
     get_parser = subparsers.add_parser('get', help='Get details of a query')
     get_parser.add_argument('query_id', help='ID of the query')
 
+    # evict query
+    evict = subparsers.add_parser('evict', help='Evict a query from engine and put it back to the request pool')
+    evict.add_argument('query_id', help='ID of the query')
+
     # show stats
     stats_parser = subparsers.add_parser('show-stats', help='Show statistics')
 
     args = parser.parse_args()
     if args.command == 'daemon':
-        start_server()
+        from alpha_seed.utils.server_client import is_local_ray_instance
+        if ray.is_initialized() is False:
+            ray.init(namespace="alphaseed")
+        if is_local_ray_instance():
+            ray.get(start_server.remote())
+        else:
+            ray.get(start_server.options(resources={'head': 1}).remote())
+    elif args.command == 'check-daemon':
+        if check_server_alive():
+            exit(0)
+        else:
+            exit(1)
     else:
         send_to_daemon(args.command, vars(args))
 

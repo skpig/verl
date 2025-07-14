@@ -20,7 +20,7 @@ class AgentWorker:
         self._thread_executor = ThreadPoolExecutor(max_workers=worker_max_concurrency,
                                                    thread_name_prefix="agent-worker")
         self.tokenizer = tokenizer
-        self.async_tokenizer = AsyncTokenizer(tokenizer, self._thread_executor)
+        self.async_tokenizer = AsyncTokenizer(tokenizer)
         self.llm = OpenAIAsyncClient(host, port)
         self.concurrency_limit = asyncio.Semaphore(worker_max_concurrency)
 

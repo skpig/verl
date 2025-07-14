@@ -33,16 +33,17 @@ class AbortHistory:
 
 @dataclass
 class Request:
-    request_id: str
+    request_id: str  # 同Query.id
     query: Query
     finished: bool = False  # 是否已经结束生成
     assigned: bool = False  # 是否已经分出去了（分出去了，但不确定具体分配的engine_id，取决于passive/active模式
     assigned_engine_id: Optional[str] = None  # 被分配到的engine
-    updated_at: float = None  # 标记最后更新时间，并发更新时可以判断数据是否过期
+    updated_at: float = None  # 标记最后更新时间，并发更新时可以判断数据是否过期 (unit: s)
 
     # fields need to assign back
     global_step: int = 0  # 当前这个query来自哪个global step的sample
-    last_pending_reschedule_ts: float = 0  # 最近一次stale被重新调度的时间戳 (unit: ms)
+    last_assigned_at: float = 0  # 最近一次调度到此engine的时间 (unit: s)
+    last_pending_reschedule_ts: float = 0  # 最近一次各种原因被重新放回池里等待调度的时间戳 (unit: ms)
     stale_histories: List[StaleHistory] = field(default_factory=list)  # 记录所有更换过的engine
     # 只记录从proxy主动abort的记录（新的在前），在重新分发时，会跳过从最近abort的engine，避免抖动
     abort_histories: List[AbortHistory] = field(default_factory=list)
@@ -61,17 +62,35 @@ class Request:
 
 
 @dataclass
+class RequestDigest:
+    query_id: str
+    assigned_engine_id: str
+    assigned_at: float
+    updated_at: float
+    input_length: int
+    output_length: int
+    aborted_count: int
+    stale_count: int
+
+
+@dataclass
 class ProgressStat:
     step: int
     total: int
     finished: int
     token_throughput: float
+    running_queries: int
+    pending_queries: int
+    active_engines: int
+    oldest_updated_time: float  # 最老的更新时间
+    oldest_query_time: float  # 目前最老的query开始跑的时间戳
+    latest_query_time: float  # 目前最新的query开始的时间戳
 
 
 class RequestPool:
 
     def __init__(self):
-        self.requests: Dict[str, Request] = {}  # 中间结果会被update进来
+        self.requests: Dict[str, Request] = {}  # {query_id -> } 中间结果会被update进来
         self.finished_requests: Dict[str, Request] = {}  # finished部分会被移到这里
         self._finished_events: Dict[str, asyncio.Event] = {}  # 标记请求完成的async event
         self._mutex = threading.Lock()
@@ -116,8 +135,12 @@ class RequestPool:
                 if request.is_recent_aborted_from(engine_id, cool_down_seconds):
                     continue
                 # 标记请求已被认领了再分发出去
+                now = time.time()
                 request.assigned = True
                 request.assigned_engine_id = engine_id
+                request.last_assigned_at = now
+                request.updated_at = now
+                request.query.dispatch_time = now
                 ret[request_id] = request
                 if len(ret) == batch_size:
                     break
@@ -147,6 +170,7 @@ class RequestPool:
             r.stale_histories = cur_req.stale_histories
             r.abort_histories = cur_req.abort_histories
             r.last_pending_reschedule_ts = cur_req.last_pending_reschedule_ts
+            r.last_assigned_at = cur_req.last_assigned_at
 
         # 从engine中取出的结果，update到这里
         ts_bucket_2s = int(time.time()) // 2 * 2
@@ -250,6 +274,18 @@ class RequestPool:
 
         reqs_for_engine.sort(key=lambda r: r.query.new_token_len)
         return reqs_for_engine[:n]
+
+    # 返回长时间assigned但未被更新的query，返回query_id和engine_id
+    def get_possible_hang_query_ids(self, threshold: float) -> List[Tuple[str, str]]:
+        now = time.time()
+        ret = []
+        with self._mutex:
+            for req_id, req in self.requests.items():
+                if req.assigned_engine_id is None:
+                    continue
+                if now - req.updated_at > threshold:
+                    ret.append((req_id, req.assigned_engine_id))
+        return ret
 
     # 返回每个engine_id在最近给定的interval里的throughput
     def get_throughput(self, step, interval=30) -> Dict[str, float]:
@@ -441,6 +477,10 @@ class RequestManager:
         # 根据还存活的engine id，将其他死掉的engine在跑的request标记为待认
         self.req_pool.update_stale(ready_engine_ids)
 
+    def get_possible_hang_query_ids(self, threshold: float) -> List[Tuple[str, str]]:
+        # return [(query_id, engine_id), ...]
+        return self.req_pool.get_possible_hang_query_ids(threshold)
+
     def set_global_step(self, global_step: int):
         self._step = global_step
         self._progress_bar.reset()
@@ -597,6 +637,24 @@ class RequestManager:
 
     ## query_tool util function ##
 
+    def get_inflight_query_digest(self) -> List[RequestDigest]:
+        ret = []
+        query_ids = list(self.req_pool.requests.keys())
+        for query_id in query_ids:
+            req = self.req_pool.requests.get(query_id)
+            reg_digest = RequestDigest(
+                query_id=query_id,
+                assigned_engine_id=req.assigned_engine_id,
+                assigned_at=req.last_assigned_at,
+                updated_at=req.updated_at,
+                input_length=req.query.original_input_len,
+                output_length=req.query.new_token_len,
+                aborted_count=len(req.abort_histories),
+                stale_count=len(req.stale_histories),
+            )
+            ret.append(reg_digest)
+        return ret
+
     def get_inflight_query_ids(self) -> List[str]:
         return list(self.req_pool.requests.keys())
 
@@ -607,6 +665,7 @@ class RequestManager:
         return self.req_pool.requests.get(query_id)
 
     def get_progress(self) -> List[ProgressStat]:
+
         # 获取当前正在跑的
         current_inflight = set(self.get_inflight_query_ids())
 
@@ -619,6 +678,37 @@ class RequestManager:
             throughput = self.req_pool.get_throughput(step)
             total_throughput = sum(throughput.values())
 
+            # 为当前step计算指标
+            step_running = 0
+            step_pending = 0
+            step_active_engines = set()
+            step_oldest_query_time = time.time()
+            step_oldest_updated_time = time.time()
+            step_latest_query_time = 0
+
+            # 遍历该step的所有queries
+            step_query_ids = self._query_id_log[step]
+            for query_id in step_query_ids:
+                req = self.req_pool.requests.get(query_id)
+                if req is None:
+                    continue
+                if req.assigned:
+                    step_running += 1
+                    step_active_engines.add(req.assigned_engine_id)
+                    if req.updated_at:
+                        step_oldest_updated_time = min(step_oldest_updated_time, req.updated_at)
+                    if req.last_assigned_at:
+                        step_oldest_query_time = min(step_oldest_query_time, req.last_assigned_at)
+                        step_latest_query_time = max(step_latest_query_time, req.last_assigned_at)
+                else:
+                    step_pending += 1
+
+            # 如果没有任何assigned的请求，重置时间戳
+            if step_running == 0:
+                step_oldest_query_time = 0
+                step_oldest_updated_time = 0
+                step_latest_query_time = 0
+
             if step_finished < step_total:
                 ret.append(
                     ProgressStat(
@@ -626,6 +716,12 @@ class RequestManager:
                         total=step_total,
                         finished=step_finished,
                         token_throughput=total_throughput,
+                        running_queries=step_running,
+                        pending_queries=step_pending,
+                        active_engines=len(step_active_engines),
+                        oldest_updated_time=step_oldest_updated_time,
+                        oldest_query_time=step_oldest_query_time,
+                        latest_query_time=step_latest_query_time,
                     ))
 
         ret = sorted(ret, key=lambda p: p.step)

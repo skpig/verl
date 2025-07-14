@@ -24,8 +24,7 @@ class ElasticRolloutManager:
         self._hybrid_rollout_addresses_fut = hybrid_rollout_address
 
     def init_elastic_rollout(self, hybrid_replica: CombinedRayWorkerGroupAdapter):
-        poll_interval = self.config.streaming_rollout.proxy.poll_internal_seconds
-        rebalance_threshold = self.config.streaming_rollout.proxy.rebalance_threshold
+        rollout_proxy_config = self.config.streaming_rollout.proxy
         # 每个rollout_worker用1个gpu，每个gpu对应1个rank
         res_shape = [self.config.streaming_rollout.n_gpus_per_node] * self.config.streaming_rollout.nnodes
         tp_size = sum(res_shape)
@@ -113,8 +112,8 @@ class ElasticRolloutManager:
             'elastic': elastic_replicas,
         })
         # 封装给worker group的接口代理
-        rollout_proxy = BalancedRolloutWorkerGroupProxy(replicas, hybrid_rollout_addrs, 'train_rollout', poll_interval,
-                                                        rebalance_threshold)
+        rollout_proxy = BalancedRolloutWorkerGroupProxy(replicas, hybrid_rollout_addrs, 'train_rollout',
+                                                        rollout_proxy_config)
 
         # initialize rollout horizontal auto scaling control handle
         elastic_pool_name = self.config.streaming_rollout.elastic.elastic_pool_name

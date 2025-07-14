@@ -21,7 +21,7 @@ from xperf_gpt.multi_models.visual.eva_vit import EVA_VIT_CONFIGS
 from alpha_seed.workers.xperf_rollout.component.query import Query, AsyncQuery, InflightQueue, batch_sync_tp_queries
 from alpha_seed.utils.observility import get_profiler_context_wrapped
 from xperf_gpt.utils import (logging_rank, logging_rank_only)
-from typing import List, Dict, Set
+from typing import List, Dict
 import logging
 import os
 import time
@@ -97,20 +97,24 @@ class StepProfiler:
         self.step += 1
 
 
-def _remove_query_list_inplace(lst: List[Query], to_remove: Set[str]) -> List[Query]:
+def _remove_query_list_inplace(lst: List[Query], to_remove: Dict[str, float]) -> List[Query]:
+    # to_remove: query_id -> ts (abort the query if before this ts)
     original_len = len(lst)
     write_index = 0
-    ret = []
+    will_remove = []
     for read_index in range(original_len):
-        if lst[read_index].id not in to_remove:
+        q = lst[read_index]
+        not_after = to_remove.get(q.id)
+        if not_after is None or q.dispatch_time >= not_after:
+            # keep this query
             if write_index != read_index:
                 lst[write_index] = lst[read_index]
             write_index += 1
         else:
-            ret.append(lst[read_index])
+            will_remove.append(lst[read_index])
     del lst[write_index:]
     # 返回删除的元素
-    return ret
+    return will_remove
 
 
 class GetMaxSet:
@@ -667,9 +671,9 @@ class InferenceSession:
                         self.all_accepted_queries.pop(q.id)
         return ret
 
-    def abort(self, query_ids: List[str]):
+    def abort(self, query_ids: List[str], not_after: float):
         for query_id in query_ids:
-            self.queries_to_abort.put(query_id)
+            self.queries_to_abort.put((query_id, not_after))
 
     def get_load_metrics(self) -> LoadMetric:
         num_prefill = 0
@@ -714,8 +718,8 @@ class InferenceSession:
             else:
                 threshold = self.num_pred_tokens + 1 if self.enable_ngrams_decoding else 0
                 if self._exceed_length_condition(query, tokens_threshold=threshold):
-                    self.all_accepted_queries[query.id].output_prompt = self.tokenizer.batch_decode(
-                        [query.output_tokens]) if self.decode_output else ""
+                    query.output_prompt = self.tokenizer.batch_decode([query.output_tokens
+                                                                      ]) if self.decode_output else ""
                     self._finish_query(query)
                 else:
                     if query.is_kv_cache_slot_allocated():
@@ -980,14 +984,18 @@ class InferenceSession:
             return num_abort, num_abort_local
 
         # get minimum synchronized aborts
-        to_abort: Set[str] = set()
+        to_abort: Dict[str, float] = {}  # query_id -> abort ts before
         for i in range(num_abort):
-            to_abort.add(self.queries_to_abort.get())
+            query_id, not_after = self.queries_to_abort.get()
+            to_abort[query_id] = not_after  # 如果query_id有重复，那queue后面的时间戳肯定大于前面的时间戳
 
         # remove from local list
         with self._accepted_queries_mutex:
-            for query_id in to_abort:
-                self.all_accepted_queries.pop(query_id, None)
+            for query_id, not_after in to_abort.items():
+                q = self.all_accepted_queries.get(query_id)
+                if q is None or q.dispatch_time >= not_after:
+                    continue
+                self.all_accepted_queries.pop(query_id)
         self.pending.remove(to_abort)
         removed = []
         removed.extend(_remove_query_list_inplace(self.paused, to_abort))
@@ -1202,13 +1210,13 @@ class InferenceSession:
     def _meet_eos_condition(self, query, next_token):
         finished_sequences = False
         if next_token in self.eos_token_id:
-            self.all_accepted_queries[query.id].output_prompt = self.tokenizer.batch_decode([query.output_tokens[:-1]]) \
+            query.output_prompt = self.tokenizer.batch_decode([query.output_tokens[:-1]]) \
                 if self.decode_output else ""
             finished_sequences = True
         elif self._exceed_length_condition(query,
                                            tokens_threshold=self.num_pred_tokens +
                                            1 if self.enable_ngrams_decoding else 0):
-            self.all_accepted_queries[query.id].output_prompt = self.tokenizer.batch_decode([query.output_tokens]) \
+            query.output_prompt = self.tokenizer.batch_decode([query.output_tokens]) \
                 if self.decode_output else ""
             finished_sequences = True
         elif self.stop_sequence_tokens and next_token in [tokens[-1] for tokens in self.stop_sequence_tokens]:
@@ -1218,7 +1226,7 @@ class InferenceSession:
                     continue
                 finished_sequences |= (query.new_token_ids[-seq_len:] == stop_sequences)
             if finished_sequences:
-                self.all_accepted_queries[query.id].output_prompt = self.tokenizer.batch_decode([query.output_tokens]) \
+                query.output_prompt = self.tokenizer.batch_decode([query.output_tokens]) \
                     if self.decode_output else ""
 
         return finished_sequences
