@@ -240,7 +240,7 @@ class AsyncSGLangRollout(BaseRollout):
         if first_rank_in_node:
             rank = dist.get_rank()
             print(f"!!! rank: {rank}, tp_rank: {self._tp_rank}, tp_size: {self._tp_size} !!!")
-            os.environ["SGLANG_BLOo pK_NONZERO_RANK_CHILDREN"] = "0"
+            os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
             self._engine = Engine(
                 model_path=actor_module,
                 dtype=config.dtype,
