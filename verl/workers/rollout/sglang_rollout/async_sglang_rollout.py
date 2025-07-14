@@ -186,6 +186,10 @@ class AsyncSGLangRollout(BaseRollout):
         print("!!! init_device_mesh !!!")
         device_mesh_cpu = init_device_mesh("cpu", **device_mesh_kwargs)
         # device_mesh_device = init_device_mesh("cuda", **device_mesh_kwargs)
+        self._device_mesh_cpu = device_mesh_cpu
+        self._rank = device_mesh_cpu.get_rank()
+        self._tp_rank = device_mesh_cpu["tp"].get_local_rank()
+        self._tp_size = device_mesh_cpu["tp"].size()
 
         # get tp_rank of this process in this tp group
         visible_devices = [None] * device_mesh_cpu.size(1)
@@ -204,7 +208,7 @@ class AsyncSGLangRollout(BaseRollout):
             port = get_open_port() if port is None else port
             [ip, port] = broadcast_pyobj(
                 [ip, port],
-                rank=self._tp_rank,
+                rank=self._rank,
                 dist_group=device_mesh_cpu.get_group("tp"),
                 src=device_mesh_cpu["tp"].mesh[0].item(),
                 force_cpu_device=False,
@@ -214,14 +218,9 @@ class AsyncSGLangRollout(BaseRollout):
             dist_init_addr = None
 
         load_format = "dummy" if config.load_format.startswith("dummy") else config.load_format
-        self._device_mesh_cpu = device_mesh_cpu
-        self._rank = device_mesh_cpu.get_rank()
-        self._tp_rank = device_mesh_cpu["tp"].get_local_rank()
-        self._tp_size = device_mesh_cpu["tp"].size()
         tp_size_per_node = self._tp_size // nnodes
         node_rank = self._tp_rank // tp_size_per_node
         first_rank_in_node = self._tp_rank % tp_size_per_node == 0
-        print(f"tp_size_per_node: {tp_size_per_node}, node_rank: {node_rank}, first_rank_in_node: {first_rank_in_node}")
 
         print("!!! Begin Engine initialization !!!")
         if first_rank_in_node:
@@ -663,7 +662,7 @@ class AsyncSGLangRollout(BaseRollout):
 
         [sorted_output_req_list] = broadcast_pyobj(
             data=[sorted_output_req_list],
-            rank=self._tp_rank,
+            rank=self._rank,
             dist_group=self._device_mesh_cpu["tp"].get_group(),
             src=self._device_mesh_cpu["tp"].mesh[0].item(),
             force_cpu_device=False,
