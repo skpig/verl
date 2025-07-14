@@ -795,7 +795,7 @@ class RolloutManager:
             query_metrics = item.meta_info['xperf_metrics']
             for key, val in query_metrics.items():
                 if key not in merged_metrics:
-                    merged_metrics[key] = val
+                    merged_metrics[key] = copy.deepcopy(val)
                 if type(val) != type(merged_metrics[key]):
                     continue
                 merged_metrics[key] += val

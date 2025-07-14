@@ -101,7 +101,7 @@ def record_xperf_metrics(batch_info, metrics, logger, global_step, prefix=''):
     metrics[f'rollout/{prefix}/prob_lt_1e-6_ratio'] = xperf_metrics.get('prob_lt_1e-6', 0) / (sample_token_num + 1e-6)
     metrics[f'rollout/{prefix}/page_swap_out_bs'] = xperf_metrics.get('page_swap_out_bs', 0)
     metrics[f'rollout/{prefix}/page_swap_out_token'] = xperf_metrics.get('page_swap_out_token', 0)
-    metrics[f'rollout/{prefix}/max_off_policy_steps'] = max(max(xperf_metrics.get('off_policy_steps', [[0]])))
+    metrics[f'rollout/{prefix}/max_off_policy_steps'] = max(xperf_metrics.get('max_off_policy_steps', [0]))
 
     # context + decode tokens
     tokens_num = xperf_metrics.get('tokens_num', [])
@@ -262,7 +262,7 @@ def pack_to_dataproto(prompts, tokenizer, data_pack: DataPack, config) -> DataPr
         batch['model_output_mask'] = response_model_output_mask.to(torch.int8)
     from mono_rl import DataProto
     out = DataProto.from_dict(batch)
-    data_pack.metrics["off_policy_steps"] = response_off_policy.tolist()
+    data_pack.metrics["max_off_policy_steps"] = [response_off_policy.max().item()]
     out.meta_info["xperf_metrics"] = data_pack.metrics
     out.meta_info["generation_kwargs"] = prompts.meta_info['generation_kwargs']
     out.non_tensor_batch = copy.deepcopy(prompts.non_tensor_batch)
