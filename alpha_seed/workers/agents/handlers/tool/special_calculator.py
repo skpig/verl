@@ -2,6 +2,7 @@
 Implement custom functions for math expression task
 """
 from functools import reduce
+import copy
 
 from transformers import PreTrainedTokenizer
 
@@ -114,6 +115,8 @@ class ToolAgent(AsyncAgent):
         # Get tool schema for the calculator
         self.tool_schemas = [self.calculator.get_openai_tool_schema().model_dump(exclude_unset=True, exclude_none=True)]
 
+        assert hasattr(tokenizer, 'pad_token'), 'we need `pad_token` to substitute the rollout ids'
+
     async def __call__(self, item: DataProto, context: TaskContext, **kwargs):
         """Main agent loop with tool calling capability"""
         max_prompt_length = context.config.data.max_prompt_length
@@ -121,6 +124,7 @@ class ToolAgent(AsyncAgent):
         max_length = max_prompt_length + max_response_length
         max_turns = context.config.actor_rollout_ref.rollout.agent.max_turns
         max_new_tokens_per_turn = context.config.actor_rollout_ref.rollout.agent.max_new_tokens_per_turn
+        item.meta_info = copy.deepcopy(item.meta_info)
 
         # Extract initial messages from DataProto
         messages = await self._extract_messages_from_dataproto(item)
@@ -135,18 +139,20 @@ class ToolAgent(AsyncAgent):
         num_tool_calls = 0
         assert num_turns <= max_turns, "max_turns should be >= 1"
 
-        input_lengths = []
+        prompt_lengths = []
         response_lengths = []
         raw_output_ids = []
         response_texts = []
         all_input_ids = []
         all_prompts = []
 
+        response_info = []
+
         while num_turns <= max_turns:
             # Generate response using LLM
             completion, prompt = await self._generate_with_tools(messages, item, context, max_length, max_prompt_length,
                                                                  max_response_length, max_new_tokens_per_turn,
-                                                                 num_turns)
+                                                                 num_turns, response_info)
             # pack_to_dataproto will use max_length to pad
             item.meta_info['generation_kwargs']['max_new_tokens'] = max_response_length
 
@@ -161,29 +167,36 @@ class ToolAgent(AsyncAgent):
                 completion_str = json.dumps(completion, indent=2)
                 raise ValueError(f"completion should contain at least one choice, got\n{completion_str}")
 
+            # 这几个量直接用，最好不要改
+            # 比如response_length指的是rollout出来的ids的length，不能是decode response_text得到的length，这两个不一定相等
             response_message = completion['choices'][0]['message']
-            input_length = len(item.batch['input_ids'][0])
+            prompt_length = len(item.batch['input_ids'][0])
             response_length = len(response_message['raw_output_ids'])
             response_text = response_message['prompt']
 
             all_input_ids.append(item.batch['input_ids'][0].tolist())
             all_prompts.append(prompt)
-            input_lengths.append(input_length)
+            prompt_lengths.append(prompt_length)
             response_lengths.append(response_length)
             raw_output_ids.append(response_message['raw_output_ids'])
             response_texts.append(response_text)
+            response_info.append({
+                'prompt_length': prompt_length,
+                'response_length': response_length,
+                'raw_output_ids': response_message['raw_output_ids']
+            })
 
             # 算这一轮新增给llm的长度（可能是上一轮的tool call的结果等）
-            incremental_input_length = input_length - last_turn_prompt_model_output_length
+            incremental_input_length = prompt_length - last_turn_prompt_model_output_length
             try:
-                assert incremental_input_length >= 0, f"incremental_input_length should be > 0, {input_length=} {last_turn_prompt_model_output_length=}, {input_lengths=}, {response_lengths=}, {num_turns=}"
+                assert incremental_input_length >= 0, f"incremental_input_length should be > 0, {prompt_length=} {last_turn_prompt_model_output_length=}, {prompt_lengths=}, {response_lengths=}, {num_turns=}"
             # input_length=1495 last_turn_prompt_model_output_length=2304, temp=[268, 1495], num_turns=2
             except:
                 save_info = {
                     "all_input_ids": all_input_ids,
-                    "input_length": input_length,
+                    "prompt_len": prompt_length,
                     "last_turn_prompt_model_output_length": last_turn_prompt_model_output_length,
-                    "input_lengths": input_lengths,
+                    "prompt_lengths": prompt_lengths,
                     "response_lengths": response_lengths,
                     "response_texts": response_texts,
                     "num_turns": num_turns,
@@ -200,7 +213,7 @@ class ToolAgent(AsyncAgent):
             model_out_mask_list.append((True, response_length))
             log_probs_list.append([-1] * incremental_input_length)
             log_probs_list.append(response_message['response_log_probs'])
-            last_turn_prompt_model_output_length = input_length + response_length
+            last_turn_prompt_model_output_length = prompt_length + response_length
 
             # length的退出逻辑，除去initial_input_ids (prompt_length)，所有的model response + env，超出max_response_length就退出
             # 规定每轮的最大输出长度
@@ -208,8 +221,11 @@ class ToolAgent(AsyncAgent):
                 break
 
             # 添加assistant的对话, 不能使用response_message['prompt']，这个会截断，可能是rebalance导致的，还在查
-            response_text = self.tokenizer.decode(response_message['raw_output_ids'])
-            messages.append({"role": "assistant", "content": response_text})
+            # response_text = self.tokenizer.decode(response_message['raw_output_ids'])
+            messages.append({
+                "role": "assistant",
+                "content": self.tokenizer.pad_token * len(response_message['raw_output_ids'])
+            })
 
             # Parse tool calls from response
             tool_calls = await self.tool_parser.extract_tool_calls(response_text)
@@ -295,7 +311,7 @@ class ToolAgent(AsyncAgent):
         return messages
 
     async def _generate_with_tools(self, messages: List[Dict], item: DataProto, context, max_length, max_prompt_length,
-                                   max_response_length, max_new_tokens_per_turn, num_turns):
+                                   max_response_length, max_new_tokens_per_turn, num_turns, response_info):
         """Generate response with tool schemas included"""
         # Apply chat template with tools
         prompt_with_tools = self.tokenizer.apply_chat_template(messages,
@@ -317,6 +333,11 @@ class ToolAgent(AsyncAgent):
         # set input and attn mask
         item.batch['input_ids'] = torch.tensor(prompt_data.input_ids, dtype=torch.int32)
         item.batch['attention_mask'] = torch.tensor(prompt_data.attention_mask, dtype=torch.int8)
+
+        # 用rollout ids填充padded tokens
+        for _resp_info in response_info:
+            item.batch['input_ids'][0, _resp_info['prompt_length']:_resp_info['prompt_length'] +
+                                    _resp_info['response_length']] = torch.tensor(_resp_info['raw_output_ids'])
 
         prompt_length_before_generate = len(item.batch['input_ids'][0])
 
