@@ -153,6 +153,7 @@ class AsyncSGLangRollout(BaseRollout):
         tensor_parallel_size = self.config.get("tensor_model_parallel_size", 1)
         assert tensor_parallel_size <= dist.get_world_size(), "tensor parallel size should be less than or equal to the world size"
 
+        print("!!! initialize_parallel_state !!!")
         if kwargs.get("train_tp", None) is not None:
             # deployed with megatron
             os.environ["CUDA_TIMER_STREAM_KAFKA_ENABLE"] = "0"
@@ -182,18 +183,22 @@ class AsyncSGLangRollout(BaseRollout):
             mesh_dim_names=["dp", "tp", "pp"],
         )
 
+        print("!!! init_device_mesh !!!")
         device_mesh_cpu = init_device_mesh("cpu", **device_mesh_kwargs)
         # device_mesh_device = init_device_mesh("cuda", **device_mesh_kwargs)
 
         # get tp_rank of this process in this tp group
         visible_devices = [None] * device_mesh_cpu.size(1)
 
+        print("!!! dist.all_gather_object visible_devices !!!")
         dist.all_gather_object(visible_devices, os.environ["CUDA_VISIBLE_DEVICES"], device_mesh_cpu.get_group("tp"))
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(visible_devices)
 
         # initialize the inference engine
+        print("!!! monkey_patch_torch_reductions !!!")
         monkey_patch_torch_reductions()
         nnodes = -(-tp_size // len(visible_devices))
+        print("!!! get_ip and get_open_port !!!")
         if nnodes > 1:
             ip = get_ip()
             port = get_open_port() if port is None else port
@@ -216,10 +221,12 @@ class AsyncSGLangRollout(BaseRollout):
         tp_size_per_node = self._tp_size // nnodes
         node_rank = self._tp_rank // tp_size_per_node
         first_rank_in_node = self._tp_rank % tp_size_per_node == 0
+        print(f"tp_size_per_node: {tp_size_per_node}, node_rank: {node_rank}, first_rank_in_node: {first_rank_in_node}")
 
+        print("!!! Begin Engine initialization !!!")
         if first_rank_in_node:
             rank = dist.get_rank()
-            os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
+            os.environ["SGLANG_BLOo pK_NONZERO_RANK_CHILDREN"] = "0"
             self._engine = Engine(
                 model_path=actor_module,
                 dtype=config.dtype,
@@ -250,9 +257,12 @@ class AsyncSGLangRollout(BaseRollout):
         else:
             self._engine = None
 
+        print("!!! End Engine initialization !!!")
         # offload
         if self._tp_rank == 0:
             self._engine.release_memory_occupation()
+        
+        print("!!! End SGLangRollout initialization !!!")
 
         kwargs = dict(
             n=1,
