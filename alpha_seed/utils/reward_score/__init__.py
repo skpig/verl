@@ -89,5 +89,8 @@ def _select_rm_score_fn(reward_style, external_lib: str = None):
     elif reward_style.startswith("rule-logic_puzzle"):
         from . import logic_puzzle
         return logic_puzzle.compute_score
+    elif reward_style == 'deep_research_verifier':
+        from . import deep_research_verifier
+        return deep_research_verifier.compute_score_client
     else:
         raise NotImplementedError

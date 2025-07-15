@@ -1,0 +1,198 @@
+import os
+import json
+import time
+import asyncio
+import aiohttp
+import numpy as np
+from collections import defaultdict
+from verl.tools.schemas import OpenAIFunctionToolSchema
+
+from alpha_seed.workers.agents.envs import BaseEnv
+from alpha_seed.workers.agents.envs.utils import truncate_str_by_tokens, parse_func_call_kwargs
+from transformers import AutoTokenizer
+
+PRINT_ERROR = os.getenv("AGENT_SEARCH_PRINT_ERROR", "0") == "1"
+SUBMITTER = os.getenv("ARNOLD_TRIAL_OWNER", "")
+
+
+async def apihub(query, search_engine, max_pages):
+    if not query:
+        return ''
+
+    headers = {"api-key": "deadf37f-f228-45a3-8a8d-1c948415fd4a", "Content-Type": "application/json"}
+    input_params = {'search_engine': search_engine}
+
+    if search_engine == "toutiao":
+        input_params["query"] = query
+        body = {"api_id": "6232", "name": "GlobalSearch", "input_params": json.dumps(input_params, ensure_ascii=False)}
+    else:
+        input_params["input_query"] = [query]
+        input_params["search_engine"] = "bing"
+        body = {
+            "api_id": "6228",
+            "name": "SeedSearchTraining",
+            "input_params": json.dumps(input_params, ensure_ascii=False)
+        }
+
+    pages = []
+
+    for _ in range(3):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post("https://gpt.bytedance.net/admin/prompt/apihub/fc_proxy",
+                                        json=body,
+                                        headers=headers,
+                                        timeout=30) as resp:
+                    resp = await resp.json()
+        except Exception as e:
+            PRINT_ERROR and print(f'[apihub] Error: {e}')
+            continue
+
+        resp_data = resp.get("data", {})
+        if resp_data is None:
+            PRINT_ERROR and print(f'[apihub] Error:', str(resp))
+            continue
+
+        pages = json.loads(resp['data']['result'])
+        for page in pages:
+            page['snippet'] = page['snippet'][:800]
+            page["url"] = page["url"].replace("https://arxiv.org/abs", "https://arxiv.org/pdf"),
+
+        if pages:
+            break
+
+    return pages[:max_pages]
+
+
+def Search(query: str) -> str:
+    """
+    Access search engines to obtain information.
+
+    Args:
+        query: the search query
+    """
+    return ""
+
+
+async def SearchAPI(query: str, max_pages: int, search_engine: str, max_token_len: int, tokenizer: AutoTokenizer,
+                    metrics: dict, **kwargs) -> str:
+    """
+    Access search engines to obtain information.
+
+    Args:
+        query: the search query
+    """
+
+    _start_time = time.time()
+    snippets = f"Result from search query: {query}\nNo results found."
+
+    if search_engine == "mix":
+        pages_usbing, pages_toutiao = await asyncio.gather(apihub(query, search_engine="usbing", max_pages=max_pages),
+                                                           apihub(query, search_engine="toutiao", max_pages=max_pages))
+        pages = []
+        url_set = set()
+        for page in pages_usbing + pages_toutiao:
+            if page["url"] not in url_set:
+                pages.append(page)
+                url_set.add(page["url"])
+    else:
+        pages = await apihub(query, search_engine=search_engine, max_pages=max_pages)
+
+    if pages:
+        snippets = f"Result from search query: {query}\n"
+        for page_idx, page in enumerate(pages[:max_pages]):
+            snippets += "<page{}>:\ntitle:{}\nsitename:{}\npublish_time:{}\nurl:{}\nsnippet:{}\n".format(
+                page_idx, page["title"], page["sitename"], page["publish_time"], page["url"], page["snippet"])
+
+    response, content_length = truncate_str_by_tokens(snippets, max_token_len, tokenizer)
+
+    metrics['time'].append(time.time() - _start_time)
+    metrics['len'].append(content_length)
+    metrics['failure'].append(int(len(pages) == 0))
+
+    return response
+
+
+class SearchEnv(BaseEnv):
+
+    def __init__(self, tokenizer, **kwargs):
+        self._call_count = 0
+        self._call_history = []
+        self._metrics = defaultdict(list)
+
+        self.tokenizer = tokenizer
+
+        self.max_pages = kwargs.get("max_pages", int(os.getenv("AGENT_SEARCH_MAX_PAGES", 10)))
+        self.max_token_len = kwargs.get("max_token_len", int(os.getenv("AGENT_SEARCH_MAX_TOKEN_LEN", 4096)))
+        self.search_engine = kwargs.get("search_engine", os.getenv("AGENT_SEARCH_ENGINE", "mix"))
+
+        assert self.search_engine in ["toutiao", "bing", "usbing", "mix"], f"invalid search engine {self.search_engine}"
+
+    def action_supported(self, action: str) -> bool:
+        func_name, _ = parse_func_call_kwargs(action)
+        return func_name == "TextBrowser"
+
+    async def step(self, instance_id, tool_name, tool_args: dict) -> str:
+        assert tool_name == "Search"
+        action = tool_args["query"]
+        self._call_count += 1
+        if action in self._call_history:
+            response = "This search query has been called before. Please try again with another query."
+        else:
+            self._call_history.append(action)
+
+            tool_args.update({
+                "max_pages": self.max_pages,
+                "tokenizer": self.tokenizer,
+                "max_token_len": self.max_token_len,
+                "search_engine": self.search_engine,
+                "metrics": self._metrics,
+            })
+
+            response = await SearchAPI(**tool_args)
+        return response
+
+    @property
+    def metrics(self) -> dict:
+        metrics = {"call_count": self._call_count}
+        metrics.update({f'avg_{k}': np.mean(v) for k, v in self._metrics.items()})
+        metrics.update({f'max_{k}': np.max(v) for k, v in self._metrics.items()})
+        return {f"search_{k}": v for k, v in metrics.items()}
+
+    def get_openai_tool_schema(self) -> OpenAIFunctionToolSchema:
+        from transformers.utils import get_json_schema
+        schema = get_json_schema(Search)
+        tool_schema = OpenAIFunctionToolSchema.model_validate(schema)
+        return tool_schema
+
+
+def create_from_env_str(env_str: str, **kwargs):
+    prefix = "deep_research/search@"
+    assert env_str.startswith(prefix)
+    tokenizer = kwargs.get("tokenizer", None)
+    assert tokenizer is not None, "Must provide a tokenizer for search env"
+    env_args = json.loads(env_str[len(prefix):])
+    return SearchEnv(tokenizer=tokenizer, **env_args)
+
+
+if __name__ == "__main__":
+    import argparse
+    import asyncio
+    import time
+    import json
+    import hdfs_io
+
+    hdfs_io.copy(
+        src=
+        "hdfs://haruna/home/byte_data_seed/ssd_hldy/user/songyuqing/cot_sft/bbpe155k-v6.4.3-ml.pret_add_code_cot_webgpt_fc_o1search_0220",
+        dst="/opt/tiger")
+
+    tokenizer = AutoTokenizer.from_pretrained("/opt/tiger/bbpe155k-v6.4.3-ml.pret_add_code_cot_webgpt_fc_o1search_0220")
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--query", type=str)
+    args = parser.parse_args()
+    print(args)
+    env = create_from_env_str(f"deep_research/search@{json.dumps(vars(args))}", tokenizer=tokenizer)
+    print(asyncio.run(env.step("", "Search", {"query": f'Search(query="{args.query}")'})))
+    print(env.get_openai_tool_schema())

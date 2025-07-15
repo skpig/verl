@@ -54,13 +54,14 @@ from alpha_seed.utils.server_client import is_local_ray_instance, validate_clien
     ClientTaskRunner, check_all_workers_alive, recreate_actor
 # rule-based reward score
 from alpha_seed.utils.reward_score.extra_reward import add_length_reward, punish_format_return_positions
-from alpha_seed.utils.reward_score import verifier_service, oj_utils, response_post_proc, _select_rm_score_fn
+from alpha_seed.utils.reward_score import verifier_service, oj_utils, deep_research_verifier, response_post_proc, _select_rm_score_fn
 from alpha_seed.utils.duplicate import para_dup
 from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRefWorker
 from alpha_seed.workers.actors.critic_worker import CriticWorker
 from alpha_seed.utils.alarm.lark_util import send_message_to_employee
 from alpha_seed.utils.server_client import validate_client_config, KVStore, ServerHealthCheck, TaskRunner, ClientTaskRunner, check_all_workers_alive, recreate_actor
 from alpha_seed.utils.ckpt import download_minimal_required_files
+from alpha_seed.utils.chat_template import CHATML, CHATML_TOOL, CHATML_TOOL_V2, CHATML_TOOL_V3
 from alpha_seed.workers.streaming_service.rollout_request_manager import RequestManager, RequestManagerRegisterCenter
 from databus import collect_array
 
@@ -110,6 +111,7 @@ class RemoteClient:
 
         self.call_oj = ray.remote(num_cpus=1)(oj_utils.compute_score)
         self.verifier_service = ray.remote(num_cpus=1)(verifier_service.compute_score)
+        self.deep_research_verifier = ray.remote(num_cpus=1)(deep_research_verifier.compute_score)
 
     def clear(self):
         # for some cases, the results won't be claimed. So we need to clear the results.
@@ -131,6 +133,8 @@ class RemoteClient:
         elif reward_style == 'verifier_service':
             result_future = self.verifier_service.remote(solution_str_post_proc, ground_truth,
                                                          self.config.trainer.verifier_service_psm)
+        elif reward_style == 'deep_research_verifier':
+            result_future = self.deep_research_verifier.remote(solution_str_post_proc, ground_truth)
         else:
             raise NotImplementedError(f'Unsupported reward_style {reward_style}')
 
@@ -937,9 +941,13 @@ def config_to_trainer_kwargs(config):
             tokenizer.bos_token = ""
     if config.data.get('chat_template', None) == 'chatml':
         # chatml from https://huggingface.co/docs/transformers/v4.53.1/en/chat_templating
-        tokenizer.chat_template = "{% if not add_generation_prompt is defined %}{% set add_generation_prompt = false %}{% endif %}{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}"
+        tokenizer.chat_template = CHATML
     if config.data.get('chat_template', None) == 'chatml_tool':
-        tokenizer.chat_template = """{% if not add_generation_prompt is defined %}{% set add_generation_prompt = false %}{% endif %}{% if tools %}{{ '<|im_start|>system\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>' }}{%- for tool in tools %}{{- '\n' }}{{ tool | tojson }}{%- endfor %}\n\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n{% endif %}{% for message in messages %}{% if message['role'] == 'tool' %}<|im_start|>user\n<tool_response>\n{{ message['content'] }}\n</tool_response><|im_end|>\n{% elif message['role'] == 'assistant' %}<|im_start|>{{ message['role'] }}\n{{ message['content'] }}\n{% else %}<|im_start|>{{ message['role'] }}\n{{ message['content'] }}<|im_end|>\n{% endif %}{% endfor %}{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}"""
+        tokenizer.chat_template = CHATML_TOOL
+    if config.data.get('chat_template', None) == 'chatml_tool_v2':
+        tokenizer.chat_template = CHATML_TOOL_V2
+    if config.data.get('chat_template', None) == 'chatml_tool_v3':
+        tokenizer.chat_template = CHATML_TOOL_V3
 
     if config.data.image_key:
         processor = AutoProcessor.from_pretrained(local_path)

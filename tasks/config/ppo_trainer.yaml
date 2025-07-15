@@ -394,6 +394,7 @@ trainer:
   verifier_service_psm: ""
   use_remote_sandbox: False
   use_remote_verifier: False
+  use_remote_search: False
   save_cases_to_hdfs: True # save all cases to hdfs each step
   # auto: find the last ckpt to resume. If can't find, start from scratch
   resume_steps: auto
