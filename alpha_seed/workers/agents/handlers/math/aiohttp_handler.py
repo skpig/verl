@@ -31,7 +31,7 @@ async def process_single_batch(item: DataProto, context: TaskContext, **kwargs):
         prompt = ''
     else:
         prompt = item.non_tensor_batch['prompt'][0]
-    completion = await internal_call(item, config, host, port, prompt=prompt)
+    completion = await internal_call(item, config, host, port)
     from alpha_seed.workers.streaming_service.streaming_utils import DataPack, pack_to_dataproto
     data_pack = DataPack.create_from_completion_dict(completion['choices'][0]['message'])
     out = pack_to_dataproto(item, tokenizer, data_pack, config)  # dataproto

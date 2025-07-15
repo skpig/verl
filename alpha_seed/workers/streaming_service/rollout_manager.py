@@ -127,7 +127,7 @@ class RolloutManager:
         # initialized with [] to avoid len(None) error
         self.standalone_batch: DataProto = []
         # batch for unfinished generating
-        self.pending_batch: List[DataProto] = []
+        self.pending_batch: List[asyncio.Task] = []
 
         self.standalone_gen_batch_output_resume: DataProto = None
         self.standalone_batch_resume: DataProto = None
@@ -151,6 +151,10 @@ class RolloutManager:
         self.train_rollout_server = None
         self.val_rollout_server = None
         self._hybrid_wg_lock = threading.Lock()
+
+        # off_policy_step counter
+        self._task_id_counter = 0
+        self._task_id_to_task_and_step: Dict[int, Tuple[int, int]] = {}
 
     def _init_servers(self):
         # server mode 下 start 各种 server
@@ -434,6 +438,30 @@ class RolloutManager:
         batch.union(gen_out_batch)
         return batch
 
+    async def _wait_max_off_policy_steps(self, step: int, metrics: Dict):
+        max_off_policy_steps = self.config.actor_rollout_ref.rollout.get('max_off_policy_steps', None)
+        if max_off_policy_steps is None:
+            return
+        should_wait = []
+        to_pop_ids = []
+        for task_id, (task, submit_step) in self._task_id_to_task_and_step.items():
+            if (step - submit_step) >= max_off_policy_steps:
+                should_wait.append(task)
+                to_pop_ids.append(task_id)
+
+        for task_id in to_pop_ids:
+            del self._task_id_to_task_and_step[task_id]
+
+        if len(should_wait) > 0:
+            with Timer(name="gen", logger=None) as timer:
+                await asyncio.wait(should_wait, return_when=asyncio.ALL_COMPLETED)
+
+            elapsed = timer.last
+            metrics['timing/wait_max_off_policy'] = elapsed
+            print(
+                f"[INFO]: step #{step} waited for {len(should_wait)} tasks reaching {max_off_policy_steps=}, {elapsed=:.3f}s"
+            )
+
     def _train_batch_gen(
         self,
         batch: DataProto,
@@ -623,8 +651,12 @@ class RolloutManager:
             running_batch = []
 
             for item in gen_batch.chunk(len(gen_batch)):
+                task_id = self._task_id_counter
+                self._task_id_counter += 1
                 task = asyncio.create_task(self.train_client_executor.submit(handler, item, context))
+                self._task_id_to_task_and_step[task_id] = (task, step)
                 running_batch.append(task)
+            await self._wait_max_off_policy_steps(step=step, metrics=metrics)
 
             print(f"[INFO] {step} train generate server[submit], batch size: {len(gen_batch)}, {time.time() - start}")
             start = time.time()
