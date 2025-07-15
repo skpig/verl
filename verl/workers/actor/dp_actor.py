@@ -436,6 +436,12 @@ class DataParallelPPOActor(BasePPOActor):
                 data = {"actor/grad_norm": grad_norm.detach().item()}
             append_to_dict(metrics, data)
         self.actor_optimizer.zero_grad()
+
+        # delete all unused torch tensors
+        del loss, entropy, log_prob
+        if self.config.use_kl_loss:
+            del kl_loss, policy_loss
+        del batch
         return metrics
 
 
@@ -725,4 +731,7 @@ class DataParallelOnlineRFTActor(BasePPOActor):
                 data = {'actor/grad_norm': grad_norm.detach().item()}
             append_to_dict(metrics, data)
         self.actor_optimizer.zero_grad()
+
+        # delete all unused torch tensors
+        del loss, entropy, log_probs, responses, attention_mask, response_mask, seq_level_reward, kl_lo
         return metrics
