@@ -475,7 +475,7 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
     def _worker_group_dead_callback(self, worker_group_ids: List[str]):
         # worker group任意死了之后，通知request manager将运行中的请求释放掉
         ready_worker_group_ids = self.replicas.ready_worker_group_ids
-        self.request_manager.handle_stale_requests.remote(ready_worker_group_ids)
+        ray.get(self.request_manager.handle_stale_requests.remote(ready_worker_group_ids))
 
     def release_running_queris(self):
         print(f"release running queris in {self._request_manager_name}...")
@@ -642,6 +642,9 @@ class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
 
         loop_start_ts_list = []  # 记录每个loop开始的时间
         sleep_interval = self.poll_interval
+        # 记录上一个loop的ready wg，两次loop之间如果有ready engine变inactive，
+        # 不会检测到有engine dead(inactive)，则可能导致query hang
+        ready_wg_ids_prev = set()
         while True:
             if self._loop_should_stop.is_set():
                 break
@@ -784,7 +787,9 @@ class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
             # handle dead engines during the loop to avoid request from staling for too long
             ready_wg_ids1 = self.replicas.ready_worker_group_ids
             dead_wg_ids_during_loop = ready_wg_ids0 - ready_wg_ids1
-            if dead_wg_ids_during_loop:
+            dead_wg_ids_between_loop = ready_wg_ids_prev - ready_wg_ids1
+            ready_wg_ids_prev = ready_wg_ids1  # save to previous
+            if dead_wg_ids_during_loop or dead_wg_ids_between_loop:
                 ray.get(self.request_manager.handle_stale_requests.remote(ready_wg_ids1))
 
             # observability

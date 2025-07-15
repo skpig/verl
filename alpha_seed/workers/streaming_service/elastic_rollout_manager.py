@@ -131,4 +131,9 @@ class ElasticRolloutManager:
                                                            policy,
                                                            metric_source=rollout_proxy)
         self.standalone_rollout_wg = StandaloneRolloutWGAdapter(elastic_replicas)
+
+        # 返回的3个对象
+        #  rollout_proxy: 负载均衡query
+        #  standalone_rollout_wg: 控制standalone rollout更新weights
+        #  replicas: 控制hybrid active/inactive
         return rollout_proxy, self.standalone_rollout_wg, replicas
