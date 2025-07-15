@@ -1,5 +1,6 @@
 import asyncio
 import copy
+from concurrent.futures.thread import ThreadPoolExecutor
 
 import torch
 import aiohttp
@@ -131,8 +132,10 @@ class OpenAIAsyncClient(AsyncLLMInterface):
 class AsyncAgent:
 
     def __init__(self, tokenizer: AsyncTokenizer | PreTrainedTokenizer, llm: AsyncLLMInterface):
-        self.tokenizer = tokenizer
+        # async tokenizer can be used as the normal pretrained tokenizer
+        self.tokenizer: AsyncTokenizer = tokenizer
         self.llm = llm
+        self.executor: ThreadPoolExecutor = None  # noqa: assign later
 
     async def __call__(self, item: DataProto, context: TaskContext, **kwargs):
         raise NotImplementedError
@@ -141,8 +144,9 @@ class AsyncAgent:
 class ThreadedAgent:
 
     def __init__(self, tokenizer: PreTrainedTokenizer, llm: AsyncLLMInterface):
-        self.tokenizer = tokenizer
+        self.tokenizer: PreTrainedTokenizer = tokenizer
         self.llm = llm
+        self.executor: ThreadPoolExecutor = None  # noqa: assign later
 
     def __call__(self, item: DataProto, context: TaskContext, **kwargs):
         raise NotImplementedError

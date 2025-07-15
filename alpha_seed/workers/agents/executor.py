@@ -15,10 +15,16 @@ from alpha_seed.workers.agents.handlers.base import AsyncAgent, functional_agent
 
 class AgentWorker:
 
-    def __init__(self, tokenizer: PreTrainedTokenizer, host, port, worker_max_concurrency):
+    def __init__(self, tokenizer: PreTrainedTokenizer, host, port, worker_max_concurrency, worker_id=0):
+        """
+        host: llm server host
+        port: llm server port
+        worker_max_concurrency: the worker can handle numbers of concurrent tasks/threads
+        worker_id: worker id to identify different workers
+        """
         self.worker_max_concurrency = worker_max_concurrency
         self._thread_executor = ThreadPoolExecutor(max_workers=worker_max_concurrency,
-                                                   thread_name_prefix="agent-worker")
+                                                   thread_name_prefix=f"agent-worker-{worker_id}")
         self.tokenizer = tokenizer
         self.async_tokenizer = AsyncTokenizer(tokenizer)
         self.llm = OpenAIAsyncClient(host, port)
@@ -31,14 +37,19 @@ class AgentWorker:
                 a.tokenizer = self.tokenizer
         if issubclass(agent_cls, AsyncAgent):
             agent = agent_cls(self.async_tokenizer, self.llm)
+            self._assign_essential_objects(agent)
             async with self.concurrency_limit:
                 return await agent(*args, **kwargs)
         else:
             agent = agent_cls(self.tokenizer, self.llm)
+            self._assign_essential_objects(agent)
             loop = asyncio.get_event_loop()
             if kwargs:
                 agent = partial(agent, **kwargs)
             return await loop.run_in_executor(self._thread_executor, agent, *args)
+
+    def _assign_essential_objects(self, agent):
+        agent.executor = self._thread_executor
 
 
 class ExecutorBase:
@@ -54,8 +65,8 @@ class RayActorExecutor(ExecutorBase):
         self.workers = [
             RemoteAgentWorker.options(scheduling_strategy="SPREAD",
                                       max_concurrency=worker_max_concurrency,
-                                      name=f"ray_executor_{idx}").remote(tokenizer, host, port, worker_max_concurrency)
-            for idx in range(max_workers)
+                                      name=f"ray_executor_{idx}").remote(tokenizer, host, port, worker_max_concurrency,
+                                                                         idx) for idx in range(max_workers)
         ]
         self.worker_pointer = cycle(range(max_workers))
 
@@ -71,7 +82,7 @@ class RayActorExecutor(ExecutorBase):
 class LocalExecutor(ExecutorBase):
 
     def __init__(self, tokenizer, host, port, max_workers=1, worker_max_concurrency=1):
-        self.workers = [AgentWorker(tokenizer, host, port, worker_max_concurrency) for idx in range(max_workers)]
+        self.workers = [AgentWorker(tokenizer, host, port, worker_max_concurrency, idx) for idx in range(max_workers)]
         self.worker_pointer = cycle(range(max_workers))
 
     async def submit(self, agent_cls: Type[AsyncAgent] | Type[ThreadedAgent] | callable, /, *args, **kwargs):
