@@ -159,8 +159,11 @@ class RolloutManager:
 
         def start_background_loop(loop):
             asyncio.set_event_loop(loop)
+            use_aiomonitor = self.config.misc.aiomonitor.enable
+            Monitor = get_aiomonitor_cls(use_aiomonitor)
             with suppress(asyncio.CancelledError):
-                loop.run_forever()
+                with Monitor(loop, termui_port=11001, console_enabled=False):
+                    loop.run_forever()
 
         self.loop = asyncio.new_event_loop()
         self._client_thread = threading.Thread(target=start_background_loop,
@@ -889,39 +892,38 @@ class RolloutManager:
 
         # train
         # create replicated worker group and rollout proxy
-        train_replicas_dict = {}
-        train_replicas_dict['hybrid'] = FixedReplicatedRayWorkerGroupAdapter(self.hybrid_wg, gen_tp_size,
-                                                                             'actor_rollout_ref')
+        hybrid_replica = FixedReplicatedRayWorkerGroupAdapter(self.hybrid_wg, gen_tp_size, 'actor_rollout_ref')
 
         if self._rollout_elastic_enabled:
             assert self.weights_communicator == 'ucx', 'weights_communicator must be "ucx" when using elastic rollout'
             assert self.train_standalone_wg is None, 'should not initialize train standalone when using elastic rollout'
-            self.train_replicas = CombinedRayWorkerGroupAdapter(train_replicas_dict)
-            self.train_rollout_proxy, self.train_standalone_wg = self.elastic_rollout_mgr.init_elastic_rollout(
-                hybrid_replica=self.train_replicas)
+            self.train_rollout_proxy, self.train_standalone_wg, self.train_replicas = self.elastic_rollout_mgr.init_elastic_rollout(
+                hybrid_replica=hybrid_replica)
         else:
+            train_intermittent_replicas = {'hybrid': hybrid_replica}
+            train_persistent_replicas = {}
             if self.train_standalone_wg is not None:
-                train_replicas_dict['standalone'] = FixedReplicatedRayWorkerGroupAdapter(
+                train_persistent_replicas['standalone'] = FixedReplicatedRayWorkerGroupAdapter(
                     self.train_standalone_wg, gen_tp_size, 'standalone_rollout')
-            self.train_replicas = CombinedRayWorkerGroupAdapter(train_replicas_dict)
+            self.train_replicas = CombinedRayWorkerGroupAdapter(train_intermittent_replicas, train_persistent_replicas)
             self.train_rollout_proxy = ProxyClass(self.train_replicas, [], 'train_rollout', rollout_proxy_config)
 
         # Turn off hybrid for gen by default (i.e. train mode initially)
         self.train_replicas.set_replica_ready_state(name='hybrid', ready=False)
-
         self.train_rollout_server = await listen('train_rollout')
 
         # validation on hybrid engine
-        val_replicas_dict = {}
-        val_replicas_dict['hybrid'] = FixedReplicatedRayWorkerGroupAdapter(self.hybrid_wg, gen_tp_size,
-                                                                           'actor_rollout_ref')
+        val_intermittent_replicas = {
+            'hybrid': FixedReplicatedRayWorkerGroupAdapter(self.hybrid_wg, gen_tp_size, 'actor_rollout_ref')
+        }
+        val_persistent_replicas = {}
 
         # standalone validation
         if self.val_standalone_wg is not None:
-            val_replicas_dict['standalone'] = FixedReplicatedRayWorkerGroupAdapter(self.val_standalone_wg, gen_tp_size,
-                                                                                   'standalone_validator')
+            val_persistent_replicas['standalone'] = FixedReplicatedRayWorkerGroupAdapter(
+                self.val_standalone_wg, gen_tp_size, 'standalone_validator')
 
-        self.val_replicas = CombinedRayWorkerGroupAdapter(val_replicas_dict)
+        self.val_replicas = CombinedRayWorkerGroupAdapter(val_intermittent_replicas, val_persistent_replicas)
         # Turn off hybrid for gen by default (i.e. train mode initially)
         self.val_replicas.set_replica_ready_state(name='hybrid', ready=False)
 

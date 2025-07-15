@@ -23,7 +23,7 @@ class ElasticRolloutManager:
     def set_hybrid_rollout_address(self, hybrid_rollout_address):
         self._hybrid_rollout_addresses_fut = hybrid_rollout_address
 
-    def init_elastic_rollout(self, hybrid_replica: CombinedRayWorkerGroupAdapter):
+    def init_elastic_rollout(self, hybrid_replica: ReplicatedRayWorkerGroup):
         rollout_proxy_config = self.config.streaming_rollout.proxy
         # 每个rollout_worker用1个gpu，每个gpu对应1个rank
         res_shape = [self.config.streaming_rollout.n_gpus_per_node] * self.config.streaming_rollout.nnodes
@@ -107,10 +107,10 @@ class ElasticRolloutManager:
         # 两个副本组合并一起组成伸缩组
         elastic_replicas = ScalingRayWorkerGroup(min_guaranteed_replicas, best_effort_replicas)
         # 组合 hybrid replica
-        replicas = CombinedRayWorkerGroupAdapter({
-            'hybrid': hybrid_replica,
-            'elastic': elastic_replicas,
-        })
+        replicas = CombinedRayWorkerGroupAdapter(
+            intermittent={'hybrid': hybrid_replica},
+            persistent={'elastic': elastic_replicas},
+        )
         # 封装给worker group的接口代理
         rollout_proxy = BalancedRolloutWorkerGroupProxy(replicas, hybrid_rollout_addrs, 'train_rollout',
                                                         rollout_proxy_config)
@@ -131,4 +131,4 @@ class ElasticRolloutManager:
                                                            policy,
                                                            metric_source=rollout_proxy)
         self.standalone_rollout_wg = StandaloneRolloutWGAdapter(elastic_replicas)
-        return rollout_proxy, self.standalone_rollout_wg
+        return rollout_proxy, self.standalone_rollout_wg, replicas

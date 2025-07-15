@@ -153,7 +153,8 @@ class UCXWeightsCommunicator(WeightsCommunicator):
         self.source_address = ""  # 作为client时，默认要连到server的地址 ip:port 格式
         self.server_up = False  # 是否作为server启动
         self.address = ""  # 作为server启动时，server的地址 ip:port 格式
-        self._setup_completed = threading.Event()
+        self._setup_completed = threading.Event()  # 已完成endpoint setup
+        self._relay_weights_loaded = threading.Event()  # 已经进行过一次weights同步，根据此判断是否可以接受elastic client过来拉
         self.client_thread = None  # client thread to receive weights
         self.loop = None  # ucx server event loop
 
@@ -221,12 +222,19 @@ class UCXWeightsCommunicator(WeightsCommunicator):
                     # 在relay即将更新的期间，等待其更新完成再开始
                     ack = 'ok'
                     if self.standalone:
-                        # 如果当前已经在写锁中，即此relay server正在update weights，则driver侧已经调用stop_server_before_update，
-                        # 如果这时候elastic client刚启动，则可能在调用update_standalone_worker时走到这里，而relay server在等
-                        # driver 完成 stop_server_before_update，stop_server_before_update 会等所有standalone worker，
-                        # 其中elastic client的那个worker正在调用update_standalone_worker而不能响应stop_server_before_update
-                        # 导致循环等待死锁。因此这里直接return，跳过这个参数update
+                        # 防止死锁：当relay server正在更新权重时（写锁状态），
+                        # 新启动的elastic client可能触发以下死锁场景：
+                        # 1. relay server获取写锁，开始更新权重
+                        # 2. driver调用stop_server_before_update，等待所有worker停止
+                        # 3. 新elastic client启动，调用update_standalone_worker到达此处
+                        # 4. 该worker因等待读锁而无法响应stop_server_before_update
+                        # 5. 形成循环等待：driver等worker停止，worker等锁释放
+                        # 解决方案：检测到写锁时直接跳过此次更新，避免死锁
                         if self.relay_server_update_lock.resource_owner == 'write':
+                            ack = 'skip'
+                        elif not self._relay_weights_loaded.is_set():
+                            # 如果relay尚未进行过第一次weights update，也要让elastic standalone skip掉这次update
+                            # 不然就会读到空的weights tensor
                             ack = 'skip'
                         else:
                             await self.relay_server_update_lock.acquire_read(ep)
@@ -236,10 +244,13 @@ class UCXWeightsCommunicator(WeightsCommunicator):
                         await self.relay_server_update_lock.release_read(ep)
                     await ep.send_obj(f"r{self.rank}".encode("utf-8"))
                 elif tensor_key == "group_end":
-                    # 注意这里也要wait enter_ready，因为hybrid rollout虽然调用了update_standalone_worker，但可能没有马上能执行，
-                    # 而standalone不一定会访问到每个hybrid rollout rank，如果此时standalone已经传输完成，且广播group_end，
-                    # 次hybrid rollout rank还没enter_ready的话，就会这里server_finish_event set之后，再进入
-                    # update_standalone_worker，又把 server_finish_event clear 掉了，导致死等
+                    # 防止时序竞争：确保在设置server_finish_event前等待enter_ready
+                    # 问题场景：
+                    # 1. hybrid rollout调用update_standalone_worker，但尚未执行到enter_ready
+                    # 2. standalone完成传输并广播group_end到达此处
+                    # 3. 如果此时直接设置server_finish_event，后续进入的update_standalone_worker
+                    #    会清除server_finish_event，导致等待该事件的代码永久阻塞
+                    # 解决方案：等待enter_ready确保所有worker都已准备就绪再设置完成事件
                     logger.debug("ucx server received 'group_end'")
                     await self.enter_ready.wait()
                     self.server_finish_event.set()
@@ -360,6 +371,7 @@ class UCXWeightsCommunicator(WeightsCommunicator):
     def on_updated(self):
         # relay server 参数更新完，在等的client可以开始传输了
         if self.is_relay:
+            self._relay_weights_loaded.set()
             self.relay_server_update_lock.release_update()
 
     def update_standalone_worker(self, role):

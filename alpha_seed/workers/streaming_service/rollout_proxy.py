@@ -168,17 +168,37 @@ class FixedReplicatedRayWorkerGroupAdapter(ReplicatedRayWorkerGroup):
 
 class CombinedRayWorkerGroupAdapter(ReplicatedRayWorkerGroup):
 
-    def __init__(self, replicas: Dict[str, ReplicatedRayWorkerGroup]):
-        assert all([isinstance(val, (ReplicatedRayWorkerGroup, ScalingRayWorkerGroup)) for val in replicas.values()])
-        self.replicas = replicas
-        self._replica_ready = {name: True for name in self.replicas}
+    ScalingOrReplicated = ReplicatedRayWorkerGroup | ScalingRayWorkerGroup
+
+    # noqa: no initializing base class, use as interface only
+    def __init__(self, intermittent: Dict[str, ScalingOrReplicated], persistent: Dict[str, ScalingOrReplicated]):
+        # intermittent: 时间上时分复用，有时候可用有时候不可用，不可用期间不会访问到对应的方法，由_replica_active决定
+        # persistent: 时间上持续存在，无论何时都可用
+        assert all(
+            [isinstance(val, (ReplicatedRayWorkerGroup, ScalingRayWorkerGroup)) for val in intermittent.values()])
+        self._intermittent_replicas = intermittent  # {name -> }
+        self._persistent_replicas = persistent  # {name -> }
+        self._replica_active = {
+            name: True for name in self._intermittent_replicas.keys() | self._persistent_replicas.keys()
+        }
+
+    @property
+    def replicas(self):
+        return {
+            **self._intermittent_replicas,
+            **self._persistent_replicas,
+        }
 
     @property
     def guaranteed(self):
-        return self
+        persistent_keys = list(self._persistent_replicas.keys())
+        assert len(persistent_keys) > 0, f"should register at least 1 persistent replica when calling {self}.guaranteed"
+        any_persistent_key = persistent_keys[0]
+        return self._persistent_replicas[any_persistent_key].guaranteed
 
     def set_dead_callback(self, fn):
-        pass
+        for replica in self.replicas.values():
+            replica.set_dead_callback(fn)
 
     def get_alive_worker_groups(self):
         ret = {}
@@ -195,17 +215,19 @@ class CombinedRayWorkerGroupAdapter(ReplicatedRayWorkerGroup):
     def get_ready_worker_groups(self):
         ret = {}
         for name, replica in self.replicas.items():
-            if self._replica_ready[name]:
+            if self._replica_active[name]:
                 ret.update(replica.get_ready_worker_groups())
         return ret
 
     @property
     def target_num_replicas(self) -> int:
         return sum(
-            [replica.target_num_replicas for name, replica in self.replicas.items() if self._replica_ready[name]])
+            [replica.target_num_replicas for name, replica in self.replicas.items() if self._replica_active[name]])
 
     def set_replica_ready_state(self, name: str, ready: bool):
-        self._replica_ready[name] = ready
+        assert name in self._intermittent_replicas, \
+            f"name({name}) should be in intermittent replicas({self._intermittent_replicas.keys()})"
+        self._replica_active[name] = ready
 
     @property
     def alive_worker_group_ids(self) -> Set[str]:
@@ -225,6 +247,9 @@ class StandaloneRolloutWGAdapter:
 
     def __init__(self, replicas):
         self.replicas = replicas
+        self._tracer = Tracer.get_instance()
+        self._update_worker_start_ts = 0
+        self._stop_server_ts = 0
 
     def get_master_addr(self) -> List[DataProto]:
         # 获取每个workergroup的每个rank的address
@@ -279,15 +304,15 @@ class StandaloneRolloutWGAdapter:
                 continue
             else:
                 break
-        # evt = CompleteEvent(
-        #     pid='RolloutProxy',
-        #     tid='update',
-        #     cat='update weights',
-        #     name='update weights',
-        #     ts=self._update_worker_start_ts,
-        #     dur=time.time() * 1e6 - self._update_worker_start_ts,
-        # )
-        # self._tracer.trace(evt)
+        evt = CompleteEvent(
+            pid='RolloutProxy',
+            tid='update',
+            cat='update weights',
+            name='update weights',
+            ts=self._update_worker_start_ts,
+            dur=time.time() * 1e6 - self._update_worker_start_ts,
+        )
+        self._tracer.trace(evt)
 
     def stop_server_before_weights_update(self):
         self._stop_server_ts = time.time() * 1e6
@@ -306,15 +331,15 @@ class StandaloneRolloutWGAdapter:
             futs.append((wg, ref))
         self.wait_ignore_actor_died(futs)
 
-        # evt = CompleteEvent(
-        #     pid='RolloutProxy',
-        #     tid='update',
-        #     cat='stop/start server',
-        #     name='stop/start server',
-        #     ts=self._stop_server_ts,
-        #     dur=time.time() * 1e6 - self._stop_server_ts,
-        # )
-        # self._tracer.trace(evt)
+        evt = CompleteEvent(
+            pid='RolloutProxy',
+            tid='update',
+            cat='stop/start server',
+            name='stop/start server',
+            ts=self._stop_server_ts,
+            dur=time.time() * 1e6 - self._stop_server_ts,
+        )
+        self._tracer.trace(evt)
 
     def wait_ignore_actor_died(self, refs: List[Tuple[RayWorkerGroup, List[ray.ObjectRef]]]):
         obj_wg_map = {}
