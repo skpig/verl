@@ -49,14 +49,7 @@ class ConnectionPool:
         self.in_use = {}  # ep -> address
         self._mutex = asyncio.Lock()
 
-    async def get_connection(self, address: str):
-        async with self._mutex:
-            if self.pool[address]:
-                # Get a free connection from the pool
-                ep = self.pool[address].pop()
-                self.in_use[ep] = address
-                return ep
-
+    async def create(self, address):
         ip_port = address.rsplit(":", 1)
         assert len(ip_port) == 2, f"expecting ip_port to be a list of 2 strings, got {ip_port}"
         ip = ip_port[0]
@@ -76,6 +69,17 @@ class ConnectionPool:
                 break
 
         assert ep is not None, "Endpoint cannot be created"
+        return ep
+
+    async def get_connection(self, address: str):
+        async with self._mutex:
+            if self.pool[address]:
+                # Get a free connection from the pool
+                ep = self.pool[address].pop()
+                self.in_use[ep] = address
+                return ep
+
+        ep = await self.create(address)
         self.in_use[ep] = address
         return ep
 
@@ -529,19 +533,22 @@ class UCXWeightsCommunicator(WeightsCommunicator):
 
     def update_standalone_worker_end(self, addresses: List[str]):
 
-        async def send_group_end_signal(addr: str):
-            ep = await self.connection_pool.get_connection(addr)
-            try:
-                group_end_msg = "group_end"
-                await ep.send_obj(group_end_msg.encode("utf-8"))
-                # server需要配合回复一个消息，并在这里接收，不然server可能根本收不到上面发的数据，不知道为什么
-                ok = await ep.recv_obj()
-            finally:
-                self.connection_pool.put_connection(ep)
+        async def send_group_end_signal(addr: str, ucx_connection_concurrency):
+            async with ucx_connection_concurrency:
+                ep = await self.connection_pool.create(addr)
+                try:
+                    group_end_msg = "group_end"
+                    await ep.send_obj(group_end_msg.encode("utf-8"))
+                    # server需要配合回复一个消息，并在这里接收，不然server可能根本收不到上面发的数据，不知道为什么
+                    ok = await ep.recv_obj()
+                finally:
+                    ep.close()
 
         async def broadcast_group_end_signal():
+            # 单个client或server创建太多连接会被直接rst，这里控一下数量
+            ucx_connection_concurrency = asyncio.Semaphore(32)
             print('will broadcast group_end signal to all trainer actors')
-            tasks = [asyncio.create_task(send_group_end_signal(addr)) for addr in addresses]
+            tasks = [asyncio.create_task(send_group_end_signal(addr, ucx_connection_concurrency)) for addr in addresses]
             await asyncio.gather(*tasks)
 
         def broadcast_group_end_signal_thread():
