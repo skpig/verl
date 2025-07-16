@@ -436,6 +436,13 @@ class RolloutManager:
         same_keys = batch.non_tensor_batch.keys() & gen_out_batch.non_tensor_batch.keys()
         batch.pop(non_tensor_batch_keys=list(same_keys))
         batch.union(gen_out_batch)
+
+        if self._use_server:
+            # maintain keys not handled in server mode
+            batch.batch["prompts"] = batch.batch["input_ids"][:, :self.config.data.max_prompt_length]
+            batch.batch["responses"] = batch.batch["input_ids"][:, self.config.data.max_prompt_length:]
+            batch.pop(batch_keys=['is_finished'])
+
         return batch
 
     async def _wait_max_off_policy_steps(self, step: int, metrics: Dict):

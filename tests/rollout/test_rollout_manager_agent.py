@@ -23,6 +23,15 @@ def get_dataproto(config, tokenizer):
         (f"{question_prompt}:\nCompute 8 @ 1", "22"),
     ]
 
+    # ci
+    question_prompt = """please call tools provided to solve this problem"""
+    qa_list = [
+        (f"You can call tools provided to solve this problem. Let $x,$ $y,$ and $z$ be positive real numbers such that $x + y + z = 1.$  Find the maximum value of $x^3 y^2 z.$The answer is in the form \\frac{{m}}{{n}}, where gcd(m, n) = 1. Please provide the value of m + n.",
+         "433"),
+        ('You can call tools provided to solve this problem. Let $$z = \\frac{1+i}{\\sqrt{2}}.$$ Calculate the value of $$\\left(z^{1^2} + z^{2^2} + z^{3^2} + \\dots + z^{12^2}\\right) \\cdot \\left(\\frac{1}{z^{1^2}} + \\frac{1}{z^{2^2}} + \\frac{1}{z^{3^2}} + \\dots + \\frac{1}{z^{12^2}}\\right).$$',
+         36)
+    ]
+
     data = []
     for question, answer in qa_list:
         prompt = [{"role": "user", "content": question}]
@@ -150,7 +159,8 @@ def test_train_generate(set_common_envs, gpu_allocator, ray_fixture, complete_ra
     config.streaming_validator.nnodes = 0
 
     # agent related config
-    config.actor_rollout_ref.model.path = 'hdfs://harunava/home/byte_data_seed_azure/alphaseed/daiweinan/models/qwen3_0.6b_p6d'
+    # config.actor_rollout_ref.model.path = 'hdfs://harunava/home/byte_data_seed_azure/alphaseed/daiweinan/models/qwen3_0.6b_p6d'
+    config.actor_rollout_ref.model.path = 'hdfs://haruna/home/byte_data_seed/ssd_wlcb/user/jiangchengquan/models/qwen3_8b_p6d'
     config.data.max_prompt_length = 8192
     config.data.max_response_length = 8192
     config.data.return_raw_chat = True
@@ -159,7 +169,8 @@ def test_train_generate(set_common_envs, gpu_allocator, ray_fixture, complete_ra
     config.data.chat_template = 'chatml_tool'
     config.data.dataloader_raw_template = True
     config.reward_model.last_characters = 300
-    config.rollout_server.handler = 'agent/tool/special_calculator'
+    config.rollout_server.handler = 'agent/ci'
+    # config.rollout_server.handler = 'agent/tool/special_calculator'
     config.algorithm.use_model_output_mask = True
 
     tokenizer = get_tokenizer(config)
@@ -183,7 +194,7 @@ def test_train_generate(set_common_envs, gpu_allocator, ray_fixture, complete_ra
         for i in range(3):
             start = time.time()
             batch = copy.deepcopy(input_batch)
-            is_warmup_step = i == 0
+            is_warmup_step = False
             batch = rollout_manager.train_generate(batch,
                                                    step=i,
                                                    save_dataproto_fn=mock_save_dataproto,

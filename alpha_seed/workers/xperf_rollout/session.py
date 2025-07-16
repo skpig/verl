@@ -785,8 +785,8 @@ class InferenceSession:
         for index, query in enumerate(running):
             if len(query.input_ids) == 0:
                 query.init_from_prompt(self.tokenizer)
-            assert len(query.input_ids) > 0 and len(query.input_ids) < self.max_length, \
-                f"input_ids length {len(query.input_ids)} must be greater than 0 and less than max_length {self.max_length}"
+            assert len(query.input_ids) > 0 and len(query.input_ids) <= self.max_length, \
+                f"input_ids length {len(query.input_ids)} must be greater than 0 and less than or equal to max_length {self.max_length}"
             context_len = len(query.input_ids) - query.prefix_already_computed_len
             max_kv_index_len = max(max_kv_index_len, len(query.kv_slot_ids))
             if query.is_context_computing:
