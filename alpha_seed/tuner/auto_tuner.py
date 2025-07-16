@@ -161,7 +161,8 @@ class AutoTuner:
             self.default_filename = f"{self.env.gpu_type}.{self.env.ngpus}.{self.config.model_type}.{nparams_str}.seq{self.max_seqlen//1024}k.yaml"
 
     def init_model_and_optimizer(self, parallel_config: ParallelConfig, num_layers: int = 10):
-        meshes = create_mesh(parallel_config.fsdp_size, parallel_config.tp_size, parallel_config.sp_size)
+        meshes = create_mesh(parallel_config.fsdp_size, parallel_config.tp_size, 1, parallel_config.sp_size)
+        meshes.pop(2)  # oe parallelism is not supported in auto-tuning
         fsdp_mesh, tp_mesh = meshes[:2]
 
         setattr(self.config, '_moe_implementation', 'fused')
