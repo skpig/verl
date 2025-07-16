@@ -334,10 +334,14 @@ algorithm:
     min_score: -1
     max_score: 1
 
-  prior_sampling: 
+  prior_sampling:
     enable: False
     prior_sampling_ema: 0.9
-    no_sample_threshold: 0.99
+    only_filtering: False
+    no_sample_max_threshold: 0.95
+    no_sample_min_threshold: 0.05
+    min_weight_clip: 0
+    temperature: 1
 
   mask_overlong: False
   overlong_punish: v0

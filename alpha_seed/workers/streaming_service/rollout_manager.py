@@ -805,6 +805,7 @@ class RolloutManager:
             start = time.time()
 
             ready_batch = await asyncio.gather(*running_batch, return_exceptions=True)
+            ready_batch = [task for task in ready_batch if task is not None]
             print(f"[INFO] {step} val gen server[as_completed], batch size: {len(gen_batch)}")
             return ready_batch
 

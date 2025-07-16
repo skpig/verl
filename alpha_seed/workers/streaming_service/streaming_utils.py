@@ -389,9 +389,17 @@ async def chat_completions(content, meta_info, config, host, port: int):
                                     "meta_info": meta_info,
                                 },
                                 timeout=timeout) as resp:
-            ret = await resp.json()
-            assert resp.status == 200, f"chat_completions failed msg: {ret}"
-            return ret
+            if resp.status == 200:
+                content_type = resp.headers.get('Content-Type', '')
+                if 'application/json' in content_type:
+                    ret = await resp.json()
+                    return ret
+                else:
+                    text = await resp.text()
+                    raise Exception(f"Expected JSON but got {content_type}: {text}, Raw Response: {text}")
+            else:
+                text = await resp.text()
+                raise Exception(f"Request failed with status {resp.status}: {text}, Raw Response: {text}")
     except Exception as e:
         raise (e)
     finally:
@@ -429,11 +437,13 @@ async def internal_call(item, config, host, port: int, prompt: str = ''):
             meta_info[key] = item.non_tensor_batch[key][0]
 
         completion = await chat_completions(data, meta_info, config, host, port)
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as e:
         # Handle task cancellation (e.g., cleanup)
         print("Request was cancelled!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        raise  # Re-raise to propagate the cancellation
+        raise e  # Re-raise to propagate the cancellation
     except Exception as e:
-        print(f"Error occurred!!!!!!!!!!!!!!!!!!", e)
-        raise  # Re-raise the exception to propagate it further
+        print(f"Error occurred!!!!!!!!!!!!!!!!!!: {e}")
+        import traceback
+        traceback.print_exc()
+        raise e  # Re-raise the exception to propagate it further
     return completion

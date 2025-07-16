@@ -41,6 +41,59 @@ def compute_score_client(solution_str, ground_truth, code_sandbox_psm, data_uid,
     return score
 
 
+def parse_sandbox_error_msg(req_res):
+    ret_code, error_msg, stdout, stderr = "Accepted", None, "", ""
+    if req_res.accepted == True:
+        return ret_code, error_msg
+    for test in req_res.tests:
+        # ignore AC testcase
+        if test.passed:
+            continue
+        # CE
+        if test.exec_info.compile_result:  # For Non-Compile Language is None
+            if test.exec_info.compile_result.stderr:
+                error_msg = test.exec_info.compile_result.stderr[:2048]
+                ret_code = "Compile Error"
+                return ret_code, error_msg
+        # TLE + WA ret code
+        if test.exec_info.run_result:
+            if test.exec_info.run_result.status == "TimeLimitExceeded":
+                ret_code = "Time Limit Exceeded"
+            elif test.exec_info.run_result.status == "Finished":
+                ret_code = "Wrong Answer"
+                stdout = test.exec_info.run_result.stdout
+            elif test.exec_info.run_result.status == "Failed":
+                ret_code = "Wrong Answer"
+                stdout = test.exec_info.run_result.stdout
+            # extra info maybe in test.exec_info.run_result.stdout
+            if test.exec_info.run_result.stderr:
+                stderr = test.exec_info.run_result.stderr
+        # WA extra info
+        if test.test_info:  # test.test_info is dict
+            d = {
+                "input": test.test_info["input"]["stdin"],
+                "correct output": test.test_info["output"]["stdout"],
+            }
+            if len(stdout) > 0:
+                d["your code output"] = stdout
+            else:
+                if ret_code == "Time Limit Exceeded":
+                    d["your code output"] = "Time ran out; no result output"
+                else:
+                    d["your code output"] = "Your code output was not same as correct output"
+            if len(stderr) > 0:
+                d["runtime time error"] = stderr
+            for k, v in d.items():
+                if len(v) > 1024:
+                    d[k] = v[:500] + "...(truncated)..." + v[-500:]
+            error_msg = f"Not Passed TestCase Display as followed:\n" + json.dumps(d)
+            if ret_code == "Accepted":
+                ret_code = "Unknown Error"
+            return ret_code, error_msg
+    # print("Unknown Error", "No TestCase Ran", req_res)
+    return "Unknown Error", error_msg
+
+
 def compute_score(solution_str, ground_truth, code_sandbox_psm, **argv) -> float:
     if isinstance(ground_truth, str):
         ground_truth = json.loads(ground_truth)
@@ -59,13 +112,15 @@ def compute_score(solution_str, ground_truth, code_sandbox_psm, **argv) -> float
         try:
             req_res = submit(req, endpoint=endpoint, max_attempts=1, client_timeout=client_timeout)
             if req_res.accepted:
-                return 1
-            return -1
+                return {"score": 1, "msg": ""}
+            else:
+                ret_code, error_msg = parse_sandbox_error_msg(req_res)
+                return {"score": -1, "msg": f"{ret_code}\n{error_msg}"}
         except Exception as ex:
             print(f'sandbox fail with error: {ex}, retrying with {run+1}/{OJ_MAX_ATTEMPTS} attempts')
         client_timeout += 30
     print(f'Finally sandbox fails')
-    return -2
+    return {"score": -2, "msg": ""}
 
 
 def test_compute_score():

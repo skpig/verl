@@ -1451,14 +1451,23 @@ class RayPPOTrainer(object):
         acc_list = [self.acc_per_query.get(index, None) for index in batch.non_tensor_batch['index']
                    ]  # [0, 1], None for no weights
         weights = []
+        weight_clip = self.config.algorithm.prior_sampling.min_weight_clip
+        temperature = self.config.algorithm.prior_sampling.temperature
         for acc in acc_list:
             if acc is None:
                 weights.append(None)
-            elif acc > self.config.algorithm.prior_sampling.no_sample_threshold:  # no weight for samples with acc > threshold
+            elif acc > self.config.algorithm.prior_sampling.no_sample_max_threshold:  # no weight for samples with acc > threshold
                 weights.append(0)
-            else:  # weight reverse to acc
-                weights.append(1 - acc)
+            elif acc < self.config.algorithm.prior_sampling.no_sample_min_threshold:  # no weight for samples with acc < threshold
+                weights.append(weight_clip)
+            else:
+                if self.config.algorithm.prior_sampling.only_filtering:
+                    weights.append(1)
+                else:  # weight reverse to acc
+                    weights.append(1 - acc)
 
+        # add temperature for weights
+        weights = [v**temperature if v is not None else None for v in weights]
         B = len(weights)
 
         weighted_indices = []
