@@ -32,7 +32,6 @@ from verl.utils.tracking import Tracking
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from transformers import AutoTokenizer
 from hdfs_io import hexists, makedirs, hcopy
-from alpha_seed.trainer.tensorcore_collect import tensorcore_collection
 from alpha_seed.utils.observility.pretty_print import pprint
 from alpha_seed.utils.functional import print_dataproto_size
 from alpha_seed.workers.streaming_service.streaming_utils import record_xperf_metrics
@@ -482,13 +481,12 @@ class RolloutManager:
         ready_batch = []
 
         with Timer(name="gen", logger=None) as timer:
-            with tensorcore_collection():
-                gen_batch_output = self.hybrid_wg.generate_sequences(gen_batch)
-                # TODO: The following two lines should be memory view. However it's not. Let's remove it by removing all its dependency
-                gen_batch_output.batch["prompts"] = gen_batch_output.batch["input_ids"][:, :self.config.data.
-                                                                                        max_prompt_length]
-                gen_batch_output.batch["responses"] = gen_batch_output.batch["input_ids"][:, self.config.data.
-                                                                                          max_prompt_length:]
+            gen_batch_output = self.hybrid_wg.generate_sequences(gen_batch)
+            # TODO: The following two lines should be memory view. However it's not. Let's remove it by removing all its dependency
+            gen_batch_output.batch["prompts"] = gen_batch_output.batch["input_ids"][:, :self.config.data.
+                                                                                    max_prompt_length]
+            gen_batch_output.batch["responses"] = gen_batch_output.batch["input_ids"][:, self.config.data.
+                                                                                      max_prompt_length:]
         metrics["timing/gen"] = timer.last
         metrics["rollout/hybrid_input_batch"] = len(gen_batch)
         metrics["memory/gen_max_allocated"] = gen_batch_output.meta_info["memory/gen_max_allocated"]

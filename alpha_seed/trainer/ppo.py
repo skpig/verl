@@ -44,7 +44,6 @@ import pandas as pd
 import numpy as np
 from codetiming import Timer
 
-from alpha_seed.trainer.tensorcore_collect import tensorcore_collection
 from alpha_seed.utils.select_strategy.bon_strategy import *
 from alpha_seed.utils.select_strategy.league_training_strategy import *
 from alpha_seed.utils.validator.validation_manager import *
