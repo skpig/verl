@@ -270,12 +270,14 @@ class RolloutManager:
             ExecutorCls = RayActorExecutor
         else:
             raise ValueError(f"Unsupported executor class: {executor_cls}")
-        self.train_client_executor = ExecutorCls(self.tokenizer,
+        self.train_client_executor = ExecutorCls(self.config,
+                                                 self.tokenizer,
                                                  self.train_rollout_server.host,
                                                  self.train_rollout_server.port,
                                                  max_workers=max_workers,
                                                  worker_max_concurrency=worker_max_concurrency)
-        self.val_client_executor = ExecutorCls(self.tokenizer,
+        self.val_client_executor = ExecutorCls(self.config,
+                                               self.tokenizer,
                                                self.val_rollout_server.host,
                                                self.val_rollout_server.port,
                                                max_workers=max_workers,

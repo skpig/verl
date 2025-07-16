@@ -4,7 +4,8 @@ NUM_STEPS="${NUM_STEPS:-50000}"
 echo $NUM_STEPS
 EXP='search_demo-dbg-250710-yy'
 # ckpt和路径
-SFT_MODEL_PATH=hdfs://harunava/home/byte_data_seed_azure/alphaseed/daiweinan/models/qwen3_0.6b_p6d
+SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/ssd_hldy/user/yueyu/qwen3_0.6b_p6d
+# hdfs://haruna/home/byte_data_seed/ssd_hldy/user/yueyu/qwen3_8b_p6d/
 # SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/ssd_wlcb/user/jiangchengquan/models/qwen3_8b_p6d
 RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/models/p6dense-0.5B-Instruct_rm
 TRAIN_FILE=hdfs://haruna/home/byte_data_seed/ssd_hldy/user/yueyu/alphaseed_workspace/data/Gaokao/mixrl/all_data_for_search.76689.source.vlm.format_v7.parquet
@@ -59,6 +60,10 @@ xperf_tp_size=2
 offload=False
 offload_train_memory=True
 
+# +data.chat_template=chatml_tool_v2 \
+# rollout_server.tool_call_start_token=\"\<tool_call\>\" \
+# rollout_server.tool_call_end_token=\"\</tool_call\>\" \
+
 python3 tasks/main_ppo.py \
     trainer.use_remote_search=True \
     data.return_raw_chat=True \
@@ -66,6 +71,8 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.rollout.agent.max_turns=10 \
     actor_rollout_ref.rollout.agent.max_new_tokens_per_turn=2048 \
     +data.chat_template=chatml_tool_v3 \
+    rollout_server.tool_call_start_token=\"\<\|FunctionCallBegin\|\>\" \
+    rollout_server.tool_call_end_token=\"\<\|FunctionCallEnd\|\>\" \
     reward_model.last_characters=300 \
     data.train_files=${TRAIN_FILE} \
     data.val_files=${TEST_FILE} \

@@ -131,11 +131,19 @@ class OpenAIAsyncClient(AsyncLLMInterface):
 
 class AsyncAgent:
 
-    def __init__(self, tokenizer: AsyncTokenizer | PreTrainedTokenizer, llm: AsyncLLMInterface):
+    def __new__(cls, *args, **kwargs):
+        config: DictConfig = kwargs.pop('config')
+        executor: ThreadPoolExecutor = kwargs.pop('executor')
+        instance = super().__new__(cls)
+        instance.config = config
+        instance.executor = executor
+        return instance
+
+    def __init__(self, tokenizer: AsyncTokenizer | PreTrainedTokenizer, llm: AsyncLLMInterface, **kwargs):
         # async tokenizer can be used as the normal pretrained tokenizer
         self.tokenizer: AsyncTokenizer = tokenizer
         self.llm = llm
-        self.executor: ThreadPoolExecutor = None  # noqa: assign later
+        # self.executor: ThreadPoolExecutor = None  # noqa: assign later
 
     async def __call__(self, item: DataProto, context: TaskContext, **kwargs):
         raise NotImplementedError
@@ -143,10 +151,17 @@ class AsyncAgent:
 
 class ThreadedAgent:
 
-    def __init__(self, tokenizer: PreTrainedTokenizer, llm: AsyncLLMInterface):
+    def __new__(cls, *args, **kwargs):
+        config: DictConfig = kwargs.pop('config')
+        executor: ThreadPoolExecutor = kwargs.pop('executor')
+        instance = super().__new__(cls)
+        instance.config = config
+        instance.executor = executor
+        return instance
+
+    def __init__(self, tokenizer: PreTrainedTokenizer, llm: AsyncLLMInterface, **kwargs):
         self.tokenizer: PreTrainedTokenizer = tokenizer
         self.llm = llm
-        self.executor: ThreadPoolExecutor = None  # noqa: assign later
 
     def __call__(self, item: DataProto, context: TaskContext, **kwargs):
         raise NotImplementedError
@@ -156,7 +171,7 @@ def functional_agent(func):
 
     class FunctionAsyncAgent(AsyncAgent):
 
-        def __init__(self, tokenizer: AsyncTokenizer | PreTrainedTokenizer, llm: AsyncLLMInterface):
+        def __init__(self, tokenizer: AsyncTokenizer | PreTrainedTokenizer, llm: AsyncLLMInterface, **kwargs):
             super().__init__(tokenizer, llm)
             self.func = func
 

@@ -6,6 +6,7 @@ from itertools import cycle
 from typing import Type
 
 import ray
+from omegaconf import DictConfig
 from transformers import AutoTokenizer, PreTrainedTokenizer
 
 from alpha_seed.utils.tokenizer.async_tokenizer import AsyncTokenizer
@@ -15,8 +16,15 @@ from alpha_seed.workers.agents.handlers.base import AsyncAgent, functional_agent
 
 class AgentWorker:
 
-    def __init__(self, tokenizer: PreTrainedTokenizer, host, port, worker_max_concurrency, worker_id=0):
+    def __init__(self,
+                 config: DictConfig,
+                 tokenizer: PreTrainedTokenizer,
+                 host,
+                 port,
+                 worker_max_concurrency,
+                 worker_id=0):
         """
+        config: root config
         host: llm server host
         port: llm server port
         worker_max_concurrency: the worker can handle numbers of concurrent tasks/threads
@@ -29,27 +37,30 @@ class AgentWorker:
         self.async_tokenizer = AsyncTokenizer(tokenizer)
         self.llm = OpenAIAsyncClient(host, port)
         self.concurrency_limit = asyncio.Semaphore(worker_max_concurrency)
+        self.config = config
 
     async def execute(self, agent_cls: Type[AsyncAgent] | Type[ThreadedAgent], /, *args, **kwargs):
         # 兼容旧的functional handler，保持task context中有tokenizer赋值
         for a in args:
             if isinstance(a, TaskContext):
                 a.tokenizer = self.tokenizer
+        agent_init_kwargs = self._make_essential_init_kwargs()
         if issubclass(agent_cls, AsyncAgent):
-            agent = agent_cls(self.async_tokenizer, self.llm)
-            self._assign_essential_objects(agent)
+            agent = agent_cls(self.async_tokenizer, self.llm, **agent_init_kwargs)
             async with self.concurrency_limit:
                 return await agent(*args, **kwargs)
         else:
-            agent = agent_cls(self.tokenizer, self.llm)
-            self._assign_essential_objects(agent)
+            agent = agent_cls(self.tokenizer, self.llm, **agent_init_kwargs)
             loop = asyncio.get_event_loop()
             if kwargs:
                 agent = partial(agent, **kwargs)
             return await loop.run_in_executor(self._thread_executor, agent, *args)
 
-    def _assign_essential_objects(self, agent):
-        agent.executor = self._thread_executor
+    def _make_essential_init_kwargs(self):
+        return {
+            'config': self.config,
+            'executor': self._thread_executor,
+        }
 
 
 class ExecutorBase:
@@ -60,13 +71,14 @@ class ExecutorBase:
 
 class RayActorExecutor(ExecutorBase):
 
-    def __init__(self, tokenizer, host, port, max_workers=1, worker_max_concurrency=1):
+    def __init__(self, config, tokenizer, host, port, max_workers=1, worker_max_concurrency=1):
         RemoteAgentWorker = ray.remote(AgentWorker)
         self.workers = [
             RemoteAgentWorker.options(scheduling_strategy="SPREAD",
                                       max_concurrency=worker_max_concurrency,
-                                      name=f"ray_executor_{idx}").remote(tokenizer, host, port, worker_max_concurrency,
-                                                                         idx) for idx in range(max_workers)
+                                      name=f"ray_executor_{idx}").remote(config, tokenizer, host, port,
+                                                                         worker_max_concurrency, idx)
+            for idx in range(max_workers)
         ]
         self.worker_pointer = cycle(range(max_workers))
 
@@ -81,8 +93,10 @@ class RayActorExecutor(ExecutorBase):
 
 class LocalExecutor(ExecutorBase):
 
-    def __init__(self, tokenizer, host, port, max_workers=1, worker_max_concurrency=1):
-        self.workers = [AgentWorker(tokenizer, host, port, worker_max_concurrency, idx) for idx in range(max_workers)]
+    def __init__(self, config, tokenizer, host, port, max_workers=1, worker_max_concurrency=1):
+        self.workers = [
+            AgentWorker(config, tokenizer, host, port, worker_max_concurrency, idx) for idx in range(max_workers)
+        ]
         self.worker_pointer = cycle(range(max_workers))
 
     async def submit(self, agent_cls: Type[AsyncAgent] | Type[ThreadedAgent] | callable, /, *args, **kwargs):

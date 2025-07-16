@@ -17,6 +17,7 @@ import json
 import torch
 import regex as re
 from uuid import uuid4
+from omegaconf import DictConfig
 import numpy as np
 import ray
 
@@ -31,11 +32,12 @@ class FunctionCall:
 class HermesToolParser:
     """Tool parser for Hermes format, adapted from verl"""
 
-    def __init__(self, tokenizer):
+    def __init__(self, tokenizer, config):
         self.tokenizer = tokenizer
-        self.tool_call_start_token = "<tool_call>"
-        self.tool_call_end_token = "</tool_call>"
-        self.tool_call_regex = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
+        self.tool_call_start_token = config.rollout_server.tool_call_start_token
+        self.tool_call_end_token = config.rollout_server.tool_call_end_token
+        self.tool_call_regex = re.compile(
+            f"{self.tool_call_start_token}(.*?){self.tool_call_end_token}".replace("|", "\|"), re.DOTALL)
 
     async def extract_tool_calls(self, response_text: str) -> List[FunctionCall]:
         """Extract tool calls from response text"""
@@ -47,8 +49,15 @@ class HermesToolParser:
         for match in matches:
             try:
                 function_call = json.loads(match)
-                name, arguments = function_call["name"], function_call["arguments"]
-                function_calls.append(FunctionCall(name=name, arguments=json.dumps(arguments, ensure_ascii=False)))
+                if isinstance(function_call, list):
+                    for f in function_call:
+                        name, arguments = f["name"], f["arguments"] if "arguments" in f else f["parameters"]
+                        function_calls.append(
+                            FunctionCall(name=name, arguments=json.dumps(arguments, ensure_ascii=False)))
+                else:
+                    name, arguments = function_call["name"], function_call[
+                        "arguments"] if "arguments" in function_call else function_call["parameters"]
+                    function_calls.append(FunctionCall(name=name, arguments=json.dumps(arguments, ensure_ascii=False)))
             except Exception as e:
                 pass  # Skip invalid tool calls
         return function_calls
@@ -57,11 +66,11 @@ class HermesToolParser:
 @register_handler("agent/tool/search_and_text_browser")
 class ToolAgent(AsyncAgent):
 
-    def __init__(self, tokenizer: AsyncTokenizer | PreTrainedTokenizer, llm: AsyncLLMInterface):
+    def __init__(self, tokenizer: AsyncTokenizer | PreTrainedTokenizer, llm: AsyncLLMInterface, **kwargs):
         super().__init__(tokenizer, llm)
         self.search = create_search_env_from_env_str("deep_research/search@{}", tokenizer=tokenizer)
         self.textbrowser = create_textbrowser_env_from_env_str("deep_research/textbrowser@{}", tokenizer=tokenizer)
-        self.tool_parser = HermesToolParser(tokenizer)
+        self.tool_parser = HermesToolParser(tokenizer, self.config)
         self.tools = {"Search": self.search, "TextBrowser": self.textbrowser}
         # Get tool schema for the calculator
         self.tool_schemas = [
@@ -321,7 +330,7 @@ class ToolAgent(AsyncAgent):
             tool_args = json.loads(tool_call.arguments)
 
             if tool_name not in self.tools:
-                return {"role": "tool", "content": f"Error: Unknown tool {tool_name}", "tool_name": tool_name}
+                return {"role": "tool", "content": f"Error: Unknown tool {tool_name}", "name": tool_name}
 
             tool = self.tools[tool_name]
             instance_id = str(uuid4())
@@ -329,7 +338,7 @@ class ToolAgent(AsyncAgent):
             # Execute the tool
             tool_response = await tool.step(instance_id, tool_name, tool_args)
 
-            return {"role": "tool", "content": tool_response, "tool_name": tool_name}
+            return {"role": "tool", "content": tool_response, "name": tool_name}
 
         except Exception as e:
-            return {"role": "tool", "content": f"Error: {str(e)}", "tool_name": tool_name}
+            return {"role": "tool", "content": f"Error: {str(e)}", "name": tool_name}

@@ -436,6 +436,8 @@ rollout_server:
     # max_workers * worker_max_concurrency 就是同时运行的task的最大并发数
     max_workers: 8 # 有多少worker
     worker_max_concurrency: 1024  # 每个worker的并发数，对所有executor类型都生效
+  tool_call_start_token: "<tool_call>"
+  tool_call_end_token: "</tool_call>"
 
 streaming_rollout:
   n_gpus_per_node: 0
