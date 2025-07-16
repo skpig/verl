@@ -19,7 +19,6 @@ def call_once_method(method):
     def wrapper(self, *args, **kwargs):
         flag_name = f"_has_run_{method.__name__}"
         if getattr(self, flag_name, False):
-            logging_rank_only(logging.warning, 0, f"Method {method.__name__} has already been run.")
             return
         setattr(self, flag_name, True)
         return method(self, *args, **kwargs)
@@ -160,7 +159,9 @@ class Query:
         return
 
     @call_once_method
-    def init_from_prompt(self, tokenizer):
+    def lazy_init_from_prompt_once(self, tokenizer):
+        if len(self.input_ids) > 0:
+            return
         self.input_ids = tokenizer.encode(self.input_prompt)
         self.original_input_ids = copy.copy(self.input_ids)
 

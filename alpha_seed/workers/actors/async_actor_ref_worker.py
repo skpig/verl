@@ -1373,7 +1373,17 @@ class AsyncActorRolloutRefWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
     def toggle_inference_server_state(self, sleep):
+        """
+            Toggle the inference server state between running and sleeping modes.
+
+            This method **must be used in a paired fashion**:
+                - Call with `sleep=False` to enable the inference engine.
+                - Later, call with `sleep=True` to properly disable and offload resources.
+
+            Unpaired usage will lead to inconsistent engine state, potential deadlocks, or GPU memory inconsistency.
+        """
         if self.config.rollout.mode == "batch":
+            # If running in batch mode, toggling is unnecessary.
             return
         if sleep:
             # 让engine停下来
@@ -1381,9 +1391,9 @@ class AsyncActorRolloutRefWorker(Worker):
                 time.sleep(1)
             with self.rollout.inference_engine.update_weights_lock:
                 self.rollout.stop_event.set()
-            # 让engine等待下一次weights loaded
+            # Clear the "weights loaded" flag, so engine won't proceed until reloaded.
             self.rollout.weights_loaded.clear()
-            # 等待engine完全退出gen loop
+            # Make sure the engine is fully stopped before offloading the
             self.rollout.gen_loop_exited.wait()
             # offload weights
             self.sharding_manager.__exit__(None, None, None)
@@ -1394,7 +1404,7 @@ class AsyncActorRolloutRefWorker(Worker):
         self.sharding_manager.__enter__()
         with self.rollout.inference_engine.update_weights_lock:
             self.rollout.stop_event.clear()
-            # 通知engine weights loaded
+            # 通知 engine weights loaded
             self.rollout.weights_loaded.set()
 
 
