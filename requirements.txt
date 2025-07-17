@@ -6,7 +6,7 @@ dill
 # flash-attn  2.7.4.post1         
 hydra-core
 liger-kernel
-numpy
+numpy<2.0.0
 pandas
 peft
 pyarrow>=19.0.0
@@ -14,7 +14,7 @@ pybind11
 pylatexenc
 pre-commit
 ray[default]
-tensordict<=0.6.2
+tensordict>=0.8.0,<=0.9.1,!=0.9.0
 torchdata
 # transformers 4.51.1
 # vllm==0.8.4
@@ -28,3 +28,5 @@ traitlets
 math-verify
 debugpy
 pysocks
+latex2sympy2_extended
+math_verify

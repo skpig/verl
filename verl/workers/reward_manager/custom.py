@@ -29,6 +29,7 @@ import signal
 
 from verl import DataProto
 from verl.utils.reward_score import _default_compute_score
+from verl.workers.reward_manager.registry import register
 
 
 async def single_compute_score(evaluation_func, completion, reference, task, task_extra_info, executor, timeout=300.0):
@@ -122,6 +123,7 @@ def parallel_compute_score_sync(
             
     return scores
 
+@register("custom")
 class CustomRewardManager:
     """
     The Reward Manager used in https://github.com/PRIME-RL/PRIME
