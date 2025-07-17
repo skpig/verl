@@ -8,14 +8,15 @@ from transformers import PreTrainedTokenizer
 
 from alpha_seed.utils.tokenizer.async_tokenizer import AsyncTokenizer
 from alpha_seed.workers.agents.handlers import register_handler, TaskContext
-from alpha_seed.workers.agents.handlers.base import AsyncAgent, AsyncLLMInterface
+from alpha_seed.workers.agents.handlers.base import AsyncAgent
+from alpha_seed.workers.agents.llm import AsyncLLMInterface
+from alpha_seed.workers.agents.handlers.tool.parser import FunctionCall, HermesToolParser
 from mono_rl import DataProto
 from verl.tools.base_tool import BaseTool
 from verl.tools.schemas import OpenAIFunctionToolSchema
 from typing import Any, Tuple, List, Dict
 import json
 import torch
-import regex as re
 from uuid import uuid4
 import numpy as np
 
@@ -71,44 +72,11 @@ class Calculator(BaseTool):
         return fn_res, 0.0, {}
 
 
-class FunctionCall:
-
-    def __init__(self, name: str, arguments: str):
-        self.name = name
-        self.arguments = arguments
-
-
-class HermesToolParser:
-    """Tool parser for Hermes format, adapted from verl"""
-
-    def __init__(self, tokenizer):
-        self.tokenizer = tokenizer
-        self.tool_call_start_token = "<tool_call>"
-        self.tool_call_end_token = "</tool_call>"
-        self.tool_call_regex = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
-
-    async def extract_tool_calls(self, response_text: str) -> List[FunctionCall]:
-        """Extract tool calls from response text"""
-        if self.tool_call_start_token not in response_text or self.tool_call_end_token not in response_text:
-            return []
-
-        matches = self.tool_call_regex.findall(response_text)
-        function_calls = []
-        for match in matches:
-            try:
-                function_call = json.loads(match)
-                name, arguments = function_call["name"], function_call["arguments"]
-                function_calls.append(FunctionCall(name=name, arguments=json.dumps(arguments, ensure_ascii=False)))
-            except Exception as e:
-                pass  # Skip invalid tool calls
-        return function_calls
-
-
 @register_handler("agent/tool/special_calculator")
 class ToolAgent(AsyncAgent):
 
-    def __init__(self, tokenizer: AsyncTokenizer | PreTrainedTokenizer, llm: AsyncLLMInterface):
-        super().__init__(tokenizer, llm)
+    def __init__(self, tokenizer: AsyncTokenizer | PreTrainedTokenizer, llm: AsyncLLMInterface, **kwargs):
+        super().__init__(tokenizer, llm, **kwargs)
         self.calculator = Calculator()
         self.tool_parser = HermesToolParser(tokenizer)
         self.tools = {"calculate": self.calculator}
@@ -220,8 +188,6 @@ class ToolAgent(AsyncAgent):
             if last_turn_prompt_model_output_length - len(initial_input_ids) > max_response_length:
                 break
 
-            # 添加assistant的对话, 不能使用response_message['prompt']，这个会截断，可能是rebalance导致的，还在查
-            # response_text = self.tokenizer.decode(response_message['raw_output_ids'])
             messages.append({
                 "role": "assistant",
                 "content": self.tokenizer.pad_token * len(response_message['raw_output_ids'])

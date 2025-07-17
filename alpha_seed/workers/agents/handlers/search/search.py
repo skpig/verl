@@ -67,7 +67,7 @@ class HermesToolParser:
 class ToolAgent(AsyncAgent):
 
     def __init__(self, tokenizer: AsyncTokenizer | PreTrainedTokenizer, llm: AsyncLLMInterface, **kwargs):
-        super().__init__(tokenizer, llm)
+        super().__init__(tokenizer, llm, **kwargs)
         self.search = create_search_env_from_env_str("deep_research/search@{}", tokenizer=tokenizer)
         self.textbrowser = create_textbrowser_env_from_env_str("deep_research/textbrowser@{}", tokenizer=tokenizer)
         self.tool_parser = HermesToolParser(tokenizer, self.config)
@@ -162,8 +162,6 @@ class ToolAgent(AsyncAgent):
             if last_turn_prompt_model_output_length - len(initial_input_ids) >= max_response_length:
                 break
 
-            # 添加assistant的对话, 不能使用response_message['prompt']，这个会截断，可能是rebalance导致的，还在查
-            # response_text = self.tokenizer.decode(response_message['raw_output_ids'])
             messages.append({
                 "role": "assistant",
                 "content": self.tokenizer.pad_token * len(response_message['raw_output_ids'])

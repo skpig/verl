@@ -71,7 +71,29 @@ class SingleTurn(AsyncAgent):
 class SingleTurnSync(ThreadedAgent):
 
     def __call__(self, item: DataProto, context: TaskContext, **kwargs):
-        pass
+        os.environ["no_proxy"] = ""
+        tokenizer = self.tokenizer
+        config = context.config
+        rollout_config = context.config.actor_rollout_ref.rollout
+        if 'image_grid_hw' in item.non_tensor_batch:
+            # vlm mode里input_ids已经提前处理好，所以这里不用prompt
+            prompt = ''
+        else:
+            # tokenize and left pad
+            prompt = item.non_tensor_batch['prompt'][0]
+            prompt_data = tokenizer.batch_encode_plus([prompt],
+                                                      padding=PaddingStrategy.MAX_LENGTH,
+                                                      padding_side='left',
+                                                      add_special_tokens=False,
+                                                      max_length=config.data.max_prompt_length)
+            item.batch['input_ids'] = torch.tensor(prompt_data.input_ids, dtype=torch.int32)
+            item.batch['attention_mask'] = torch.tensor(prompt_data.attention_mask, dtype=torch.int8)
+        # 因为已经提前tokenize好，不传prompt
+        completion = self.llm.complete(item, rollout_config)
+        from alpha_seed.workers.streaming_service.streaming_utils import DataPack, pack_to_dataproto
+        data_pack = DataPack.create_from_completion_dict(completion['choices'][0]['message'])
+        out = pack_to_dataproto(item, tokenizer, data_pack, rollout_config)  # dataproto
+        return out
 
 
 if __name__ == '__main__':

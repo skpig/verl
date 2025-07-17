@@ -56,8 +56,8 @@ class SandboxFeedback:
 @register_handler("competitive_coding/multiturn")
 class CodeAgent(AsyncAgent):
 
-    def __init__(self, tokenizer: AsyncTokenizer | PreTrainedTokenizer, llm: AsyncLLMInterface):
-        super().__init__(tokenizer, llm)
+    def __init__(self, tokenizer: AsyncTokenizer | PreTrainedTokenizer, llm: AsyncLLMInterface, **kwargs):
+        super().__init__(tokenizer, llm, **kwargs)
         self.sandbox_feedback = SandboxFeedback(self.tokenizer)
         self.pad_token_id = self.tokenizer.pad_token_id
         self.eos_token_id = self.tokenizer.eos_token_id

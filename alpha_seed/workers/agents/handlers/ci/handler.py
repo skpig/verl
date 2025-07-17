@@ -63,8 +63,8 @@ class FunctionCall:
 @register_handler("agent/ci")
 class ToolAsyncAgent(AsyncAgent):
 
-    def __init__(self, tokenizer, llm):
-        super().__init__(tokenizer, llm)
+    def __init__(self, tokenizer, llm, **kwargs):
+        super().__init__(tokenizer, llm, **kwargs)
         self.ci = JupyterCI()
         self.tool_parser = parse_func_call_kwargs
         self.tool_parser = HermesToolParser(tokenizer)
@@ -181,8 +181,6 @@ class ToolAsyncAgent(AsyncAgent):
             if last_turn_prompt_model_output_length - len(initial_input_ids) > max_response_length:
                 break
 
-            # 添加assistant的对话, 不能使用response_message['prompt']，这个会截断，可能是rebalance导致的，还在查
-            # response_text = self.tokenizer.decode(response_message['raw_output_ids'])
             messages.append({
                 "role": "assistant",
                 "content": self.tokenizer.pad_token * len(response_message['raw_output_ids'])
