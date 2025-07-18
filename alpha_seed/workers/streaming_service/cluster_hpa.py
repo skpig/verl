@@ -128,7 +128,7 @@ class ArnoldTrialResourceManager:
         if represent_ray_node_info is None:
             warnings.warn("cannot find ray node with role name {self.worker_pool_name}, "
                           "possibly this resource pool is not ready. will use the node info in config")
-            return NodeSpec(self.config.gpu_type, self.config.n_gpu_per_node)
+            return NodeSpec(self.config.gpu_type, self.config.n_gpus_per_node)
 
         accelerator_type = None
         accelerator_count = 0

@@ -892,6 +892,9 @@ def init_ray(config: DictConfig):
 
 
 def validate_config(config):
+    if config.trainer.nnodes > 0:
+        assert config.trainer.n_gpus_per_node > 0, f'When trainer is enabled, n_gpus_per_node must be larger than 0'
+
     n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
 
     # data
@@ -905,6 +908,7 @@ def validate_config(config):
         assert complete_ratio == 1.0, f'When streaming rollout (server) is not enabled, complete_ratio must be 1. Got {complete_ratio}'
     else:
         assert complete_ratio < 1.0, f'When streaming rollout (server) is enabled, complete_ratio must be smaller than 1. Got {complete_ratio}.'
+        assert config.streaming_rollout.n_gpus_per_node > 0, f'When streaming rollout (server) is enabled, n_gpus_per_node must be larger than 0'
 
     # actor
     assert real_train_batch_size % config.actor_rollout_ref.actor.ppo_mini_batch_size == 0, f"{real_train_batch_size=} vs. {config.actor_rollout_ref.actor.ppo_mini_batch_size=}"

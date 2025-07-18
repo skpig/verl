@@ -380,7 +380,7 @@ trainer:
   experiment_name: gsm8k
   logger: ['console', 'tracking']
   nnodes: 1
-  n_gpus_per_node: 8
+  n_gpus_per_node: 0
   save_freq: -1
   test_freq: 2
   critic_warmup: 0
@@ -487,7 +487,7 @@ elastic:
   pools:
     - name: elasticworker # merlin trial弹性伸缩池的role
       gpu_type: L20  # 从ray resource里读不到的时候会从这里读，暂时影响不大
-      n_gpu_per_node: 16  # 从ray resource里读不到的时候会从这里读
+      n_gpus_per_node: 0  # 从ray resource里读不到的时候会从这里读
       hard_min: 1 # 缩容时可缩到的最小值
       hard_max: 200  # 扩容时可缩到的物理最大值，一般是一个不太会达到的很大的值，暂时写一个数字避免扩爆
       buffer_size: 1  # extra idle buffer nodes
