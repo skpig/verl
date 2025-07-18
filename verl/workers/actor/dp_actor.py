@@ -489,5 +489,4 @@ class DataParallelPPOActor(BasePPOActor):
         del loss, entropy, log_prob
         if self.config.use_kl_loss:
             del kl_loss, policy_loss
-        del batch
         return metrics
