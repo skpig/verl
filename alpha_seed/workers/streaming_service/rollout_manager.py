@@ -655,6 +655,10 @@ class RolloutManager:
             running_batch = []
 
             for item in gen_batch.chunk(len(gen_batch)):
+                if 'agent_handler' in item.non_tensor_batch and not pd.isna(item.non_tensor_batch['agent_handler'][0]):
+                    handler = select_handler_fn(item.non_tensor_batch['agent_handler'][0],
+                                                external_lib=self.config.rollout_server.external_lib)
+
                 task_id = self._task_id_counter
                 self._task_id_counter += 1
                 task = asyncio.create_task(self.train_client_executor.submit(handler, item, context))

@@ -266,7 +266,11 @@ class RLHFDataset(Dataset):
         if self.return_raw_chat:
             row_dict['raw_prompt'] = chat.tolist()
 
-        index = row_dict.get("extra_info", {}).get("index", item)
+        extra_info = row_dict.get("extra_info")
+        if extra_info is None or pd.isna(extra_info):
+            index = item
+        else:
+            index = extra_info['index']
         row_dict["index"] = index
         row_dict['prompt_names'] = prompt_names
 
