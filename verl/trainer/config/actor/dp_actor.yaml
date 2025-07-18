@@ -24,10 +24,10 @@ grad_clip: 1.0
 ulysses_sequence_parallel_size: 1
 
 # calculate entropy with chunking to reduce memory peak
-entropy_from_logits_with_chunking: False
+entropy_from_logits_with_chunking: True
 
 # recompute entropy
-entropy_checkpointing: False
+entropy_checkpointing: True
 
 # optimizer configs
 optim:
