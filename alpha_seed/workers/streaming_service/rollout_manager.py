@@ -1,7 +1,4 @@
 import itertools
-import random
-from functools import partial
-from functools import partial
 from typing import *
 import asyncio
 import copy
@@ -153,7 +150,7 @@ class RolloutManager:
 
         # off_policy_step counter
         self._task_id_counter = 0
-        self._task_id_to_task_and_step: Dict[int, Tuple[int, int]] = {}
+        self._task_id_to_task_and_step: Dict[int, Tuple[asyncio.Task, int]] = {}
 
     def _init_servers(self):
         # server mode 下 start 各种 server
@@ -639,8 +636,8 @@ class RolloutManager:
             print(f"[INFO] {step} generate streaming[update weights and restart] {timer.last}")
             metrics["timing/update_rollout_server"] = timer.last
 
-        handler = select_handler_fn(self.config.rollout_server.handler,
-                                    external_lib=self.config.rollout_server.external_lib)
+        global_handler = select_handler_fn(self.config.rollout_server.handler,
+                                           external_lib=self.config.rollout_server.external_lib)
         context = TaskContext(
             config=self.config,
             global_step=step,
@@ -655,13 +652,14 @@ class RolloutManager:
             running_batch = []
 
             for item in gen_batch.chunk(len(gen_batch)):
+                handler = None
                 if 'agent_handler' in item.non_tensor_batch and not pd.isna(item.non_tensor_batch['agent_handler'][0]):
                     handler = select_handler_fn(item.non_tensor_batch['agent_handler'][0],
                                                 external_lib=self.config.rollout_server.external_lib)
 
                 task_id = self._task_id_counter
                 self._task_id_counter += 1
-                task = asyncio.create_task(self.train_client_executor.submit(handler, item, context))
+                task = asyncio.create_task(self.train_client_executor.submit(handler or global_handler, item, context))
                 self._task_id_to_task_and_step[task_id] = (task, step)
                 running_batch.append(task)
             await self._wait_max_off_policy_steps(step=step, metrics=metrics)
@@ -788,8 +786,8 @@ class RolloutManager:
             print(f"[INFO] {step} val generate server[update weights and restart] {timer.last}")
             metrics["timing/update_rollout_server"] = timer.last
 
-        handler = select_handler_fn(self.config.rollout_server.handler,
-                                    external_lib=self.config.rollout_server.external_lib)
+        global_handler = select_handler_fn(self.config.rollout_server.handler,
+                                           external_lib=self.config.rollout_server.external_lib)
         context = TaskContext(
             config=self.config,
             global_step=step,
@@ -803,7 +801,7 @@ class RolloutManager:
             start = time.time()
             running_batch = []
             for item in gen_batch.chunk(len(gen_batch)):
-                task = asyncio.create_task(self.val_client_executor.submit(handler, item, context))
+                task = asyncio.create_task(self.val_client_executor.submit(global_handler, item, context))
                 running_batch.append(task)
             print(f"[INFO] {step} val generate streaming[submit], batch size: {len(gen_batch)}, {time.time() - start}")
             start = time.time()

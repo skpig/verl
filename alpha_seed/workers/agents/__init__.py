@@ -3,11 +3,13 @@ import sys
 import re
 import importlib
 import importlib.machinery
+from functools import cache
 from pathlib import Path
 
 MODULE_CACHE = dict()
 
 
+@cache
 def load_external_module(package_name: str, external_lib: str = None, external_path: str = None):
     """Load an external module from either a submodule of `external_lib` or a python file under `external_path`
     Args:
