@@ -286,8 +286,8 @@ class RolloutManager:
         self.train_standalone_wg = train_standalone_wg
         self.val_standalone_wg = val_standalone_wg
 
-        self._init_servers()
         self._init_standalone_comms()
+        self._init_servers()
         self._init_eos_callback()
         self._init_client_executor()
         self._initialized = True

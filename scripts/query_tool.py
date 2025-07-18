@@ -377,7 +377,7 @@ def main():
         if is_local_ray_instance():
             ray.get(start_server.remote())
         else:
-            ray.get(start_server.options(resources={'head': 1}).remote())
+            ray.get(start_server.options(num_cpus=0, resources={'head': 1}).remote())
     elif args.command == 'check-daemon':
         if check_server_alive():
             exit(0)

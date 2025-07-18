@@ -2,7 +2,7 @@ name: unit tests
 trigger:
   change
 jobs:
-  gen_ut:
+  gen_ut2:
     # Merlin - data.aml.verl:v205 
     image: hub.byted.org/reckon/data.reckon.mlx.image_5940:26def500fbbd577bdfd57f100f6aa993
     if: ${{ !contains(Event.Change.Title, "WIP") }}
@@ -30,22 +30,16 @@ jobs:
           - sudo pip3 install openai
           - sudo pip3 install pytest-xdist pytest-timeout
 
-      - name: agents
+      - name: rollout2
         commands:
           - export NCCL_SHM_DISABLE=1
           - export PYTHONPATH=$PYTHONPATH:/opt/tiger/mono_rl:/opt/tiger/seed_models
           - export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
           - cd /home/code
-          - pytest -n 4 -v tests/agents/test_example_env.py tests/agents/test_example_plugin.py tests/agents/test_query_plugin.py tests/agents/test_plugin_manager.py tests/agents/test_tag_matcher.py
           - ray stop --force
           - ray start --num-cpus=100 --head
-          - pytest -n 4 -v -x --timeout=600 tests/agents/test_e2e_gen.py tests/agents/test_call_server_in_rollout_actor.py tests/agents/test_reward_plugin.py
+          - |
+            pytest -n 4 -v --timeout=600 \
+              tests/rollout/test_rollout_manager.py::test_train_generate \
+              tests/rollout/test_rollout_manager.py::test_val_generate
           - ray stop --force
-
-      - name: rollout_cache_manager
-        commands:
-          - export NCCL_SHM_DISABLE=1
-          - export PYTHONPATH=$PYTHONPATH:/opt/tiger/mono_rl:/opt/tiger/seed_models
-          - export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-          - cd /home/code
-          - pytest -n 4 -v tests/rollout/test_cache_manager.py

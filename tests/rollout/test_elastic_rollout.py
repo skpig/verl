@@ -121,8 +121,8 @@ def _check_score(out_text, batch):
 @pytest.mark.parametrize("weights_communicator", ["ucx"])
 @pytest.mark.parametrize("gpu_allocator", [8], indirect=True)
 def test_train_elastic_generate(set_common_envs, gpu_allocator, ray_fixture, complete_ratio, weights_communicator):
-    if 0.0 < complete_ratio:
-        pytest.skip("0<complete_ratio does not support atm")
+    if complete_ratio == 1.0:
+        pytest.skip("complete_ratio == 1.0 does not support atm")
 
     config = get_common_config()
     config.actor_rollout_ref.rollout.mode = 'server'

@@ -744,6 +744,11 @@ class RemoteAsyncXPerfGPTRollout(Worker):
             self.rollout_actor.reset_status()
             self.rollout_actor.stop_event.clear()
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def do_ndtimeline_action(self, action, *args, **kwargs):
+        # 需要实现的一个接口方法，但现在没什么要做的事情，所以先返回空
+        return
+
 
 # for type annotation convenience
 def _unwrap_ray_remote(cls) -> Type[RemoteAsyncXPerfGPTRollout]:

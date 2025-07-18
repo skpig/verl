@@ -542,7 +542,7 @@ class UCXWeightsCommunicator(WeightsCommunicator):
                     # server需要配合回复一个消息，并在这里接收，不然server可能根本收不到上面发的数据，不知道为什么
                     ok = await ep.recv_obj()
                 finally:
-                    ep.close()
+                    await ep.close()
 
         async def broadcast_group_end_signal():
             # 单个client或server创建太多连接会被直接rst，这里控一下数量

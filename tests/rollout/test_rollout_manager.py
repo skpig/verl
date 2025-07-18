@@ -134,8 +134,8 @@ def test_train_generate(set_common_envs, gpu_allocator, ray_fixture, complete_ra
         pytest.skip("temporarily disabled due to underlying ray state API conflict with multiple clusters")
     if elastic and weights_communicator == "nccl":
         pytest.skip("skip elastic and weights_communicator=nccl")
-    if elastic and complete_ratio > 0.0:
-        pytest.skip("skip elastic and complete_ratio > 0.0")
+    if elastic and complete_ratio == 1.0:
+        pytest.skip("skip elastic and complete_ratio == 1.0")
 
     config = get_common_config()
     has_standalone = complete_ratio < 1.0
@@ -270,3 +270,7 @@ def test_streaming_train_val(set_common_envs, gpu_allocator, ray_fixture, is_ser
         val_stop.set()
         val_fut.result()
         rollout_manager.stop_servers()
+
+
+# Note(lixiang):
+#  注意这个文件增加新的testcase时，请手动将对应的case function加入到gen_ci_?.yaml中

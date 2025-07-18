@@ -1,4 +1,5 @@
 import random
+import time
 from typing import Union, List, Optional
 
 import ray
@@ -81,7 +82,8 @@ class ElasticRolloutManager:
         min_guaranteed_replicas = ReplicatedRayWorkerGroup(rollout_cls, stable_res_pool,
                                                            initial_stable_model_setup_comm)
         # 拉起最小副本数
-        min_replicas_init_fut = min_guaranteed_replicas.scale_up(self.config.streaming_rollout.elastic.min_replicas)
+        num_guaranteed = self.config.streaming_rollout.elastic.min_replicas
+        min_replicas_init_fut = min_guaranteed_replicas.scale_up(num_guaranteed)
 
         # 等待stable standalone rollout启动完成
         # [tp0, tp1, tp0, tp1, ...]
@@ -131,6 +133,13 @@ class ElasticRolloutManager:
                                                            policy,
                                                            metric_source=rollout_proxy)
         self.standalone_rollout_wg = StandaloneRolloutWGAdapter(elastic_replicas)
+
+        # 必须等min_replicas部分变成initialized状态才可以返回
+        # 因为完成scale_up调用并不会立即变成initialized状态，由liveness probe线程将其设置为initialized，
+        # 这期间可能大约1-2s滞后，可能会在接下来第一次gen时错过update_standalone_weights，导致guaranteed部分没有weights，
+        # 这里等一下，保证guaranteed部分是一定能参数weights update的
+        while len(min_guaranteed_replicas.initialized_worker_group_ids) < num_guaranteed:
+            time.sleep(0.5)
 
         # 返回的3个对象
         #  rollout_proxy: 负载均衡query
