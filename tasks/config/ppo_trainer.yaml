@@ -200,7 +200,7 @@ actor_rollout_ref:
       max_ctx_batch_size: 8
       num_slots: 32
     enable_cuda_graph: False
-    enable_paged_attention: False
+    enable_paged_attention: True
     rollout_server_args: ${rollout_server}
     agent:
       max_turns: 10
