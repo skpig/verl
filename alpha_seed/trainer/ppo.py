@@ -206,7 +206,7 @@ def apply_kl_penalty(data: DataProto,
     metrics.update({
         'rollout/kl_diff_max': kl_diff_max,
         'rollout/kl_diff_max_rollout_log_probs': rollout_log_probs_max,
-        'rollout/kl_diff_max_old_log_probs': old_log_probs_max
+        'rollout/kl_diff_max_old_log_probs': old_log_probs_max,
     })
 
     kl_diff_min = kl_diff.min().item()

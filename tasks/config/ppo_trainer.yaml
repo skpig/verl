@@ -397,6 +397,10 @@ trainer:
   code_sandbox_psm: ""
   ci_sandbox_psm: ""
   verifier_service_psm: ""
+  gaokao_verifier_service_psm: ""
+  aider_service_psm: ""
+  use_remote_aider_sandbox: False
+  use_remote_swe_sandbox: False
   use_remote_sandbox: False
   use_remote_verifier: False
   use_remote_search: False

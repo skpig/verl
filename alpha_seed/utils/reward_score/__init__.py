@@ -50,6 +50,9 @@ def _select_rm_score_fn(reward_style, external_lib: str = None):
     elif reward_style == "verifier_service":
         from . import verifier_service
         return verifier_service.compute_score_client
+    elif reward_style == "gaokao_verifier_service":
+        from . import gaokao_verifier_service
+        return gaokao_verifier_service.compute_score_client
     elif reward_style == "verifier_math":
         from . import math_verifier_v2
         return math_verifier_v2.compute_score
@@ -92,5 +95,17 @@ def _select_rm_score_fn(reward_style, external_lib: str = None):
     elif reward_style == 'deep_research_verifier':
         from . import deep_research_verifier
         return deep_research_verifier.compute_score_client
+    elif reward_style == "aider":
+        from . import aider_utils
+        return aider_utils.compute_score_client
+    elif reward_style == "swe_file_locate":
+        from . import swe_file_locate_verifier
+        return swe_file_locate_verifier.compute_score
+    elif reward_style == "swe_repair":
+        from . import swe_repair
+        return swe_repair.compute_score
+    elif reward_style == "swe_repair_verifier":
+        from . import swe_repair_verifier
+        return swe_repair_verifier.compute_score_client
     else:
         raise NotImplementedError

@@ -176,7 +176,7 @@ class CkptGlobalUploader:
         print(f"write_tracker: write {str(global_step)} to {local_latest_checkpointed_iteration} success")
 
         if not is_local_path(self.remote_checkpoint_folder):
-            await asyncio.to_thread(hdfs_io.hput, local_latest_checkpointed_iteration, self.remote_checkpoint_folder)
+            await asyncio.to_thread(hdfs_io.hcopy, local_latest_checkpointed_iteration, self.remote_checkpoint_folder)
 
         # mark a checkpoint version for future checkpoint format change and compatibility
         local_ckpt_version = os.path.join(self.local_checkpoint_folder, 'checkpoint_version.txt')
@@ -185,7 +185,7 @@ class CkptGlobalUploader:
         print(f"write_tracker: write {self.ckpt_version} to {local_ckpt_version} success")
 
         if not is_local_path(self.remote_checkpoint_folder):
-            await asyncio.to_thread(hdfs_io.hput, local_ckpt_version, self.remote_checkpoint_folder)
+            await asyncio.to_thread(hdfs_io.hcopy, local_ckpt_version, self.remote_checkpoint_folder)
 
 
 @ray.remote

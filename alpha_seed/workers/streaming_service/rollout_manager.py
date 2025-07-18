@@ -225,8 +225,13 @@ class RolloutManager:
         remote_reward_style = []
         if self.config.trainer.use_remote_sandbox:
             remote_reward_style.append('code-sandbox')
+        if self.config.trainer.use_remote_sandbox:
+            remote_reward_style.append('aider')
         if self.config.trainer.use_remote_verifier:
             remote_reward_style.append('verifier_service')
+            remote_reward_style.append('gaokao_verifier_service')
+        if self.config.trainer.use_remote_swe_sandbox:
+            remote_reward_style.append('swe_repair_verifier')
         # add more reward style here that are going to be pipelined inside generation
 
         # set the eos_callback_fn of actor_rollout

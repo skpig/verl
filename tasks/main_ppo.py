@@ -26,6 +26,7 @@ from types import MappingProxyType, SimpleNamespace
 import warnings
 import contextlib
 import json
+import numpy as np
 from datetime import datetime
 from transformers import AutoTokenizer
 from multiprocessing import Process
@@ -54,7 +55,7 @@ from alpha_seed.utils.server_client import is_local_ray_instance, validate_clien
     ClientTaskRunner, check_all_workers_alive, recreate_actor
 # rule-based reward score
 from alpha_seed.utils.reward_score.extra_reward import add_length_reward, punish_format_return_positions
-from alpha_seed.utils.reward_score import verifier_service, oj_utils, deep_research_verifier, response_post_proc, _select_rm_score_fn
+from alpha_seed.utils.reward_score import verifier_service, gaokao_verifier_service, aider_utils, swe_repair_verifier, oj_utils, deep_research_verifier, response_post_proc, _select_rm_score_fn
 from alpha_seed.utils.duplicate import para_dup
 from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRefWorker
 from alpha_seed.workers.actors.critic_worker import CriticWorker
@@ -110,8 +111,11 @@ class RemoteClient:
         self.results = {}
 
         self.call_oj = ray.remote(num_cpus=1)(oj_utils.compute_score)
+        self.aider_service = ray.remote(num_cpus=1)(aider_utils.compute_score)
         self.verifier_service = ray.remote(num_cpus=1)(verifier_service.compute_score)
         self.deep_research_verifier = ray.remote(num_cpus=1)(deep_research_verifier.compute_score)
+        self.gaokao_verifier_service = ray.remote(num_cpus=1)(gaokao_verifier_service.compute_score)
+        self.call_swe = ray.remote(num_cpus=1)(swe_repair_verifier.compute_score)
 
     def clear(self):
         # for some cases, the results won't be claimed. So we need to clear the results.
@@ -122,7 +126,10 @@ class RemoteClient:
         return len(self.results)
 
     async def add_requests(self, req_id, input_ids, ground_truth, reward_style):
-        solution_str = self.tokenizer.decode(input_ids, skip_special_tokens=True)
+        input_ids = np.array(input_ids)
+        input_ids = input_ids[input_ids >= 0].tolist()
+        solution_str = self.tokenizer.decode(input_ids, skip_special_tokens=False)
+        solution_str = solution_str.split("assistant\n")[-1]
         solution_str_post_proc = post_process_solution_str(self.config,
                                                            solution_str,
                                                            eos_token=self.tokenizer.eos_token)
@@ -130,11 +137,21 @@ class RemoteClient:
         if reward_style == 'code-sandbox':
             result_future = self.call_oj.remote(solution_str_post_proc, ground_truth,
                                                 self.config.trainer.code_sandbox_psm)
+        elif reward_style == 'aider':
+            solution_str_post_proc = solution_str.rsplit(self.tokenizer.eos_token, 1)[0]
+            result_future = self.aider_service.remote(solution_str_post_proc, ground_truth,
+                                                      self.config.trainer.code_sandbox_psm)
+
         elif reward_style == 'verifier_service':
             result_future = self.verifier_service.remote(solution_str_post_proc, ground_truth,
                                                          self.config.trainer.verifier_service_psm)
         elif reward_style == 'deep_research_verifier':
             result_future = self.deep_research_verifier.remote(solution_str_post_proc, ground_truth)
+        elif reward_style == 'gaokao_verifier_service':
+            result_future = self.gaokao_verifier_service.remote(solution_str_post_proc, ground_truth,
+                                                                self.config.trainer.gaokao_verifier_service_psm)
+        elif reward_style == 'swe_repair_verifier':
+            result_future = self.call_swe.remote(solution_str_post_proc, ground_truth)
         else:
             raise NotImplementedError(f'Unsupported reward_style {reward_style}')
 
@@ -143,6 +160,7 @@ class RemoteClient:
 
     async def get_results(self, req_id):
         if req_id not in self.results:
+            print(f"[get_results] {req_id} not found")
             return None
 
         assert req_id in self.results, f"{req_id} not found"
@@ -314,8 +332,14 @@ class RewardManager():
             }
             if reward_style == "code-sandbox":
                 score_fn_inputs["code_sandbox_psm"] = self.config.trainer.code_sandbox_psm
+            if reward_style == "aider":
+                score_fn_inputs['solution_str'] = solution_str.rsplit(self.tokenizer.eos_token, 1)[0]
+                score_fn_inputs["aider_service_psm"] = self.config.trainer.code_sandbox_psm
             if reward_style == "verifier_service":
                 score_fn_inputs["verifier_service_psm"] = self.config.trainer.verifier_service_psm
+            if reward_style == "gaokao_verifier_service":
+                score_fn_inputs["gaokao_verifier_service_psm"] = self.config.trainer.gaokao_verifier_service_psm
+
             extra_data = data_item.non_tensor_batch.get('extra_data', None)
             if isinstance(extra_data, dict) and ((env_state_bytes := extra_data.get('env_states', None)) is not None):
                 import base64
@@ -365,8 +389,14 @@ class RewardManager():
             rm_res_future_list.append(self.rm_req_executor.submit(get_rm_score, i))
         oj_fail_cnt = 0
         verifier_fail_cnt = 0
+        gaokao_verifier_fail_cnt = 0
         oj_total_cnt = 0
         verifier_total_cnt = 0
+        gaokao_verifier_total_cnt = 0
+        aider_total_cnt = 0
+        aider_fail_cnt = 0
+        swe_total_cnt = 0
+        swe_fail_cnt = 0
         dup_cnt = 0
         dup_lens = []
         timeout_cnt = 0
@@ -425,15 +455,32 @@ class RewardManager():
                 if score == -2:
                     score = -1
                     oj_fail_cnt += 1
+            if reward_style == "aider":
+                oj_total_cnt += 1
+                # 访问失败的score现在设置成-2，用来计数，但是训练的时候还是当做没做对来处理
+                if score == -2:
+                    score = -1
+                    oj_fail_cnt += 1
             if reward_style == "verifier_service":
                 verifier_total_cnt += 1
                 if score == -2:
                     score = -1
                     verifier_fail_cnt += 1
+            if reward_style == "gaokao_verifier_service":
+                gaokao_verifier_total_cnt += 1
+                if score == -2:
+                    score = -1
+                    gaokao_verifier_fail_cnt += 1
             if reward_style == "verifier_math":
                 if score == -2:
                     timeout_cnt += 1
                     score = -0.1
+            if reward_style == 'swe_repair_verifier':
+                swe_total_cnt += 1
+                if score == -2:
+                    score = -1
+                    swe_fail_cnt += 1
+
             # train的时候做这个norm，但是打点的时候恢复，打原始值
             # eval的时候不做这个norm
             if need_norm:
@@ -488,6 +535,7 @@ class RewardManager():
             if i % log_table_interval == 0 and already_print_data_sources[
                     reward_style] < static_conf.trainer.num_cases_to_wandb:
                 already_print_data_sources[reward_style] += 1
+
                 if self.log_image:
                     from xperf_gpt.multi_models.preprocess.data_decoder import BytesDecoder
                     if 'raw_image' in data[idx].non_tensor_batch and len(data[idx].non_tensor_batch['raw_image']) > 0:
@@ -529,14 +577,28 @@ class RewardManager():
         counter = Counter(all_final_scores)
         prefix = "" if not is_validation else "val/"
         log_data = {
-            prefix + "oj/fail_rate": oj_fail_cnt / oj_total_cnt if oj_total_cnt > 0 else -1,
-            prefix + "verifier/fail_rate": verifier_fail_cnt / verifier_total_cnt if verifier_total_cnt > 0 else -1,
-            prefix + "dup/para_dup": dup_cnt / len(data),
-            prefix + "dup/dup_response_len": sum(dup_lens) / max(1, len(dup_lens)),
-            prefix + "dup/not_dup_response_len": sum(not_dup_lens) / max(1, len(not_dup_lens)),
-            prefix + 'unique_2gram': len(set(all_ngram)) / (len(all_ngram) + 1),
-            prefix + 'current_mean_len': current_mean_len,
-            prefix + 'timeout_cnt': timeout_cnt,
+            prefix + "aider/fail_rate":
+                aider_fail_cnt / aider_total_cnt if aider_total_cnt > 0 else -1,
+            prefix + "swe/fail_rate":
+                swe_fail_cnt / swe_total_cnt if swe_total_cnt > 0 else -1,
+            prefix + "oj/fail_rate":
+                oj_fail_cnt / oj_total_cnt if oj_total_cnt > 0 else -1,
+            prefix + "verifier/fail_rate":
+                verifier_fail_cnt / verifier_total_cnt if verifier_total_cnt > 0 else -1,
+            prefix + "gaokao_verifier/fail_rate":
+                gaokao_verifier_fail_cnt / gaokao_verifier_total_cnt if gaokao_verifier_total_cnt > 0 else -1,
+            prefix + "dup/para_dup":
+                dup_cnt / len(data),
+            prefix + "dup/dup_response_len":
+                sum(dup_lens) / max(1, len(dup_lens)),
+            prefix + "dup/not_dup_response_len":
+                sum(not_dup_lens) / max(1, len(not_dup_lens)),
+            prefix + 'unique_2gram':
+                len(set(all_ngram)) / (len(all_ngram) + 1),
+            prefix + 'current_mean_len':
+                current_mean_len,
+            prefix + 'timeout_cnt':
+                timeout_cnt,
         }
         log_counter = {prefix + f"score_counter/raw_{key}": value for key, value in raw_counter.items()}
         log_counter.update({prefix + f"score_counter/final_{key}": value for key, value in final_counter.items()})
@@ -583,6 +645,19 @@ class RewardManager():
             send_message_to_employee(
                 "alpha seed任务verifier失败率过高",
                 f"任务链接: {task_url}, 失败率: {round(verifier_fail_cnt / verifier_total_cnt * 100.0, 2)}", user_email)
+        if gaokao_verifier_total_cnt > 0 and gaokao_verifier_fail_cnt / gaokao_verifier_total_cnt >= 0.01:
+            send_message_to_employee(
+                "alpha seed任务gaokao_verifier失败率过高",
+                f"任务链接: {task_url}, 失败率: {round(gaokao_verifier_fail_cnt / gaokao_verifier_total_cnt * 100.0, 2)}",
+                user_email)
+        if aider_total_cnt > 0 and aider_fail_cnt / aider_total_cnt >= 0.01:
+            send_message_to_employee("alpha seed任务aider失败率过高",
+                                     f"任务链接: {task_url}, 失败率: {round(aider_fail_cnt / aider_total_cnt * 100.0, 2)}",
+                                     user_email)
+        if swe_total_cnt > 0 and swe_fail_cnt / swe_total_cnt >= 0.05:
+            send_message_to_employee("alpha seed任务swe失败率过高",
+                                     f"任务链接: {task_url}, 失败率: {round(swe_fail_cnt / swe_total_cnt * 100.0, 2)}",
+                                     user_email)
         log_table = None
         if self.config.trainer.num_cases_to_wandb > 0:
             log_table = {

@@ -121,6 +121,7 @@ class Query:
         self.pixel_values = pixel_values
         self.pixel_values_ref = pixel_values_ref
         self.image_grid_hw = image_grid_hw
+        self.action = True
 
     # Check whether current query is going to enter the decoding stage
     def is_to_decoding_compute(self):
@@ -184,7 +185,7 @@ class Query:
         self.new_token_len += 1
 
     def meet_pause_condition(self) -> bool:
-        if self.plugin_query:
+        if self.plugin_query and self.action:
             return self.plugin_query.meet_pause_condition()
         return False
 

@@ -393,27 +393,28 @@ class RLHFDatasetVL(RLHFDataset):
                 "text": f"{self.tokenizer.eos_token}{self.tokenizer.bos_token}assistant\n"
             })
 
-            conversation = [{
-                "role":
-                    "system",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": f"{self.tokenizer.bos_token}system\n"
-                    },
-                    {
-                        "type": "text",
-                        "text": row_dict['system_prompt']
-                    },
-                    {
-                        "type": "text",
-                        "text": self.tokenizer.eos_token,
-                    },
-                ]
-            }, {
-                "role": "user",
-                "content": user_contents
-            }]
+            system_prompt = row_dict['system_prompt'].strip()
+            conversation = []
+            if system_prompt:
+                conversation.append({
+                    "role":
+                        "system",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"{self.tokenizer.bos_token}system\n"
+                        },
+                        {
+                            "type": "text",
+                            "text": system_prompt
+                        },
+                        {
+                            "type": "text",
+                            "text": self.tokenizer.eos_token,
+                        },
+                    ]
+                })
+            conversation.append({"role": "user", "content": user_contents})
             if self.dist_image:
                 inputs = self.process(image_inputs=image_inputs,
                                       conversation=conversation,

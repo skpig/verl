@@ -293,6 +293,12 @@ class QueryPlugin:
             self._update_plugin_metrics(resp.metrics)
 
         results_str = "\n".join(results_str_list)
+
+        if len(results_str.strip()) == 0:
+            # skip if empty result
+            self._query.action = False
+            return
+
         if self.result_apply_chat_template:
             # chat_template = "{% for message in messages %}{% set role = message['role'] %}{{  '\n' + role + '\n' + message['content'] | trim + eos_token }}{% endfor %}{% if add_generation_prompt %}{{ 'assistant\n'}}{% endif %}"
             chat = [{"role": "user", "content": results_str}]

@@ -279,7 +279,7 @@ def compute_policy_loss(old_log_prob,
     """
     seq_len_per_sample = torch.clamp(torch.sum(eos_mask, dim=1), min=1.0)
     if not use_ewma_loss:
-        ratio = torch.exp(log_prob - old_log_prob)
+        ratio = torch.exp(torch.clamp(log_prob - old_log_prob, min=-5, max=5))
         pg_losses1 = -advantages * ratio
         pg_losses2 = -advantages * torch.clamp(ratio, 1.0 - cliprange_low, 1.0 + cliprange_high)
         pg_losses2_hi = -advantages * torch.clamp(ratio, max=1.0 + cliprange_high)
@@ -315,7 +315,7 @@ def compute_policy_loss(old_log_prob,
     else:
         pg_loss = pg_losses  # batch x seq_len
 
-    negative_approx_kl = kl_penalty(log_prob, old_log_prob, kl_penalty_type=kl_penalty_type)
+    negative_approx_kl = torch.clamp(kl_penalty(log_prob, old_log_prob, kl_penalty_type=kl_penalty_type), min=-5, max=5)
     ppo_kl = verl_F.masked_mean(-negative_approx_kl, eos_mask)
     ppo_kl_sum = torch.mean(torch.sum(-negative_approx_kl * eos_mask, dim=1))
 

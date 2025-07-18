@@ -591,6 +591,8 @@ def default_loss_fn(config, micro_data, full_entropy, log_prob):
 
     policy_loss = total_loss - entropy_loss * entropy_coeff + kl_loss_weight * kl_loss + lm_loss_weight * lm_loss + offpolicy_kl_loss_weight * offpolicy_kl_loss
 
+    logprob_eq_zero = torch.lt(torch.exp(old_log_prob), 1e-10).float().mean()
+
     metrics = {
         # 'actor/entropy': entropy_loss.detach().item(),
         'actor/pg_loss': pg_loss.detach().item(),
@@ -605,6 +607,7 @@ def default_loss_fn(config, micro_data, full_entropy, log_prob):
         'actor/ppo_kl_sum': ppo_kl_sum.detach().item(),
         'actor/tokens_per_micro_batch_update': attention_mask.sum().detach().item(),
         'actor/lm_loss': lm_loss.detach().item(),
+        'actor/logprob_eq_zero': logprob_eq_zero.detach().item(),
     }
     return policy_loss, metrics
 

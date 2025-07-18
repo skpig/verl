@@ -36,6 +36,7 @@ from threading import Lock
 from transformers import AutoTokenizer
 from alpha_seed.workers.xperf_rollout.utils.vit_inferencer import VITInferencer
 import numpy as np
+from alpha_seed.models.transformers.modeling_vlm import convert_tensor_to_numpy, convert_numpy_to_tensor
 
 # Constants
 BLOCK_SIZE_ALIGNMENT = 256
@@ -717,7 +718,7 @@ class InferenceSession:
                 new_paused.append(query)
             else:
                 threshold = self.num_pred_tokens + 1 if self.enable_ngrams_decoding else 0
-                if self._exceed_length_condition(query, tokens_threshold=threshold):
+                if self._exceed_length_condition(query, tokens_threshold=threshold) or not query.action:
                     query.output_prompt = self.tokenizer.batch_decode([query.output_tokens
                                                                       ]) if self.decode_output else ""
                     self._finish_query(query)
@@ -737,10 +738,10 @@ class InferenceSession:
     def _prepare_image_embeds(self, input_ids, pixel_values, image_grid_hw):
         assert pixel_values is not None
         if isinstance(pixel_values, np.ndarray):
-            pixel_values = torch.from_numpy(pixel_values.astype(float))
+            pixel_values = convert_numpy_to_tensor(pixel_values, float)
         pixel_values = pixel_values.to(torch.bfloat16).cuda(non_blocking=True)
         if isinstance(image_grid_hw, np.ndarray):
-            image_grid_hw = torch.from_numpy(image_grid_hw.astype(int))
+            image_grid_hw = convert_numpy_to_tensor(image_grid_hw, int)
 
         # compute image embedding
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
@@ -1267,6 +1268,11 @@ class InferenceSession:
                     next_token = query_next_tokens[token_idx]
                     if len(query.new_token_ids) == 0:
                         query.first_token_time = time.time() * 1000
+
+                    if not query.action:
+                        finished_sequences = True
+                        break
+
                     query.add_token(token_id=next_token,
                                     accepted_len=accepted_len[i] if accepted_len is not None else 0,
                                     log_prob=log_probs[i] if log_probs is not None else 0)
