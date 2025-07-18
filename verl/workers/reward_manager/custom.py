@@ -135,21 +135,20 @@ class CustomRewardManager:
         num_examine: int,
         compute_score: Optional[Callable] = None,
         reward_fn_key: str = "data_source",
-        max_resp_len: Optional[int] = None,
-        overlong_buffer_cfg: Optional[dict] = None,
+        config: Optional[dict] = None,
     ) -> None:
         self.tokenizer = tokenizer
         self.num_examine = num_examine  # the number of batches of decoded responses to print to the console
         self.compute_score = compute_score or _default_compute_score
         self.reward_fn_key = reward_fn_key
 
-        self.overlong_buffer_cfg = overlong_buffer_cfg
-        self.max_resp_len = max_resp_len
+        self.overlong_buffer_cfg = config.reward_model.overlong_buffer
+        self.max_resp_len = config.data.max_response_length
 
-        if self.overlong_buffer_cfg is not None:
-            assert self.max_resp_len is not None, (
-                f"max_resp_len must be provided if {overlong_buffer_cfg=}, but got None"
-            )
+        # if self.overlong_buffer_cfg is not None:
+        #     assert self.max_resp_len is not None, (
+        #         f"max_resp_len must be provided if {overlong_buffer_cfg=}, but got None"
+        #     )
 
     def verify(self, data):
         """
