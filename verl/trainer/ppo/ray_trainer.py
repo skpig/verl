@@ -1264,7 +1264,7 @@ class RayPPOTrainer:
         # perform validation before training
         # currently, we only support validation using the reward_function.
         if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True) and self.global_steps == 0:
-            self.ray_validate_task_list.append(self._validate(logger))
+            self.ray_validate_task_list.append(self._validate())
             # val_metrics = self._validate()
             # assert val_metrics, f"{val_metrics=}"
             # pprint(f"Initial validation metrics: {val_metrics}")
@@ -1519,7 +1519,7 @@ class RayPPOTrainer:
                     ):
                         with marked_timer("testing", timing_raw, color="green"):
                             # hackin: log the data within the validation function as a ray task
-                            self.ray_validate_task_list.append(self._validate(logger))
+                            self.ray_validate_task_list.append(self._validate())
                         #     val_metrics: dict = self._validate()
                         #     if is_last_step:
                         #         last_val_metrics = val_metrics
