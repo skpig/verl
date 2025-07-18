@@ -16,7 +16,8 @@ import datetime
 import inspect
 import logging
 from contextlib import contextmanager
-from typing import Any, Optional
+from typing import Any, Optional, Dict
+import time
 
 import torch
 import torch.distributed as dist
@@ -121,18 +122,21 @@ def log_print(ctn: Any):
     print(f"[{current_time}-{file_name}:{line_number}:{function_name}]: {ctn}")
 
 
-def _timer(name: str, timing_raw: dict[str, float]):
-    """Inner function that handles the core timing logic.
+def _time_stamp():
+    timestamp = time.time()
+    local_time = time.localtime(timestamp)
+    formatted_time = time.strftime("%Y-%m-%d %H:%M:%S", local_time)
+    # print(f"Current time: {formatted_time}")
+    return formatted_time
 
-    Args:
-        name (str): The name/identifier for this timing measurement.
-        timing_raw (Dict[str, float]): Dictionary to store timing information.
-    """
+def _timer(name: str, timing_raw: Dict[str, float]):
     with Timer(name=name, logger=None) as timer:
+        print("Start timing of : ", name, _time_stamp())
         yield
     if name not in timing_raw:
         timing_raw[name] = 0
     timing_raw[name] += timer.last
+    print("Duration of {}: {:.2f} seconds".format(name, timer.last), _time_stamp())
 
 
 @contextmanager
