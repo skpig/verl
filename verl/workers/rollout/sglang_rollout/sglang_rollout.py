@@ -19,6 +19,7 @@ import asyncio
 import logging
 import multiprocessing as mp
 import os
+import socket
 import time
 from copy import deepcopy
 from json import JSONDecodeError
@@ -125,6 +126,22 @@ def _set_envs_and_config(server_args: ServerArgs):
     # Set mp start method
     mp.set_start_method("spawn", force=True)
 
+def get_open_ports(n: int) -> List[int]:
+    ports = []
+    
+    for _ in range(n):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("", 0))
+                port = s.getsockname()[1]
+                ports.append(port)
+        except OSError:
+            with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
+                s.bind(("", 0))
+                port = s.getsockname()[1]
+                ports.append(port)
+    
+    return ports
 
 sglang.srt.entrypoints.engine._set_envs_and_config = _set_envs_and_config
 
@@ -362,6 +379,7 @@ class SGLangRollout(BaseRollout):
         # get tp_rank of this process in this tp group
         visible_devices = [None] * self._device_mesh_cpu.size(1)
 
+        self.cuda_visible_device_ids = [int(i) for i in os.environ["CUDA_VISIBLE_DEVICES"].split(",")]
         torch.distributed.all_gather_object(
             visible_devices, os.environ["CUDA_VISIBLE_DEVICES"], self._device_mesh_cpu.get_group("tp")
         )
@@ -426,6 +444,7 @@ class SGLangRollout(BaseRollout):
                 force_cpu_device=False,
             )
             dist_init_addr = f"[{ip}]:{port}" if is_ipv6(ip) else f"{ip}:{port}"
+            print("sglang engine has multiple nodes, with dist_init_adr: ", dist_init_addr)
         else:
             dist_init_addr = None
 
@@ -437,6 +456,7 @@ class SGLangRollout(BaseRollout):
         if first_rank_in_node:
             rank = dist.get_rank()
             os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
+            all_open_ports = get_open_ports(16)
             self._engine = AsyncEngine(
                 model_path=actor_module,
                 dtype=self.config.dtype,
@@ -452,7 +472,7 @@ class SGLangRollout(BaseRollout):
                 trust_remote_code=trust_remote_code,
                 # NOTE(linjunrong): add rank to prevent SGLang generate same port inside PortArgs.init_new
                 # when random.seed is being set during training
-                port=30000 + rank,
+                port=all_open_ports[self.cuda_visible_device_ids[0]],
                 # NOTE(Chenyang): if you want to debug the SGLang engine output
                 # please set the following parameters
                 # Otherwise, it will make the engine run too slow
