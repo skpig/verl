@@ -712,6 +712,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             output = self.ulysses_sharding_manager.postprocess_data(data=output)
             output = output.to("cpu")
 
+        log_gpu_memory_usage("Before offload actor model during update_actor", logger=logger)
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
             log_gpu_memory_usage("After offload actor model during update_actor", logger=logger)
