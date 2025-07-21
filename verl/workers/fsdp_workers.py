@@ -682,16 +682,20 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         data.meta_info['temperature'] = self.config.rollout.temperature
 
         assert self._is_actor
+        log_gpu_memory_usage("Before loading actor model during update_actor", logger=logger)
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
         if self._is_offload_optimizer:
             load_fsdp_optimizer(optimizer=self.actor_optimizer, device_id=get_device_id())
 
         with self.ulysses_sharding_manager:
+            log_gpu_memory_usage("Before preprocessing data during update_actor", logger=logger)
             data = self.ulysses_sharding_manager.preprocess_data(data=data)
+            log_gpu_memory_usage("After preprocessing data during update_actor", logger=logger)
             # perform training
             with Timer(name="update_policy", logger=None) as timer:
                 metrics = self.actor.update_policy(data=data)
+            log_gpu_memory_usage("After actor update_policy", logger=logger)
             delta_time = timer.last
             global_num_tokens = data.meta_info["global_token_num"]
             estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
@@ -711,6 +715,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
             output = self.ulysses_sharding_manager.postprocess_data(data=output)
             output = output.to("cpu")
+            log_gpu_memory_usage("After postprocessing data during update_actor", logger=logger)
 
         log_gpu_memory_usage("Before offload actor model during update_actor", logger=logger)
         if self._is_offload_param:
