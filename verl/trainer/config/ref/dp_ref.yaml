@@ -35,4 +35,4 @@ ulysses_sequence_parallel_size: ${oc.select:actor_rollout_ref.actor.ulysses_sequ
 entropy_from_logits_with_chunking: True
 
 # recompute entropy
-entropy_checkpointing: False
+entropy_checkpointing: True

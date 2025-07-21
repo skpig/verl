@@ -227,7 +227,7 @@ class FSDPVLLMShardingManager(BaseShardingManager):
                 log_gpu_memory_usage("Before offload_fsdp_model_to_cpu", logger=logger)
                 print("Offloading FSDP model to CPU")
                 offload_fsdp_model_to_cpu(self.module)
-            torch.cuda.synchronize() # make sure all offloading is done
+
             get_torch_device().empty_cache()
             log_gpu_memory_usage("Before wake up kv_cache", logger=logger)
 

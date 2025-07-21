@@ -774,6 +774,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # when is_lora is True, we use the actor without lora applied to calculate the log_prob
         # which is mostly used for ref log_prob calculation
         assert self._is_actor
+        log_gpu_memory_usage("Before loading actor model during compute_log_prob", logger=logger)
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
@@ -788,6 +789,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         data.meta_info["max_token_len"] = self.config.rollout.log_prob_max_token_len_per_gpu
         data.meta_info["use_dynamic_bsz"] = self.config.rollout.log_prob_use_dynamic_bsz
         data.meta_info["temperature"] = self.config.rollout.temperature
+
+        log_gpu_memory_usage("Before preprocessing data during compute_log_prob", logger=logger)
         # perform recompute log_prob
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
