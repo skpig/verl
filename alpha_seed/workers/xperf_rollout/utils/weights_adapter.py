@@ -745,6 +745,7 @@ class FSDPVLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
         self.ffn_intermediate_dim = (int(config.embed_dim * config.mlp_ratio) + 63) // 64 * 64
         self.padding_size = self.ffn_intermediate_dim - int(config.embed_dim * config.mlp_ratio)
         self.qkv_bias = config.qkv_bias
+        self.use_xperf_gpt = xperf_model.use_xperf_gpt
 
     def load_from_state_dict(self, state_dict: Dict[str, Union[torch.Tensor, DTensor]], prefix: str) -> None:
 
@@ -834,10 +835,15 @@ class FSDPVLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
             ]
             assign_weights(binding_weights, layer_idx)
 
-        xperf_weights.prepare_infer_weights()
-        xperf_model.visual_encoder.module.layer_weight = xperf_weights.layers_weight
-        xperf_model.visual_encoder.module.patch_embed.proj.weight.data = xperf_weights.module_weight.patch_embed[0]
-        xperf_model.visual_encoder.module.patch_embed.proj.bias.data = xperf_weights.module_weight.patch_embed[1]
+        if self.use_xperf_gpt:
+            xperf_weights.prepare_infer_weights()
+            xperf_model.visual_encoder.module.layer_weight = xperf_weights.layers_weight
+            xperf_model.visual_encoder.module.patch_embed.proj.weight.data = xperf_weights.module_weight.patch_embed[0]
+            xperf_model.visual_encoder.module.patch_embed.proj.bias.data = xperf_weights.module_weight.patch_embed[1]
+        else:
+            xperf_model.visual_encoder.module.custom_decoder = None
+            xperf_model.visual_encoder.module.build_decoder()
+            xperf_model.visual_encoder.module.custom_decoder.cuda()
         xperf_model.ln_vision.weight.data = xperf_model.visual_encoder.module.weights.module_weight.ln_vision[0]
         xperf_model.ln_vision.bias.data = xperf_model.visual_encoder.module.weights.module_weight.ln_vision[1]
         xperf_model.seed_proj[0].weight.data = xperf_model.visual_encoder.module.weights.module_weight.seed_proj[0]
@@ -938,7 +944,7 @@ class FSDPVLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
         fc1_b = self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['fc1_b']), torch.bfloat16)
         fc2_b = self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['fc2_b']), torch.bfloat16)
 
-        if self.padding_size > 0:
+        if self.padding_size > 0 and self.use_xperf_gpt:
             fc1 = torch.nn.functional.pad(fc1, (0, 0, 0, self.padding_size))
             fc2 = torch.nn.functional.pad(fc2, (0, self.padding_size))
             fc1_b = torch.nn.functional.pad(fc1_b, (0, self.padding_size))

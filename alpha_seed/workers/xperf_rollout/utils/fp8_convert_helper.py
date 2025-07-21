@@ -543,26 +543,6 @@ def _reshard_fsdp_state_dict_to_xperf_m8_fp8(tp_model,
     torch.cuda.empty_cache()
 
 
-def _reshard_fsdp_state_dict_to_xperf_vl_fp8(tp_model, vit_tp_model, state_dict, device_mesh, model_config,
-                                             enable_actor_critic_spatial_mux):
-    if model_config.text_config.architectures[0] == "M8ForCausalLM":
-        if hasattr(vit_tp_model.visual_encoder.module, "layers_weight"):
-            adapter = WeightsAdapter(model_config,
-                                     quant_mode="WFP8",
-                                     enable_actor_critic_spatial_mux=enable_actor_critic_spatial_mux)
-            adapter(tp_model, vit_tp_model, state_dict=state_dict, device_mesh=device_mesh)
-        else:
-            llm_adapter = WeightsAdapter(model_config.text_config,
-                                         quant_mode="WFP8",
-                                         enable_actor_critic_spatial_mux=enable_actor_critic_spatial_mux)
-            llm_adapter(tp_model, state_dict=state_dict, device_mesh=device_mesh, prefix="language_model.")
-            from alpha_seed.workers.xperf_rollout.utils.bf16_convert_helper import _reshard_fsdp_state_dict_to_xperf_m8_vision
-            _reshard_fsdp_state_dict_to_xperf_m8_vision(vit_tp_model, state_dict, device_mesh,
-                                                        model_config.vision_config)
-    else:
-        raise ValueError(f"Unsupported model type: {model_config.text_config.architectures[0]}")
-
-
 def _reshard_fsdp_state_dict_to_xperf_deepseek_v3_fp8(tp_model, state_dict, device_mesh: DeviceMesh, model_config):
     """
     Reshard the state dict of FSDP model to XPerf DeepSeek V3 model.
