@@ -477,17 +477,6 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
         ready_worker_group_ids = self.replicas.ready_worker_group_ids
         ray.get(self.request_manager.handle_stale_requests.remote(ready_worker_group_ids))
 
-    def release_running_queris(self):
-        print(f"release running queris in {self._request_manager_name}...")
-        # 先将finish query/unfinished query update到req_pool
-        for engine_id, wg in self.replicas.get_ready_worker_groups().items():
-            queries: List[Query] = wg.get_all_queries(self._request_manager_name)
-            if len(queries) > 0:
-                print(f"release {len(queries)} queries in {self._request_manager_name}/{wg.group_name}")
-                ray.get(self.request_manager.update_intermediate_queries.remote(queries, engine_id, time.time()))
-            wg.release_running_queries()
-        ray.get(self.request_manager.pop_remain_request.remote())
-
     def _dispatch_loop(self):
         print(f'start background dispatch loop for {self._request_manager_name}')
 

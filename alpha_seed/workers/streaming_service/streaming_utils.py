@@ -91,7 +91,8 @@ def process_output(input_batch, output_batch, tokenizer, ready_batch, pending_ba
 
 def record_xperf_metrics(batch_info, metrics, logger, global_step, prefix=''):
     xperf_metrics = batch_info.meta_info['xperf_metrics']
-    metrics[f'rollout/{prefix}/steps'] = len(xperf_metrics.get('finished_tokens_by_step', []))
+    finished_steps = xperf_metrics.get('finished_tokens_by_step', [])
+    metrics[f'rollout/{prefix}/steps'] = finished_steps[-1] if len(finished_steps) > 0 else 0
     # sampling tokens
     sample_token_num = xperf_metrics.get('sample_token_num', 0)
     metrics[f'rollout/{prefix}/prob_mean'] = xperf_metrics.get('prob_mean', 0) / (sample_token_num + 1e-6)

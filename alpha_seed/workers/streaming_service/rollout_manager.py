@@ -464,6 +464,20 @@ class RolloutManager:
                 f"[INFO]: step #{step} waited for {len(should_wait)} tasks reaching {max_off_policy_steps=}, {elapsed=:.3f}s"
             )
 
+    def _merge_xperf_metrics(self, batch_list: List[DataProto], merged_metrics: Dict) -> Dict:
+        """Merge per query xperf_metrics"""
+        for item in batch_list:
+            if "xperf_metrics" not in item.meta_info:
+                continue
+            query_metrics = item.meta_info['xperf_metrics']
+            for key, val in query_metrics.items():
+                if key not in merged_metrics:
+                    merged_metrics[key] = copy.deepcopy(val)
+                if type(val) != type(merged_metrics[key]):
+                    continue
+                merged_metrics[key] += val
+        return merged_metrics
+
     def _train_batch_gen(
         self,
         batch: DataProto,
@@ -721,7 +735,7 @@ class RolloutManager:
             # print(f"[INFO] {step} generate streaming[update weights and restart] {timer.last}")
             # metrics["timing/update_rollout_server"] = timer.last
             done, pending = asyncio.run_coroutine_threadsafe(submit_and_wait(), self.loop).result()
-
+        xperf_metrics = self.finalize_hybrid_server_gen()
         pending = list(pending)
         results = []
         for task in done:
@@ -740,7 +754,7 @@ class RolloutManager:
         ready_batch = results
         finished_num = len(ready_batch)
 
-        dummy_batch = DataProto(meta_info={"xperf_metrics": self._merge_xperf_metrics(ready_batch)})
+        dummy_batch = DataProto(meta_info={"xperf_metrics": self._merge_xperf_metrics(ready_batch, xperf_metrics[0])})
         record_xperf_metrics(dummy_batch,
                              metrics,
                              self.logger,
@@ -813,7 +827,7 @@ class RolloutManager:
 
         with nullcontext() if is_standalone else self.enable_hybrid_server_gen_ctx(is_train=False):
             ready_batch = asyncio.run_coroutine_threadsafe(_submit_and_wait(), self.loop).result()
-
+        xperf_metrics = self.finalize_hybrid_server_gen()
         # flatten ready_batch
         results = []
         for res in ready_batch:
@@ -829,24 +843,10 @@ class RolloutManager:
         ready_batch = results
 
         gen_out = DataProto.concat(ready_batch)
-        gen_out.meta_info['xperf_metrics'] = self._merge_xperf_metrics(ready_batch)
+        # only use DP[0] for metrics presentation
+        gen_out.meta_info['xperf_metrics'] = self._merge_xperf_metrics(ready_batch, xperf_metrics[0])
         record_xperf_metrics(gen_out, metrics, self.logger, step, prefix="standalone" if is_standalone else "hybrid")
         return gen_out
-
-    def _merge_xperf_metrics(self, batch_list: List[DataProto]) -> Dict:
-        """Merge per query xperf_metrics"""
-        merged_metrics = dict()
-        for item in batch_list:
-            if "xperf_metrics" not in item.meta_info:
-                continue
-            query_metrics = item.meta_info['xperf_metrics']
-            for key, val in query_metrics.items():
-                if key not in merged_metrics:
-                    merged_metrics[key] = copy.deepcopy(val)
-                if type(val) != type(merged_metrics[key]):
-                    continue
-                merged_metrics[key] += val
-        return merged_metrics
 
     def _prepare_gen_batch(self, batch: DataProto, step, is_train: bool):
 
@@ -986,7 +986,10 @@ class RolloutManager:
             with hybrid_enable_server_ctx(self.hybrid_wg):
                 yield
         replicas.set_replica_ready_state(name='hybrid', ready=False)
-        self.hybrid_wg.release_running_queries()
+
+    def finalize_hybrid_server_gen(self):
+        """After exiting ctx, collect metrics"""
+        return self.hybrid_wg.release_running_queries_and_return_metrics()
 
     def update_standalone_server_weights(self, is_train: bool):
         standalone_wg = self.train_standalone_wg if is_train else self.val_standalone_wg
