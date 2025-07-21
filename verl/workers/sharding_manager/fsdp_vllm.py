@@ -18,6 +18,7 @@ import os
 import time
 from collections import OrderedDict
 
+import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConfig, StateDictType
 from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel as FSDP
@@ -210,16 +211,24 @@ class FSDPVLLMShardingManager(BaseShardingManager):
             if self.rollout_config.free_cache_engine:
                 if "tags" in inspect.signature(self.inference_engine.wake_up).parameters:
                     self.inference_engine.wake_up(tags=["weights"])
+                    print("Waking up 'weights' in vLLM inference engine")
                 else:
                     self.inference_engine.wake_up()
+                    print("Waking up vLLM inference engine")
+            log_gpu_memory_usage("After wake up weights in sharding manager", logger=logger)
 
             # update model params
             self.update_params(params, peft_config=peft_config)
             log_gpu_memory_usage("After sync model weights in sharding manager", logger=logger)
             del params
             if self.offload_param:
+                get_torch_device().empty_cache()
+                log_gpu_memory_usage("Before offload_fsdp_model_to_cpu", logger=logger)
+                print("Offloading FSDP model to CPU")
                 offload_fsdp_model_to_cpu(self.module)
+            dist.barrier()  # make sure all tp ranks have the same model weights
             get_torch_device().empty_cache()
+            log_gpu_memory_usage("Before wake up kv_cache", logger=logger)
 
             if (
                 self.rollout_config.free_cache_engine
