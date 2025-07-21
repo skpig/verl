@@ -160,11 +160,7 @@ def fully_shard(
                        device_id=torch.cuda.current_device(),
                        device_mesh=fsdp_mesh,
                        **fsdp_kwargs)
-    if len(shards) > 0:
-        warnings.warn(
-            "detected some parameter is not loaded in the model. Ignore this warning if you changed the model structure."
-        )
-        shards.clear()
+    shards.clear()
 
     # enable activation offload
     if act_offload:

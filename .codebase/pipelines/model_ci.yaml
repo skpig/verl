@@ -46,3 +46,10 @@ jobs:
           - pytest tests/parallelize/test_save_load.py
           - pytest tests/parallelize/test_train_memory_offload.py
           - pytest tests/parallelize/test_omnistore_reshard.py
+
+      - name: autotuner tests
+        commands:
+          - cd /home/code
+          - export NCCL_SHM_DISABLE=1
+          - export PYTHONPATH=/opt/tiger/seed_models:/opt/tiger/mono_rl:$PYTHONPATH
+          - torchrun --nproc_per_node=8 tests/hybrid_engine/test_autotuner.py

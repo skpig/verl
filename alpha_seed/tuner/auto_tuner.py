@@ -49,8 +49,6 @@ from dist_attn.ulysses.ops import gather_outputs
 from alpha_seed.models.transformers.monkey_patch import apply_monkey_patch, get_parallel_plan
 from alpha_seed.workers.fsdp import fully_shard
 from alpha_seed.workers.fsdp.offload import offload_fsdp_optimizer, load_fsdp_optimizer
-from tests.hybrid_engine.test_parallel import init_random_data
-from alpha_seed.workers.fsdp.offload import activation_offload
 import hdfs_io
 import verl.utils.torch_functional as verl_F
 import torch.distributed as dist
@@ -162,7 +160,6 @@ class AutoTuner:
 
     def init_model_and_optimizer(self, parallel_config: ParallelConfig, num_layers: int = 10):
         meshes = create_mesh(parallel_config.fsdp_size, parallel_config.tp_size, 1, parallel_config.sp_size)
-        meshes.pop(2)  # oe parallelism is not supported in auto-tuning
         fsdp_mesh, tp_mesh = meshes[:2]
 
         setattr(self.config, '_moe_implementation', 'fused')
@@ -209,13 +206,29 @@ class AutoTuner:
         print0(f"after reset peak memory states: {torch.cuda.max_memory_allocated() / (1024**3):.2f} GB")
         return model, optimizer, meshes
 
+    def init_random_data(self, seqlen: int, max_token: int):
+        num_seqs = max_token // seqlen
+        assert num_seqs >= 1
+        seqs = [seqlen] * num_seqs + [max_token % seqlen]
+        input_ids, position_ids = [], []
+        device = torch.cuda.current_device()
+        for seq in seqs:
+            input_ids += [torch.randint(0, 8192, size=(seq,), dtype=torch.long, device=device)]
+            position_ids += [torch.arange(seq, dtype=torch.long, device=device)]
+        input_ids = torch.concat(input_ids).unsqueeze(0)
+        assert input_ids.size(1) == max_token
+        position_ids = torch.concat(position_ids).unsqueeze(0)
+        input_ids_rolled = torch.roll(input_ids, shifts=-1, dims=1).squeeze(0)
+        masks = torch.ones_like(input_ids).squeeze(0)
+        return input_ids, input_ids_rolled, masks, position_ids, seqs
+
     def train_one_step(self, model: FSDP, optimizer, meshes, max_token, accum_steps: int = -1):
 
-        fsdp_mesh, tp_mesh, sp_mesh, gather_mesh = meshes
+        fsdp_mesh, tp_mesh, _, sp_mesh, gather_mesh, _ = meshes
 
         torch.manual_seed(self.seed)
         # self.seed += 1
-        input_ids, input_ids_rolled, masks, position_ids, seqs = init_random_data(self.max_seqlen, max_token)
+        input_ids, input_ids_rolled, masks, position_ids, seqs = self.init_random_data(self.max_seqlen, max_token)
         unpad_size = input_ids.size(1)
         if sp_mesh.size() > 1:
             set_ulysses_sequence_parallel_group(sp_mesh.get_group())
@@ -269,7 +282,7 @@ class AutoTuner:
         token_stop = max(self.max_seqlen * 2, token_stop)
         config = self.empirical_config(constraints)
         model, optimizer, meshes = self.init_model_and_optimizer(config)
-        fsdp_mesh, tp_mesh, sp_mesh, gather_mesh = meshes
+        fsdp_mesh, tp_mesh, _, sp_mesh, gather_mesh, _ = meshes
         fsdp_size = fsdp_mesh.size()
         tp_size = tp_mesh.size()
         sp_size = sp_mesh.size()
@@ -464,7 +477,7 @@ class AutoTuner:
         assert filepath.endswith(".yaml"), f"{filepath} must ends with .yaml"
         with open('tasks_scripts/recipes/template.yaml', "r") as f:
             template = yaml.safe_load(f)
-        template["actor_rollout_ref"]["actor"]["ppo_max_token_len"] = config.max_token_len
+        template["actor_rollout_ref"]["actor"]["ppo_max_token_len"] = min(config.max_token_len, 200000)
         template["actor_rollout_ref"]["actor"]["fsdp_size"] = config.fsdp_size
         template["actor_rollout_ref"]["actor"]["tp_size"] = config.tp_size
         template["actor_rollout_ref"]["actor"]["ulysses_sequence_parallel_size"] = config.sp_size
@@ -472,12 +485,12 @@ class AutoTuner:
         # if config.act_offload:
         #     template["actor_rollout_ref"]["actor"]["gc_freq"] = "micro"
 
-        template["actor_rollout_ref"]["ref"]["max_token_len"] = config.max_token_len
+        template["actor_rollout_ref"]["ref"]["max_token_len"] = min(config.max_token_len, 200000)
         template["actor_rollout_ref"]["ref"]["fsdp_size"] = config.fsdp_size
         template["actor_rollout_ref"]["ref"]["tp_size"] = config.tp_size
         template["actor_rollout_ref"]["ref"]["ulysses_sequence_parallel_size"] = config.sp_size
 
-        template["critic"]["ppo_max_token_len"] = config.max_token_len
+        template["critic"]["ppo_max_token_len"] = min(config.max_token_len, 200000)
         template["critic"]["fsdp_size"] = config.fsdp_size
         template["critic"]["tp_size"] = config.tp_size
         template["critic"]["ulysses_sequence_parallel_size"] = config.sp_size

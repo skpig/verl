@@ -382,9 +382,22 @@ def parallel_init_fsdp_fn(module: torch.nn.Module,
                           train_mesh: DeviceMesh = None):
 
     state2fqn = {}
+    fqns = set()
     for name, state in itertools.chain(module.named_parameters(remove_duplicate=False),
                                        module.named_buffers(remove_duplicate=False)):
         state2fqn.setdefault(state, []).append(name)
+        fqns.add(name)
+    # remove unexpected keys
+    unexpected_keys = []
+    for name in tuple(shard_states.keys()):
+        if name not in fqns:
+            unexpected_keys.append(name)
+            shard_states.pop(name)
+    if len(unexpected_keys) > 0:
+        warnings.warn(
+            f"detected {unexpected_keys} don't exist in the model. Ignore this warning if you changed the model structure."
+        )
+
     # remove standalone parameters and buffers
     shared = set(s for s, names in state2fqn.items() if len(names) > 1)
     materialized_states = {}
