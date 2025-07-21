@@ -136,7 +136,11 @@ class CriticWorker(Worker):
                                                      torch.distributed.get_world_size())
         # note that the tokenizer between actor and critic may be different. So override tokenizer info with actor info
         # using random initialized model from any architecture. May not be the same as Actor.
-        tokenizer_path = copy_local_path_from_hdfs(config.model.tokenizer_path)
+        # tokenizer_path = copy_local_path_from_hdfs(config.model.tokenizer_path)
+        tokenizer_path = os.path.join(local_path, 'tokenizer')
+        if not os.path.exists(tokenizer_path):
+            tokenizer_path = local_path
+
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path,
                                                        trust_remote_code=config.model.get('trust_remote_code', False))
         self.processor = AutoProcessor.from_pretrained(tokenizer_path,

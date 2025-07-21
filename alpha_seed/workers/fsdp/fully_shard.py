@@ -32,6 +32,7 @@ def fully_shard(
     tp_plan: Optional[Dict[str, Placement]] = None,
     tp_mesh: DeviceMesh = None,
     tp_outside: bool = None,
+    oe_mesh: DeviceMesh = None,
     recompute: bool = False,
     act_offload: bool = False,
     param_offload: bool = False,

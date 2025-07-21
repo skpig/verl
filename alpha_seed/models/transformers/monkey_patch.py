@@ -172,25 +172,32 @@ def apply_monkey_patch(config: PretrainedConfig, verbose=True):
     return success_apply_monkey_patch
 
 
-def get_parallel_plan(config, tp_mesh: DeviceMesh) -> Dict[str, Placement]:
+def get_parallel_plan(config, tp_mesh: DeviceMesh, strategy: str = 'fsdp') -> Dict[str, Placement]:
     """
     Get tensor parallel plan for the model
     """
+    assert strategy in ['fsdp', 'vescale-fsdp2']
+
     make_plan_fn = None
     if config.model_type == 'seed_m8' or \
             (hasattr(config, "text_config") and config.text_config.model_type == 'seed_m8'):
-        from .modeling_m8 import make_m8_plan
-        make_plan_fn = make_m8_plan
-    if config.model_type == 'seed_m10':
+        from .modeling_m8 import make_m8_plan, make_m8_plan_fsdp2
+        if strategy == 'fsdp':
+            make_plan_fn = make_m8_plan
+        elif strategy == 'vescale-fsdp2':
+            make_plan_fn = make_m8_plan_fsdp2
+        else:
+            raise ValueError(f"Invalid strategy: {strategy}")
+    elif config.model_type == 'seed_m10':
         from .modeling_m10 import make_m10_plan
         make_plan_fn = make_m10_plan
-    if config.model_type == 'seed_m11':
+    elif config.model_type == 'seed_m11':
         from .modeling_m11 import make_m11_plan
         make_plan_fn = make_m11_plan
-    if config.model_type == "deepseek_v3":
+    elif config.model_type == "deepseek_v3":
         from .modeling_ds import make_dsv3_plan
         make_plan_fn = make_dsv3_plan
-    if "P6Dense" in config.architectures[0]:
+    elif "P6Dense" in config.architectures[0]:
         from .modeling_p6d import make_p6d_plan
         make_plan_fn = make_p6d_plan
 

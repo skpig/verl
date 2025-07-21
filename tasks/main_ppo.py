@@ -1009,7 +1009,10 @@ def config_to_trainer_kwargs(config):
     local_path = copy_local_path_from_hdfs(config.actor_rollout_ref.model.path)
 
     # instantiate tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(local_path)
+    tokenizer_path = os.path.join(local_path, 'tokenizer')
+    if not os.path.exists(tokenizer_path):
+        tokenizer_path = local_path
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     if config.data.get('chat_template', None) == 'seed':
         from mono_rl.utils.seed import CHAT_TEMPLATE
         tokenizer.chat_template = CHAT_TEMPLATE

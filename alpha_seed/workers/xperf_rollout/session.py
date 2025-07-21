@@ -36,6 +36,7 @@ from threading import Lock
 from transformers import AutoTokenizer
 from alpha_seed.workers.xperf_rollout.utils.vit_inferencer import VITInferencer
 import numpy as np
+import torch.nn.functional as F
 from alpha_seed.models.transformers.modeling_vlm import convert_tensor_to_numpy, convert_numpy_to_tensor
 
 # Constants
@@ -407,6 +408,7 @@ class InferenceSession:
             self.engine = init_inference(None, **init_inference_kwargs)
         self.sampler = Sampler(generation_config=generation_config)
         self.num_return_sequences = self.engine.module.num_return_sequences
+        self.oe_max_stride = max(getattr(self.engine.module.config, "over_enc_vocab_stride", [1]))
 
         self.reset_logging_level()
 
@@ -769,6 +771,7 @@ class InferenceSession:
         phase1_list = []
         phase0_total_length = []
         phase1_total_length = []
+        phase1_oe_histroy = []
         phase0_kv_index = []
         phase1_kv_index = []
         context_shift = []
@@ -794,12 +797,28 @@ class InferenceSession:
 
                 def _get_inp_embs(input_ids, start: int, end: int):
                     is_vlm = query.pixel_values is not None
+                    is_oe = self.oe_max_stride > 1
                     if is_vlm:
                         input_ids = input_ids.cuda()
                         input_embs = self._prepare_image_embeds(input_ids, query.pixel_values, query.image_grid_hw)
                     else:
-                        input_ids = input_ids[start:end].cuda()
-                        input_embs = self.engine.get_input_embeddings(input_ids=input_ids)
+                        if is_oe:
+                            curr_input_ids = input_ids[start:end].unsqueeze(0).cuda()
+                            step_seq_length = torch.tensor((curr_input_ids.shape[1]),
+                                                           device=curr_input_ids.device,
+                                                           dtype=torch.int).unsqueeze(0)
+                            total_seq_length = torch.tensor((curr_input_ids.shape[1] + start),
+                                                            device=curr_input_ids.device,
+                                                            dtype=torch.int).unsqueeze(0)
+                            oe_histroy = input_ids[start - self.oe_max_stride + 1:start].unsqueeze(0).cuda()
+                            pad_len = (self.oe_max_stride - 1) - oe_histroy.shape[1]
+                            oe_histroy = F.pad(oe_histroy, (pad_len, 0), value=self.pad_token_id)
+                            curr_input_ids = torch.concat([oe_histroy, curr_input_ids], dim=1)
+                            input_embs = self.engine.get_input_oe_embeddings(curr_input_ids, step_seq_length,
+                                                                             total_seq_length)
+                        else:
+                            input_ids = input_ids[start:end].cuda()
+                            input_embs = self.engine.get_input_embeddings(input_ids=input_ids)
                     if input_embs.ndim == 2:
                         input_embs = input_embs.unsqueeze(0)
                     if is_vlm:
@@ -837,6 +856,12 @@ class InferenceSession:
                 phase1_total_length.append(context_len + len(query.new_token_ids) + query.prefix_already_computed_len)
                 phase1_kv_index.append(query.kv_slot_ids) if self.enable_paged_attn else phase1_kv_index.extend(
                     query.kv_slot_ids)
+                if len(query.new_token_ids) >= self.oe_max_stride:
+                    oe_histroy = query.new_token_ids[-self.oe_max_stride:-1]
+                else:
+                    oe_histroy = query.input_ids[-(self.oe_max_stride - len(query.new_token_ids) + 1) +
+                                                 1:] + query.new_token_ids[:-1]
+                phase1_oe_histroy.append(oe_histroy)
                 if self.enable_ngrams_decoding:
                     max_code_book_len = max(max_code_book_len, len(query.code_book))
                     key = query.new_token_ids[-self.max_ngram_size:]
@@ -865,8 +890,10 @@ class InferenceSession:
                 pad_tokens = None if max_context_len - query.shape[1] == 0 else [self.pad_token_id] * (max_context_len -
                                                                                                        query.shape[1])
                 if pad_tokens is not None:
-                    pad_tokens = torch.tensor(pad_tokens, dtype=torch.int64)
-                    pad_emb = self.engine.get_input_embeddings(pad_tokens.cuda()).unsqueeze(0)
+                    pad_tokens = torch.tensor(pad_tokens, dtype=torch.int64).unsqueeze(0)
+                    pad_emb = torch.empty((1, pad_tokens.shape[1], query.shape[2]),
+                                          dtype=query.dtype,
+                                          device=query.device)
                     phase0_list[i] = torch.concat([pad_emb, query], dim=1)
                     running[phase0_index[i]].cur_batch_pad_token = max_context_len - query.shape[1]
                 if context_emb is None:
@@ -879,7 +906,14 @@ class InferenceSession:
             results['context_input'] = None
 
         if len(phase1_list) > 0:
-            decode_input = torch.tensor(phase1_list, dtype=torch.int64).unsqueeze(1).cuda()
+            if self.oe_max_stride > 1:
+                for i, (query, oe_histroy) in enumerate(zip(phase1_list, phase1_oe_histroy)):
+                    phase1_list[i] = [self.pad_token_id] * (self.oe_max_stride - 1 - len(oe_histroy)) + oe_histroy + [
+                        query
+                    ]
+                decode_input = torch.tensor(phase1_list, dtype=torch.int64, device="cuda")
+            else:
+                decode_input = torch.tensor(phase1_list, dtype=torch.int64, device="cuda").unsqueeze(1)
             for i, code_book in enumerate(code_books_list):
                 code_books_list[i] = code_book + [self.pad_token_id] * (max_code_book_len - len(code_book))
             results['decode_input'] = decode_input

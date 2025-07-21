@@ -50,11 +50,18 @@ def main(global_config):
     m8_path = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/M8_680m_SFT_hf'
     p6_path_qwen = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/qwen2.5_32b_v3.1.2_o1-mini-monologue_241201_hf'
     m10_path = 'hdfs://haruna/home/byte_data_seed/ssd_lq/public/seed_models/m10_680m_new'
+    # 680m with small oe
+    m11_path = 'hdfs://haruna/home/byte_data_seed/hl_lq/user/fantiantian.tt/pretrain/tmp/seedmodels_680m_mini_8k_m11_hf/checkpoints/global_step_111000_merged'
     from mono_rl.utils.seed import CHAT_TEMPLATE
     from omegaconf import OmegaConf
 
-    model_path = copy_local_path_from_hdfs(m10_path)
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    model_path = copy_local_path_from_hdfs(m11_path)
+    if local_rank == 0:
+        print(model_path)
+    torch.distributed.barrier()
+
+    tokenizer_path = os.path.join(model_path, 'tokenizer')  # only valid for m11
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     tokenizer.padding_side = "left"
 
     raw_template = """{% for message in messages %}{{ message['content'] }}{% endfor %}"""

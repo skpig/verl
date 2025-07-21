@@ -66,6 +66,17 @@ def make_m8_plan():
     return plan
 
 
+def make_m8_plan_fsdp2():
+    plan = {
+        # moe experts (EP)
+        "*.moe.experts.fc1_1": Shard(0),
+        "*.moe.experts.fc1_2": Shard(0),
+        "*.moe.experts.fc2": Shard(0),
+        # TODO: support Megatron sequence parallelism
+    }
+    return plan
+
+
 def flash_attn2_rmpad_forward(
     self,
     hidden_states: torch.Tensor,

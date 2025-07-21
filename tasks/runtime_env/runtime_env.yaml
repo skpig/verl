@@ -2,7 +2,8 @@ working_dir: ./
 excludes: ["/.git/"]
 env_vars:
   TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
-  PYTHONPATH: /opt/tiger/mono_rl:/opt/tiger/seed_models:/opt/tiger/verifiable_tasks:/opt/tiger/bpex_triton:/opt/tiger/byted_optimizer:/opt/tiger/mariana:/opt/tiger/cruise:/opt/tiger/vescale:/opt/tiger/xperf_gpt_custom:/opt/tiger/xperf_gpt_triton:/opt/tiger/agents_extension/python:/opt/tiger/agents_extension
+  PYTHONPATH: /opt/tiger/mono_rl:/opt/tiger/seed_models:/opt/tiger/verifiable_tasks:/opt/tiger/bpex_triton:/opt/tiger/byted_optimizer:/opt/tiger/mariana:/opt/tiger/cruise:/opt/tiger/vescale:/opt/tiger/xperf_gpt_custom:/opt/tiger/xperf_gpt_triton:/opt/tiger/agents_extension/python:/opt/tiger/seed_kernels:/opt/tiger/bumi:/opt/tiger/agents_extension
   MARIANA_DISABLE_ROPE_REGISTER_INV_FREQ: "1"
   PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
   MARIANA_DEFAULT_GROUP_BOOT_ASYNC: "1"
+  NCCL_DEBUG: "WARN"

@@ -131,6 +131,8 @@ class AsyncXPerfGPTRollout(object):
         print(f'local_path: {local_path}')
 
         from seed_models import P4Config, P5Config, P6Config
+
+        # tokenizer_path = os.path.join(local_path, 'tokenizer')
         self.tokenizer = AutoTokenizer.from_pretrained(local_path, trust_remote_code=False)
         self.model_hf_config = AutoConfig.from_pretrained(local_path, trust_remote_code=False)
         self.is_standalone = is_standalone
@@ -427,20 +429,11 @@ class AsyncXPerfGPTRollout(object):
             tp_size = 1 if self.device_mesh is None else self.device_mesh['tp'].size()
             save_model_name = f"{global_rank}_{tp_rank}_{tp_size}"
             print("saving... inference engine ... ", f"{save_model_name}_model_engine")
-            torch.save(self.inference_engine.engine.module.layers_weight,
-                       f"{save_model_name}_model_engine_layers_weight.pt")
-            torch.save(self.inference_engine.engine.module.wte_weight, f"{save_model_name}_model_engine_wte_weight.pt")
-            torch.save(self.inference_engine.engine.module.lm_head_weight,
-                       f"{save_model_name}_model_engine_lm_head_weight.pt")
-            torch.save(self.inference_engine.engine.module.layernorm_weight,
-                       f"{save_model_name}_model_engine_layernorm_weight.pt")
+            torch.save(self.inference_engine.engine.module.weights, f"{save_model_name}_model_engine_weights.pt")
             torch.save(self.inference_engine.get_inorder_responses(), f"{save_model_name}_output.pt")
             print(f"dump weights/tensors to {dump_nan_dir}")
             hmkdir(self.config.get("dump_nan", None))
-            hcopy(f"{save_model_name}_model_engine_layers_weight.pt", self.config.get("dump_nan", None))
-            hcopy(f"{save_model_name}_model_engine_wte_weight.pt", self.config.get("dump_nan", None))
-            hcopy(f"{save_model_name}_model_engine_layernorm_weight.pt", self.config.get("dump_nan", None))
-            hcopy(f"{save_model_name}_model_engine_lm_head_weight.pt", self.config.get("dump_nan", None))
+            hcopy(f"{save_model_name}_model_engine_weights.pt", self.config.get("dump_nan", None))
             hcopy(f"{save_model_name}_output.pt", self.config.get("dump_nan", None))
 
     def generate(self):

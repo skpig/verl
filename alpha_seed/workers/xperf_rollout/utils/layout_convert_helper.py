@@ -52,6 +52,16 @@ def offload_param_to_device(tp_model, device):
                         [p for layer in tp_model.layers_weight for p in layer if isinstance(p, torch.Tensor)]
         if hasattr(tp_model, 'wpe'):
             param_list.append(tp_model.wpe.weight)
+        if tp_model.config.has_over_encoding and device != "meta":
+            param = tp_model.weights.module_weight.over_enc_emb_weight
+            if param.is_meta:
+                tp_model.weights.module_weight.over_enc_emb_weight = torch.empty_like(param, device="cpu").pin_memory()
+            else:
+                tp_model.weights.module_weight.over_enc_emb_weight = param.cpu().pin_memory()
+            # FIXME
+            tp_model.weights.module_weight.reduce_static_weight[0] = torch.empty_like(
+                tp_model.weights.module_weight.reduce_static_weight[0], device=device)
+            param_list.append(tp_model.weights.module_weight.over_enc_proj_weight)
     for param in param_list:
         if param.is_meta:
             out = torch.empty_like(param, device=device)

@@ -22,21 +22,24 @@ from contextlib import nullcontext
 from torch.utils.checkpoint import noop_context_fn
 
 
-def fully_shard(model: PreTrainedModel,
-                block_cls: Union[type, str],
-                fsdp_mesh: DeviceMesh,
-                tp_plan: Optional[Dict[str, Placement]] = None,
-                tp_mesh: DeviceMesh = None,
-                tp_outside: bool = None,
-                oe_mesh: DeviceMesh = None,
-                recompute: bool = False,
-                act_offload: bool = False,
-                param_offload: bool = False,
-                weights: str = None,
-                enable_training_stats: bool = False,
-                ignored_modules: Tuple = None,
-                fsdp_kwargs: dict = None,
-                act_offload_kwargs: dict = None) -> Tuple[FSDPModule, Optional[MetricsTorchDispatchMode]]:
+def fully_shard(
+        model: PreTrainedModel,
+        block_cls: Union[type, str],
+        fsdp_mesh: DeviceMesh,
+        tp_plan: Optional[Dict[str, Placement]] = None,
+        tp_mesh: DeviceMesh = None,
+        tp_outside: bool = None,
+        oe_mesh: DeviceMesh = None,
+        recompute: bool = False,
+        act_offload: bool = False,
+        param_offload: bool = False,
+        weights: str = None,
+        enable_training_stats: bool = False,
+        ignored_modules: Tuple = None,
+        fsdp_kwargs: dict = None,
+        act_offload_kwargs: dict = None,
+        # TODO: implement mux here
+        train_mesh: DeviceMesh = None) -> Tuple[FSDPModule, Optional[MetricsTorchDispatchMode]]:
     """
     Create FSDP/HSDP withx tensor parallelism extension.
 
@@ -75,9 +78,15 @@ def fully_shard(model: PreTrainedModel,
 
     # set module wrap class
     if isinstance(block_cls, str):
-        block_cls = get_module_class_from_name(model, block_cls)
-    if not issubclass(block_cls, torch.nn.Module):
-        raise NotImplementedError(f"block cls must be subclass of torch.nn.Module, but got {block_cls}")
+        block_cls = [block_cls]
+
+    assert isinstance(block_cls, list)
+
+    block_cls = tuple([get_module_class_from_name(model, block) for block in block_cls])
+
+    for block in block_cls:
+        if not issubclass(block, torch.nn.Module):
+            raise NotImplementedError(f"block cls must be subclass of torch.nn.Module, but got {block_cls}")
 
     # parallelize module
     assert fsdp_mesh._parent_mesh is not None
@@ -125,7 +134,7 @@ def fully_shard(model: PreTrainedModel,
 
     # load pretrained weights
     shards = parallel_load_safetensors(weights, device="cpu") if weights else {}
-    module_materialize_fn, _, _ = parallel_init_module_fn(model, shards, pad_state=True)
+    module_materialize_fn, _, _ = parallel_init_module_fn(model, shards, pad_state=True, strict=False)
 
     # wrap to fsdp + prefetch
     last_fsdp_modules = None
@@ -141,6 +150,9 @@ def fully_shard(model: PreTrainedModel,
     fully_shard_fn(model)
     model.set_reshard_after_backward(True)
     model._set_unshard_async_op(True)
+
+    from vescale.parallel.fsdp2.extension.spmd import apply_spmd_extension
+    apply_spmd_extension(model)
 
     # apply recompute for each layer
     if enable_training_stats:

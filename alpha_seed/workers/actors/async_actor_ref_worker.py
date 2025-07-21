@@ -244,8 +244,12 @@ class AsyncActorRolloutRefWorker(Worker):
                                                           torch.distributed.get_world_size())
 
         # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect
-        # TODO(zhangchi.usc1992): 1. support create from random initialized model. 2. Support init with FSDP directly
-        self.tokenizer = AutoTokenizer.from_pretrained(self.local_path, trust_remote_code=trust_remote_code)
+        # TODO(zhangchi.usc1992): 1. (support create from random initialized model. 2. Support init with FSDP directly
+        tokenizer_path = os.path.join(self.local_path, 'tokenizer')
+        if not os.path.exists(tokenizer_path):
+            tokenizer_path = self.local_path
+
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=trust_remote_code)
         self.processor = AutoProcessor.from_pretrained(self.local_path, trust_remote_code=trust_remote_code)
         torch_dtype = torch.float32 if self._is_actor else torch.bfloat16
 
@@ -315,6 +319,7 @@ class AsyncActorRolloutRefWorker(Worker):
         fsdp_mesh = self.ref_fsdp_mesh if role == 'ref' else self.actor_fsdp_mesh
         train_mesh = self.ref_train_mesh if role == 'ref' else self.actor_train_mesh
         tp_mesh = self.ref_tp_mesh if role == 'ref' else self.actor_tp_mesh
+        oe_mesh = self.ref_oe_mesh if role == 'ref' else self.actor_oe_mesh
         tp_outside = self.config.ref.tp_outside if role == "ref" else self.config.actor.tp_outside
 
         strategy = self.ref_strategy if role == "ref" else self.actor_strategy
@@ -369,8 +374,9 @@ class AsyncActorRolloutRefWorker(Worker):
             model=actor_module,
             block_cls=block_cls,
             fsdp_mesh=fsdp_mesh,
-            tp_plan=get_parallel_plan(actor_model_config, tp_mesh),
+            tp_plan=get_parallel_plan(actor_model_config, tp_mesh, strategy),
             tp_mesh=tp_mesh,
+            oe_mesh=oe_mesh,
             tp_outside=tp_outside,
             recompute=enable_gradient_checkpointing,
             act_offload=self.config.actor.act_offload if role == 'actor' else False,
@@ -461,7 +467,9 @@ class AsyncActorRolloutRefWorker(Worker):
 
         # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect
         # TODO(zhangchi.usc1992): 1. support create from random initialized model. 2. Support init with FSDP directly
-        self.tokenizer = AutoTokenizer.from_pretrained(config_path)
+
+        tokenizer_path = os.path.join(config_path, 'tokenizer')
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
         actor_model_config = AutoConfig.from_pretrained(config_path)
 
         if self._is_standalone_rollout or self._is_standalone_validator:

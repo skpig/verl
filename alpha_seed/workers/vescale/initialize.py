@@ -2,7 +2,13 @@ import torch.distributed as dist
 from vescale.initialize.mesh import create_mesh_with_names
 
 
-def create_mesh(fsdp_size: int, tp_size: int, oe_size: int, sp_size: int, tp_outside: bool = False):
+def create_mesh(fsdp_size: int,
+                tp_size: int,
+                oe_size: int,
+                sp_size: int,
+                tp_outside: bool = False,
+                enable_actor_critic_spatial_mux: bool = False,
+                role: str = None):
     """
     Create device meshes for fsdp, tp, and sp.
 
@@ -22,4 +28,6 @@ def create_mesh(fsdp_size: int, tp_size: int, oe_size: int, sp_size: int, tp_out
     oe_mesh = create_mesh_with_names("cuda", dp=-1, oe=oe_size)["oe"]
     sp_mesh = create_mesh_with_names("cuda", dp=-1, sp=sp_size)["sp"]
     gather_mesh = sp_mesh
-    return fsdp_mesh, ep_mesh, oe_mesh, sp_mesh, gather_mesh
+    # TODO: implement spatial mux here
+    train_mesh = create_mesh_with_names("cuda", train=world_size)["train"]
+    return fsdp_mesh, ep_mesh, oe_mesh, sp_mesh, gather_mesh, train_mesh

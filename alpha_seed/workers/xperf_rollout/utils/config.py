@@ -42,6 +42,8 @@ def get_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
         return _get_dsv3_xperf_gpt_config(model_config, tokenizer)
     elif model_config.model_type == 'seed_m10':
         return _get_m10_xperf_gpt_config(model_config, tokenizer)
+    elif model_config.model_type == 'seed_m11':
+        return _get_m11_xperf_gpt_config(model_config, tokenizer)
     else:
         raise NotImplementedError(f'Unsupported model {model_config.model_type}')
 
@@ -556,6 +558,122 @@ def _get_m10_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
             config.use_attention_output_layernorm,
         "ffn_outputnorm":
             True,
+    }
+
+    return xperf_config
+
+
+def _get_m11_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
+    from seed_models import M11Config
+    assert isinstance(model_config, M11Config)
+    config = model_config
+    xperf_config = {
+        "dtype":
+            "bfloat16",
+        "embed_dim":
+            config.hidden_size,
+        "gqa_weights_layout":
+            "AABB",
+        "has_attn_bias":
+            config.attention_bias,
+        "has_context_layernorm":
+            config.use_context_groupnorm,
+        "has_k_layernorm":
+            config.use_key_norm,
+        "has_mlp_gate":
+            True,
+        "hidden_size":
+            config.hidden_size,
+        "is_exp_moe":
+            False,
+        "is_meta":
+            True,
+        "kv_mirror_imitated_layers": [],
+        "kv_mirror_layers": [],
+        "max_position_embeddings":
+            config.max_position_embeddings,
+        "model_name":
+            "GPT2LMHeadModelMoe" if config.moe_num_expert else "GPT2LMHeadModel",
+        "moe_expert_num":
+            config.moe_num_expert,
+        "moe_ffn_has_bias":
+            False,
+        "moe_ffn_internal_dim":
+            int(config.intermediate_size),
+        "vocab_size":
+            config.vocab_size,
+        "num_heads":
+            config.num_attention_heads,
+        "q_head_times":
+            config.query_head_scale_factor,
+        # "num_layers":
+        #     config.num_hidden_layers + config.mtp_n_heads - 1,
+        "num_layers":
+            config.num_hidden_layers,
+        "num_kv_heads":
+            config.num_key_value_heads,
+        "has_mqa":
+            config.num_attention_heads != config.num_key_value_heads,
+        "moe_topk":
+            config.moe_topk,
+        "share_expert_num":
+            int(config.moe_share_expert_num),
+        "use_rmsnorm":
+            True,
+        "tokenizer_path":
+            tokenizer.name_or_path,  # donot download from huggingface
+        "rope_mode":
+            config.rope_scaling['rope_type'],
+        "rope_base":
+            int(config.rope_theta),
+        "rope_scale":
+            int(config.rope_scaling['factor']),
+        "rope_cut":
+            True,
+        "rope_cut_head_dim":
+            config.rope_scaling["rope_cut_head_dim"],
+        "rope_percentage":
+            config.rope_scaling["rope_cut_head_dim"] / (config.hidden_size // config.num_attention_heads),
+        "window_size":
+            config.sliding_window,
+        "attn_input_after_norm":
+            True,
+        "attn_residual_after_norm":
+            True,
+        "ffn_input_after_norm":
+            True,
+        "ffn_residual_after_norm":
+            False,
+        "special_norm_pos_config":
+            "_{1:{\"attn_residual_after_norm\":False}}_",
+        "mtp_n_heads":
+            config.mtp_n_heads,
+        "querynorm":
+            config.use_query_norm,
+        "keynorm":
+            config.use_key_norm,
+        "valuenorm":
+            False,
+        "contextnorm":
+            config.use_context_groupnorm,
+        "attn_outputnorm":
+            config.use_attention_output_norm,
+        "ffn_outputnorm":
+            False,
+        "over_enc_embed_dim":
+            config.over_enc_embed_dim,
+        "over_enc_fuse_all":
+            config.over_enc_fuse_all,
+        "over_enc_vocab_size":
+            config.over_enc_vocab_size,
+        "over_enc_vocab_stride":
+            config.over_enc_vocab_stride,
+        "over_enc_m":
+            config.vwn_m,
+        "over_enc_n_in":
+            config.vwn_n_in,
+        "over_enc_n_out":
+            config.vwn_n_out
     }
 
     return xperf_config

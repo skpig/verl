@@ -117,7 +117,7 @@ class ActorXPerfGPTShardingManager(BaseShardingManager):
         if (not self.only_bind_once) or (not self._bind_fn_called):
             # materialize to cuda if tensors are on meta device
             state_dict = self._get_actor_state_dict() if self.module else {}
-            offload_to_device(self.inference_engine.engine.module, "cuda")
+            offload_to_device(self.inference_engine.engine.module, "cpu")
             # prepare the state_dict into a format for xperf_gpt
             if self.model_config.model_type == 'seed_vl':
                 self.bind_fn(self.inference_engine.engine.module,

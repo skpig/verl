@@ -98,10 +98,14 @@ class WeightsAdapter:
 
         return tensor
 
-    def _redistribute_dtensor(self, tensor: DTensor, placements: List[Union[Shard, Replicate]]) -> torch.Tensor:
+    def _redistribute_dtensor(self,
+                              tensor: DTensor,
+                              placements: List[Union[Shard, Replicate]],
+                              device_mesh: Optional[Dict[str, torch.distributed.ProcessGroup]] = None) -> torch.Tensor:
 
-        return tensor._local_tensor if not self.device_mesh else tensor.redistribute(
-            device_mesh=self.device_mesh, placements=placements)._local_tensor
+        device_mesh = device_mesh or self.device_mesh
+        return tensor._local_tensor if not device_mesh else tensor.redistribute(device_mesh=device_mesh,
+                                                                                placements=placements)._local_tensor
 
     def _cast_to(self, tensor: Union[torch.Tensor, DTensor], dtype: torch.dtype) -> Union[torch.Tensor, DTensor]:
 
@@ -123,7 +127,7 @@ class WeightsAdapter:
 
 
 class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
-    _support_model_type = ["seed_p6", "seed_p6dense", "seed_p7", "seed_m8", "seed_m10"]
+    _support_model_type = ["seed_p6", "seed_p6dense", "seed_p7", "seed_m8", "seed_m10", "seed_m11"]
 
     def __init__(self, model_config: PretrainedConfig, quant_mode: str, enable_actor_critic_spatial_mux: bool) -> None:
 
@@ -134,26 +138,31 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
 
     def get_model_info(self, xperf_model: torch.nn.Module) -> None:
 
-        config = self.model_config
-        self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+        config = xperf_model.config
+        self.head_dim = config.head_dim
         self.hidden_size = config.hidden_size
-        self.num_kv_heads = config.num_key_value_heads
+        self.num_kv_heads = config.mqa_kv_heads
         self.kv_replicate = self.tp_size // self.num_kv_heads if self.tp_size % self.num_kv_heads == 0 else 1
-        self.num_layers = config.num_hidden_layers
-        self.attention_bias = config.attention_bias
-        self.moe_num_expert = getattr(config, "moe_num_expert", 0)
+        self.num_layers = config.num_layers
+        self.attention_bias = getattr(config, "has_attn_bias", False)
+        self.moe_num_expert = getattr(config, "moe_expert_num", 0)
         self.share_expert_num = getattr(config, "share_expert_num", 0)
-        self.use_query_layernorm = getattr(config, "use_query_layernorm", False)
-        self.use_key_layernorm = getattr(config, "use_key_layernorm", False)
-        self.use_qk_rmsnorm = getattr(config, "use_qk_rmsnorm", False)
-        self.use_context_groupnorm = getattr(config, "use_context_groupnorm", False)
-        self.use_attention_output_layernorm = getattr(config, "use_attention_output_layernorm", False)
+        self.use_query_layernorm = getattr(config, "querynorm", False)
+        self.use_key_layernorm = getattr(config, "keynorm", False) or getattr(config, "has_k_layernorm", False)
+        self.use_context_groupnorm = getattr(config, "contextnorm", False) or getattr(
+            config, "has_context_layernorm", False)
+        self.use_attention_output_layernorm = getattr(config, "attn_outputnorm", False)
+        self.has_over_encoding = getattr(config, "has_over_encoding", False)
+        self.over_enc_vocab_size = getattr(config, "over_enc_vocab_size", None)
+        self.over_enc_embed_dim = getattr(config, "over_enc_embed_dim", None)
+        self.over_enc_vocab_stride = getattr(config, "over_enc_vocab_stride", None)
+        self.over_enc_m = getattr(config, "over_enc_m", None)
+        self.over_enc_n_in = getattr(config, "over_enc_n_in", None)
+        self.over_enc_n_out = getattr(config, "over_enc_n_out", None)
         self.mtp_n_heads = getattr(config, "mtp_n_heads", 1)
         self.use_ep = getattr(xperf_model, "use_ep", False)
         self.use_mtp = getattr(xperf_model, "use_mtp", False)
         self.vocab_tp = getattr(xperf_model, "vocab_tp", False)
-        if self.use_mtp:
-            self.num_layers = self.num_layers + self.mtp_n_heads - 1
 
     def load_from_state_dict(self, state_dict: Dict[str, Union[torch.Tensor, DTensor]], prefix: str) -> None:
 
@@ -167,10 +176,14 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
         ln_f_bias = loader("transformer.ln_f.bias")
         self.source_weights['ln_f'] = torch.cat((ln_f, ln_f_bias), dim=0) if ln_f_bias is not None else ln_f
 
+        if self.has_over_encoding:
+            self.source_weights["oe_emb"] = loader("transformer.over_encoded_embeddings.embedding_list.0.weight")
+            self.source_weights["oe_proj"] = loader("transformer.over_encoded_embeddings.emb_proj.weight")
+
         for layer_idx in range(self.num_layers):
             if self.model_config.model_type == "seed_p6dense":
                 layer_key = f"model.layers.{layer_idx}"
-            elif self.model_config.model_type == "seed_m10":
+            elif self.model_config.model_type in ["seed_m10", "seed_m11"]:
                 layer_key = f"transformer.model.layers.{layer_idx}"
             else:
                 layer_key = f"transformer.h.{layer_idx}"
@@ -188,7 +201,8 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
             key_norm_bias = loader(f"{layer_key}.attn.key_layernorm.bias")
             key_norm = torch.cat((key_norm, key_norm_bias), dim=0) if key_norm_bias is not None else key_norm
 
-            context_norm = loader(f"{layer_key}.attn.context_norm.weight")
+            context_norm = loader(f"{layer_key}.attn.context_norm.weight",
+                                  f"{layer_key}.self_attention.context_groupnorm.weight")
             context_norm_bias = loader(f"{layer_key}.attn.context_norm.bias")
             context_norm = torch.cat(
                 (context_norm, context_norm_bias), dim=0) if context_norm_bias is not None else context_norm
@@ -246,8 +260,43 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
                     loader(f"{layer_key}.mlp.moe.experts.fc2", f"{layer_key}.mlp.down_proj.weight",
                            f"{layer_key}.mlp.moe.experts.down_proj"),
                 'share_fc2':
-                    loader(f"{layer_key}.mlp.moe.experts_share.fc2", f"{layer_key}.mlp.moe.shared_experts.down_proj")
+                    loader(f"{layer_key}.mlp.moe.experts_share.fc2", f"{layer_key}.mlp.moe.shared_experts.down_proj"),
+                'vwn0_static_alpha':
+                    loader(f"{layer_key}.hc1.static_alpha"),
+                'vwn0_static_beta':
+                    loader(f"{layer_key}.hc1.static_beta"),
+                'vwn0_dynamic_alpha':
+                    loader(f"{layer_key}.hc1.dynamic_alpha_fn"),
+                'vwn0_dynamic_alpha_scale':
+                    loader(f"{layer_key}.hc1.dynamic_alpha_scale"),
+                'vwn0_dynamic_beta':
+                    loader(f"{layer_key}.hc1.dynamic_beta_fn"),
+                'vwn0_dynamic_beta_scale':
+                    loader(f"{layer_key}.hc1.dynamic_beta_scale"),
+                'vwn0_layer_norm':
+                    loader(f"{layer_key}.hc1.layer_norm.weight"),
+                'vwn1_static_alpha':
+                    loader(f"{layer_key}.hc2.static_alpha"),
+                'vwn1_static_beta':
+                    loader(f"{layer_key}.hc2.static_beta"),
+                'vwn1_dynamic_alpha':
+                    loader(f"{layer_key}.hc2.dynamic_alpha_fn"),
+                'vwn1_dynamic_alpha_scale':
+                    loader(f"{layer_key}.hc2.dynamic_alpha_scale"),
+                'vwn1_dynamic_beta':
+                    loader(f"{layer_key}.hc2.dynamic_beta_fn"),
+                'vwn1_dynamic_beta_scale':
+                    loader(f"{layer_key}.hc2.dynamic_beta_scale"),
+                'vwn1_layer_norm':
+                    loader(f"{layer_key}.hc2.layer_norm.weight"),
             }
+
+        for mtp_idx in range(self.mtp_n_heads):
+            layer_idx = self.num_layers - self.mtp_n_heads + mtp_idx
+            if mtp_idx == 0:
+                self.source_weights[layer_idx]["static_reduce"] = loader(
+                    f"transformer.model.layers.{layer_idx}.hc2.static_reduce")
+                continue
 
     def process_and_assign_weights(self, xperf_model: torch.nn.Module) -> None:
 
@@ -263,10 +312,12 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
                     name = f"{layer_idx}_{name}"
                 self._assign_and_validate(src=weight, dst=dst, name=name)
 
-        wte_weight, lm_head_weight, ln_f_weight = self._process_top_level_weights()
+        wte_weight, lm_head_weight, ln_f_weight, oe_weight, oe_proj = self._process_top_level_weights()
         binding_weights = [(xperf_weights.module_weight, wte_weight, "wte_weight"),
                            (xperf_weights.module_weight, lm_head_weight, "lm_head_weight"),
-                           (xperf_weights.module_weight, ln_f_weight, "ln_f_weight")]
+                           (xperf_weights.module_weight, ln_f_weight, "ln_f_weight"),
+                           (xperf_weights.module_weight, oe_weight, "over_enc_emb_weight"),
+                           (xperf_weights.module_weight, oe_proj, "over_enc_proj_weight")]
         assign_weights(binding_weights)
 
         for layer_idx in range(self.num_layers):
@@ -277,6 +328,8 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
             qkv_weight, o_weight, fc1_weight, fc2_weight, share_fc1_weight, share_fc2_weight, wfp8_qscale = self._process_quant_wfp8(
                 qkv_weight, o_weight, fc1_weight, fc2_weight, share_fc1_weight, share_fc2_weight)
             gate_wg_weight = self._process_gate_weights(layer_idx)
+            vwn0_static_alpha, vwn0_static_beta, vwn0_dynamic_alpha, vwn0_dynamic_alpha_scale, vwn0_dynamic_beta, vwn0_dynamic_beta_scale, vwn0_layer_norm, \
+            vwn1_static_alpha, vwn1_static_beta, vwn1_dynamic_alpha, vwn1_dynamic_alpha_scale, vwn1_dynamic_beta, vwn1_dynamic_beta_scale, vwn1_layer_norm = self._process_vwn_weights(layer_idx)
 
             binding_weights = [
                 (xperf_weights.layer_weight, ln_1_weight, "norm0_gamma_beta"),
@@ -295,9 +348,31 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
                 (xperf_weights.layer_weight, fc2_weight, "FFN1_weight"),
                 (xperf_weights.layer_weight, share_fc2_weight, "FFN1_share_weight"),
                 (xperf_weights.layer_weight, gate_wg_weight, "moe_gate_weight"),
+                (xperf_weights.layer_weight, vwn0_static_alpha, "vwn0_static_alpha"),
+                (xperf_weights.layer_weight, vwn0_static_beta, "vwn0_static_beta"),
+                (xperf_weights.layer_weight, vwn0_dynamic_alpha, "vwn0_dynamic_alpha"),
+                (xperf_weights.layer_weight, vwn0_dynamic_alpha_scale, "vwn0_dynamic_alpha_scale"),
+                (xperf_weights.layer_weight, vwn0_dynamic_beta, "vwn0_dynamic_beta"),
+                (xperf_weights.layer_weight, vwn0_dynamic_beta_scale, "vwn0_dynamic_beta_scale"),
+                (xperf_weights.layer_weight, vwn0_layer_norm, "vwn0_layernorm_weight"),
+                (xperf_weights.layer_weight, vwn1_static_alpha, "vwn1_static_alpha"),
+                (xperf_weights.layer_weight, vwn1_static_beta, "vwn1_static_beta"),
+                (xperf_weights.layer_weight, vwn1_dynamic_alpha, "vwn1_dynamic_alpha"),
+                (xperf_weights.layer_weight, vwn1_dynamic_alpha_scale, "vwn1_dynamic_alpha_scale"),
+                (xperf_weights.layer_weight, vwn1_dynamic_beta, "vwn1_dynamic_beta"),
+                (xperf_weights.layer_weight, vwn1_dynamic_beta_scale, "vwn1_dynamic_beta_scale"),
+                (xperf_weights.layer_weight, vwn1_layer_norm, "vwn1_layernorm_weight"),
                 (xperf_weights.quant_weight, wfp8_qscale, "wfp8_qscale"),
             ]
             assign_weights(binding_weights, layer_idx)
+
+        for mtp_idx in range(self.mtp_n_heads):
+            layer_idx = self.num_layers - self.mtp_n_heads + mtp_idx
+            if mtp_idx == 0:
+                static_reduce = self._process_mtp_weights(layer_idx)
+                binding_weights = [(xperf_weights.module_weight, static_reduce, "reduce_static_weight")]
+                assign_weights(binding_weights, mtp_idx)
+                continue
 
         xperf_weights.prepare_infer_weights()
         xperf_model.layers_weight = xperf_weights.layers_weight
@@ -314,15 +389,69 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
 
         ln_f_weight = ln_f.view(-1, self.hidden_size).contiguous()
 
+        if self.has_over_encoding:
+            assert self.device_mesh is not None and self.vocab_tp, "OE must have device mesh and vocab tp enabled"
+            from vescale.initialize.mesh import create_mesh_with_names
+
+            oe_emb: DTensor = self._cast_to(self.source_weights['oe_emb'], torch.bfloat16)
+            # TODO: currently oe emb only supports sharding across all devices
+            for mesh_size, placement in zip(oe_emb.device_mesh.shape, oe_emb.placements):
+                if placement.is_replicate():
+                    assert mesh_size == 1, "Over Encoding Embedding weight can only support shard across all devices"
+            oe_emb: torch.Tensor = oe_emb._local_tensor
+
+            full_mesh = create_mesh_with_names("cuda", shard=dist.get_world_size())
+            # [Shard(0)] -> [Shard(1)]
+            oe_emb = DTensor.from_local(oe_emb, full_mesh, [Shard(0)]).redistribute(placements=[Shard(1)])._local_tensor
+            # [Shard(1)] -> [Shard(1), Replicate()]
+            oe_mesh = create_mesh_with_names("cuda", shard=self.device_mesh.size(1), replicate=-1)
+            oe_emb = DTensor.from_local(oe_emb, oe_mesh["replicate"], [Shard(1)]).full_tensor()
+            # [Shard(1), Replicate()] -> [Replicate(), Shard(1)]
+            world_size = dist.get_world_size()
+            myrank = dist.get_rank()
+            devices = torch.arange(world_size).view(oe_mesh.shape).permute(1, 0).flatten().tolist()
+            send_rank, recv_rank = devices.index(myrank), devices[myrank]
+            out = torch.empty_like(oe_emb)
+            if myrank == send_rank:
+                assert send_rank == recv_rank, f"{devices=}, {myrank=}, {send_rank=}, {recv_rank=}"
+                out = oe_emb
+            elif myrank > send_rank:
+                dist.send(oe_emb, send_rank)
+                dist.recv(out, recv_rank)
+            else:
+                dist.recv(out, recv_rank)
+                dist.send(oe_emb, send_rank)
+            torch.cuda.synchronize()
+            oe_emb_weight = out[:sum(self.over_enc_vocab_size), :].cpu()
+            torch.cuda.empty_cache()
+
+            oe_proj = self._cast_to(self._get_full_tensor(self.source_weights['oe_proj']), torch.bfloat16)
+            oe_emb_dim = oe_emb_weight.shape[1] * self.tp_size
+            oe_vocab_num = len(self.over_enc_vocab_size)
+            total_oe_emb_dim = oe_emb_dim * oe_vocab_num
+            wte_proj, oe_proj = torch.split(oe_proj, [oe_proj.shape[1] - total_oe_emb_dim, total_oe_emb_dim], dim=1)
+
+            wte_proj = DTensor.from_local(wte_proj, self.device_mesh, [Replicate(), Replicate()])
+            wte_proj = self._redistribute_dtensor(wte_proj, [Replicate(), Shard(1)])
+
+            oe_proj = DTensor.from_local(oe_proj.reshape(-1, oe_vocab_num, oe_emb_dim), self.device_mesh,
+                                         [Replicate(), Replicate()])
+            oe_proj = self._redistribute_dtensor(oe_proj, [Replicate(), Shard(2)]).reshape(oe_proj.shape[0], -1)
+
+            oe_proj_weight = torch.concat([wte_proj, oe_proj], dim=1)
+        else:
+            oe_emb_weight = oe_proj_weight = None
+
         if self.device_mesh is not None and self.vocab_tp:
             wte = DTensor.from_local(wte, self.device_mesh, [Replicate(), Replicate()])
             wte_weight = self._redistribute_dtensor(wte, [Replicate(), Shard(1)])
+            lm_head = DTensor.from_local(lm_head, self.device_mesh, [Replicate(), Replicate()])
             lm_head_weight = self._redistribute_dtensor(lm_head, [Replicate(), Shard(0)])
         else:
             wte_weight = wte.contiguous()
             lm_head_weight = lm_head.contiguous()
 
-        return wte_weight, lm_head_weight, ln_f_weight
+        return wte_weight, lm_head_weight, ln_f_weight, oe_emb_weight, oe_proj_weight
 
     def _process_layernorm_weights(self, layer_idx: int) -> Tuple[torch.Tensor, ...]:
 
@@ -332,13 +461,13 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
         ln_2_weight = self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['ln_2']),
                                     torch.bfloat16).reshape(-1, self.hidden_size)
 
-        if self.use_query_layernorm or self.use_qk_rmsnorm:
+        if self.use_query_layernorm:
             query_norm_weight = self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['query_norm']),
                                               torch.bfloat16).reshape(-1, self.head_dim)
         else:
             query_norm_weight = None
 
-        if self.use_key_layernorm or self.use_qk_rmsnorm:
+        if self.use_key_layernorm:
             key_norm_weight = self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['key_norm']),
                                             torch.bfloat16).reshape(-1, self.head_dim)
         else:
@@ -517,6 +646,50 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
             gate_weight = None
 
         return gate_weight
+
+    def _process_vwn_weights(self, layer_idx: int) -> Tuple[torch.Tensor, ...]:
+
+        vwn_weights = [None] * 14
+        if self.has_over_encoding:
+            vwn_weights = (
+                self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn0_static_alpha']),
+                              torch.bfloat16),
+                self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn0_static_beta']),
+                              torch.bfloat16),
+                self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn0_dynamic_alpha']),
+                              torch.bfloat16).transpose(0, 1).contiguous(),
+                self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn0_dynamic_alpha_scale']),
+                              torch.bfloat16),
+                self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn0_dynamic_beta']),
+                              torch.bfloat16).transpose(0, 1).contiguous(),
+                self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn0_dynamic_beta_scale']),
+                              torch.bfloat16),
+                self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn0_layer_norm']), torch.bfloat16),
+                self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn1_static_alpha']),
+                              torch.bfloat16),
+                self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn1_static_beta']),
+                              torch.bfloat16),
+                self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn1_dynamic_alpha']),
+                              torch.bfloat16).transpose(0, 1).contiguous(),
+                self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn1_dynamic_alpha_scale']),
+                              torch.bfloat16),
+                self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn1_dynamic_beta']),
+                              torch.bfloat16).transpose(0, 1).contiguous(),
+                self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn1_dynamic_beta_scale']),
+                              torch.bfloat16),
+                self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn1_layer_norm']), torch.bfloat16),
+            )
+
+        return vwn_weights
+
+    def _process_mtp_weights(self, layer_idx: int) -> Tuple[torch.Tensor, ...]:
+
+        static_reduce = None
+        if self.has_over_encoding:
+            static_reduce = self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['static_reduce']),
+                                          torch.bfloat16)
+
+        return static_reduce
 
     def _process_quant_wfp8(self, *args) -> Tuple[torch.Tensor, ...]:
 
