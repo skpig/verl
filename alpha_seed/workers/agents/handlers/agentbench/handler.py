@@ -362,7 +362,7 @@ if __name__ == '__main__':
             }]
         }
 
-    client_executor = LocalExecutor('train', config, tokenizer, None, None)
+    client_executor = LocalExecutor('train', config, tokenizer, None, None, "train_rollout")
     for worker in client_executor.workers:
         worker.sync_llm.chat_completions = chat_completions
 

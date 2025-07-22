@@ -441,6 +441,7 @@ rollout_server:
     max_workers: 4 # 有多少worker
     worker_max_concurrency: 1024  # 每个worker的并发数，对所有executor类型都生效
     llm_request_concurrency: 0  # 每个worker调用llm的并发，默认0表示不限制，如果llm有限制的需要再调这个
+    direct_submit_query: False  # 是否直接将query对象发给request manager，跳过http发给openai compatible serve的过程
   tool_call_start_token: "<tool_call>"
   tool_call_end_token: "</tool_call>"
 

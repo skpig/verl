@@ -131,15 +131,11 @@ class JupyterCI(BaseTool):
 
     async def get_endpoint(self, psm):
         code_sandbox_psm = psm if psm else SANDBOX_PSM
-        from bytedance import servicediscovery
+        import servicediscovery.aio as servicediscovery
         for i in range(30):
             try:
-                # Run potentially blocking service discovery in executor
-                loop = asyncio.get_event_loop()
-                sd_result = await loop.run_in_executor(
-                    None, functools.partial(servicediscovery.get_one, code_sandbox_psm, address_family="dual-stack"))
-
-                host = f"[{sd_result['Host']}]" if ':' in sd_result['Host'] else sd_result['Host']
+                sd_result = await servicediscovery.get_one(code_sandbox_psm, address_family="v6")
+                host = f"[{sd_result['Host']}]"
                 port = sd_result["Port"]
                 temp_endpoint = f"http://{host}:{port}"
 

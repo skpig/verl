@@ -12,26 +12,36 @@ from transformers import AutoTokenizer, PreTrainedTokenizer
 from alpha_seed.utils.tokenizer.async_tokenizer import AsyncTokenizer
 from alpha_seed.workers.agents.handlers import TaskContext
 from alpha_seed.workers.agents.handlers.base import AsyncAgent, functional_agent, ThreadedAgent
-from alpha_seed.workers.agents.llm import OpenAIAsyncClient, OpenAIClient
+from alpha_seed.workers.agents.llm import OpenAIAsyncClient, OpenAIClient, DirectAsyncClient, DirectClient
 
 
 class AgentWorker:
 
-    def __init__(self, config: DictConfig, tokenizer: PreTrainedTokenizer, host, port, worker_id: int):
+    def __init__(self, config: DictConfig, tokenizer: PreTrainedTokenizer, host, port, request_manager_name,
+                 worker_id: int):
         """
         config: root config
         host: llm server host
         port: llm server port
+        request_manager_name: the corresponding request manager of rollout
         worker_id: worker id to identify different workers
         """
         self.worker_max_concurrency = config.rollout_server.agent.worker_max_concurrency
         self.llm_request_concurrency = config.rollout_server.agent.llm_request_concurrency
+        self.llm_timeout = config.rollout_server.timeout
         self._thread_executor = ThreadPoolExecutor(max_workers=self.worker_max_concurrency,
                                                    thread_name_prefix=f"agent-worker-{worker_id}")
         self.tokenizer = tokenizer
         self.async_tokenizer = AsyncTokenizer(tokenizer)
-        self.llm = OpenAIAsyncClient(host, port, self.llm_request_concurrency)
-        self.sync_llm = OpenAIClient(host, port)
+
+        # 根据配置选择使用Direct/OpenAI client
+        if config.rollout_server.agent.direct_submit_query:
+            self.llm = DirectAsyncClient(request_manager_name)
+            self.sync_llm = DirectClient(request_manager_name)
+        else:
+            self.llm = OpenAIAsyncClient(host, port, self.llm_request_concurrency, self.llm_timeout)
+            self.sync_llm = OpenAIClient(host, port, self.llm_timeout)
+
         self.concurrency_limit = asyncio.Semaphore(self.worker_max_concurrency)
         self.config = config
 
@@ -67,7 +77,7 @@ class ExecutorBase:
 
 class RayActorExecutor(ExecutorBase):
 
-    def __init__(self, name, config, tokenizer, host, port):
+    def __init__(self, name, config, tokenizer, host, port, request_manager_name):
         self.name = name
         self.max_workers = config.rollout_server.agent.max_workers
         self.worker_max_concurrency = config.rollout_server.agent.worker_max_concurrency
@@ -75,7 +85,8 @@ class RayActorExecutor(ExecutorBase):
         self.workers = [
             RemoteAgentWorker.options(scheduling_strategy="SPREAD",
                                       max_concurrency=self.worker_max_concurrency,
-                                      name=f"{name}-agent_worker_{idx}").remote(config, tokenizer, host, port, idx)
+                                      name=f"{name}-agent_worker_{idx}").remote(config, tokenizer, host, port,
+                                                                                request_manager_name, idx)
             for idx in range(self.max_workers)
         ]
         self.worker_pointer = cycle(range(self.max_workers))
@@ -91,11 +102,13 @@ class RayActorExecutor(ExecutorBase):
 
 class LocalExecutor(ExecutorBase):
 
-    def __init__(self, name, config, tokenizer, host, port):
+    def __init__(self, name, config, tokenizer, host, port, request_manager_name):
         self.name = name
         self.max_workers = config.rollout_server.agent.max_workers
         self.worker_max_concurrency = config.rollout_server.agent.worker_max_concurrency
-        self.workers = [AgentWorker(config, tokenizer, host, port, idx) for idx in range(self.max_workers)]
+        self.workers = [
+            AgentWorker(config, tokenizer, host, port, request_manager_name, idx) for idx in range(self.max_workers)
+        ]
         self.worker_pointer = cycle(range(self.max_workers))
 
     async def submit(self, agent_cls: Type[AsyncAgent] | Type[ThreadedAgent] | callable, /, *args, **kwargs):

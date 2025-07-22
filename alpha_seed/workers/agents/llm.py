@@ -4,9 +4,15 @@ from abc import ABC, abstractmethod
 
 import aiohttp
 import httpx
+import ray
 import torch
 from omegaconf import DictConfig
 
+from alpha_seed.workers.streaming_service.rollout_request_manager import RequestManager, RequestManagerRegisterCenter
+from alpha_seed.workers.xperf_rollout.component.query import Query
+from alpha_seed.workers.streaming_service.protocol import ChatCompletionRollout, ChoiceRollout, ChatCompletionMessageRollout, CompletionUsage
+import uuid
+import time
 from mono_rl import DataProto
 from mono_rl.utils.network import is_ipv6
 
@@ -75,13 +81,13 @@ class AsyncLLMInterface(ABC):
 
 class OpenAIAsyncClient(AsyncLLMInterface):
 
-    def __init__(self, host: str, port: int, max_connection: int):
+    def __init__(self, host: str, port: int, max_connection: int, timeout: float = 9600):
         if is_ipv6(host):
             self._host = f'[{host}]'
         else:
             self._host = host
         self._port = port
-        self.timeout = aiohttp.ClientTimeout(total=9600)
+        self.timeout = aiohttp.ClientTimeout(total=timeout)
         self.max_connection = max_connection
         self.url = f"http://{self._host}:{self._port}/chat/completions"
         self._session = None
@@ -147,6 +153,84 @@ class OpenAIAsyncClient(AsyncLLMInterface):
         return self._port
 
 
+class DirectAsyncClient(AsyncLLMInterface):
+
+    def __init__(self, request_manager_name):
+        self.request_manager: RequestManager = RequestManagerRegisterCenter.get(request_manager_name)
+
+    async def chat_completions(self, content: dict, meta_info: dict, config: DictConfig):
+        # 从content和meta_info构造Query对象
+        prompt = content["prompt"]
+        if isinstance(prompt, str):
+            input_ids = []
+            input_prompt = prompt
+        else:
+            input_ids = prompt
+            input_prompt = ""
+
+        request_id = uuid.uuid4().hex
+        generation_kwargs = meta_info['generation_kwargs']
+
+        # 构造sampling参数
+        sampling_kwargs = {
+            "top_k": generation_kwargs['top_k'],
+            "top_p": generation_kwargs['top_p'],
+            "temperature": generation_kwargs['temperature'],
+            "max_new_tokens": generation_kwargs['max_new_tokens'],
+            "max_length": config.prompt_length + config.response_length,
+        }
+
+        # 图像支持
+        image_kwargs = None
+        if 'pixel_values_ref' in content:
+            image_kwargs = {'pixel_values_ref': content['pixel_values_ref'], 'image_grid_hw': content['image_grid_hw']}
+
+        # 创建Query对象
+        query = Query.from_request(input_ids, input_prompt, request_id, sampling_kwargs, meta_info, image_kwargs)
+
+        # 提交query到request_manager
+        query_id = await self.request_manager.put_new_query.remote(query)
+
+        # 等待完成
+        finished_query = await self.request_manager.wait_until_finished.remote(query_id)
+
+        # 构造response dict（模仿server的返回格式）
+        message = ChatCompletionMessageRollout(
+            role="assistant",
+            prompt=finished_query.input_prompt + finished_query.output_prompt[0],  # input+output
+            raw_output_ids=finished_query.output_tokens,
+            response_log_probs=finished_query.new_token_log_probs,
+            is_finished=finished_query.is_finished,
+            model_output_mask=finished_query.model_output_mask,
+            extra_data=finished_query.extra_data,
+            metrics=finished_query.metrics)
+
+        choice_data = ChoiceRollout(finish_reason="stop" if finished_query.is_finished else "length",
+                                    index=0,
+                                    message=message)
+
+        usage = CompletionUsage(completion_tokens=finished_query.new_token_len,
+                                prompt_tokens=finished_query.original_input_len,
+                                total_tokens=finished_query.original_input_len + finished_query.new_token_len)
+
+        response = ChatCompletionRollout(id=finished_query.id,
+                                         choices=[choice_data],
+                                         created=int(time.time()),
+                                         model="rollout",
+                                         usage=usage)
+
+        # 转换成dict返回
+        return response.dict()
+
+    @property
+    def host(self) -> str:
+        return ""
+
+    @property
+    def port(self) -> int:
+        return 0
+
+
 class SyncLLMInterface(ABC):
 
     @abstractmethod
@@ -180,13 +264,13 @@ class SyncLLMInterface(ABC):
 
 class OpenAIClient(SyncLLMInterface):
 
-    def __init__(self, host: str, port: int):
+    def __init__(self, host: str, port: int, timeout: float = 9600):
         if is_ipv6(host):
             self._host = f'[{host}]'
         else:
             self._host = host
         self._port = port
-        self.timeout = 9600  # httpx timeout in seconds
+        self.timeout = timeout  # httpx timeout in seconds
         self.url = f"http://{self._host}:{self._port}/chat/completions"
 
     def chat_completions(self, content: dict, meta_info: dict, config: DictConfig):
@@ -214,7 +298,10 @@ class OpenAIClient(SyncLLMInterface):
 
             with httpx.Client(timeout=self.timeout) as client:
                 response = client.post(url=self.url,
-                                       headers={"Authorization": "Bearer token-abc123"},
+                                       headers={
+                                           "Authorization": "Bearer token-abc123",
+                                           "Connection": "keep-alive",
+                                       },
                                        json=request_data)
 
                 if response.status_code == 200:
@@ -238,3 +325,81 @@ class OpenAIClient(SyncLLMInterface):
     @property
     def port(self) -> int:
         return self._port
+
+
+class DirectClient(SyncLLMInterface):
+
+    def __init__(self, request_manager_name):
+        self.request_manager: RequestManager = RequestManagerRegisterCenter.get(request_manager_name)
+
+    def chat_completions(self, content: dict, meta_info: dict, config: DictConfig):
+        # 从content和meta_info构造Query对象
+        prompt = content["prompt"]
+        if isinstance(prompt, str):
+            input_ids = []
+            input_prompt = prompt
+        else:
+            input_ids = prompt
+            input_prompt = ""
+
+        request_id = uuid.uuid4().hex
+        generation_kwargs = meta_info['generation_kwargs']
+
+        # 构造sampling参数
+        sampling_kwargs = {
+            "top_k": generation_kwargs['top_k'],
+            "top_p": generation_kwargs['top_p'],
+            "temperature": generation_kwargs['temperature'],
+            "max_new_tokens": generation_kwargs['max_new_tokens'],
+            "max_length": config.prompt_length + config.response_length,
+        }
+
+        # 图像支持
+        image_kwargs = None
+        if 'pixel_values_ref' in content:
+            image_kwargs = {'pixel_values_ref': content['pixel_values_ref'], 'image_grid_hw': content['image_grid_hw']}
+
+        # 创建Query对象
+        query = Query.from_request(input_ids, input_prompt, request_id, sampling_kwargs, meta_info, image_kwargs)
+
+        # 提交query到request_manager
+        query_id = ray.get(self.request_manager.put_new_query.remote(query))
+
+        # 等待完成
+        finished_query = ray.get(self.request_manager.wait_until_finished.remote(query_id))
+
+        # 构造response dict（模仿server的返回格式）
+        message = ChatCompletionMessageRollout(
+            role="assistant",
+            prompt=finished_query.input_prompt + finished_query.output_prompt[0],  # input+output
+            raw_output_ids=finished_query.output_tokens,
+            response_log_probs=finished_query.new_token_log_probs,
+            is_finished=finished_query.is_finished,
+            model_output_mask=finished_query.model_output_mask,
+            extra_data=finished_query.extra_data,
+            metrics=finished_query.metrics)
+
+        choice_data = ChoiceRollout(finish_reason="stop" if finished_query.is_finished else "length",
+                                    index=0,
+                                    message=message)
+
+        usage = CompletionUsage(completion_tokens=finished_query.new_token_len,
+                                prompt_tokens=finished_query.original_input_len,
+                                total_tokens=finished_query.original_input_len + finished_query.new_token_len)
+
+        response = ChatCompletionRollout(id=finished_query.id,
+                                         choices=[choice_data],
+                                         created=int(time.time()),
+                                         model="rollout",
+                                         usage=usage)
+
+        # 转换成dict返回
+        return response.dict()
+
+    @property
+    def host(self) -> str:
+        return ""
+
+    @property
+    def port(self) -> int:
+        return 0
