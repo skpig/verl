@@ -1048,7 +1048,6 @@ class AsyncActorRolloutRefWorker(Worker):
     def old_log_probs(self, prompts: DataProto):
         log_gpu_memory_usage('Before old_log_probs')
         prompts = prompts.to('cpu')
-
         # set to False if it is validation
         recompute_log_prob = prompts.meta_info.get('recompute_log_prob', True)
 
@@ -1088,52 +1087,35 @@ class AsyncActorRolloutRefWorker(Worker):
                 self.to("cpu", model=True, optimizer=False)
 
         output = output.to('cpu')
-
         # clear kv cache
         log_gpu_memory_usage('After recompute log prob')
         return output
 
-    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    def generate_sequences(self, prompts: DataProto):
+    def _run_sequence(self, prompts: DataProto, mode: str = "rollout"):
         torch.cuda.reset_peak_memory_stats()
         prompts = prompts.to('cuda')
-
         assert self._is_rollout or self._is_standalone_validator
-
         prompts.batch = prompts.batch.cuda()
-        meta_info = {'eos_token_id': self.tokenizer.eos_token_id, 'pad_token_id': self.tokenizer.pad_token_id}
-        prompts.meta_info.update(meta_info)
-
-        log_gpu_memory_usage('Before load training memory')
-
+        log_gpu_memory_usage(f'Rollout[{mode}]: Before load training memory')
         # xperf needs parameters from actor
         if self.config.actor.train_memory_offload:
             self.to("cuda", model=True, optimizer=False)
-
-        log_gpu_memory_usage('Before entering sharding manager')
-
+        log_gpu_memory_usage(f'Rollout[{mode}]: Before entering sharding manager')
         self.binding_timer.start()
-
         with self.sharding_manager:
-
             binding_time = self.binding_timer.stop()
-
-            log_gpu_memory_usage('After entering sharding manager')
+            log_gpu_memory_usage(f'Rollout[{mode}]: After entering sharding manager')
             # after parameters go to xperf, offload actor model to CPU
             if self.config.actor.train_memory_offload:
                 self.to("cpu", model=True, optimizer=False)
-
-            log_gpu_memory_usage('After offload train parameters')
+            log_gpu_memory_usage(f'Rollout[{mode}]: After offload train parameters')
             prompts = self.sharding_manager.preprocess_data(prompts)
-
-            generator = self.rollout.generate_sequences(prompts=prompts)
+            generator = self.rollout.generate_sequences(prompts=prompts, mode=mode)
             output = next(generator)
-
             output = self.sharding_manager.postprocess_data(output)
+            log_gpu_memory_usage(f'Rollout[{mode}]: After sequence computation')
 
-            log_gpu_memory_usage('After generate sequences')
-
-        log_gpu_memory_usage('After release kv cache')
+        log_gpu_memory_usage(f'Rollout[{mode}]: After release kv cache')
 
         max_memory_allocated, max_memory_reserved = get_memory()
         output.meta_info.update({
@@ -1142,11 +1124,17 @@ class AsyncActorRolloutRefWorker(Worker):
             'timing/weight_binding': binding_time
         })
         output = output.to('cpu')
-
-        log_gpu_memory_usage('After rollout generation')
         # clear kv cache
         torch.cuda.empty_cache()
         return output
+
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def compute_rollout_log_probs(self, prompts: DataProto):
+        return self._run_sequence(prompts, mode="log_probs")
+
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def generate_sequences(self, prompts: DataProto):
+        return self._run_sequence(prompts, mode="rollout")
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def generate_sequences_put(self, prompts: DataProto):

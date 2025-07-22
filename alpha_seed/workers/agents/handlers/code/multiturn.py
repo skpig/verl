@@ -252,7 +252,7 @@ class CodeAgent(AsyncAgent):
         total_output_ids = entire_seq_list[len(initial_input_ids):]
         log_probs = reduce(lambda x, y: x + y, log_probs_list)[len(initial_input_ids):]
         item.batch['raw_output_ids'] = torch.tensor([total_output_ids], dtype=torch.int32)
-        item.batch['rollout_log_probs'] = torch.tensor([log_probs], dtype=torch.bfloat16)
+        item.batch['rollout_behavior_log_probs'] = torch.tensor([log_probs], dtype=torch.bfloat16)
 
         # left pad and adjust original input
         left_pad_size = context.config.data.max_prompt_length - len(initial_input_ids)

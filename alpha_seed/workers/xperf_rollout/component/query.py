@@ -33,11 +33,10 @@ class Query:
     original_input_ids: Optional[List[int]]
     input_ids: Optional[List[int]]
     code_book: Optional[List[int]]
-    constraint_decoding_predictor: Optional[Any]
     accepted_len: Optional[List[int]]
     input_prompt: Union[str, List[str]]
     new_token_ids: Optional[List[int]]
-    new_token_log_probs: Optional[List[float]]
+    log_probs: Optional[List[float]]
     kv_slot_ids: Optional[List[int]]
     is_context_computing: bool
     new_token_len: int
@@ -55,11 +54,10 @@ class Query:
     finished_time: float  # decode完的时间
     hidden_states: Optional[torch.Tensor]
     logits: Optional[torch.Tensor]
-    logits_mask: Optional[torch.Tensor]
-    shift_label: Optional[torch.Tensor]
     cur_batch_pad_token: int
     nll_loss: Optional[torch.Tensor]
     is_finished: bool
+    prefill_only: bool
     off_policy_steps: int
     meta_info: Optional[Dict]
     plugin_query: QueryPlugin
@@ -74,7 +72,6 @@ class Query:
                  prefix_already_computed_len=0,
                  system_ids_len=0,
                  code_book=None,
-                 constraint_decoding_predictor=None,
                  pixel_values=None,
                  pixel_values_ref=None,
                  image_grid_hw=None):
@@ -83,13 +80,12 @@ class Query:
         self.original_input_ids = copy.copy(input_ids)
         self.input_ids = input_ids
         self.code_book = code_book
-        self.constraint_decoding_predictor = constraint_decoding_predictor
         self.accepted_len = []
         self.input_prompt = input_prompt
         self.prefix_already_computed_len = prefix_already_computed_len
         self.is_context_computing = True
         self.new_token_ids = []
-        self.new_token_log_probs: List[float] = []
+        self.log_probs: List[float] = []
         self.kv_slot_ids = []
         self.new_token_len = 0
         self.output_prompt = ""
@@ -97,15 +93,13 @@ class Query:
         self.system_ids_len = system_ids_len
         self.hidden_states = None
         self.logits = None
-        self.logits_mask = None
-        self.shift_label = None
         self.cur_batch_pad_token = 0
         self.nll_loss = None
         self.is_finished = False
+        self.prefill_only = False
         self.meta_info = {}
 
         # timestamp units are all milliseconds
-        self.created_time = time.time() * 1000
         self.reset_timestamp()
         self.is_jumping = False
         self.jump_tokens = 0
@@ -176,13 +170,16 @@ class Query:
 
     def add_token(self, token_id, accepted_len=-1, log_prob=0.0):
         self.accepted_len.append(accepted_len)
-        self.new_token_log_probs.append(log_prob)
-        self.new_token_ids.append(token_id)
         self.is_context_computing = False
+        if isinstance(log_prob, List):
+            self.log_probs.extend(log_prob)
+        else:
+            self.log_probs.append(log_prob)
+        if not self.prefill_only:
+            self.new_token_ids.append(token_id)
+            self.new_token_len += 1
         if self.plugin_query:
             self.plugin_query.record_model_token(token_id)
-        # 其他字段都更新完后，最后commit这个更新
-        self.new_token_len += 1
 
     def meet_pause_condition(self) -> bool:
         if self.plugin_query and self.action:
@@ -234,6 +231,10 @@ class Query:
         self.first_scheduled_time = 0
         self.first_token_time = 0
         self.finished_time = 0
+        # not yet dispatch and not yet enqueued
+        self.dispatch_time = -1
+        self.enqueue_time = -1
+        self.created_time = time.time() * 1000
 
     def clone(self) -> 'Query':
         ret = copy.copy(self)
@@ -242,7 +243,7 @@ class Query:
         # 为避免这里出现脏读，始终以new_token_len的值表示已经commit的token
         # 所以这里复制已提交部分实现clone的读事务隔离
         ret.accepted_len = ret.accepted_len[:ret.new_token_len]
-        ret.new_token_log_probs = ret.new_token_log_probs[:ret.new_token_len]
+        ret.log_probs = ret.log_probs[:ret.new_token_len]
         # new_token_ids比较特殊，每次reset_compute会把new_token_ids追加到input_ids里面
         # 但new_token_len持续累加，所以这里算出来真正需要truncate的量
         total_committed_tokens = ret.original_input_len + ret.new_token_len
@@ -296,7 +297,7 @@ class Query:
 
     def attach_session(self, session):
         """Attach session, initialize session-dependant fields"""
-        generation_kwargs = self.meta_info['generation_kwargs']
+        generation_kwargs = self.meta_info.get('generation_kwargs', {})
         plugin_config = generation_kwargs.get('plugin_config', None)
         plugin_enabled = plugin_config and plugin_config.get('enable', False)
 

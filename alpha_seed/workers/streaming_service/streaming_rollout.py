@@ -111,8 +111,31 @@ class AsyncXPerfGPTRollout(object):
         # 表示engine是否在gen loop里，hybrid模式如果weights offloaded，不应该在gen loop里，可以用这个event来判断状态
         self.gen_loop_exited = threading.Event()
         self.stop_event = threading.Event()
-        if self.config.mode == "server" or self.role == "rollout_server":
+        self.exit_event = threading.Event()
+        self.is_async_generate = self.config.mode == "server" or self.role == "rollout_server"
+
+    def switch_mode(self, to_async: bool):
+        """
+        Switch the background generation thread between async_generate and generate.
+        Will stop the current thread and start a new one.
+        
+        :param to_async: If True, switch to async_generate; else use generate.
+        """
+        print(f"[Switch] Switching to {'async_generate' if to_async else 'generate'} mode...")
+        if self.process_thread and self.process_thread.is_alive():
+            self.exit_event.set()
             self.stop_event.set()
+            self.process_thread.join(timeout=5)
+            if self.process_thread.is_alive():
+                print("[Switch] process_thread did not exit cleanly")
+            else:
+                print("[Switch] Previous process_thread stopped successfully")
+
+        new_target = self.async_generate if to_async else self.generate
+        self.process_thread = threading.Thread(target=new_target, name="streaming-rollout-background-generate")
+        self.exit_event.clear()
+        self.process_thread.start()
+        print("[Switch] New process_thread started")
 
     def initialize(self,
                    local_path=None,
@@ -341,6 +364,8 @@ class AsyncXPerfGPTRollout(object):
             self.inference_engine.abort(query_ids, not_after)
 
     def get_all_queries(self, query_type: str) -> List[Query]:
+        if not self.process_thread.is_alive():
+            return []
         assert self.process_thread.is_alive(), "process thread is not alive, please check the traceback in log"
         return self.inference_engine.get_all_queries(query_type=query_type, retain_finished=False)
 
@@ -373,11 +398,12 @@ class AsyncXPerfGPTRollout(object):
 
     def __init_sub_process(self):
         self._set_tuner_config()
+        if self.is_async_generate:
+            self.stop_event.set()
         self.input_queue = queue.Queue()
         self.output_queue = queue.Queue()
         # rollout_server 等于 standalone rollout + elastic模式
-        use_async_gen = self.config.mode == "server" or self.role == "rollout_server"
-        self.process_thread = threading.Thread(target=self.async_generate if use_async_gen else self.generate,
+        self.process_thread = threading.Thread(target=self.async_generate if self.is_async_generate else self.generate,
                                                name="streaming-rollout-background-generate")
         self.process_thread.start()
 
@@ -436,16 +462,99 @@ class AsyncXPerfGPTRollout(object):
             hcopy(f"{save_model_name}_model_engine_weights.pt", self.config.get("dump_nan", None))
             hcopy(f"{save_model_name}_output.pt", self.config.get("dump_nan", None))
 
+    def _process_log_probs(self, prompts, data_pack):
+        if self.is_async_generate:
+            self.switch_mode(True)
+        original_prompt_ids = prompts.batch['prompts']  # (bs, prompt_length)
+        first_non_one_indices = (original_prompt_ids != self.tokenizer.pad_token_id).int().argmax(dim=1)
+        rmv_padding_original_prompt_ids = [
+            row[index:].tolist() for row, index in zip(original_prompt_ids, first_non_one_indices)
+        ]
+        max_new_tokens = prompts.meta_info.get('generation_kwargs').get('max_new_tokens', self.config.response_length)
+        log_prob_lists = data_pack.response_log_probs
+        padded_rollout_policy_log_probs = torch.full((len(log_prob_lists), max_new_tokens), fill_value=-100.0)
+        for i, log_probs in enumerate(log_prob_lists):
+            response_log_probs = log_probs[len(rmv_padding_original_prompt_ids[i]):]
+            assert (len(response_log_probs) <= max_new_tokens)
+            padded_rollout_policy_log_probs[i, :len(response_log_probs)] = torch.tensor(response_log_probs)
+        prompts.batch["rollout_policy_log_probs"] = padded_rollout_policy_log_probs.bfloat16()
+        return prompts
+
+    @torch.no_grad()
+    def generate_sequences(self, prompts: DataProto, is_async=False, mode="rollout"):
+        if mode == "log_probs" and self.is_async_generate:
+            self.switch_mode(False)
+        complete_ratio = prompts.meta_info.get('complete_ratio', 1)
+        prompt_ids = prompts.batch['input_ids']  # (bs, prompt_length)
+        # left-padded attention_mask
+        off_turn_off_policy_steps = prompts.batch["off_policy_steps"]
+        first_non_one_indices = (prompt_ids != self.tokenizer.pad_token_id).int().argmax(dim=1)
+        rmv_padding_prompt_ids = [row[index:].tolist() for row, index in zip(prompt_ids, first_non_one_indices)]
+        generation_kwargs = prompts.meta_info['generation_kwargs']
+
+        prompt_meta_info = [{
+            "off_policy_steps": max(off_policy_step),
+            "generation_kwargs": generation_kwargs,
+            "mode": mode,
+        } for off_policy_step in off_turn_off_policy_steps.tolist()]
+        prompt_meta_info = self._batch_process_images(prompts, prompt_meta_info)
+        self.input_queue.put((rmv_padding_prompt_ids, complete_ratio, generation_kwargs, prompt_meta_info))
+
+        if is_async:
+            yield
+            # stop event
+            if self.async_remain_warmup_step <= 0:
+                self.stop_event.set()
+            data_pack = self._get_output_from_queue()
+            if self.async_remain_warmup_step <= 0:
+                self.stop_event.clear()
+            self.async_remain_warmup_step -= 1
+        else:
+            # complete_ratio or all prompts are finished
+            data_pack = self._get_output_from_queue()
+        if mode == "log_probs":
+            prompts = self._process_log_probs(prompts, data_pack)
+            yield prompts
+            return
+
+        out = pack_to_dataproto(prompts=prompts, data_pack=data_pack, config=self.config, tokenizer=self.tokenizer)
+        yield out
+
+    def async_generate(self):
+        torch.cuda.set_device(int(os.getenv('LOCAL_RANK', '0')))
+        while (not self.exit_event.is_set()):
+            if not self.weights_loaded.wait(timeout=1):
+                continue
+            if self.stop_event.is_set():
+                continue
+            with logging_set_level(self.config.get('logging_level', 'WARN')), self.profiler_context as p:
+                try:
+                    self.reset_status()
+                    self.gen_loop_exited.clear()
+                    # server mode: rollout only
+                    self.inference_engine.switch_inference_mode("rollout")
+                    self.inference_engine.async_execute(self.stop_event)
+                    profile_step(p, None)
+                    self.gen_loop_exited.set()
+                except Exception as e:
+                    self._dump_context()
+                    raise (e)
+
     def generate(self):
         torch.cuda.set_device(int(os.getenv('LOCAL_RANK', '0')))
-        while True:
-            (query_pool, complete_ratio, generation_kwargs, prompt_meta_info) = self.input_queue.get(block=True)
+        while (not self.exit_event.is_set()):
+            try:
+                item = self.input_queue.get(timeout=1)
+            except queue.Empty:
+                continue
+            (query_pool, complete_ratio, generation_kwargs, prompt_meta_info) = item
             original_query_pool = copy.deepcopy(query_pool)
             self.inference_engine.set_generator_strategy(**generation_kwargs)
             with logging_set_level(self.config.get('logging_level', 'WARN')), self.profiler_context as p:
                 try:
                     self.reset_status()
                     self.gen_loop_exited.clear()
+                    self.inference_engine.switch_inference_mode(prompt_meta_info[0]['mode'])
                     self.inference_engine.execute(query_pool,
                                                   complete_ratio=complete_ratio,
                                                   stop_event=self.stop_event if self.is_standalone else None,
@@ -466,9 +575,9 @@ class AsyncXPerfGPTRollout(object):
             for prompt, v in zip(original_query_pool, self.inference_engine.get_inorder_responses()):
                 response_output_ids = (v.input_ids + v.new_token_ids)[len(prompt):]
                 response_outputs.append(response_output_ids)
-                response_log_probs.append(v.new_token_log_probs)
+                response_log_probs.append(v.log_probs)
                 is_finished.append(v.is_finished)
-                off_policy_steps.append([-1] * len(v.new_token_log_probs))
+                off_policy_steps.append([-1] * len(v.log_probs))
                 model_output_masks.append(v.model_output_mask)
                 query_metrics.append(v.metrics)
                 extra_data.append(v.extra_data)
@@ -527,59 +636,6 @@ class AsyncXPerfGPTRollout(object):
                 for i in range(batch_size):
                     prompt_meta_info[i][key] = value[i]
         return prompt_meta_info
-
-    @torch.no_grad()
-    def generate_sequences(self, prompts: DataProto, is_async=False):
-        complete_ratio = prompts.meta_info.get('complete_ratio', 1)
-        prompt_ids = prompts.batch['input_ids']  # (bs, prompt_length)
-        # left-padded attention_mask
-        off_turn_off_policy_steps = prompts.batch["off_policy_steps"]
-        first_non_one_indices = (prompt_ids != self.tokenizer.pad_token_id).int().argmax(dim=1)
-        rmv_padding_prompt_ids = [row[index:].tolist() for row, index in zip(prompt_ids, first_non_one_indices)]
-        generation_kwargs = prompts.meta_info['generation_kwargs']
-
-        prompt_meta_info = [{
-            "off_policy_steps": max(off_policy_step),
-            "generation_kwargs": generation_kwargs,
-        } for off_policy_step in off_turn_off_policy_steps.tolist()]
-
-        prompt_meta_info = self._batch_process_images(prompts, prompt_meta_info)
-        self.input_queue.put((rmv_padding_prompt_ids, complete_ratio, generation_kwargs, prompt_meta_info))
-
-        if is_async:
-            yield
-            # stop event
-            if self.async_remain_warmup_step <= 0:
-                self.stop_event.set()
-            data_pack = self._get_output_from_queue()
-            if self.async_remain_warmup_step <= 0:
-                self.stop_event.clear()
-            self.async_remain_warmup_step -= 1
-        else:
-            # complete_ratio or all prompts are finished
-            data_pack = self._get_output_from_queue()
-
-        out = pack_to_dataproto(prompts=prompts, data_pack=data_pack, config=self.config, tokenizer=self.tokenizer)
-        yield out
-
-    def async_generate(self):
-        torch.cuda.set_device(int(os.getenv('LOCAL_RANK', '0')))
-        while True:
-            # 这里先等rollout的weights确定load好了再进入engine的循环，避免在hybrid engine里提前进入engine循环
-            # 触发到_should_terminate里的tensor all reduce导致和actor model初始化互相死锁
-            self.weights_loaded.wait()
-            if self.stop_event.is_set():
-                continue
-            with logging_set_level(self.config.get('logging_level', 'WARN')), self.profiler_context as p:
-                try:
-                    self.reset_status()
-                    self.gen_loop_exited.clear()
-                    self.inference_engine.async_execute(self.stop_event)
-                    profile_step(p, None)
-                    self.gen_loop_exited.set()
-                except Exception as e:
-                    self._dump_context()
-                    raise (e)
 
 
 from omegaconf import DictConfig

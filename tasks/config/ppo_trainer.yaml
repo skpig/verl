@@ -325,9 +325,8 @@ reward_model:
 
 algorithm:
   group_shuffle: False
-
   shuffle_sample_batch: False
-
+  enable_rollout_log_probs: False
   dynamic_sampling:
     enable: False
     sync: True

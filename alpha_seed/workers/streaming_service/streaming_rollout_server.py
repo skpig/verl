@@ -82,7 +82,7 @@ class OpenAIProxy(ABC):
             role="assistant",
             prompt=query.input_prompt + query.output_prompt[0],
             raw_output_ids=query.output_tokens,
-            response_log_probs=query.new_token_log_probs,
+            response_log_probs=query.log_probs,
             is_finished=query.is_finished,
             model_output_mask=query.model_output_mask,
             extra_data=query.extra_data,

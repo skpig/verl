@@ -217,7 +217,7 @@ def pack_to_dataproto(prompts, tokenizer, data_pack: DataPack, config) -> DataPr
     attention_mask = prompts.batch['attention_mask']
     off_policy_model_output_mask = prompts.batch.get('model_output_mask', None)
     off_turn_off_policy_steps = prompts.batch["off_policy_steps"]
-    off_policy_response_log_probs = prompts.batch["rollout_log_probs"]
+    off_policy_response_log_probs = prompts.batch["rollout_behavior_log_probs"]
 
     from unittest.mock import patch
     # remove warning
@@ -253,7 +253,7 @@ def pack_to_dataproto(prompts, tokenizer, data_pack: DataPack, config) -> DataPr
 
     # all the tp ranks should contain the same data here. data in all ranks are valid
     batch = {
-        'rollout_log_probs': response_log_probs.to(torch.bfloat16),
+        'rollout_behavior_log_probs': response_log_probs.to(torch.bfloat16),
         'input_ids': input_ids.to(torch.int32),  # here input_ids become the whole sentences
         'attention_mask': attention_mask.to(torch.int8),
         'is_finished': torch.Tensor(data_pack.is_finished).to(torch.int8),

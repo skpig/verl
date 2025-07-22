@@ -141,7 +141,7 @@ python3 tasks/main_ppo.py \
     trainer.log_file=/opt/tiger/alpha-seed/log.jsonl \
     trainer.resume_steps=disable \
     actor_rollout_ref.rollout.schedule_strategy="fifo" \
-    +actor_rollout_ref.actor.use_rollout_log_probs=True \
+    +actor_rollout_ref.actor.use_rollout_behavior_log_probs=True \
     trainer.offload_train_memory=True \
     trainer.total_steps=${NUM_STEPS} \
     streaming_validator.nnodes=0 \

@@ -31,7 +31,6 @@ class CacheManager:
             self,
             slot_num,
             max_batch_size,
-            pp_size,
             use_vllm,
             slot_block_size=256,
             context_batchsize_limit=1,
@@ -43,8 +42,6 @@ class CacheManager:
         self.slot_num = slot_num
         self.slot_block_size = slot_block_size
         self.max_batch_size = max_batch_size
-        self.pp_size = pp_size
-        self.micro_max_batch_size = max(int(self.max_batch_size / self.pp_size), 1)
         self.use_vllm = use_vllm
         self.slot_table_status: List[SlotStatus] = [SlotStatus(id=i) for i in range(slot_num)]
         self.available_slot_table: deque = deque([i for i in range(slot_num)])
@@ -52,7 +49,6 @@ class CacheManager:
         self.cur_context_bs_this_run = 0
         self.cur_bs_this_run = 0
         self.context_batchsize_limit = context_batchsize_limit
-        self.micro_context_batchsize_limit = max(int(context_batchsize_limit / self.pp_size), 1)
         self.page_swap_out_bs = 0
         self.page_swap_out_token = 0
         self.enable_ngrams_decoding = enable_ngrams_decoding
@@ -240,10 +236,10 @@ class CacheManager:
                 (self.slot_num - len(self.available_slot_table)) / self.slot_num))
 
     def _update_query(self, query: Query, thresold: int = 0) -> UpdateQueryStatus:
-        if self.cur_bs_this_run == self.micro_max_batch_size:
+        if self.cur_bs_this_run == self.max_batch_size:
             return UpdateQueryStatus.REACH_MAX_BS
 
-        if self.micro_context_batchsize_limit == self.cur_context_bs_this_run and query.is_context_computing:
+        if self.context_batchsize_limit == self.cur_context_bs_this_run and query.is_context_computing:
             return UpdateQueryStatus.REACH_MAX_CTX_BS
 
         # Context stage: Allocate kv_slot_ids for query for the first time

@@ -230,7 +230,7 @@ def main(global_config):
         'input_ids': input_ids,
         'attention_mask': attention_mask,
         'off_policy_steps': torch.zeros(input_ids.shape[0], global_config.data.max_response_length),
-        'rollout_log_probs': torch.randn(input_ids.shape[0], global_config.data.max_response_length),
+        'rollout_behavior_log_probs': torch.randn(input_ids.shape[0], global_config.data.max_response_length),
     }
 
     non_tensors = {

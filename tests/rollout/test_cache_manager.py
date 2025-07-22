@@ -26,11 +26,9 @@ def test_scheduler(use_vllm, schedule_strategy: str):
     slot_num = 288
     slot_block_size = 1024
     max_batch_size = 100 if use_vllm else 16
-    pp_size = 1
     context_batchsize_limit = 8
     mgr = CacheManager(slot_num=slot_num,
                        max_batch_size=max_batch_size,
-                       pp_size=pp_size,
                        use_vllm=use_vllm,
                        slot_block_size=slot_block_size,
                        context_batchsize_limit=context_batchsize_limit,

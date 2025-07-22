@@ -207,6 +207,7 @@ class InferenceSession:
         self.schedule_strategy = schedule_strategy
         self.step_profiler = step_profiler
         self.status = "idle"
+        self.mode = "rollout"
         self.enable_mtp_decoding = enable_mtp_decoding
         self.record_input_prompt = True
         self.tokenizer = None
@@ -271,13 +272,18 @@ class InferenceSession:
         self.common_prefix_tensor_len = 0
         self.return_full_hidden_states = False
         self.return_padding_tensor = False
-        self.return_full_hidden_states_after_layernorm = True
         self.last_token_only = True
         self.eos_callback_fn = None
         self.stop_signal_tensor = torch.tensor([0.0]).float().cuda()
         self.update_weights_lock = Lock()
         self._accepted_queries_mutex = Lock()
         self.tp_group = None
+
+    def switch_inference_mode(self, mode):
+        self.mode = mode
+        if mode == "log_probs":
+            self.cache_manager.context_batchsize_limit = 1
+        self.infer_scheduler.switch_mode(mode)
 
     def _validate_paged_attention_config(self):
         """Validate paged attention configuration constraints"""
@@ -306,7 +312,6 @@ class InferenceSession:
             "save_mp_checkpoint_path": None,
             "return_full_hidden_states": False,
             "return_padding_tensor": False,
-            "return_full_hidden_states_after_layernorm": True,
             "last_token_only": True,
             "stop_sequence_tokens": None,
             "record_input_prompt": None,
@@ -318,7 +323,6 @@ class InferenceSession:
         if self.enable_mtp_decoding:
             kwargs.update({
                 "return_full_hidden_states": True,
-                "return_full_hidden_states_after_layernorm": False,
                 "last_token_only": False,
             })
 
@@ -414,7 +418,6 @@ class InferenceSession:
 
         self.cache_manager = CacheManager(slot_num=self.num_slots,
                                           max_batch_size=self.max_batch_size,
-                                          pp_size=1,
                                           use_vllm=self.enable_paged_attn,
                                           slot_block_size=self.slot_block_size,
                                           context_batchsize_limit=self.context_limit_bs,
@@ -428,7 +431,6 @@ class InferenceSession:
             sampler=self.sampler,
             return_full_hidden_states=self.return_full_hidden_states,
             return_padding_tensor=self.return_padding_tensor,
-            return_full_hidden_states_after_layernorm=self.return_full_hidden_states_after_layernorm,
             last_token_only=self.last_token_only,
             context_only=False,
             enable_cuda_graph=self.enable_cuda_graph,
@@ -502,7 +504,7 @@ class InferenceSession:
                 truncate_input_ids.append(input_ids)
         return truncate_input_ids
 
-    def find_longest_common_prefix(self, input_ids_list, logits_masks):
+    def find_longest_common_prefix(self, input_ids_list):
         size = len(input_ids_list)
         assert (size > 0)
         if size == 1 or not int(os.getenv("USE_SESSION_CACHE", 1)):
@@ -515,9 +517,6 @@ class InferenceSession:
             return
 
         end = min([len(input_ids) for input_ids in input_ids_list])
-        if logits_masks is not None:
-            max_pre_len = min([mask.index(1) for mask in logits_masks])
-            end = min(end, max_pre_len)
 
         i = 0
         while (i < end) and \
@@ -538,7 +537,7 @@ class InferenceSession:
         elif isinstance(code_book, list) and isinstance(code_book[0], int):
             return code_book
 
-    def prepare_context_inputs(self, input_ids_list, logits_masks, prompt_meta_info: List[Dict]):
+    def prepare_context_inputs(self, input_ids_list, prompt_meta_info: List[Dict]):
         code_books = [None for _ in range(len(input_ids_list))]
         off_policy_steps = [0 for _ in range(len(input_ids_list))]
 
@@ -567,11 +566,6 @@ class InferenceSession:
                               input_prompt=prompt,
                               idx=idx,
                               prefix_already_computed_len=prefix_already_computed_len)
-                if logits_masks is not None:
-                    self.return_padding_tensor = True
-                    assert len(logits_masks[idx]) == len(query.input_ids), "logits_mask length not match input_ids"
-                    query.logits_mask = torch.tensor(logits_masks[idx]).long()
-                    query.shift_label = torch.tensor(input_ids[1:] + [-1]).cuda()
                 if len(input_ids) <= self.max_length:
                     self.waiting.append(query)
                 query.off_policy_steps = off_policy_steps[idx]
@@ -584,6 +578,7 @@ class InferenceSession:
                 query.pixel_values = query.meta_info.pop("pixel_values", None)
                 query.pixel_values_ref = query.meta_info.pop("pixel_values_ref", None)
                 query.image_grid_hw = query.meta_info.pop("image_grid_hw", None)
+                query.prefill_only = self.mode != "rollout"
                 query.attach_session(session=self)
                 with self._accepted_queries_mutex:
                     self.all_accepted_queries[query.id] = query
@@ -767,6 +762,7 @@ class InferenceSession:
         max_kv_index_len = -1
         phase0_index = []  # index in running
         phase0_list = []
+        phase0_labels_list = []  # for log probs only
         phase1_index = []
         phase1_list = []
         phase0_total_length = []
@@ -786,6 +782,7 @@ class InferenceSession:
         draft_list = []
         draft_total_length = []
         target_hidden_states = []
+        # MTP is PD separate
         prefill_only = self.enable_mtp_decoding and any([query.is_context_computing for query in running])
 
         for index, query in enumerate(running):
@@ -795,11 +792,14 @@ class InferenceSession:
             max_kv_index_len = max(max_kv_index_len, len(query.kv_slot_ids))
             if query.is_context_computing:
 
-                def _get_inp_embs(input_ids, start: int, end: int):
+                def _get_inp_embs_and_labels(input_ids, start: int, end: int):
                     is_vlm = query.pixel_values is not None
+                    labels_ids = input_ids + [self.pad_token_id]
+                    labels_ids = labels_ids[start + 1:end + 1]
+                    input_ids = torch.tensor(input_ids).cuda()
                     is_oe = self.oe_max_stride > 1
                     if is_vlm:
-                        input_ids = input_ids.cuda()
+                        input_ids = input_ids
                         input_embs = self._prepare_image_embeds(input_ids, query.pixel_values, query.image_grid_hw)
                     else:
                         if is_oe:
@@ -817,34 +817,34 @@ class InferenceSession:
                             input_embs = self.engine.get_input_oe_embeddings(curr_input_ids, step_seq_length,
                                                                              total_seq_length)
                         else:
-                            input_ids = input_ids[start:end].cuda()
+                            input_ids = input_ids[start:end]
                             input_embs = self.engine.get_input_embeddings(input_ids=input_ids)
                     if input_embs.ndim == 2:
                         input_embs = input_embs.unsqueeze(0)
                     if is_vlm:
                         assert (input_embs.ndim == 3)
                         input_embs = input_embs[:, start:end, :]
-                    return input_embs
-
-                input_ids = torch.tensor(query.input_ids)
+                    return input_embs, torch.tensor(labels_ids)
 
                 current_context_shift = query.context_shift + query.prefix_already_computed_len
                 # start from context_shift pos
                 if context_len > self.context_split_len or query.context_shift > 0:
-                    query_input_emb = _get_inp_embs(input_ids, current_context_shift,
-                                                    current_context_shift + self.context_split_len)
+                    query_input_emb, labels_ids = _get_inp_embs_and_labels(
+                        query.input_ids, current_context_shift, current_context_shift + self.context_split_len)
                     logging_rank_only(
                         logging.debug, 0,
                         "trigger context split {} -> {}:{}".format(context_len, current_context_shift,
                                                                    current_context_shift + context_len))
                     context_len = query_input_emb.shape[1]
                 else:
-                    query_input_emb = _get_inp_embs(input_ids, current_context_shift, input_ids.shape[0])
+                    query_input_emb, labels_ids = _get_inp_embs_and_labels(query.input_ids, current_context_shift,
+                                                                           len(query.input_ids))
 
                 query.context_shift += query_input_emb.shape[1]
                 max_context_len = max(max_context_len, context_len)
                 phase0_index.append(index)
                 phase0_list.append(query_input_emb)
+                phase0_labels_list.append(labels_ids)
                 phase0_total_length.append(context_len)
                 phase0_kv_index.append(query.kv_slot_ids) if self.enable_paged_attn else phase0_kv_index.extend(
                     query.kv_slot_ids)
@@ -886,6 +886,7 @@ class InferenceSession:
         # left pad context_input
         if len(phase0_list) > 0:
             context_emb = None
+            context_input_ids = None
             for i, query in enumerate(phase0_list):
                 pad_tokens = None if max_context_len - query.shape[1] == 0 else [self.pad_token_id] * (max_context_len -
                                                                                                        query.shape[1])
@@ -898,12 +899,16 @@ class InferenceSession:
                     running[phase0_index[i]].cur_batch_pad_token = max_context_len - query.shape[1]
                 if context_emb is None:
                     context_emb = phase0_list[i]
+                    context_labels_ids = phase0_labels_list[i]
                 else:
                     context_emb = torch.concat([context_emb, phase0_list[i]], dim=0)
+                    context_labels_ids = torch.concat([context_labels_ids, phase0_labels_list[i]], dim=0)
             context_input = context_emb
             results['context_input'] = context_input
+            results['context_labels_ids'] = context_labels_ids
         else:
             results['context_input'] = None
+            results['context_labels_ids'] = None
 
         if len(phase1_list) > 0:
             if self.oe_max_stride > 1:
@@ -1072,17 +1077,11 @@ class InferenceSession:
             self._try_resume_paused_queries()
             time.sleep(0.1)
 
-    def execute(self,
-                prompts,
-                logits_masks: List[List[int]] = None,
-                complete_ratio=1,
-                stop_event=None,
-                prompt_meta_info: List[Dict] = None):
+    def execute(self, prompts, complete_ratio=1, stop_event=None, prompt_meta_info: List[Dict] = None):
         """Main inference execution loop
         
         Args:
             prompts: List of text prompts or tokenized IDs
-            logits_masks: Per-token logits masks for constrained decoding
             complete_ratio: Stop when this fraction of queries complete
             stop_event: External termination signal
             prompt_meta_info: Additional per-prompt metadata
@@ -1090,16 +1089,15 @@ class InferenceSession:
         Returns:
             List of completed Query objects with results by method get_inorder_responses()
         """
-
         torch.manual_seed(int(os.getenv('XPERF_RANDOM_SEED', '0')))
-        input_ids_list = self.truncate_prompts(prompts, logits_masks is not None)
-        self.find_longest_common_prefix(input_ids_list, logits_masks)
+        input_ids_list = self.truncate_prompts(prompts, False)
+        self.find_longest_common_prefix(input_ids_list)
         if not self.is_xperf_custom and not self.is_xperf_triton:
             self.build_prefix_kv_cache()
             logging_rank(
                 logging.info, "find common prefix which contains {} tokens, reuse this kv cache!".format(
                     self.common_prefix_tensor_len))
-        self.prepare_context_inputs(input_ids_list, logits_masks, prompt_meta_info)
+        self.prepare_context_inputs(input_ids_list, prompt_meta_info)
         self.current_steps = 0
         self.finished_num = 0
         if self.step_profiler is not None:
@@ -1126,6 +1124,7 @@ class InferenceSession:
                 kv_index=forward_inputs['kv_index'],
                 orca_updated=True,
                 context_shifts=forward_inputs['context_shifts'],
+                context_labels_ids=forward_inputs['context_labels_ids'],
                 history_ids=forward_inputs['history_ids'],
                 sample_kwargs=forward_inputs['sample_kwargs'],
                 draft_input=forward_inputs['draft_input'],
@@ -1208,6 +1207,7 @@ class InferenceSession:
                     total_length=forward_inputs['total_length'],
                     kv_index=forward_inputs['kv_index'],
                     orca_updated=True,
+                    context_labels_ids=None,
                     context_shifts=forward_inputs['context_shifts'],
                     history_ids=forward_inputs['history_ids'],
                     sample_kwargs=forward_inputs['sample_kwargs'],
@@ -1274,7 +1274,7 @@ class InferenceSession:
                               hidden_states=None):
         next_running = [[], []]
         new_paused = []
-        next_tokens = next_tokens.cpu().tolist()
+        next_tokens = next_tokens.cpu().tolist() if next_tokens is not None else None
         if accepted_len is not None:
             assert (accepted_len.shape[0] == len(index_in_running_batch))
             accepted_len = accepted_len.cpu().tolist()
@@ -1291,33 +1291,34 @@ class InferenceSession:
             i = running_index_to_i[idx]
             # decoding
             if query.is_to_decoding_compute():
-                # Each query might have multile next tokens when spec/ngrams is enabled
-                query_next_tokens = next_tokens[i]
-                if isinstance(query_next_tokens, int):
-                    query_next_tokens = [query_next_tokens]
-                query_next_tokens_len = 1 if accepted_len is None else accepted_len[i] + 1
-                finished_sequences = False
-                paused_triggered = False
-                for token_idx in range(query_next_tokens_len):
-                    next_token = query_next_tokens[token_idx]
-                    if len(query.new_token_ids) == 0:
-                        query.first_token_time = time.time() * 1000
-
-                    if not query.action:
-                        finished_sequences = True
-                        break
-
-                    query.add_token(token_id=next_token,
+                if query.prefill_only:
+                    query.add_token(token_id=self.pad_token_id,
                                     accepted_len=accepted_len[i] if accepted_len is not None else 0,
                                     log_prob=log_probs[i] if log_probs is not None else 0)
-                    if query.meet_pause_condition():
-                        query.pause()
-                        new_paused.append(query)
-                        paused_triggered = True
-                        break
-                    elif self._meet_eos_condition(query, next_token):
-                        finished_sequences = True
-                        break
+                    finished_sequences = True
+                else:
+                    # Each query might have multile next tokens when spec/ngrams is enabled
+                    query_next_tokens = next_tokens[i]
+                    if isinstance(query_next_tokens, int):
+                        query_next_tokens = [query_next_tokens]
+                    query_next_tokens_len = 1 if accepted_len is None else accepted_len[i] + 1
+                    finished_sequences = False
+                    paused_triggered = False
+                    for token_idx in range(query_next_tokens_len):
+                        next_token = query_next_tokens[token_idx]
+                        if len(query.new_token_ids) == 0:
+                            query.first_token_time = time.time() * 1000
+                        query.add_token(token_id=next_token,
+                                        accepted_len=accepted_len[i] if accepted_len is not None else 0,
+                                        log_prob=log_probs[i] if log_probs is not None else 0)
+                        if query.meet_pause_condition():
+                            query.pause()
+                            new_paused.append(query)
+                            paused_triggered = True
+                            break
+                        elif self._meet_eos_condition(query, next_token):
+                            finished_sequences = True
+                            break
 
                 if not finished_sequences:
                     if not paused_triggered:
@@ -1333,6 +1334,8 @@ class InferenceSession:
                 if self.enable_mtp_decoding:
                     query.hidden_states = hidden_states[i] if query.hidden_states is None else torch.cat(
                         [query.hidden_states, hidden_states[i]], dim=0)
+                if query.prefill_only:
+                    query.log_probs.extend(log_probs[i])
                 next_running[0].append(query)
 
         self.running = next_running[0] + next_running[1]

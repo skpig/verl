@@ -40,8 +40,8 @@ def log_samples_to_wandb(batch, tokenizer, global_step):
     print(time.ctime(), "sample shape", responses.shape)
 
     select_keys = [
-        "rollout_log_probs", "old_log_probs", "old_entropy", "raw_scores", "returns", "values", "origin_advantages",
-        "token_level_rewards", "token_level_scores", "upgo_advantages"
+        "rollout_behavior_log_probs", "old_log_probs", "old_entropy", "raw_scores", "returns", "values",
+        "origin_advantages", "token_level_rewards", "token_level_scores", "upgo_advantages"
     ]
     real_response_lens = batch.batch['attention_mask'][:, -response_length:].numpy().sum(-1).tolist()
     raw_scores = batch.batch["raw_scores"].numpy().sum(-1).tolist()

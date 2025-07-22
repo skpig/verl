@@ -501,11 +501,11 @@ def default_loss_fn(config, micro_data, full_entropy, log_prob):
     else:
         response_mask = attention_mask[:, -response_length:]
 
-    use_rollout_log_probs = config.get("use_rollout_log_probs", False)
-    if use_rollout_log_probs:
-        # use ewma if use_rollout_log_probs: importance sampling by rollout_logprob, clip by old_log_prob
+    use_rollout_behavior_log_probs = config.get("use_rollout_behavior_log_probs", False)
+    if use_rollout_behavior_log_probs:
+        # use ewma if use_rollout_behavior_log_probs: importance sampling by rollout_logprob, clip by old_log_prob
         use_ewma_loss = True
-        old_log_prob = micro_data['rollout_log_probs']
+        old_log_prob = micro_data['rollout_behavior_log_probs']
         ref_log_prob = micro_data['old_log_probs']
     else:
         use_ewma_loss = config.use_ewma_loss
@@ -619,7 +619,8 @@ def make_mini_step_dataloader(data, ppo_mini_batch_size, return_dataproto=False)
         'responses', 'input_ids', 'attention_mask', 'old_log_probs', 'advantages', 'upgo_advantages', 'off_policy_steps'
     ]
     for opt_key in [
-            'ref_log_prob', 'rollout_log_probs', 'overlong_mask', 'eos_ids', 'token_level_scores', 'model_output_mask'
+            'ref_log_prob', 'rollout_behavior_log_probs', 'overlong_mask', 'eos_ids', 'token_level_scores',
+            'model_output_mask'
     ]:
         if opt_key in data.batch.keys():
             select_keys.append(opt_key)

@@ -11,7 +11,6 @@ class InferScheduler():
                  sampler,
                  return_full_hidden_states,
                  return_padding_tensor,
-                 return_full_hidden_states_after_layernorm,
                  last_token_only,
                  context_only,
                  enable_cuda_graph=False,
@@ -24,7 +23,6 @@ class InferScheduler():
         self.sampler = sampler
         self.return_full_hidden_states = return_full_hidden_states
         self.return_padding_tensor = return_padding_tensor
-        self.return_full_hidden_states_after_layernorm = return_full_hidden_states_after_layernorm
         self.last_token_only = last_token_only
         self.context_only = context_only
         self.enable_metrics = enable_metrics
@@ -41,6 +39,20 @@ class InferScheduler():
         if key not in self.metrics.keys():
             self.metrics[key] = []
         self.metrics[key].extend(value)
+
+    def switch_mode(self, mode):
+        if mode == "rollout":
+            self.return_full_hidden_states = False
+            self.return_padding_tensor = False
+            self.last_token_only = True
+            self.context_only = False
+        elif mode == "log_probs":
+            self.context_only = True
+            self.return_full_hidden_states = False
+            self.return_padding_tensor = True
+            self.last_token_only = False
+        else:
+            raise ValueError(f"Invalid mode: {mode}")
 
     def init_metrics(self):
         if not self.enable_metrics:
@@ -91,7 +103,7 @@ class InferScheduler():
 
             self.bs_graph_map[bs] = torch.cuda.CUDAGraph()
             with torch.cuda.graph(self.bs_graph_map[bs]):
-                output = self.engine.forward_orca(context_input_ids=None,
+                output = self.engine.forward_orca(context_labels_ids=None,
                                                   decode_input_ids=self.graph_decode_input_ids_placeholder[bs],
                                                   total_length=self.graph_total_length_placeholder[bs],
                                                   kv_cache_index=self.graph_kv_cache_index_placeholder[bs],
@@ -155,9 +167,9 @@ class InferScheduler():
                            kv_index: torch.Tensor,
                            orca_updated: bool,
                            context_shifts: torch.Tensor,
+                           context_labels_ids: torch.Tensor,
                            history_ids: List[List[int]],
                            keys: torch.Tensor = None,
-                           code_books: torch.Tensor = None,
                            sample_kwargs: dict = None,
                            draft_input: torch.Tensor = None,
                            draft_total_length: torch.Tensor = None,
@@ -177,6 +189,11 @@ class InferScheduler():
 
             # 2. sample
             if self.context_only:
+                assert (logits.shape[0] == 1)
+                import torch.nn.functional as F
+                log_probs = F.log_softmax(logits, dim=-1)
+                token_ids = context_labels_ids.unsqueeze(0).unsqueeze(-1).cuda()
+                log_probs = torch.gather(log_probs, dim=-1, index=token_ids).squeeze(-1)
                 next_tokens = None
             else:
                 next_tokens, log_probs, = self.sampler.sample(logits,

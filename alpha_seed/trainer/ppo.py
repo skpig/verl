@@ -156,7 +156,7 @@ def apply_kl_penalty(data: DataProto,
                      kl_ctrl: core_algos.AdaptiveKLController,
                      kl_penalty='kl',
                      use_model_output_mask=False):
-    rollout_log_probs = data.batch['rollout_log_probs']
+    rollout_behavior_log_probs = data.batch['rollout_behavior_log_probs']
     old_log_probs = data.batch['old_log_probs']
     responses = data.batch['responses']
     response_length = responses.size(1)
@@ -194,28 +194,28 @@ def apply_kl_penalty(data: DataProto,
     metrics = {'critic/kl': current_kl, 'critic/kl_coeff': beta, 'critic/kl_sum': current_kl_sum}
 
     # track KL divergence changes in model outputs, xperf logprobs versus seedmodels old logprobs
-    kl_diff = (rollout_log_probs - old_log_probs) * response_mask
+    kl_diff = (rollout_behavior_log_probs - old_log_probs) * response_mask
     kl_diff[:, -1] = 0
     kl_diff_mean = (kl_diff.sum() / response_mask.sum()).item()
     metrics.update({'rollout/kl_diff_mean': kl_diff_mean})
 
     kl_diff_max = kl_diff.max().item()
     idx = torch.nonzero(kl_diff_max == kl_diff)
-    rollout_log_probs_max = rollout_log_probs[idx[0][0], idx[0][1]].item()
+    rollout_behavior_log_probs_max = rollout_behavior_log_probs[idx[0][0], idx[0][1]].item()
     old_log_probs_max = old_log_probs[idx[0][0], idx[0][1]].item()
     metrics.update({
         'rollout/kl_diff_max': kl_diff_max,
-        'rollout/kl_diff_max_rollout_log_probs': rollout_log_probs_max,
-        'rollout/kl_diff_max_old_log_probs': old_log_probs_max,
+        'rollout/kl_diff_max_rollout_behavior_log_probs': rollout_behavior_log_probs_max,
+        'rollout/kl_diff_max_old_log_probs': old_log_probs_max
     })
 
     kl_diff_min = kl_diff.min().item()
     idx = torch.nonzero(kl_diff_min == kl_diff)
-    rollout_log_probs_min = rollout_log_probs[idx[0][0], idx[0][1]].item()
+    rollout_behavior_log_probs_min = rollout_behavior_log_probs[idx[0][0], idx[0][1]].item()
     old_log_probs_min = old_log_probs[idx[0][0], idx[0][1]].item()
     metrics.update({
         'rollout/kl_diff_min': kl_diff_min,
-        'rollout/kl_diff_min_rollout_log_probs': rollout_log_probs_min,
+        'rollout/kl_diff_min_rollout_behavior_log_probs': rollout_behavior_log_probs_min,
         'rollout/kl_diff_min_old_log_probs': old_log_probs_min
     })
 
@@ -1696,7 +1696,12 @@ class RayPPOTrainer(object):
 
                     batch.meta_info['global_step'] = self.global_step
                     self.update_len_per_query(batch, metrics)
-
+                    # xperf rollout engine: use current policy to compute log probs
+                    if self.config.algorithm.enable_rollout_log_probs:
+                        with Timer(name='rollout_log_probs', logger=None) as timer:
+                            batch = self.actor_rollout_wg.compute_rollout_log_probs(batch)
+                        metrics['timing/rollout_log_probs'] = timer.last
+                    print("after rollout log probs computation!!!")
                     # training
                     with Timer(name='rm_score', logger=None) as timer:
                         # compute scores. Support both model and function-based.
@@ -1709,7 +1714,6 @@ class RayPPOTrainer(object):
                             metrics['memory/rm_max_allocated'] = reward_tensor.meta_info['memory/rm_max_allocated']
                             metrics['memory/rm_max_reserved'] = reward_tensor.meta_info['memory/rm_max_reserved']
                     metrics['timing/rm_score'] = timer.last
-
                     print_dataproto_size(batch, head='After Reward Model')
 
                     with Timer(name='reward_fn', logger=None) as timer:

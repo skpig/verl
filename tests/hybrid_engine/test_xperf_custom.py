@@ -68,7 +68,7 @@ data = {
     "input_ids": input_ids,
     "attention_mask": attention_mask,
     "off_policy_steps": get_dummy_tensor(),
-    "rollout_log_probs": get_dummy_tensor(),
+    "rollout_behavior_log_probs": get_dummy_tensor(),
 }
 
 data = DataProto.from_dict(data, meta_info={"generation_kwargs": config.rollout.train_generate_kwargs})
