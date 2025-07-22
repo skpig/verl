@@ -147,8 +147,10 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
         self.attention_bias = getattr(config, "has_attn_bias", False)
         self.moe_num_expert = getattr(config, "moe_expert_num", 0)
         self.share_expert_num = getattr(config, "share_expert_num", 0)
-        self.use_query_layernorm = getattr(config, "querynorm", False)
-        self.use_key_layernorm = getattr(config, "keynorm", False) or getattr(config, "has_k_layernorm", False)
+        self.use_query_layernorm = getattr(config, "querynorm", False) or getattr(self.model_config, "use_qk_rmsnorm",
+                                                                                  False)
+        self.use_key_layernorm = getattr(config, "keynorm", False) or getattr(
+            config, "has_k_layernorm", False) or getattr(self.model_config, "use_qk_rmsnorm", False)
         self.use_context_groupnorm = getattr(config, "contextnorm", False) or getattr(
             config, "has_context_layernorm", False)
         self.use_attention_output_layernorm = getattr(config, "attn_outputnorm", False)
