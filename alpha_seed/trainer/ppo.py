@@ -39,6 +39,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Type, List, Union, Tuple
 import hdfs_io
+from collections import defaultdict
 
 import pandas as pd
 import numpy as np
@@ -617,6 +618,98 @@ def compute_data_metrics(self, batch: DataProto):
     metrics.update(agent_metrics)
 
     return DataProto.from_dict({'dummy': torch.ones(size=(1,))}, meta_info={'metrics': metrics})
+
+
+def compute_metrics_on_driver(batch: DataProto):
+    """
+    Compute metrics on the driver side (non-distributed).
+    This includes agent metrics and data source metrics.
+    """
+    sequence_score = batch.batch['token_level_scores'].sum(-1)
+    driver_metrics = {}
+
+    # Compute agent metrics on driver
+    agent_num_turns = batch.non_tensor_batch.get('agent_num_turns', None)
+    agent_num_tool_calls = batch.non_tensor_batch.get('agent_num_tool_calls', None)
+    agent_handler = batch.non_tensor_batch.get('agent_handler', None)
+
+    agent_metrics = {}
+    if agent_num_turns is not None or agent_num_tool_calls is not None:
+        handler_turns = defaultdict(list)
+        handler_tool_calls = defaultdict(list)
+
+        if agent_handler is None:
+            agent_handler = ['default'] * len(agent_num_turns if agent_num_turns is not None else agent_num_tool_calls)
+
+        for i, handler in enumerate(agent_handler):
+            if agent_num_turns is not None and agent_num_turns[i] is not None:
+                handler_turns[handler].append(agent_num_turns[i])
+            if agent_num_tool_calls is not None and agent_num_tool_calls[i] is not None:
+                handler_tool_calls[handler].append(agent_num_tool_calls[i])
+
+        all_handler_types = set(handler_turns.keys()) | set(handler_tool_calls.keys())
+
+        for handler_type in sorted(all_handler_types):
+            turns_list = handler_turns.get(handler_type, [])
+            if turns_list:
+                turns_array = np.array(turns_list, dtype=np.float32)
+                agent_metrics[f'agent/{handler_type.replace("agent/", "")}_num_turns_mean'] = np.mean(turns_array)
+                agent_metrics[f'agent/{handler_type.replace("agent/", "")}_num_turns_max'] = np.max(turns_array)
+                agent_metrics[f'agent/{handler_type.replace("agent/", "")}_num_turns_min'] = np.min(turns_array)
+
+            tool_calls_list = handler_tool_calls.get(handler_type, [])
+            if tool_calls_list:
+                tool_calls_array = np.array(tool_calls_list, dtype=np.float32)
+                agent_metrics[f'agent/{handler_type.replace("agent/", "")}_num_tool_calls_mean'] = np.mean(
+                    tool_calls_array)
+                agent_metrics[f'agent/{handler_type.replace("agent/", "")}_num_tool_calls_max'] = np.max(
+                    tool_calls_array)
+                agent_metrics[f'agent/{handler_type.replace("agent/", "")}_num_tool_calls_min'] = np.min(
+                    tool_calls_array)
+
+    driver_metrics.update(agent_metrics)
+
+    # Compute data source metrics
+    data_sources = batch.non_tensor_batch.get('data_source', ['unknown'] * sequence_score.shape[0])
+    data_source_reward_2nd = defaultdict(list)
+    data_source_reward_1st = defaultdict(list)
+
+    for i in range(sequence_score.shape[0]):
+        data_source = data_sources[i]
+        data_source_reward_2nd[data_source].append(sequence_score[i])
+        # 一级分类
+        data_source = data_source.split('##')[0]
+        data_source_reward_1st[data_source].append(sequence_score[i])
+
+    for data_source, rewards in data_source_reward_2nd.items():
+        rewards_tensor_data_source = torch.stack(rewards, dim=0)
+        score_mean = torch.mean(rewards_tensor_data_source)
+        score_max = torch.max(rewards_tensor_data_source)
+        score_min = torch.min(rewards_tensor_data_source)
+        score_std = torch.std(rewards_tensor_data_source)
+        driver_metrics.update({
+            f'score_per_source/mean_2nd_{data_source}': score_mean.detach().item(),
+            f'score_per_source/max_2nd_{data_source}': score_max.detach().item(),
+            f'score_per_source/min_2nd_{data_source}': score_min.detach().item(),
+            f'score_per_source/std_2nd_{data_source}': score_std.detach().item(),
+            f'score_per_source/num_2nd_{data_source}': rewards_tensor_data_source.shape[0],
+        })
+
+    for data_source, rewards in data_source_reward_1st.items():
+        rewards_tensor_data_source = torch.stack(rewards, dim=0)
+        score_mean = torch.mean(rewards_tensor_data_source)
+        score_max = torch.max(rewards_tensor_data_source)
+        score_min = torch.min(rewards_tensor_data_source)
+        score_std = torch.std(rewards_tensor_data_source)
+        driver_metrics.update({
+            f'score_per_source/mean_1st_{data_source}': score_mean.detach().item(),
+            f'score_per_source/max_1st_{data_source}': score_max.detach().item(),
+            f'score_per_source/min_1st_{data_source}': score_min.detach().item(),
+            f'score_per_source/std_1st_{data_source}': score_std.detach().item(),
+            f'score_per_source/num_1st_{data_source}': rewards_tensor_data_source.shape[0],
+        })
+
+    return driver_metrics
 
 
 def _deduplicate_shared_tensors(obj, visited_tensors=None):
@@ -2056,56 +2149,10 @@ class RayPPOTrainer(object):
                                 compute_data_metrics, batch)
                             data_metrics = data_metrics.meta_info['metrics']
                             metrics.update(data_metrics)
-                            sequence_score = batch.batch['token_level_scores'].sum(-1)
-                            score_metrics = {}
-                            data_sources = batch.non_tensor_batch.get('data_source',
-                                                                      ['unknown'] * sequence_score.shape[0])
-                            # evaluate test_score based on data source
-                            data_source_reward_2nd = defaultdict(list)
-                            data_source_reward_1st = defaultdict(list)
-                            for i in range(sequence_score.shape[0]):
-                                data_source = data_sources[i]
-                                data_source_reward_2nd[data_source].append(sequence_score[i])
-                                # 一级分类
-                                data_source = data_source.split('##')[0]
-                                data_source_reward_1st[data_source].append(sequence_score[i])
-                            for data_source, rewards in data_source_reward_2nd.items():
-                                rewards_tensor_data_source = torch.stack(rewards, dim=0)
-                                score_mean = torch.mean(rewards_tensor_data_source)
-                                score_max = torch.max(rewards_tensor_data_source)
-                                score_min = torch.min(rewards_tensor_data_source)
-                                score_std = torch.std(rewards_tensor_data_source)
-                                score_metrics.update({
-                                    f'critic/score_per_source_mean_2nd/{data_source}':
-                                        score_mean.detach().item(),
-                                    f'critic/score_per_source_max_2nd/{data_source}':
-                                        score_max.detach().item(),
-                                    f'critic/score_per_source_min_2nd/{data_source}':
-                                        score_min.detach().item(),
-                                    f'critic/score_per_source_std_2nd/{data_source}':
-                                        score_std.detach().item(),
-                                    f'critic/score_per_source_num_2nd/{data_source}':
-                                        rewards_tensor_data_source.shape[0],
-                                })
-                            for data_source, rewards in data_source_reward_1st.items():
-                                rewards_tensor_data_source = torch.stack(rewards, dim=0)
-                                score_mean = torch.mean(rewards_tensor_data_source)
-                                score_max = torch.max(rewards_tensor_data_source)
-                                score_min = torch.min(rewards_tensor_data_source)
-                                score_std = torch.std(rewards_tensor_data_source)
-                                score_metrics.update({
-                                    f'critic/score_per_source_mean_1st/{data_source}':
-                                        score_mean.detach().item(),
-                                    f'critic/score_per_source_max_1st/{data_source}':
-                                        score_max.detach().item(),
-                                    f'critic/score_per_source_min_1st/{data_source}':
-                                        score_min.detach().item(),
-                                    f'critic/score_per_source_std_1st/{data_source}':
-                                        score_std.detach().item(),
-                                    f'critic/score_per_source_num_1st/{data_source}':
-                                        rewards_tensor_data_source.shape[0],
-                                })
-                            metrics.update(score_metrics)
+
+                            # Compute driver-side metrics (agent and data source metrics)
+                            driver_metrics = compute_metrics_on_driver(batch)
+                            metrics.update(driver_metrics)
 
                             # save batch to hdfs
                             if self.save_batch_dir:
