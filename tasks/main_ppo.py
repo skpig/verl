@@ -108,6 +108,7 @@ class RemoteClient:
         self.config = config
         local_path = download_minimal_required_files(tokenizer_path, from_scratch=False, rank=0, world_size=1)
         self.tokenizer = AutoTokenizer.from_pretrained(local_path)
+        self.callback_running_pool = {}
         self.results = {}
 
         self.call_oj = ray.remote(num_cpus=1)(oj_utils.compute_score)
@@ -126,6 +127,10 @@ class RemoteClient:
         return len(self.results)
 
     async def add_requests(self, req_id, input_ids, ground_truth, reward_style):
+        # there maybe same uid callback in agent server mode
+        if self.callback_running_pool.get(req_id, False):
+            return
+        self.callback_running_pool[req_id] = True
         input_ids = np.array(input_ids)
         input_ids = input_ids[input_ids >= 0].tolist()
         solution_str = self.tokenizer.decode(input_ids, skip_special_tokens=False)
@@ -165,6 +170,9 @@ class RemoteClient:
 
         assert req_id in self.results, f"{req_id} not found"
         result_future = self.results.pop(req_id)
+        # call running should be removed
+        if req_id in self.callback_running_pool:
+            del self.callback_running_pool[req_id]
         return await result_future
 
 

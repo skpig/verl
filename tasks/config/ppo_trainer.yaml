@@ -206,6 +206,9 @@ actor_rollout_ref:
     rollout_server_args: ${rollout_server}
     agent:
       max_turns: 10
+      target_score: 0.5
+      enable_prefix_sampling: False
+      show_error_case_prob: 0.7
       max_new_tokens_per_turn: ${data.max_response_length}
   streaming_rollout_args: ${streaming_rollout}
   streaming_validator_args: ${streaming_validator}
