@@ -10,6 +10,18 @@ from transformers import PreTrainedTokenizer
 from alpha_seed.workers.agents import load_external_module
 
 
+class GlobalState:
+
+    def __init__(self):
+        self.global_step = 0
+
+    def set_global_step(self, global_step: int):
+        self.global_step = global_step
+
+    def get_global_step(self) -> int:
+        return self.global_step
+
+
 @dataclass
 class TaskContext:
     config: DictConfig

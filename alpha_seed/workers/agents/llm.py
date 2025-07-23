@@ -199,7 +199,7 @@ class DirectAsyncClient(AsyncLLMInterface):
             role="assistant",
             prompt=finished_query.input_prompt + finished_query.output_prompt[0],  # input+output
             raw_output_ids=finished_query.output_tokens,
-            response_log_probs=finished_query.new_token_log_probs,
+            response_log_probs=finished_query.log_probs,
             is_finished=finished_query.is_finished,
             model_output_mask=finished_query.model_output_mask,
             extra_data=finished_query.extra_data,
@@ -373,7 +373,7 @@ class DirectClient(SyncLLMInterface):
             role="assistant",
             prompt=finished_query.input_prompt + finished_query.output_prompt[0],  # input+output
             raw_output_ids=finished_query.output_tokens,
-            response_log_probs=finished_query.new_token_log_probs,
+            response_log_probs=finished_query.log_probs,
             is_finished=finished_query.is_finished,
             model_output_mask=finished_query.model_output_mask,
             extra_data=finished_query.extra_data,

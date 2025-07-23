@@ -342,6 +342,7 @@ class RolloutManager:
         if self._use_server:
             self.rollout_server_started.wait()
             self.train_rollout_proxy.step(step)
+            self.train_client_executor.set_global_step(step)
             # hybrid server mode
             gen_batch.union(batch)
             ready_batch, self.pending_batch = self._train_server_gen(gen_batch,
@@ -424,6 +425,8 @@ class RolloutManager:
 
         if self._use_server:
             gen_batch.union(batch)
+            self.rollout_server_started.wait()
+            self.val_client_executor.set_global_step(step)
             gen_out_batch = self._val_server_gen(gen_batch, step=step, metrics=metrics, is_standalone=is_async)
         else:
             gen_out_batch = self._val_batch_gen(gen_batch, step=step, metrics=metrics, is_standalone=is_async)
@@ -793,7 +796,6 @@ class RolloutManager:
         return gen_out_batch
 
     def _val_server_gen(self, gen_batch: DataProto, step: int, metrics: Dict, is_standalone: bool) -> DataProto:
-        self.rollout_server_started.wait()
         if self.val_standalone_wg is not None:
             with Timer(name="update_rollout_server", logger=None) as timer:
                 self.update_standalone_server_weights(is_train=False)

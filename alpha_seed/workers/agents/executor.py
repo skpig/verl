@@ -3,16 +3,17 @@ import inspect
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from itertools import cycle
-from typing import Type
+from typing import Type, List
 
 import ray
 from omegaconf import DictConfig
-from transformers import AutoTokenizer, PreTrainedTokenizer
+from transformers import PreTrainedTokenizer
 
 from alpha_seed.utils.tokenizer.async_tokenizer import AsyncTokenizer
-from alpha_seed.workers.agents.handlers import TaskContext
+from alpha_seed.workers.agents.handlers import TaskContext, GlobalState
 from alpha_seed.workers.agents.handlers.base import AsyncAgent, functional_agent, ThreadedAgent
 from alpha_seed.workers.agents.llm import OpenAIAsyncClient, OpenAIClient, DirectAsyncClient, DirectClient
+from mono_rl import DataProto
 
 
 class AgentWorker:
@@ -44,6 +45,7 @@ class AgentWorker:
 
         self.concurrency_limit = asyncio.Semaphore(self.worker_max_concurrency)
         self.config = config
+        self.global_state = GlobalState()
 
     async def execute(self, agent_cls: Type[AsyncAgent] | Type[ThreadedAgent], /, *args, **kwargs):
         # 兼容旧的functional handler，保持task context中有tokenizer赋值
@@ -62,16 +64,30 @@ class AgentWorker:
                 agent = partial(agent, **kwargs)
             return await loop.run_in_executor(self._thread_executor, agent, *args)
 
+    def set_global_step(self, global_step: int):
+        self.global_state.set_global_step(global_step)
+
     def _make_essential_init_kwargs(self):
         return {
             'config': self.config,
             'executor': self._thread_executor,
+            'global_state': self.global_state,
         }
 
 
 class ExecutorBase:
 
-    async def submit(self, cls: Type[callable], /, *args, **kwargs):
+    async def submit(self, cls: Type[callable], /, *args, **kwargs) -> DataProto | List[DataProto]:
+        """
+        提交一个prompt到AgentWorker里运行(rollout)，
+        返回rollout的结果，DataProto或者List[DataProto]，1个prompt可以返回0～N条
+        """
+        raise NotImplementedError()
+
+    def set_global_step(self, global_step: int):
+        """
+        设置当前trainer开始的step。需要讲global_step传到每个AgentWorker里
+        """
         raise NotImplementedError()
 
 
@@ -81,13 +97,17 @@ class RayActorExecutor(ExecutorBase):
         self.name = name
         self.max_workers = config.rollout_server.agent.max_workers
         self.worker_max_concurrency = config.rollout_server.agent.worker_max_concurrency
+        worker_oob_concurrency = 10  # 允许worker额外的并发度，用于控制指令和其他非rollout调用
         RemoteAgentWorker = ray.remote(AgentWorker)
         self.workers = [
             RemoteAgentWorker.options(scheduling_strategy="SPREAD",
-                                      max_concurrency=self.worker_max_concurrency,
+                                      max_concurrency=self.worker_max_concurrency + worker_oob_concurrency,
                                       name=f"{name}-agent_worker_{idx}").remote(config, tokenizer, host, port,
                                                                                 request_manager_name, idx)
             for idx in range(self.max_workers)
+        ]
+        self.worker_in_band_concurrency_limits = [
+            asyncio.Semaphore(self.worker_max_concurrency) for idx in range(self.max_workers)
         ]
         self.worker_pointer = cycle(range(self.max_workers))
 
@@ -97,7 +117,17 @@ class RayActorExecutor(ExecutorBase):
         # 兼容旧的functional handler
         if inspect.isfunction(agent_cls):
             agent_cls = functional_agent(agent_cls)
-        return await worker.execute.remote(agent_cls, *args, **kwargs)
+
+        # 这里统一控制ray actor in-band并发度，预留一小部分给控制
+        async with self.worker_in_band_concurrency_limits[worker_idx]:
+            return await worker.execute.remote(agent_cls, *args, **kwargs)
+
+    def set_global_step(self, global_step: int):
+        refs = []
+        for w in self.workers:
+            ref = w.set_global_step.remote(global_step)
+            refs.append(ref)
+        ray.get(refs)
 
 
 class LocalExecutor(ExecutorBase):
@@ -118,3 +148,7 @@ class LocalExecutor(ExecutorBase):
         if inspect.isfunction(agent_cls):
             agent_cls = functional_agent(agent_cls)
         return await worker.execute(agent_cls, *args, **kwargs)
+
+    def set_global_step(self, global_step: int):
+        for w in self.workers:
+            w.set_global_step(global_step)

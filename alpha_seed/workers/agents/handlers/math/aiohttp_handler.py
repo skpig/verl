@@ -55,6 +55,7 @@ class SingleTurn(AsyncAgent):
             prompt_data = await tokenizer.batch_encode_plus_async([prompt],
                                                                   padding=PaddingStrategy.MAX_LENGTH,
                                                                   padding_side='left',
+                                                                  truncation=True,
                                                                   add_special_tokens=False,
                                                                   max_length=config.data.max_prompt_length)
             item.batch['input_ids'] = torch.tensor(prompt_data.input_ids, dtype=torch.int32)

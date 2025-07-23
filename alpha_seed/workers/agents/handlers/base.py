@@ -4,7 +4,7 @@ from omegaconf import DictConfig
 from transformers import PreTrainedTokenizer
 
 from alpha_seed.utils.tokenizer.async_tokenizer import AsyncTokenizer
-from alpha_seed.workers.agents.handlers import TaskContext
+from alpha_seed.workers.agents.handlers import TaskContext, GlobalState
 from alpha_seed.workers.agents.llm import AsyncLLMInterface, SyncLLMInterface
 from mono_rl import DataProto
 
@@ -14,9 +14,11 @@ class AsyncAgent:
     def __new__(cls, *args, **kwargs):
         config: DictConfig = kwargs.pop('config')
         executor: ThreadPoolExecutor = kwargs.pop('executor')
+        global_state: GlobalState = kwargs.pop('global_state')
         instance = super().__new__(cls)
         instance.config = config
         instance.executor = executor
+        instance.global_state = global_state
         return instance
 
     def __init__(self, tokenizer: AsyncTokenizer | PreTrainedTokenizer, llm: AsyncLLMInterface, **kwargs):
@@ -33,9 +35,11 @@ class ThreadedAgent:
     def __new__(cls, *args, **kwargs):
         config: DictConfig = kwargs.pop('config')
         executor: ThreadPoolExecutor = kwargs.pop('executor')
+        global_state: GlobalState = kwargs.pop('global_state')
         instance = super().__new__(cls)
         instance.config = config
         instance.executor = executor
+        instance.global_state = global_state
         return instance
 
     def __init__(self, tokenizer: PreTrainedTokenizer, llm: SyncLLMInterface, **kwargs):
