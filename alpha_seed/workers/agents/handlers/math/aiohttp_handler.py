@@ -27,11 +27,12 @@ async def process_single_batch(item: DataProto, context: TaskContext, **kwargs):
     config = context.config.actor_rollout_ref.rollout
     host = context.server_host
     port = context.server_port
-    if 'image_grid_hw' in item.non_tensor_batch:
+    if 'image_data_ref' in item.non_tensor_batch:
+        # already process vlm input_ids
         prompt = ''
     else:
         prompt = item.non_tensor_batch['prompt'][0]
-    completion = await internal_call(item, config, host, port)
+    completion = await internal_call(item, config, host, port, prompt=prompt, is_train=context.is_train)
     from alpha_seed.workers.streaming_service.streaming_utils import DataPack, pack_to_dataproto
     data_pack = DataPack.create_from_completion_dict(completion['choices'][0]['message'])
     out = pack_to_dataproto(item, tokenizer, data_pack, config)  # dataproto
@@ -46,7 +47,7 @@ class SingleTurn(AsyncAgent):
         tokenizer = self.tokenizer
         config = context.config
         rollout_config = context.config.actor_rollout_ref.rollout
-        if 'image_grid_hw' in item.non_tensor_batch:
+        if 'image_data_ref' in item.non_tensor_batch:
             # vlm mode里input_ids已经提前处理好，所以这里不用prompt
             prompt = ''
         else:

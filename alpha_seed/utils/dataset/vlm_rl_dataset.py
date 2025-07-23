@@ -27,42 +27,51 @@ import verl.utils.torch_functional as verl_F
 from PIL import Image
 
 from alpha_seed.utils.dataset.rl_dataset import RLHFDataset
-from transformers import AutoImageProcessor
+from alpha_seed.utils.dataset.dist_data_util import DistImageLoader, get_image_manager, get_local_inputs, save_dataproto_image_data_dist
 
-from alpha_seed.models.transformers.modeling_vlm import convert_tensor_to_numpy
-from alpha_seed.utils.ckpt.hdfs import download_config_and_tokenizer
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.image_utils import ImageInput
 from transformers.utils import TensorType
 
 
-def load_image_data_dist(non_tensor_batch):
-    if not 'pixel_values' in non_tensor_batch:
-        return
-    image_manager = get_image_manager()
-    data_indices = []
-    for i, pixel_values in enumerate(non_tensor_batch['pixel_values']):
-        if pixel_values is not None:
-            data_indices.append(non_tensor_batch['dataset_index'][i])
+def convert_prompts_into_input_ids(prompts,
+                                   tokenizer,
+                                   image_processor,
+                                   max_prompt_length,
+                                   num_image_tokens,
+                                   truncation='error'):
+    input_ids_list = []
+    attention_mask_list = []
+    for i in range(prompts.batch.batch_size[0]):
+        prompt = prompts.non_tensor_batch['prompt'][i]
+        input_ids, attention_mask = convert_single_prompt_to_input_ids(prompt,
+                                                                       tokenizer=tokenizer,
+                                                                       image_processor=image_processor,
+                                                                       num_image_tokens=num_image_tokens[i])
+        input_ids, attention_mask = postprocess_data(input_ids,
+                                                     attention_mask,
+                                                     max_length=max_prompt_length,
+                                                     pad_token_id=tokenizer.pad_token_id,
+                                                     left_pad=True,
+                                                     truncation=truncation)
+        input_ids_list.append(input_ids[0])
+        attention_mask_list.append(attention_mask[0])
+    input_ids = torch.stack(input_ids_list, dim=0)
+    attention_mask = torch.stack(attention_mask_list, dim=0)
+    prompts.batch['input_ids'] = input_ids
+    prompts.batch['attention_mask'] = attention_mask
 
-    image_refs = ray.get(image_manager.get_ref_ids_by_indices.remote(data_indices))
-    for i, pixel_values in enumerate(non_tensor_batch['pixel_values']):
-        if pixel_values is not None:
-            non_tensor_batch['pixel_values'][i] = image_refs[i]
 
-
-class BytesDecoder:
-
-    def __call__(self, image_bytes):
-        with Image.open(io.BytesIO(image_bytes)) as image:
-            if image.mode == "RGBA" or image.info.get("transparency", None) is not None:
-                image = image.convert("RGBA")
-                white = Image.new(mode="RGB", size=image.size, color=(255, 255, 255))
-                white.paste(image, mask=image.split()[3])
-                image = white
-            else:
-                image = image.convert("RGB")
-        return image
+def decode_bytes_to_rgb_image(image_bytes):
+    with Image.open(io.BytesIO(image_bytes)) as image:
+        if image.mode == "RGBA" or image.info.get("transparency", None) is not None:
+            image = image.convert("RGBA")
+            white = Image.new(mode="RGB", size=image.size, color=(255, 255, 255))
+            white.paste(image, mask=image.split()[3])
+            image = white
+        else:
+            image = image.convert("RGB")
+    return image
 
 
 def collate_fn(data_list: list[dict]) -> dict:
@@ -125,111 +134,61 @@ def postprocess_data(input_ids, attention_mask, max_length: int, pad_token_id: i
     return input_ids, attention_mask
 
 
-@ray.remote
-class DistImageLoader:
-
-    def __init__(self, parquet_files, image_key, tokenizer_file, n_partition, node_rank):
-        self.image_key = image_key
-        self.tokenizer_file = tokenizer_file
-        self.bytes_decoder = BytesDecoder()
-        self.node_rank = node_rank
-        self.n_partition = n_partition
-        if tokenizer_file.startswith('hdfs'):
-            self.tokenizer_file = download_config_and_tokenizer(tokenizer_file)
-        self.processor = AutoImageProcessor.from_pretrained(self.tokenizer_file)
-        image_keys = [image_key]
-        if isinstance(parquet_files, str):
-            parquet_files = [parquet_files]
-        from verl.utils.fs import copy_local_path_from_hdfs
-        for i, parquet_file in enumerate(parquet_files):
-            parquet_files[i] = copy_local_path_from_hdfs(src=parquet_file)
-        dataframes = []
-        for fn in parquet_files:
-            ds = pd.read_parquet(fn)
-
-            for i, row_dict in ds.iterrows():
-                if 'session' in row_dict:
-                    row_dict = row_dict['session']
-                else:
-                    row_dict = row_dict.to_dict()
-                image_data = {}
-                for key in image_keys:
-                    image_data[key] = row_dict.get(key)
-                dataframes.append(image_data)
-        ds = pd.DataFrame.from_dict(dataframes)
-        partitions = np.array_split(ds, n_partition)
-        self.ds = partitions[node_rank]
-        self.partition_counts = [len(d) for d in partitions]
-        self.offset = 0
-        for i in range(node_rank):
-            self.offset += self.partition_counts[i]
-        self.image_manager = get_image_manager()
-
-    def get_offset(self):
-        return self.offset
-
-    def process_image(self, row, idx):
-        if 'session' in row:
-            row_dict = row['session']
-        else:
-            row_dict = row
-        if self.image_key in row_dict:
-            images = row_dict[self.image_key]
-            if isinstance(images, dict):
-                assert 'pixel_values_ref' in images
+def convert_conversation_to_prompt(conversation):
+    prompt = ""
+    for turn in conversation:
+        turn_prompt = ""
+        for content in turn["content"]:
+            if content["type"] == "image":
+                turn_prompt += "[SOI]<ImageHere>[EOI]"
+            elif content["type"] == "text":
+                turn_prompt += content["text"]
             else:
-                pil_images = [self.bytes_decoder(img) for img in images
-                             ] if images is not None and len(images) > 0 else None
-                if pil_images is not None:
-                    inputs = self.processor(images=pil_images)
-                    img_token_num = inputs['pixel_values'].shape[0]
-                    pixel_values = convert_tensor_to_numpy(inputs['pixel_values'])
-                    inputs = {
-                        "image_grid_hw": inputs["image_grid_hw"],
-                        "num_image_tokens": inputs["num_image_tokens"],
-                        "img_token_num": img_token_num
-                    }
-                    # TODO: put the whole inputs to ray object store
-                    ref = ray.put(pixel_values)
-                    ray.get(self.image_manager.add_refs.remote({idx: ref}))
-                    inputs['pixel_values_ref'] = ref.hex()
-                    row_dict[self.image_key] = inputs
-                    images = inputs
-        return images
-
-    def get_item(self, idx):
-        idx = idx - self.offset
-        row_dict = self.ds.iloc[idx]
-        return self.process_image(row_dict, idx)
+                raise NotImplementedError
+        # turn_prompt = f"{self.tokenizer.bos_token} {turn_prompt}"
+        prompt += turn_prompt
+    return prompt
 
 
-@ray.remote
-class ImageManager:
+def convert_single_prompt_to_input_ids(prompt,
+                                       tokenizer,
+                                       image_processor,
+                                       num_image_tokens,
+                                       padding=False,
+                                       truncation=False,
+                                       max_length=None):
+    image_token_id = (-100 if not hasattr(tokenizer, "image_token_id") else tokenizer.image_token_id)
+    chunks = prompt.split("<ImageHere>")
 
-    def __init__(self):
-        self.image_refs: Dict[str, ray.ObjectRef] = dict()
-        self.index_to_image_refs = dict()
+    input_ids = []
+    attention_mask = []
+    img_idx = 0
+    for chunk in chunks:
+        if chunk == "":
+            continue
+        text_inputs = tokenizer(chunk, padding=padding, truncation=truncation, max_length=max_length)
+        input_ids += text_inputs["input_ids"]
+        attention_mask += text_inputs["attention_mask"]
+        if num_image_tokens is not None and img_idx < len(num_image_tokens):
+            if image_processor.use_navit:
+                num_img_token = num_image_tokens[img_idx]
+            else:
+                num_img_token = image_processor.num_img_token
+            input_ids += [image_token_id] * num_img_token
+            attention_mask += [1] * num_img_token
+        img_idx += 1
 
-    def get_refs(self, ids: List[str]) -> List[ray.ObjectRef]:
-        refs = []
-        for i in ids:
-            ref = None
-            if i is not None:
-                ref = self.image_refs[i]
-            refs.append(ref)
-        return refs
-
-    def get_ref_ids_by_indices(self, indices: List[int]) -> List[str]:
-        return [self.index_to_image_refs[idx].hex() for idx in indices]
-
-    def add_refs(self, id2refs):
-        for idx, ref in id2refs.items():
-            self.image_refs[ref.hex()] = ref
-            self.index_to_image_refs[idx] = ref
+    input_ids = torch.tensor(input_ids).unsqueeze(0)
+    attention_mask = torch.tensor(attention_mask).unsqueeze(0)
+    return input_ids, attention_mask
 
 
-def get_image_manager():
-    return ImageManager.options(name="ImageManager", get_if_exists=True).remote()
+def process_images(images, image_processor):
+    if images is not None:
+        if not isinstance(images, List):
+            images = [images]
+        image_inputs = image_processor(images=images)
+        return image_inputs
 
 
 class RLHFDatasetVL(RLHFDataset):
@@ -242,8 +201,8 @@ class RLHFDatasetVL(RLHFDataset):
         self.num_limit = kwargs.pop('num_limit', None)
         self.image_key = kwargs.pop('image_key', 'image')
         self.tokenizer_file = kwargs.pop('tokenizer_file', None)
-        self.bytes_decoder = BytesDecoder()
-        self.dist_image = kwargs.pop('dist_image', False)
+        self.dist_image = kwargs.pop('dist_image', True)
+        self.image_manager = get_image_manager()
         super().__init__(*args, **kwargs)
 
     def process(self,
@@ -301,23 +260,34 @@ class RLHFDatasetVL(RLHFDataset):
 
         return BatchFeature(data={"input_ids": input_ids, "attention_mask": attention_mask, **image_inputs})
 
-    def _read_files_and_tokenize(self):
-        if self.dist_image:
-            nodes = [node for node in ray.nodes() if node["Alive"] and node['Resources'].get('GPU', 0) > 0]
-            self.image_loaders = []
-            image_keys = [self.image_key]
-            for i, node in enumerate(nodes):
-                image_loader = DistImageLoader.options(
-                    scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
-                        node_id=node["NodeID"],
-                        soft=False,
-                    )).remote(self.original_parquet_files, self.image_key, self.tokenizer_file, len(nodes), i)
-                self.image_loaders.append(image_loader)
-            offsets = []
-            for img_loader in self.image_loaders:
-                offsets.append(img_loader.get_offset.remote())
+    def _read_files_and_tokenize_dist(self):
+        nodes = [node for node in ray.nodes() if node["Alive"] and node['Resources'].get('GPU', 0) > 0]
+        self.image_loaders = []
+        image_keys = [self.image_key]
+        for i, node in enumerate(nodes):
+            image_loader = DistImageLoader.options(
+                scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
+                    node_id=node["NodeID"],
+                    soft=False,
+                )).remote(self.original_parquet_files, self.image_key, self.tokenizer_file, len(nodes), i)
+            self.image_loaders.append(image_loader)
+        ray.get(self.image_manager.set_image_loaders.remote(self.image_loaders))
+        offsets = []
+        refs = []
+        for img_loader in self.image_loaders:
+            refs.append(img_loader.process_all_images.remote())
 
-            self.offsets = ray.get(offsets)
+            offsets.append(img_loader.get_offset.remote())
+
+        self.offsets = ray.get(offsets)
+        images_bytes_refs = ray.get(refs)
+        images_bytes_refs_list = []
+        indices = []
+        for refs in images_bytes_refs:
+            images_bytes_refs_list.extend(refs[0])
+            indices.extend(refs[1])
+        # make sure no duplicate index
+        assert len(indices) == len(set(indices))
 
         dataframes = []
         for parquet_file in self.parquet_files:
@@ -325,10 +295,11 @@ class RLHFDatasetVL(RLHFDataset):
             dataframe = pd.read_parquet(parquet_file)
             if 'session' in dataframe:
                 dataframe = pd.DataFrame(list(dataframe['session']))
-            if self.dist_image:
-                dataframe.drop(columns=image_keys, inplace=True)
+            # dataframe.drop(columns=image_keys, inplace=True)
             dataframes.append(dataframe)
         self.dataframe = pd.concat(dataframes)
+        self.dataframe['images_bytes_ref'] = images_bytes_refs_list
+        self.dataframe['dataset_index'] = indices
 
         print(f'original dataset len: {len(self.dataframe)}')
 
@@ -336,20 +307,12 @@ class RLHFDatasetVL(RLHFDataset):
         if hasattr(self, 'data_auto_repeat') and self.data_auto_repeat:
             assert not self.dist_image
             self._replicate_for_epochs()
-        if self.num_limit:
-            assert not self.dist_image
-            self.dataframe = self.dataframe[:self.num_limit]
 
-    def get_remote_loader(self, idx):
-        assert self.dist_image
-        loader = self.image_loaders[0]
-        for i, offset in enumerate(self.offsets):
-            if idx >= offset:
-                loader = self.image_loaders[i]
-            else:
-                break
-
-        return loader
+    def _read_files_and_tokenize(self):
+        if self.dist_image:
+            return self._read_files_and_tokenize_dist()
+        else:
+            return super()._read_files_and_tokenize()
 
     def __getitem__(self, item):
         """
@@ -363,105 +326,49 @@ class RLHFDatasetVL(RLHFDataset):
         row_dict_ret = {}
 
         chat = row_dict[self.prompt_key]
-        image = None
-        if self.image_key in row_dict and not self.dist_image:
-            image = row_dict[self.image_key]
-        image_inputs = None
-        if self.dist_image:
-            if '__image_inputs__' in row_dict:
-                image_inputs = row_dict['__image_inputs__']
-            else:
-                image_inputs = ray.get(self.get_remote_loader(item).get_item.remote(item))
-                row_dict['__image_inputs__'] = image_inputs
 
-        prompt_names = []
-        if self.multi_prompts == "none":
-            if not self.dist_image:
-                pil_images = [self.bytes_decoder(img) for img in image
-                             ] if image is not None and len(image) > 0 else None
-            user_contents = [{"type": "text", "text": f"{self.tokenizer.bos_token}user\n "}]
-            prompt_chunks = re.split(r"(<image>)", chat[0])
-            for chunk in prompt_chunks:
-                if not chunk:
-                    continue
-                if chunk == '<image>':
-                    user_contents.append({"type": "image"})
-                else:
-                    user_contents.append({"type": "text", "text": chunk})
-            user_contents.append({
-                "type": "text",
-                "text": f"{self.tokenizer.eos_token}{self.tokenizer.bos_token}assistant\n"
+        user_contents = [{"type": "text", "text": f"{self.tokenizer.bos_token}user\n "}]
+        prompt_chunks = re.split(r"(<image>)", chat[0])
+        for chunk in prompt_chunks:
+            if not chunk:
+                continue
+            if chunk == '<image>':
+                user_contents.append({"type": "image"})
+            else:
+                user_contents.append({"type": "text", "text": chunk})
+        user_contents.append({
+            "type": "text",
+            "text": f"{self.tokenizer.eos_token}{self.tokenizer.bos_token}assistant\n"
+        })
+        system_prompt = row_dict['system_prompt'].strip()
+        conversation = []
+        if system_prompt:
+            conversation.append({
+                "role":
+                    "system",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"{self.tokenizer.bos_token}system\n"
+                    },
+                    {
+                        "type": "text",
+                        "text": system_prompt
+                    },
+                    {
+                        "type": "text",
+                        "text": self.tokenizer.eos_token,
+                    },
+                ]
             })
+        conversation.append({"role": "user", "content": user_contents})
 
-            system_prompt = row_dict['system_prompt'].strip()
-            conversation = []
-            if system_prompt:
-                conversation.append({
-                    "role":
-                        "system",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": f"{self.tokenizer.bos_token}system\n"
-                        },
-                        {
-                            "type": "text",
-                            "text": system_prompt
-                        },
-                        {
-                            "type": "text",
-                            "text": self.tokenizer.eos_token,
-                        },
-                    ]
-                })
-            conversation.append({"role": "user", "content": user_contents})
-            if self.dist_image:
-                inputs = self.process(image_inputs=image_inputs,
-                                      conversation=conversation,
-                                      return_tensors="pt",
-                                      return_prompt=True)
-            else:
-                inputs = self.processor(images=pil_images,
-                                        conversation=conversation,
-                                        return_tensors="pt",
-                                        return_prompt=True)
-            input_ids = inputs["input_ids"]
-            attention_mask = inputs["attention_mask"]
-            prompt_with_chat_template = inputs['prompt']
-            input_ids, attention_mask = postprocess_data(input_ids,
-                                                         attention_mask,
-                                                         max_length=self.max_prompt_length,
-                                                         pad_token_id=self.tokenizer.pad_token_id,
-                                                         left_pad=True,
-                                                         truncation=self.truncation)
+        prompt = convert_conversation_to_prompt(conversation)
 
-            row_dict_ret['input_ids'] = input_ids[0]
-            row_dict_ret['prompt'] = prompt_with_chat_template
-            row_dict_ret['attention_mask'] = attention_mask[0]
-            if self.dist_image:
-                assert image_inputs is not None
-                if len(image_inputs) > 0:
-                    row_dict_ret['pixel_values_ref'] = image_inputs['pixel_values_ref']
-                    row_dict_ret['image_grid_hw'] = np.array(image_inputs['image_grid_hw'])
-                    row_dict_ret['img_token_num'] = image_inputs['img_token_num']
-                else:
-                    row_dict_ret['pixel_values_ref'] = None
-                    row_dict_ret['image_grid_hw'] = None
-                    row_dict_ret['img_token_num'] = 0
-            elif image is not None and len(image) > 0:
-                row_dict_ret['pixel_values'] = inputs['pixel_values']
-                row_dict_ret['image_grid_hw'] = np.array(inputs['image_grid_hw'])
-            else:
-                row_dict_ret['pixel_values'] = None
-                row_dict_ret['image_grid_hw'] = None
-
-            # reward_model is required
-            row_dict_ret['reward_model'] = {}
-            row_dict_ret['reward_model']['style'] = row_dict['ability']
-            row_dict_ret['reward_model']['ground_truth'] = row_dict['verifier_feature']
-            prompt_names.append("")
-        else:
-            assert NotImplementedError
+        # reward_model is required
+        row_dict_ret['reward_model'] = {}
+        row_dict_ret['reward_model']['style'] = row_dict['ability']
+        row_dict_ret['reward_model']['ground_truth'] = row_dict['verifier_feature']
 
         # 添加answer
         if self.use_ref_answer:
@@ -477,16 +384,154 @@ class RLHFDatasetVL(RLHFDataset):
 
         index = row_dict.get("extra_info", {}).get("index", item)  ## important for grpo to group info
         row_dict_ret["index"] = index
-        row_dict_ret['dataset_index'] = item
-        row_dict_ret['prompt_names'] = prompt_names
+        row_dict_ret['prompt_names'] = [""]
+        row_dict_ret['prompt'] = prompt
 
         def cast_type(key, dtype):
             if key in row_dict_ret:
                 row_dict_ret[key] = row_dict_ret[key].to(dtype)
 
-        # type cast to save memory
-        cast_type('input_ids', torch.int32)
-        cast_type('attention_mask', torch.int8)
         row_dict_ret['data_source'] = row_dict['data_source']
         row_dict_ret['off_policy_steps'] = torch.zeros([1]).to(torch.int8)
+        row_dict_ret['images_bytes_ref'] = row_dict['images_bytes_ref']
         return row_dict_ret
+
+    def __getstate__(self):
+        if self.new_dataset_flag:
+            state = self.__dict__.copy()
+            if 'dataframe' in state:
+                del state['dataframe']
+            if 'image_manager' in state:
+                del state['image_manager']
+            if 'image_loaders' in state:
+                del state['image_loaders']
+            return state
+        return self.__dict__.copy()
+
+    def resume_dataset_state(self):
+        self.new_dataset_flag = True if hasattr(self, 'original_parquet_files') else False
+        # resume dataframe if not it's serialized in data.pt
+        if self.new_dataset_flag:
+            self.image_manager = get_image_manager()
+            self._download(origin=True)
+            self._read_files_and_tokenize()
+        else:
+            print(r'old dataloader ckpt file is used, please train from scratch for better ckpt performance')
+
+
+def convert_input_ids_to_chat(prompt_ids, tokenizer):
+    first_non_one_indices = (prompt_ids != tokenizer.pad_token_id).int().argmax(dim=1)
+    rmv_padding_prompt_ids = [row[index:].tolist() for row, index in zip(prompt_ids, first_non_one_indices)]
+    chat = []
+    for input_ids in rmv_padding_prompt_ids:
+        processed_ids = []
+        i = 0
+        n = len(input_ids)
+        while i < n:
+            if input_ids[i] == -100:
+                # 检查连续的-100
+                start = i
+                while i < n and input_ids[i] == -100:
+                    i += 1
+                # 替换为一个<image>标记
+                processed_ids.append(tokenizer.convert_tokens_to_ids("<image>"))
+            else:
+                processed_ids.append(input_ids[i])
+                i += 1
+        # 将处理后的ids转换为字符串
+        text = tokenizer.decode(processed_ids, skip_special_tokens=True)
+        chat.append([text])
+    return chat
+
+
+def transform_image(prompt, images_bytes, tokenizer, processor, truncation, max_prompt_length=None):
+    row_dict_ret = {}
+    pil_images = [decode_bytes_to_rgb_image(img) for img in images_bytes
+                 ] if images_bytes is not None and len(images_bytes) > 0 else None
+    inputs = process_images(pil_images, processor.image_processor)
+    if pil_images is not None:
+        num_image_tokens = inputs['num_image_tokens']
+    else:
+        num_image_tokens = []
+    input_ids, attention_mask = convert_single_prompt_to_input_ids(prompt, tokenizer, processor.image_processor,
+                                                                   num_image_tokens)
+
+    if max_prompt_length is not None:
+        input_ids, attention_mask = postprocess_data(input_ids,
+                                                     attention_mask,
+                                                     max_length=max_prompt_length,
+                                                     pad_token_id=tokenizer.pad_token_id,
+                                                     left_pad=True,
+                                                     truncation=truncation)
+
+    row_dict_ret['input_ids'] = input_ids[0]
+    row_dict_ret['prompt'] = prompt
+    row_dict_ret['attention_mask'] = attention_mask[0]
+    if images_bytes is not None and len(images_bytes) > 0:
+        row_dict_ret['raw_image'] = []
+        pixel_values = inputs['pixel_values']
+        row_dict_ret['image_data'] = {
+            "pixel_values": pixel_values,
+            "image_grid_hw": torch.tensor(inputs['image_grid_hw'])
+        }
+        row_dict_ret['num_image_tokens'] = inputs['num_image_tokens']
+    else:
+        row_dict_ret['raw_image'] = []
+        row_dict_ret['image_data'] = None
+        row_dict_ret['num_image_tokens'] = None
+    return row_dict_ret
+
+
+def load_and_transform_image(prompts, tokenizer, processor, image_manager, max_prompt_length=None):
+    batch_size = prompts.batch.batch_size[0]
+    if 'input_ids' not in prompts.batch:
+        image_bytes = get_local_inputs(prompts.non_tensor_batch, 'images_bytes_ref', image_manager)
+        processed_list = []
+        from alpha_seed.utils.dataset.vlm_rl_dataset import collate_fn
+        for i in range(len(image_bytes)):
+            processed = transform_image(prompts.non_tensor_batch['prompt'][i],
+                                        image_bytes[i],
+                                        tokenizer,
+                                        processor,
+                                        truncation="error",
+                                        max_prompt_length=max_prompt_length)
+            # processed['images_bytes'] = image_bytes[i]
+            processed_list.append(processed)
+        processed_dict = collate_fn(processed_list)
+        prompt_ids = processed_dict.pop('input_ids')  # (bs, prompt_length)
+        prompts.batch['input_ids'] = prompt_ids
+        prompts.batch['attention_mask'] = processed_dict.pop('attention_mask')
+
+        # TODO(caisonghua) we may not need all the keys in non_tensor_batch
+        for key in prompts.non_tensor_batch:
+            if key not in processed_dict:
+                processed_dict[key] = prompts.non_tensor_batch[key]
+    else:
+        processed_dict = prompts.non_tensor_batch
+        if 'image_data_ref' in processed_dict:
+            image_data = get_local_inputs(processed_dict, 'image_data_ref', image_manager)
+            processed_dict['image_data'] = image_data
+    return processed_dict
+
+
+def load_and_transform_save_image(prompts, tokenizer, processor, image_manager, max_prompt_length=None):
+    if 'input_ids' not in prompts.batch:
+        image_bytes = get_local_inputs(prompts.non_tensor_batch, 'images_bytes_ref', image_manager)
+        processed_list = []
+        from alpha_seed.utils.dataset.vlm_rl_dataset import collate_fn
+        for i in range(len(image_bytes)):
+            processed = transform_image(prompts.non_tensor_batch['prompt'][i],
+                                        image_bytes[i],
+                                        tokenizer,
+                                        processor,
+                                        truncation="error",
+                                        max_prompt_length=max_prompt_length)
+            processed_list.append(processed)
+        processed_dict = collate_fn(processed_list)
+        prompt_ids = processed_dict.pop('input_ids')  # (bs, prompt_length)
+        prompts.batch['input_ids'] = prompt_ids
+        prompts.batch['attention_mask'] = processed_dict.pop('attention_mask')
+        prompts.non_tensor_batch['image_data'] = processed_dict['image_data']
+        prompts.non_tensor_batch['num_image_tokens'] = processed_dict['num_image_tokens']
+        save_dataproto_image_data_dist(prompts, image_manager)
+    return prompts

@@ -56,7 +56,7 @@ from alpha_seed.utils import ndtimeline
 from alpha_seed.utils.functional import print_dataproto_size
 from alpha_seed.utils.tracking_utils import async_process_batch_samples_to_wandb
 from alpha_seed.utils.multithreads import ThreadPoolManager
-from alpha_seed.utils.dataset.vlm_rl_dataset import load_image_data_dist
+from alpha_seed.utils.dataset.dist_data_util import load_image_data_dist, get_image_manager
 from alpha_seed.workers.actors.checkpoint.utils import find_latest_ckpt_path_
 from alpha_seed.trainer.utils.dataloader_mgr import DataLoaderMgr
 from alpha_seed.workers.actors.sample_pool import SamplePool
@@ -77,6 +77,7 @@ except ImportError:
     print('Cannot find pad_dataproto_to_divisor. Please use latest verl master')
     raise
 from alpha_seed import core_algos
+from alpha_seed.utils.dataset.dist_data_util import load_and_resume_image_data, load_and_save_image_data
 import pickle as pkl
 
 try:
@@ -669,9 +670,10 @@ def _deduplicate_shared_tensors(obj, visited_tensors=None):
         return obj
 
 
-def save_dataproto(data: DataProto, path, prefix=''):
+def save_dataproto(data: DataProto, path, prefix='', image_manager=None):
     # Deduplicate shared tensors before saving to avoid RuntimeError
     torch.save(_deduplicate_shared_tensors(data.batch), f"{prefix}.batch.pt")
+    load_and_save_image_data(data, image_manager, path, prefix)
     torch.save(data.non_tensor_batch, f"{prefix}.non_tensor_batch.pt")
     torch.save(data.meta_info, f"{prefix}.meta_info.pt")
     hcopy(f"{prefix}.batch.pt", path)
@@ -679,7 +681,7 @@ def save_dataproto(data: DataProto, path, prefix=''):
     hcopy(f"{prefix}.meta_info.pt", path)
 
 
-def load_dataproto(path, prefix=''):
+def load_dataproto(path, prefix='', image_manager=None):
     batch = f"{path}/{prefix}.batch.pt"
     non_tensor_batch = f"{path}/{prefix}.non_tensor_batch.pt"
     meta_info = f"{path}/{prefix}.meta_info.pt"
@@ -691,6 +693,7 @@ def load_dataproto(path, prefix=''):
     load_image_data_dist(non_tensor_batch)
     meta_info = copy_local_path_from_hdfs(meta_info)
     meta_info = torch.load(meta_info)
+    load_and_resume_image_data(image_manager, non_tensor_batch, path, prefix)
     return DataProto(batch=batch, non_tensor_batch=non_tensor_batch, meta_info=meta_info)
 
 
@@ -782,6 +785,7 @@ class RayPPOTrainer(object):
             self.request_managers = get_all_request_manager_actors()
 
         self.enable_actor_critic_spatial_mux = self.config.trainer.get("enable_actor_critic_spatial_mux", False)
+        self.image_manager = get_image_manager()
 
         safely_do(lambda: report_job_config(config), rank=0)()
 
@@ -811,7 +815,10 @@ class RayPPOTrainer(object):
 
     def _create_rollout_manager(self):
         from alpha_seed.workers.streaming_service.rollout_manager import RolloutManager
-        self.rollout_manager = RolloutManager(config=self.config, logger=self.logger, tokenizer=self.tokenizer)
+        self.rollout_manager = RolloutManager(config=self.config,
+                                              logger=self.logger,
+                                              tokenizer=self.tokenizer,
+                                              processor=self.processor)
         hybrid_wg = self.actor_rollout_wg
         self.rollout_manager.initialize(hybrid_wg=hybrid_wg,
                                         rollout_pool=self.rollout_pool,
@@ -1370,8 +1377,8 @@ class RayPPOTrainer(object):
             with open(acc_per_query_local_path, 'rb') as fin:
                 self.acc_per_query = pkl.load(fin)
                 print("acc_per_query RESUMED!!!!!!")
-
-        self.rollout_manager.resume(remote_global_step_folder, load_dataproto_fn=load_dataproto)
+        load_dataproto_fn = partial(load_dataproto, image_manager=self.image_manager)
+        self.rollout_manager.resume(remote_global_step_folder, load_dataproto_fn=load_dataproto_fn)
 
     def _balance_batch(self, batch, metrics, logging_prefix='global_seqlen'):
         # Note that the reorder is in place
@@ -1657,6 +1664,10 @@ class RayPPOTrainer(object):
                     # hybrid generate (on policy)
                     if self.config.trainer.load_train_batch_path is None:
                         batch: DataProto = DataProto.from_single_dict(batch_dict)
+                        if 'images_bytes_ref' in batch.non_tensor_batch:
+                            with Timer(name='image_process', logger=None) as image_process_timer:
+                                batch = self.actor_rollout_wg.load_and_transform_save_image(batch)
+                            metrics['timing/image_process'] = image_process_timer.last
 
                         if self.config.algorithm.priority_sample:
                             self.sample_pool.fill_sample_pool(batch)
@@ -1672,7 +1683,9 @@ class RayPPOTrainer(object):
                         is_warmup_step = self.global_step < self.rollout_pool_warmup_step + start_step
                         with Timer(name='generate', logger=None) as timer:
                             save_path = f"{self.config.trainer.default_hdfs_dir}/checkpoints/global_step_{self.global_step - 1}/"
-                            save_dataproto_fn = partial(save_dataproto, path=save_path)
+                            save_dataproto_fn = partial(save_dataproto,
+                                                        path=save_path,
+                                                        image_manager=self.image_manager)
                             batch = self.rollout_manager.train_generate(batch,
                                                                         step=self.global_step,
                                                                         save_dataproto_fn=save_dataproto_fn,
@@ -1871,8 +1884,8 @@ class RayPPOTrainer(object):
                                 ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
                                 batch = batch.union(ref_log_prob)
                             metrics['timing/ref'] = timer.last
-                            metrics['memory/ref_max_allocated'] = ref_log_prob.meta_info['memory/ref_max_allocated']
-                            metrics['memory/ref_max_reserved'] = ref_log_prob.meta_info['memory/ref_max_reserved']
+                            metrics['memory/ref_max_allocated'] = batch.meta_info.pop('memory/ref_max_allocated')
+                            metrics['memory/ref_max_reserved'] = batch.meta_info.pop('memory/ref_max_reserved')
 
                     print_dataproto_size(batch, head='After reference policy')
 
@@ -2143,9 +2156,10 @@ class RayPPOTrainer(object):
                         num_remaining_results = ray.get(remote_client.get_num_pending_outputs.remote())
                         metrics['remote_client/remaining_results'] = num_remaining_results
 
-                metrics['timing/step'] = step_timer.last
+                metrics['timing/step'] = step_timer.last + metrics['timing/dataloader']
                 # TODO: make a canonical logger that supports various backend
                 self.logger.log(data=metrics, step=self.global_step)
+                release_object(self.image_manager)
                 start_data_time = time.time()
 
                 self.global_step += 1

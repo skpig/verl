@@ -6,6 +6,7 @@ import queue
 import logging
 
 from mono_rl import DataProto
+from alpha_seed.utils.dataset.dist_data_util import release_ref_counts, get_image_manager
 
 logger = logging.getLogger(__file__)
 '''
@@ -37,7 +38,7 @@ class VanillaReplayBufferClient():
             yield key
 
     def delete(self, key: str):
-        self.__pool.pop(key)
+        return self.__pool.pop(key)
 
 
 class RolloutPool:
@@ -76,6 +77,7 @@ class RolloutPool:
         self.rollout_id2uid = defaultdict(set)
 
         self.pool_with_grad = queue.Queue()
+        self.image_manager = get_image_manager()
         # self.pool_with_grad_ready_batch = queue.Queue()
 
     def get_train_batch(self):
@@ -162,7 +164,8 @@ class RolloutPool:
             # ready_batch will occupy very large memory, especially in vlm tasks
             empty_ready_batch = {}
             self.history_pool[index] = empty_ready_batch
-            self.pool.delete(index)
+            delete_batch = self.pool.delete(index)
+            release_ref_counts(self.image_manager, delete_batch)
             self.pool_size -= self.num_bon
         complete_bon_bsz = len(return_batch)
 

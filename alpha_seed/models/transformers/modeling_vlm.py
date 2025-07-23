@@ -1,4 +1,3 @@
-import numpy as np
 import torch
 from seed_models.models.seed_vl.modeling_seed_vl import SeedVLForConditionalGeneration
 from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
@@ -6,46 +5,25 @@ from dist_attn.ulysses.ops import slice_input_tensor
 from typing import Optional, Tuple, Union, List
 from transformers.modeling_outputs import MoeCausalLMOutputWithPast
 import ray
+from alpha_seed.utils.dataset.utils import convert_numpy_to_tensor
 
 
 def add_pixel_values_to_inflight_query(queries, image_manager):
     image_refs = []
     for query in queries:
-        if query.pixel_values_ref is not None:
-            assert isinstance(query.pixel_values_ref,
-                              str), f'pixel_values must be a str, but got {query.pixel_values_ref}'
-            image_refs.append(query.pixel_values_ref)
+        if query.image_data_ref is not None:
+            image_refs.append(query.image_data_ref)
+    if len(image_refs) == 0:
+        return queries
     # convert str to object_ref
     image_refs = ray.get(image_manager.get_refs.remote(image_refs))
-    pixel_values = ray.get(image_refs)
+    image_data = ray.get(image_refs)
     index = 0
     for query in queries:
-        if query.pixel_values_ref is not None:
-            query.pixel_values = pixel_values[index]
+        if query.image_data_ref is not None:
+            query.image_data = image_data[index]
             index += 1
     return queries
-
-
-def convert_tensor_to_numpy(tensor):
-    if tensor is None or isinstance(tensor, np.ndarray):
-        return tensor
-    if isinstance(tensor, list):
-        return [convert_tensor_to_numpy(t) for t in tensor]
-    if tensor.dtype == torch.bfloat16:
-        return tensor.view(torch.uint16).numpy()
-    return tensor.numpy()
-
-
-def convert_numpy_to_tensor(numpy_array, dtype=None):
-    if numpy_array is None or isinstance(numpy_array, torch.Tensor):
-        return numpy_array
-    if isinstance(numpy_array, list):
-        return [convert_numpy_to_tensor(t, dtype) for t in numpy_array]
-    if numpy_array.dtype == np.uint16:
-        return torch.from_numpy(numpy_array).view(torch.bfloat16)
-    if dtype is not None:
-        return torch.from_numpy(numpy_array.astype(dtype))
-    return torch.from_numpy(numpy_array)
 
 
 def get_dummy_image_features(self, pixel_values, image_grid_hw=None):
@@ -85,25 +63,27 @@ def get_local_non_none_inputs(ref_list, image_manager):
 
 def get_image_inputs(non_tensor_batch, image_manager=None):
     image_kwargs = {}
-    if 'pixel_values_ref' in non_tensor_batch:
-        pixel_values_ref = non_tensor_batch['pixel_values_ref']
+    if 'image_data_ref' in non_tensor_batch:
+        image_data_ref = non_tensor_batch['image_data_ref']
         assert image_manager is not None
-        pixel_values = get_local_non_none_inputs(pixel_values_ref, image_manager)
-    elif 'pixel_values' in non_tensor_batch:
-        pixel_values = non_tensor_batch['pixel_values']
+        image_data = get_local_non_none_inputs(image_data_ref, image_manager)
+    elif 'image_data' in non_tensor_batch:
+        image_data = non_tensor_batch['image_data']
     else:
         return image_kwargs
+    pixel_values = [data['pixel_values'] for data in image_data if data is not None]
+    image_grid_hw = [data['image_grid_hw'] for data in image_data if data is not None]
     pixel_values = [convert_numpy_to_tensor(v, float) for v in pixel_values if v is not None]
     if len(pixel_values) == 0:
         return image_kwargs
     image_kwargs['pixel_values'] = torch.cat(pixel_values).cuda()
-    image_grid_hw = [convert_numpy_to_tensor(v, int) for v in non_tensor_batch['image_grid_hw'] if v is not None]
+    image_grid_hw = [convert_numpy_to_tensor(v, int) for v in image_grid_hw if v is not None]
     image_kwargs['image_grid_hw'] = torch.cat(image_grid_hw).cuda()
     return image_kwargs
 
 
 def get_image_keys(non_tensor_batch):
-    keys = ['pixel_values', 'image_grid_hw', 'pixel_values_ref']
+    keys = ['pixel_values', 'image_grid_hw', 'image_data_ref', 'image_data']
     keys = [k for k in keys if k in non_tensor_batch]
     return keys
 

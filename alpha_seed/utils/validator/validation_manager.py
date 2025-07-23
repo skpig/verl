@@ -20,6 +20,7 @@ except ImportError:
     print('Cannot find pad_dataproto_to_divisor. Please use latest verl master')
     raise
 from alpha_seed.models.transformers.modeling_vlm import get_image_keys
+from alpha_seed.utils.dataset.dist_data_util import release_object, get_image_manager
 
 
 class ValidateManager(object):
@@ -44,6 +45,7 @@ class ValidateManager(object):
             print('Using fast result on wandb mode.')
         assert len(self.val_dataloader) == 1, "for bon metrics computation"
         self.rollout_manager = rollout_manager
+        self.image_manager = get_image_manager()
 
     def validate(self,
                  val_epoch=1,
@@ -109,6 +111,8 @@ class ValidateManager(object):
         for val_epoch_idx in range(val_epoch):
             for val_idx, test_data in enumerate(self.val_dataloader):
                 test_batch = DataProto.from_single_dict(test_data)
+                if 'images_bytes_ref' in test_batch.non_tensor_batch:
+                    test_batch = self.rollout_manager.hybrid_wg.load_and_transform_save_image(test_batch)
 
                 prompt_names = test_batch.non_tensor_batch['prompt_names'][0]
                 num_prompts_per_data = len(prompt_names)
@@ -182,6 +186,7 @@ class ValidateManager(object):
                         data = {"reward": reward.item(), "prompt": prompt, "response": response}
                         f.write(json.dumps(data, ensure_ascii=False) + "\n")
                         f.flush()
+                release_object(self.image_manager, test_batch.non_tensor_batch, ['image_data_ref', 'images_bytes_ref'])
 
         reward_tensor = torch.cat(reward_tensor_lst, dim=0).cpu()  # (valsize*num_prompt_per_data, eval_bon)
         reward_tensor = torch.clamp(reward_tensor, min=0)

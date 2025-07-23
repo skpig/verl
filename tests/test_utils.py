@@ -9,7 +9,7 @@ from verl.utils.tracking import Tracking
 from verl.utils.fs import copy_local_path_from_hdfs
 from mono_rl.single_controller.ray import RayResourcePool, RayClassWithInitArgs, RayWorkerGroup
 from mono_rl.single_controller.ray import create_colocated_worker_cls
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, AutoProcessor
 
 import ray
 from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRefWorker
@@ -97,6 +97,12 @@ def get_tokenizer(config):
     return tokenizer
 
 
+def get_processor(config):
+    local_path = copy_local_path_from_hdfs(config.actor_rollout_ref.model.path)
+    processor = AutoProcessor.from_pretrained(local_path)
+    return processor
+
+
 def _create_rollout_wg_common(actor_rollout_ref_config, ngpus: int, role: str, name: str, is_server: bool):
     resource_pool = RayResourcePool(process_on_nodes=[ngpus], use_gpu=True, name_prefix=name)
     rollout_cls_with_init = RayClassWithInitArgs(
@@ -176,12 +182,13 @@ def create_rollout_manager(config):
         tokenizer.chat_template = "{% if not add_generation_prompt is defined %}{% set add_generation_prompt = false %}{% endif %}{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}"
     if config.data.get('chat_template', None) == 'chatml_tool':
         tokenizer.chat_template = """{% if not add_generation_prompt is defined %}{% set add_generation_prompt = false %}{% endif %}{% if tools %}{{ '<|im_start|>system\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>' }}{%- for tool in tools %}{{- '\n' }}{{ tool | tojson }}{%- endfor %}\n\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n{% endif %}{% for message in messages %}{% if message['role'] == 'tool' %}<|im_start|>user\n<tool_response>\n{{ message['content'] }}\n</tool_response><|im_end|>\n{% elif message['role'] == 'assistant' %}<|im_start|>{{ message['role'] }}\n{{ message['content'] }}\n{% else %}<|im_start|>{{ message['role'] }}\n{{ message['content'] }}<|im_end|>\n{% endif %}{% endfor %}{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}"""
+    processor = get_processor(config)
 
     hybrid_wg = create_hybrid_wg(config)
     streaming_rollout_wg = create_streaming_rollout_wg(config)
     streaming_validator_wg = create_streaming_validator_wg(config)
     rollout_pool = create_rollout_pool(config)
-    rollout_manager = RolloutManager(config, logger=logger, tokenizer=tokenizer)
+    rollout_manager = RolloutManager(config, logger=logger, tokenizer=tokenizer, processor=processor)
 
     rollout_manager.initialize(hybrid_wg,
                                rollout_pool=rollout_pool,

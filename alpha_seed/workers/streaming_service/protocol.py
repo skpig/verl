@@ -76,8 +76,8 @@ class ErrorResponse(BaseModel):
 
 class ChatCompletionRolloutMessageParam(TypedDict, total=False):
     prompt: Required[Union[str, List[int]]]
-    pixel_values_ref: Optional[str]
-    image_grid_hw: Optional[List[List[int]]]
+    images_bytes_ref: Optional[str]
+    image_data_ref: Optional[str]
     """The contents of the user message."""
 
 
@@ -162,6 +162,10 @@ class ChatCompletionMessageRollout(ChatCompletionMessage):
     """Extra info required for trainer"""
     metrics: Optional[dict] = {}
     """Query level metrics"""
+    image_data_ref: Optional[str] = None
+    """Query image data"""
+    num_image_tokens: Optional[List[int]] = None
+    """Number of image tokens"""
 
     def to_dict(self):
         return self.model_dump()

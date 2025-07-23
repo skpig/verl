@@ -54,10 +54,11 @@ from alpha_seed.workers.ppo_actor import DataParallelPPOActor
 from alpha_seed.utils.kernels.persist_gemm import deploy_persist_gemm
 from alpha_seed.models.transformers.parallel.collectives import get_memory
 from alpha_seed.models.transformers.modeling_vlm import add_pixel_values_to_inflight_query
+from alpha_seed.utils.dataset.vlm_rl_dataset import load_and_transform_save_image
 from alpha_seed.utils.observility.training_stats import MetricsTorchDispatchMode
 from alpha_seed.utils.observility import get_profiler_context_wrapped
 from alpha_seed.utils.ckpt import download_minimal_required_files
-from alpha_seed.utils.dataset.vlm_rl_dataset import get_image_manager
+from alpha_seed.utils.dataset.dist_data_util import get_image_manager
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig, AutoModelForVision2Seq
 from transformers import AutoProcessor
 
@@ -928,6 +929,15 @@ class AsyncActorRolloutRefWorker(Worker):
         assert self._is_rollout or self._is_standalone_rollout or self._is_standalone_validator
         # 通知所有actor server退出weights transfer
         self.sharding_manager.weights_communicator.update_standalone_worker_end(self.hybrid_rollout_addresses)
+
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO, blocking=True)
+    def load_and_transform_save_image(self, prompts: DataProto):
+        prompts = load_and_transform_save_image(prompts,
+                                                self.tokenizer,
+                                                self.processor,
+                                                self.image_manager,
+                                                max_prompt_length=self.config.rollout.prompt_length)
+        return prompts
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO, blocking=False)
     def update_actor(self, data: DataProto):

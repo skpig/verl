@@ -47,7 +47,7 @@ from alpha_seed.workers.hybrid_engine.fsdp_gather import ulysses_pad_and_slice_i
 from alpha_seed.models.transformers.modeling_vlm import get_image_inputs, get_image_keys
 from alpha_seed.utils.observility.training_stats import sync_training_stats
 from alpha_seed.utils.observility import get_profiler_context_wrapped, profile_step
-from alpha_seed.utils.dataset.vlm_rl_dataset import get_image_manager
+from alpha_seed.utils.dataset.dist_data_util import get_image_manager
 from alpha_seed import core_algos
 from alpha_seed.models.transformers.monkey_patch import update_gate_ema
 from verl.utils.seqlen_balancing import rearrange_micro_batches, get_reverse_idx

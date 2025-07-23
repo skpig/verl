@@ -38,7 +38,7 @@ from transformers import AutoTokenizer
 from alpha_seed.workers.xperf_rollout.utils.vit_inferencer import TorchVitInferencer, gen_vit_cfg
 import numpy as np
 import torch.nn.functional as F
-from alpha_seed.models.transformers.modeling_vlm import convert_tensor_to_numpy, convert_numpy_to_tensor
+from alpha_seed.utils.dataset.utils import convert_numpy_to_tensor
 
 # Constants
 BLOCK_SIZE_ALIGNMENT = 256
@@ -585,9 +585,7 @@ class InferenceSession:
                 query.temperature = temperature[idx] if prompt_meta_info is not None else None
                 query.max_new_tokens = max_new_tokens[idx] if prompt_meta_info is not None else self.max_new_tokens
                 query.max_length = max_length[idx] if prompt_meta_info is not None else self.max_length
-                query.pixel_values = query.meta_info.pop("pixel_values", None)
-                query.pixel_values_ref = query.meta_info.pop("pixel_values_ref", None)
-                query.image_grid_hw = query.meta_info.pop("image_grid_hw", None)
+                query.image_data = query.meta_info.pop("image_data", None)
                 query.prefill_only = self.mode != "rollout"
                 query.attach_session(session=self)
                 with self._accepted_queries_mutex:
@@ -713,6 +711,10 @@ class InferenceSession:
         self.finished_num += 1
         self.cache_manager.release_query(query)
         self.infer_scheduler.record("finished_tokens_by_step", [self.current_steps])
+        # only set image_data to None when validation
+        if 'image_data' in query.meta_info and query.meta_info.get('validate', False):
+            image_data = query.meta_info.pop('image_data')
+            del image_data
 
     def _try_resume_paused_queries(self):
         if len(self.paused) == 0:
@@ -742,8 +744,10 @@ class InferenceSession:
             query.lazy_init_from_prompt_once(self.tokenizer)
         return self.cache_manager.update_queries(self.running, self.waiting, self.paused)
 
-    def _prepare_image_embeds(self, input_ids, pixel_values, image_grid_hw):
-        assert pixel_values is not None
+    def _prepare_image_embeds(self, input_ids, image_data):
+        assert image_data is not None
+        pixel_values = image_data['pixel_values']
+        image_grid_hw = image_data['image_grid_hw']
         if isinstance(pixel_values, np.ndarray):
             pixel_values = convert_numpy_to_tensor(pixel_values, float)
         pixel_values = pixel_values.to(torch.bfloat16).cuda(non_blocking=True)
@@ -806,14 +810,14 @@ class InferenceSession:
             if query.is_context_computing:
 
                 def _get_inp_embs_and_labels(input_ids, start: int, end: int):
-                    is_vlm = query.pixel_values is not None
+                    is_vlm = query.image_data is not None
                     labels_ids = input_ids + [self.pad_token_id]
                     labels_ids = labels_ids[start + 1:end + 1]
                     input_ids = torch.tensor(input_ids).cuda()
                     is_oe = self.oe_max_stride > 1
                     if is_vlm:
-                        input_ids = input_ids
-                        input_embs = self._prepare_image_embeds(input_ids, query.pixel_values, query.image_grid_hw)
+                        input_ids = input_ids.cuda()
+                        input_embs = self._prepare_image_embeds(input_ids, query.image_data)
                     else:
                         if is_oe:
                             curr_input_ids = input_ids[start:end].unsqueeze(0).cuda()

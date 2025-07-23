@@ -1,24 +1,24 @@
+# pytest -vvv -s tests/hybrid_engine/test_vlm.py
 import pytest
 from omegaconf import OmegaConf
 from tests.test_utils import ray_fixture, gpu_allocator, get_config, get_tokenizer, create_rollout_manager
+from alpha_seed.utils.dataset.vlm_rl_dataset import load_and_transform_save_image
+from alpha_seed.utils.dataset.dist_data_util import get_image_manager
+from transformers import AutoProcessor
+from verl.utils.fs import copy_local_path_from_hdfs
 from mono_rl import DataProto
 import numpy as np
 import uuid
 
 
-def get_batch(config, tokenizer):
+def get_batch(config, tokenizer, processor, model_path):
     from alpha_seed.utils.dataset.vlm_rl_dataset import RLHFDatasetVL
-    from transformers import AutoProcessor
-    from verl.utils.fs import copy_local_path_from_hdfs
     from alpha_seed.utils.dataset.vlm_rl_dataset import collate_fn
     from torch.utils.data import DataLoader
     from torch.utils.data import SequentialSampler
 
-    model_path = copy_local_path_from_hdfs(config.actor_rollout_ref.model.path)
-    processor = AutoProcessor.from_pretrained(model_path)
     dataset = RLHFDatasetVL(
-        parquet_files=
-        "hdfs://haruna/home/byte_data_seed/hl_lq/iccv/user/xiaoboqin/data/rlhf/math/mmathcot_v4_hard_w_sys_for_rl.parquet",
+        parquet_files="hdfs://harunawl/home/byte_data_seed_wl/user/caisonghua/mmathcot_v4_hard_w_sys_for_rl_10.parquet",
         tokenizer=tokenizer,
         prompt_key="prompt",
         answer_key="answer",
@@ -28,6 +28,7 @@ def get_batch(config, tokenizer):
         multi_prompts="none",
         num_prompts_per_data=1,
         processor=processor,
+        tokenizer_file=model_path,
     )
 
     sampler = SequentialSampler(data_source=dataset)
@@ -65,7 +66,6 @@ def test_vlm_gen(monkeypatch, gpu_allocator, ray_fixture):
                 "enable_paged_attention": True,
                 "max_ctx_batch_size": 1,
                 "gpu_memory_utilization": 0.5,
-                "vit_use_xperf_gpt": True
             }
         },
         "trainer": {
@@ -80,14 +80,16 @@ def test_vlm_gen(monkeypatch, gpu_allocator, ray_fixture):
     config = get_config(override_config)
     tokenizer = get_tokenizer(config)
     tokenizer.padding_side = 'left'
-    batch = get_batch(config, tokenizer)
+    image_manager = get_image_manager()
+    model_path = copy_local_path_from_hdfs(config.actor_rollout_ref.model.path)
+    processor = AutoProcessor.from_pretrained(model_path)
+    batch = get_batch(config, tokenizer, processor, model_path)
 
     rollout_manager = create_rollout_manager(config)
+    batch = load_and_transform_save_image(batch, tokenizer, processor, image_manager, max_prompt_length=8192)
     batch = rollout_manager.val_generate(batch)
     prompt0_len = batch.batch['attention_mask'][0].sum()
-
-    tokens = batch.batch['input_ids'][0, prompt0_len:].clone()
-    tokens[tokens < 0] = 1
-
-    response0 = tokenizer.decode(tokens, skip_special_tokens=True)
+    input_ids = batch.batch['input_ids'][batch.batch['input_ids'] != tokenizer.pad_token_id]
+    input_ids = input_ids[input_ids > 0]
+    response0 = tokenizer.decode(input_ids, skip_special_tokens=True)
     print(response0)

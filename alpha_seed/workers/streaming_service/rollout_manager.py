@@ -27,7 +27,7 @@ from mono_rl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, 
 from mono_rl.single_controller.ray.replicated_worker_group import ReplicatedRayWorkerGroup, ScalingRayWorkerGroup
 from verl.utils.tracking import Tracking
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, AutoProcessor
 from hdfs_io import hexists, makedirs, hcopy
 from alpha_seed.utils.observility.pretty_print import pprint
 from alpha_seed.utils.functional import print_dataproto_size
@@ -99,16 +99,12 @@ def hybrid_enable_server_ctx(hybrid_wg):
 
 class RolloutManager:
 
-    def __init__(
-        self,
-        config: DictConfig,
-        logger: Tracking,
-        tokenizer: AutoTokenizer,
-    ):
+    def __init__(self, config: DictConfig, logger: Tracking, tokenizer: AutoTokenizer, processor: AutoProcessor):
         self.config = config
         self.config_dict = OmegaConf.to_container(self.config, resolve=True)
         self.logger = logger
         self.tokenizer = tokenizer
+        self.processor = processor
         self.train_client_executor: Optional[ExecutorBase] = None
         self.val_client_executor: Optional[ExecutorBase] = None
 

@@ -37,7 +37,7 @@ from verl.utils.model import compute_position_id_with_mask
 from tensordict import TensorDict
 
 from alpha_seed.utils.functional import rearrange_micro_data_proto
-from alpha_seed.utils.dataset.vlm_rl_dataset import get_image_manager
+from alpha_seed.utils.dataset.dist_data_util import get_image_manager
 from alpha_seed.workers.hybrid_engine.fsdp_gather import ulysses_pad_and_slice_inputs, ulysses_pad
 from alpha_seed.models.transformers.modeling_vlm import get_image_inputs, get_image_keys
 from alpha_seed import core_algos

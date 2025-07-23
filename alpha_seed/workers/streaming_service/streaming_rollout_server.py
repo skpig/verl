@@ -36,6 +36,7 @@ from alpha_seed.workers.streaming_service.protocol import (ChatCompletionRequest
 from alpha_seed.workers.streaming_service.rollout_request_manager import RequestManagerRegisterCenter
 from alpha_seed.workers.streaming_service.streaming_utils import get_node_ip, get_free_port
 from alpha_seed.workers.xperf_rollout.component.query import AsyncQuery, Query
+from alpha_seed.utils.dataset.dist_data_util import save_query_image_data_dist, get_image_manager
 
 
 class OpenAIProxy(ABC):
@@ -43,6 +44,7 @@ class OpenAIProxy(ABC):
     def __init__(self):
         self.app = FastAPI()
         self.setup_routes()
+        self.image_manager = get_image_manager()
 
     @abstractmethod
     async def create_chat_completion(self, request: ChatCompletionRequest, raw_request: Request):
@@ -68,26 +70,20 @@ class OpenAIProxy(ABC):
             input_prompt = ""
         request_id = uuid.uuid4().hex
         kwargs = {}
-        if 'pixel_values_ref' in request.messages:
-            kwargs['image_kwargs'] = {
-                'pixel_values_ref': request.messages['pixel_values_ref'],
-                'image_grid_hw': request.messages['image_grid_hw']
-            }
-            assert isinstance(kwargs['image_kwargs']['pixel_values_ref'], str)
+        if 'image_data_ref' in request.messages:
+            kwargs['image_kwargs'] = {'image_data_ref': request.messages['image_data_ref']}
         return Query.from_request(input_ids, input_prompt, request_id, request.to_sampling_params(), request.meta_info,
                                   **kwargs)
 
     def create_response(self, query: Query) -> ChatCompletionRollout:
-        message = ChatCompletionMessageRollout(
-            role="assistant",
-            prompt=query.input_prompt + query.output_prompt[0],
-            raw_output_ids=query.output_tokens,
-            response_log_probs=query.log_probs,
-            is_finished=query.is_finished,
-            model_output_mask=query.model_output_mask,
-            extra_data=query.extra_data,
-            metrics=query.metrics,
-        )
+        message = ChatCompletionMessageRollout(role="assistant",
+                                               prompt=query.input_prompt + query.output_prompt[0],
+                                               raw_output_ids=query.output_tokens,
+                                               response_log_probs=query.log_probs,
+                                               is_finished=query.is_finished,
+                                               model_output_mask=query.model_output_mask,
+                                               extra_data=query.extra_data,
+                                               metrics=query.metrics)
 
         # 使用自定义的ChoiceRollout类型，确保正确序列化
         choice_data = ChoiceRollout(

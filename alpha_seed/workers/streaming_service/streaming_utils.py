@@ -407,7 +407,7 @@ async def chat_completions(content, meta_info, config, host, port: int):
         await session.close()
 
 
-async def internal_call(item, config, host, port: int, prompt: str = ''):
+async def internal_call(item, config, host, port: int, prompt: str = '', is_train=True):
     completion = None
     try:
         if prompt == '':
@@ -419,12 +419,14 @@ async def internal_call(item, config, host, port: int, prompt: str = ''):
             data = {"prompt": prompt_ids}
         else:
             data = {"prompt": prompt}
-        if 'pixel_values_ref' in item.non_tensor_batch:
-            assert len(item.non_tensor_batch['pixel_values_ref']) == 1
-            pixel_values_ref = item.non_tensor_batch['pixel_values_ref'][0]
-            if pixel_values_ref is not None:
-                data['pixel_values_ref'] = pixel_values_ref
-                data['image_grid_hw'] = item.non_tensor_batch['image_grid_hw'][0].tolist()
+        if 'image_data_ref' in item.non_tensor_batch:
+            image_data_ref = item.non_tensor_batch['image_data_ref'][0]
+            if image_data_ref is not None:
+                data['image_data_ref'] = image_data_ref
+        if 'images_bytes_ref' in item.non_tensor_batch:
+            images_bytes_ref = item.non_tensor_batch['images_bytes_ref'][0]
+            if images_bytes_ref is not None:
+                data['images_bytes_ref'] = images_bytes_ref
         meta_info = copy.copy(item.meta_info)
         # required for eos callback
         meta_info['uid'] = item.non_tensor_batch['uid'][0]
@@ -436,6 +438,7 @@ async def internal_call(item, config, host, port: int, prompt: str = ''):
         # required for tool calling
         if (key := 'extra_data') in item.non_tensor_batch:
             meta_info[key] = item.non_tensor_batch[key][0]
+        meta_info['validate'] = not is_train
 
         completion = await chat_completions(data, meta_info, config, host, port)
     except asyncio.CancelledError as e:

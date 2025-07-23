@@ -15,7 +15,6 @@
 Create a XPerfGPT Rollout
 """
 
-from alpha_seed.utils.dataset.vlm_rl_dataset import get_image_manager
 from alpha_seed.workers.xperf_rollout.utils.base_weights_communicator import WeightsCommunicator
 from mono_rl import DataProto
 import copy
@@ -60,8 +59,8 @@ from alpha_seed.workers.xperf_rollout.utils.nccl_weights_communicator import NCC
 from alpha_seed.workers.streaming_service.xperf_model_prophet import XperfModelProphet
 from alpha_seed.workers.xperf_rollout.utils.logits_manipulate import logits_manipulate_fn_core, logits_manipulate_fn_eta, logits_manipulate_fn_minp, logits_manipulate_fn_clip
 from alpha_seed.utils.observility import get_profiler_context_wrapped, profile_step
-from alpha_seed.utils.dataset.vlm_rl_dataset import get_image_manager
 from alpha_seed.models.transformers.modeling_vlm import add_pixel_values_to_inflight_query
+from alpha_seed.utils.dataset.dist_data_util import get_image_manager, get_local_inputs
 from functools import partial
 import omegaconf
 import dill
@@ -118,7 +117,7 @@ class AsyncXPerfGPTRollout(object):
         """
         Switch the background generation thread between async_generate and generate.
         Will stop the current thread and start a new one.
-        
+
         :param to_async: If True, switch to async_generate; else use generate.
         """
         print(f"[Switch] Switching to {'async_generate' if to_async else 'generate'} mode...")
@@ -487,6 +486,7 @@ class AsyncXPerfGPTRollout(object):
     def generate_sequences(self, prompts: DataProto, is_async=False, mode="rollout"):
         if mode == "log_probs" and self.is_async_generate:
             self.switch_mode(False)
+
         complete_ratio = prompts.meta_info.get('complete_ratio', 1)
         prompt_ids = prompts.batch['input_ids']  # (bs, prompt_length)
         # left-padded attention_mask
@@ -500,7 +500,16 @@ class AsyncXPerfGPTRollout(object):
             "generation_kwargs": generation_kwargs,
             "mode": mode,
         } for off_policy_step in off_turn_off_policy_steps.tolist()]
-        prompt_meta_info = self._batch_process_images(prompts, prompt_meta_info)
+        batch_size = len(prompts)
+        if 'image_data_ref' in prompts.non_tensor_batch:
+            image_data = get_local_inputs(prompts.non_tensor_batch, 'image_data_ref', self.image_manager)
+        for key, value in prompts.non_tensor_batch.items():
+            for i in range(batch_size):
+                prompt_meta_info[i][key] = value[i]
+                if key == 'image_data_ref':
+                    prompt_meta_info[i]['image_data'] = image_data[i]
+        for i in range(batch_size):
+            prompt_meta_info[i]['validate'] = prompts.meta_info.get('validate', False)
         self.input_queue.put((rmv_padding_prompt_ids, complete_ratio, generation_kwargs, prompt_meta_info))
 
         if is_async:
@@ -614,31 +623,6 @@ class AsyncXPerfGPTRollout(object):
                 return self.output_queue.get(timeout=1)
             except Exception:
                 assert self.process_thread.is_alive()
-
-    def _batch_process_images(self, prompts, prompt_meta_info):
-        batch_size = len(prompts)
-        for key, value in prompts.non_tensor_batch.items():
-            v_hex_list = []
-            index_list = []
-            if key == 'pixel_values_ref':
-                for i in range(batch_size):
-                    if isinstance(value[i], str):
-                        v_hex = value[i]
-                        v_hex_list.append(v_hex)
-                        index_list.append(i)
-                if v_hex_list:
-                    image_refs = ray.get(self.image_manager.get_refs.remote(v_hex_list))
-                    images = ray.get(image_refs)
-                    for idx, i in enumerate(index_list):
-                        prompt_meta_info[i]['pixel_values'] = images[idx]
-                        prompt_meta_info[i]['pixel_values_ref'] = v_hex_list[idx]
-                for i in range(batch_size):
-                    if not isinstance(value[i], str):
-                        prompt_meta_info[i][key] = value[i]
-            else:
-                for i in range(batch_size):
-                    prompt_meta_info[i][key] = value[i]
-        return prompt_meta_info
 
 
 from omegaconf import DictConfig

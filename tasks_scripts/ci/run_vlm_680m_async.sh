@@ -10,7 +10,7 @@ SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/caisonghua/m8_vlm_68
 TRAIN_FILE=hdfs://haruna/home/byte_data_seed/hl_lq/iccv/user/xiaoboqin/data/rlhf/math/mmathcot_v4_hard_w_sys_for_rl.parquet
 TRAIN_FILE=hdfs://haruna/home/byte_data_seed/hl_lq/iccv/user/lingyue/data/rl/math_37k_knowlegde_species_15k_zero_train.parquet
 TEST_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/caisonghua/eval_mathvision_mini.parquet
-default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/caisonghua/test/vlm_grpo
+default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/caisonghua/test/vlm_grpo_680m_async_$(date +%F)
 
 
 # 训练长度
@@ -23,7 +23,7 @@ ppo_mini_batch_size=8
 val_batch_size=8
 total_epochs=200
 test_freq=-1
-save_freq=1
+save_freq=-1
 # 算法相关的参数
 actor_lr=2e-6
 critic_lr=2e-6
@@ -73,7 +73,7 @@ python3 tasks/main_ppo.py \
     data.prompt_key=prompt \
     data.answer_key=answer \
     data.image_key=img \
-    data.dist_image=False \
+    data.dist_image=True \
     data.use_ref_answer=${use_ref_answer} \
     data.max_prompt_length=${max_prompt_length} \
     data.max_response_length=${max_response_length} \
@@ -132,7 +132,7 @@ python3 tasks/main_ppo.py \
     trainer.val_epoch=1 \
     trainer.need_log=False \
     trainer.log_file=/opt/tiger/alpha-seed/log.jsonl \
-    trainer.resume_steps="disable" \
+    trainer.resume_steps="auto" \
     +actor_rollout_ref.rollout.complete_ratio=0.5 \
     +actor_rollout_ref.rollout.max_off_policy_steps=5 \
     actor_rollout_ref.actor.fsdp_size=${fsdp_size} \
