@@ -434,66 +434,6 @@ def compute_data_metrics(self, batch: DataProto):
     agent_num_tool_calls = batch.non_tensor_batch.get('agent_num_tool_calls', None)
     agent_handler = batch.non_tensor_batch.get('agent_handler', None)
 
-    # Compute agent metrics mean, max, min values if data exists
-    agent_metrics = {}
-
-    # Group metrics by agent_handler
-    if agent_num_turns is not None or agent_num_tool_calls is not None:
-        from collections import defaultdict
-
-        handler_turns = defaultdict(list)
-        handler_tool_calls = defaultdict(list)
-
-        if agent_handler is None:
-            agent_handler = ['default'] * len(agent_num_turns if agent_num_turns is not None else agent_num_tool_calls)
-
-        for i, handler in enumerate(agent_handler):
-            if agent_num_turns is not None and agent_num_turns[i] is not None:
-                handler_turns[handler].append(agent_num_turns[i])
-            if agent_num_tool_calls is not None and agent_num_tool_calls[i] is not None:
-                handler_tool_calls[handler].append(agent_num_tool_calls[i])
-
-        # Merge all handler types across all processes to ensure consistency
-        local_handler_types = set(handler_turns.keys()) | set(handler_tool_calls.keys())
-        all_handler_types = set()
-        local_handler_list = list(local_handler_types)
-        gathered_handlers = [None for _ in range(dist.get_world_size())]
-        dist.all_gather_object(gathered_handlers, local_handler_list)
-        for handler_list in gathered_handlers:
-            all_handler_types.update(handler_list)
-
-        for handler_type in sorted(all_handler_types):  # Sort for deterministic order
-            turns_list = handler_turns.get(handler_type, [])
-            if turns_list:
-                turns_tensor = torch.tensor(turns_list, dtype=torch.float32, device=sequence_score.device)
-            else:
-                turns_tensor = torch.empty(0, dtype=torch.float32, device=sequence_score.device)
-
-            turns_mean, turns_max, turns_min, _ = distributed_mean_max_min_std(turns_tensor,
-                                                                               compute_max=True,
-                                                                               compute_min=True,
-                                                                               compute_std=False)
-            agent_metrics[f'agent/{handler_type.replace("agent/", "")}_num_turns_mean'] = turns_mean.detach().item()
-            agent_metrics[f'agent/{handler_type.replace("agent/", "")}_num_turns_max'] = turns_max.detach().item()
-            agent_metrics[f'agent/{handler_type.replace("agent/", "")}_num_turns_min'] = turns_min.detach().item()
-
-            tool_calls_list = handler_tool_calls.get(handler_type, [])
-            if tool_calls_list:
-                tool_calls_tensor = torch.tensor(tool_calls_list, dtype=torch.float32, device=sequence_score.device)
-            else:
-                tool_calls_tensor = torch.empty(0, dtype=torch.float32, device=sequence_score.device)
-
-            tool_calls_mean, tool_calls_max, tool_calls_min, _ = distributed_mean_max_min_std(tool_calls_tensor,
-                                                                                              compute_max=True,
-                                                                                              compute_min=True,
-                                                                                              compute_std=False)
-            agent_metrics[f'agent/{handler_type.replace("agent/", "")}_num_tool_calls_mean'] = tool_calls_mean.detach(
-            ).item()
-            agent_metrics[f'agent/{handler_type.replace("agent/", "")}_num_tool_calls_max'] = tool_calls_max.detach(
-            ).item()
-            agent_metrics[f'agent/{handler_type.replace("agent/", "")}_num_tool_calls_min'] = tool_calls_min.detach(
-            ).item()
-
     metrics = {
         # actor
         'actor/entropy': mean_entropy.detach().item(),
@@ -613,9 +553,6 @@ def compute_data_metrics(self, batch: DataProto):
             'critic/vf/vf_explained_var': (1.0 - return_diff_var / (return_var + 1e-5)).detach().item(),
         }
         metrics.update(values_metrics)
-
-    # Add agent metrics to the main metrics dictionary
-    metrics.update(agent_metrics)
 
     return DataProto.from_dict({'dummy': torch.ones(size=(1,))}, meta_info={'metrics': metrics})
 
