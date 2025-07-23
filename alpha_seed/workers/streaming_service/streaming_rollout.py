@@ -158,6 +158,7 @@ class AsyncXPerfGPTRollout(object):
         # tokenizer_path = os.path.join(local_path, 'tokenizer')
         self.tokenizer = AutoTokenizer.from_pretrained(local_path, trust_remote_code=False)
         self.model_hf_config = AutoConfig.from_pretrained(local_path, trust_remote_code=False)
+        self.vit_model_path = local_path
         self.is_standalone = is_standalone
 
         self.rank = rank
@@ -257,7 +258,8 @@ class AsyncXPerfGPTRollout(object):
                                           enable_cuda_graph=enable_cuda_graph,
                                           standalone=self.is_standalone,
                                           schedule_strategy=self.config.schedule_strategy,
-                                          step_profiler=step_profiler)
+                                          step_profiler=step_profiler,
+                                          vit_use_xperf_gpt=self.config.vit_use_xperf_gpt)
         inference_sess.max_off_policy_steps = self.config.get('max_off_policy_steps', 5)
         with tempfile.NamedTemporaryFile(mode='w', suffix=".json") as f:
             print(f"load xperf config ... {text_cfg}")
@@ -329,6 +331,7 @@ class AsyncXPerfGPTRollout(object):
                                                                  use_xperf_triton=self.config.xperf_triton.enable,
                                                                  vit_config=vision_cfg,
                                                                  xperf_triton_cfg=self.config.xperf_triton,
+                                                                 vit_model_cfg_path=self.vit_model_path,
                                                                  **xperf_custom_kwargs)
                     if dist.is_initialized() and tp_size > 1:
                         dist.barrier()

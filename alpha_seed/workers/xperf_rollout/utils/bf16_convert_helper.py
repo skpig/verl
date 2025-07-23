@@ -30,6 +30,7 @@ from seed_models import P4Config, P5Config, P6Config
 
 from alpha_seed.workers.xperf_rollout.utils.layout_convert_helper import _fix_qkv_ordering, _fix_o_ordering, load_to_cuda
 from alpha_seed.workers.xperf_rollout.utils.weights_adapter import WeightsAdapter
+from alpha_seed.workers.xperf_rollout.utils.vit_inferencer import TorchVitInferencer
 
 
 def assert_not_nan(tensor: torch.Tensor):

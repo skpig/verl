@@ -4,6 +4,7 @@ import threading
 import torch
 from unittest.mock import patch
 
+from alpha_seed.workers.xperf_rollout.utils.vit_inferencer import TorchVitInferencer
 from alpha_seed.workers.xperf_rollout.utils.base_weights_communicator import WeightsCommunicator
 from verl.utils.debug import log_gpu_memory_usage
 
@@ -76,6 +77,12 @@ class NCCLWeightsCommunicator(WeightsCommunicator):
 
             # TODO: if freezed, we don't need to update vit model
             vit_engine = self.inference_engine.vit_engine
+
+            # for torch vit
+            if isinstance(vit_engine, TorchVitInferencer):
+                vit_engine.update_standalone_weighs(comm_fn, comm_rank)
+                return
+
             if hasattr(vit_engine.visual_encoder.module, "layers_weight"):
                 for layer, layer_weight in enumerate(vit_engine.visual_encoder.module.layers_weight):
                     for i, weight in enumerate(layer_weight):

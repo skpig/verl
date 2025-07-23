@@ -1,111 +1,110 @@
 import os
 import torch
 import torch.nn as nn
-import xperf_gpt
-from xperf_gpt.multi_models.visual.inferencer import VITInferencer as XPERF_VITInferencer
-from xperf_gpt.multi_models.visual.token_builder import VisualBuilder
-from xperf_gpt.multi_models.visual.eva_vit import EVA_VIT_CONFIGS
-from xperf_gpt.model_implementations.config import XperfViTInferenceConfig
-from torch.nn import LayerNorm as FusedLayerNorm
-from xperf_gpt.model_implementations.vit_torch import Attention, DropPath, Mlp
+from seed_models.models.seed_vl import SeedVLConfig
+from transformers.modeling_utils import PreTrainedModel
+from seed_models.models.seed_vl.modeling_seed_vl import SeedVisionTransformer
+from transformers import AutoConfig
 
 
-# TODO: move it to xperf_gpt
-class Block(nn.Module):
+def gen_vit_cfg(vit_cfg_path):
+    config = AutoConfig.from_pretrained(vit_cfg_path, trust_remote_code=True)
+    return config.vision_config
 
-    def __init__(self, config: XperfViTInferenceConfig):
-        super().__init__()
-        dim = config.embed_dim
-        self.norm1 = FusedLayerNorm(dim, eps=1e-6)
-        self.attn = Attention(config)
-        self.drop_path = DropPath(config.drop_path_rate) if config.drop_path_rate > 0.0 else nn.Identity()
-        self.norm2 = FusedLayerNorm(dim, eps=1e-6)
-        mlp_hidden_dim = int(dim * config.mlp_ratio)
 
-        self.mlp = Mlp(
-            in_features=dim,
-            hidden_features=mlp_hidden_dim,
+# torch vit model from seed_models
+class TorchVitInferencer(PreTrainedModel):
+
+    def __init__(self, config: SeedVLConfig, *args, **kwargs) -> None:
+        super().__init__(config)
+        # model
+        self.visual_encoder = SeedVisionTransformer(config)
+        # layer norm
+        self.ln_vision = nn.LayerNorm(self.visual_encoder.num_features)
+        self.vision_config = config
+        bridge_activation_func = nn.ReLU if self.vision_config.bridge_activation_type == "ReLU" else nn.GELU
+        # seed proj
+        self.seed_proj = nn.Sequential(
+            nn.Linear(self.visual_encoder.num_features, self.vision_config.projector_hidden_dim),
+            bridge_activation_func(),
+            nn.Linear(self.vision_config.projector_hidden_dim, self.vision_config.projector_embed_dim),
         )
 
-    def forward(self, x, rel_pos_bias=None, attn_mask=None, grid_hw=None, rotary_pos_emb=None):
-        x = x + self.drop_path(
-            self.attn(self.norm1(x),
-                      rel_pos_bias=rel_pos_bias,
-                      attn_mask=attn_mask,
-                      grid_hw=grid_hw,
-                      rotary_pos_emb=rotary_pos_emb))
-        x = x + self.drop_path(self.mlp(self.norm2(x)))
-        return x
+        # default bf16 in xperf
+        self.cuda().to(dtype=torch.bfloat16)
+        print("init torch vit done...")
 
+    @torch.no_grad()
+    def get_image_features(self, pixel_values, grid_hw):
+        device = next(self.visual_encoder.parameters()).device
+        pixel_values = pixel_values.to(device)
+        if isinstance(grid_hw, list):
+            grid_hw = torch.tensor(grid_hw, dtype=torch.long)
+        grid_hw = grid_hw.to(device)
 
-class VITInferencer(XPERF_VITInferencer):
+        image_embeds = self.visual_encoder(pixel_values, grid_hw=grid_hw)
+        if self.ln_vision is not None:
+            image_embeds = self.ln_vision(image_embeds)
+        if self.seed_proj is not None:
+            image_embeds = self.seed_proj(image_embeds)
+        return image_embeds
 
-    def __init__(self, *args, **kwargs) -> None:
-        self.use_xperf_gpt = kwargs.get("use_xperf_gpt", False)
-        super().__init__(*args, **kwargs)
+    def weights_update(self, state_dict):
 
-    def build_encoder(self, generate_kwargs):
-        if generate_kwargs is None or len(generate_kwargs) == 0:
-            generate_kwargs = dict(max_new_tokens=128, do_sample=False, top_p=0.7, use_xperf_vit=self.use_xperf_gpt)
+        def assert_not_nan(tensor: torch.Tensor):
+            if torch.distributed.is_initialized():
+                rank = torch.distributed.get_rank()
+            else:
+                rank = 0
 
-        detail_config = {}
-        if self.vit_model_config['vit_model'] in EVA_VIT_CONFIGS.keys():
-            detail_config = EVA_VIT_CONFIGS[self.vit_model_config['vit_model']]['transformer_config']
+            if os.getenv('XPERF_CHECK_NAN', '1') == '1':
+                assert not torch.any(torch.isnan(tensor)).item(), f'Got nan in parameter {tensor} on rank {rank}'
 
-        ### begin ckpt policy ### default use xgpt infernece
-        self.vit_config = {}
-        self.vit_config['model_config'] = self.vit_model_config
-        self.vit_config['model_config']['navit_anyres'] = self.vit_model_config.get(
-            'use_navit', False) or self.vit_model_config.get('navit_anyres', False)
-        self.vit_config['model_config'].update(detail_config)
-        if 'transformer_config' in self.vit_config['model_config']:
-            self.vit_config['model_config'].update(self.vit_config['model_config']['transformer_config'])
-        if self.vit_model_ckpt_path:
-            self.vit_config['vanilla_checkpoint_path'] = self.vit_model_ckpt_path
-        self.vit_config['model_config']['model_name'] = 'EVAVisionTransformer'
+        def update_param(vit_model_param, key):
+            if isinstance(key, str):
+                param_in_state_dict = state_dict.pop(key).to(torch.bfloat16).full_tensor()
+            else:
+                param_in_state_dict = key
+            assert vit_model_param.shape == param_in_state_dict.shape, f'{key=}, {vit_model_param.shape=}, {param_in_state_dict.shape=}'
+            vit_model_param.data = param_in_state_dict.contiguous()
+            assert_not_nan(vit_model_param.data)
 
-        self.dp_vit = self.vit_config['model_config'].get('dp_vit', False) or self.vit_config.get('dp_vit', False)
-        kwargs = {'rank0_split': True}
-        # disable tp when using small vit or using dp vit
-        if self.vit_config['model_config']['embed_dim'] < 2048 or self.dp_vit:
-            kwargs['mp_size'] = 1
-            kwargs['rank0_split'] = False
+        # for visual_encoder model
+        for vision_key, param in self.visual_encoder.named_parameters():
+            vision_key = "vision_encoder." + vision_key
+            update_param(param, vision_key)
 
-        from xperf_gpt.model_implementations import vit_torch
-        vit_torch.Block = Block
-        vit_model = xperf_gpt.init_inference(None,
-                                             config=self.vit_config,
-                                             dtype=torch.bfloat16,
-                                             is_vit_model=True,
-                                             use_xperf_gpt=self.use_xperf_gpt,
-                                             **kwargs)
-        if not self.use_xperf_gpt:
-            assert vit_model.module.custom_decoder.layers[0].norm1.eps == 1e-6
-            assert vit_model.module.custom_decoder.layers[0].norm2.eps == 1e-6
+        for proj_key, proj_param in self.seed_proj.named_parameters():
+            proj_key = "multi_modal_projector." + proj_key
+            update_param(proj_param, proj_key)
 
-        if self.dp_vit:
-            import torch.distributed as dist
-            if not dist.is_initialized():
-                dist.init_process_group(backend='nccl')
-            self.dp_group = dist.new_group(backend='nccl')
-            self.vit_dp_infer_threshold = os.environ.get('XPERF_VIT_DP_INFER_THRESHOLD', 16)
+        for ln_key, ln_param in self.ln_vision.named_parameters():
+            ln_key = "ln_vision." + ln_key
+            update_param(ln_param, ln_key)
 
-        with xperf_gpt.OnDevice(dtype=torch.bfloat16, device="meta"):
-            _, self.ln_vision, self.token_merger, self.seed_proj = VisualBuilder.build_vit(self.vit_model_config)
+        torch.cuda.empty_cache()
+        print('====>> resharding VIT finished !!!')
 
-        def parameter_pack(t):
-            return torch.nn.Parameter(t, requires_grad=False)
+    def update_standalone_weighs(self, comm_fn, comm_rank):
 
-        self.anyres_image_newline = None
-        self.multicrop_anyres = self.vit_model_config.get('multicrop_anyres', False)
-        if self.multicrop_anyres:
-            self.anyres_image_newline = parameter_pack(vit_model.module.weights['anyres_image_newline'][0])
-        self.ln_vision.weight = parameter_pack(vit_model.module.weights['ln_vision'][0])
-        self.ln_vision.bias = parameter_pack(vit_model.module.weights['ln_vision'][1])
-        self.seed_proj[0].weight = parameter_pack(vit_model.module.weights['seed_proj'][0])
-        self.seed_proj[0].bias = parameter_pack(vit_model.module.weights['seed_proj'][1])
-        self.seed_proj[2].weight = parameter_pack(vit_model.module.weights['seed_proj'][2])
-        self.seed_proj[2].bias = parameter_pack(vit_model.module.weights['seed_proj'][3])
-        self.visual_encoder = vit_model
-        self.llm_hidden_size = self.seed_proj[2].weight.shape[0]
-        print('====>> Loading VIT Done')
+        def comm_and_assign(module, param_names=None):
+            if param_names is None:
+                param_names = ["weight", "bias"]
+            for param_name in param_names:
+                param = getattr(module, param_name)
+                cu_param = param.cuda()
+                comm_fn(cu_param, comm_rank)
+                setattr(module, param_name, nn.Parameter(cu_param))
+
+        for layer in self.visual_encoder.blocks:
+            comm_and_assign(layer.norm1)
+            comm_and_assign(layer.norm2)
+            comm_and_assign(layer.mlp.fc1)
+            comm_and_assign(layer.mlp.fc2)
+            comm_and_assign(layer.attn.proj)
+            comm_and_assign(layer.attn.qkv, ['weight'])
+            comm_and_assign(layer.attn, param_names=['q_bias', 'v_bias'])
+        comm_and_assign(self.visual_encoder.patch_embed.proj)
+        comm_and_assign(self.ln_vision)
+        comm_and_assign(self.seed_proj[0])
+        comm_and_assign(self.seed_proj[2])

@@ -17,6 +17,7 @@ from alpha_seed.workers.xperf_rollout.component.cache_manager import CacheManage
 from alpha_seed.workers.xperf_rollout.component.infer_scheduler import InferScheduler
 from alpha_seed.workers.xperf_rollout.component.sampling_manager import Sampler
 from alpha_seed.workers.xperf_rollout.utils.custom_xperf_convert_helper import XCustomInferenceModuleAdapter
+from xperf_gpt.multi_models.visual.inferencer import VITInferencer
 from xperf_gpt.multi_models.visual.eva_vit import EVA_VIT_CONFIGS
 from alpha_seed.workers.xperf_rollout.component.query import Query, AsyncQuery, InflightQueue, batch_sync_tp_queries
 from alpha_seed.utils.observility import get_profiler_context_wrapped
@@ -34,7 +35,7 @@ import base64
 import time
 from threading import Lock
 from transformers import AutoTokenizer
-from alpha_seed.workers.xperf_rollout.utils.vit_inferencer import VITInferencer
+from alpha_seed.workers.xperf_rollout.utils.vit_inferencer import TorchVitInferencer, gen_vit_cfg
 import numpy as np
 import torch.nn.functional as F
 from alpha_seed.models.transformers.modeling_vlm import convert_tensor_to_numpy, convert_numpy_to_tensor
@@ -167,6 +168,7 @@ class InferenceSession:
         max_length=4096,
         enable_paged_attn=False,
         context_split_len=4 * 1024,
+        vit_use_xperf_gpt=True,
         max_prompt_length=None,
         context_limit_bs=1,
         max_context_shift=0,
@@ -193,6 +195,7 @@ class InferenceSession:
         self.standalone = standalone
         # Context processing
         self.context_split_len = context_split_len
+        self.vit_use_xperf_gpt = vit_use_xperf_gpt
         self.context_limit_bs = context_limit_bs
 
         self.max_prompt_length = max_prompt_length
@@ -339,6 +342,7 @@ class InferenceSession:
                               use_xperf_custom=False,
                               use_xperf_triton=False,
                               vit_config=None,
+                              vit_model_cfg_path=None,
                               **kwargs):
         """Initialize model engine and associated components
         
@@ -439,16 +443,22 @@ class InferenceSession:
             num_pred_tokens=self.num_pred_tokens,
             enable_mtp_decoding=self.enable_mtp_decoding,
         )
+
         if vit_config is not None:
-            if vit_config['vit_model'] not in EVA_VIT_CONFIGS.keys():
-                vit_config.update(vit_config.get('transformer_config'))
+            if self.vit_use_xperf_gpt:
+                if vit_config['vit_model'] not in EVA_VIT_CONFIGS.keys():
+                    vit_config.update(vit_config.get('transformer_config'))
+                else:
+                    detail_config = EVA_VIT_CONFIGS[vit_config['vit_model']]
+                    vit_config.update(detail_config)
+                if vit_config.get('use_navit', False):
+                    vit_config['navit_anyres'] = True
+                self.vit_engine = VITInferencer(vit_config_dict=vit_config,
+                                                tokenization_path=self.tokenizer_path).cuda().to(torch.bfloat16)
             else:
-                detail_config = EVA_VIT_CONFIGS[vit_config['vit_model']]
-                vit_config.update(detail_config)
-            if vit_config.get('use_navit', False):
-                vit_config['navit_anyres'] = True
-            self.vit_engine = VITInferencer(vit_config_dict=vit_config,
-                                            tokenization_path=self.tokenizer_path).cuda().to(torch.bfloat16)
+                # use torch vit based on seed_models
+                vit_cfg = gen_vit_cfg(vit_model_cfg_path)
+                self.vit_engine = TorchVitInferencer(vit_cfg)
 
     def set_tp_group(self, tp_group):
         self.tp_group = tp_group
@@ -740,13 +750,16 @@ class InferenceSession:
         if isinstance(image_grid_hw, np.ndarray):
             image_grid_hw = convert_numpy_to_tensor(image_grid_hw, int)
 
-        # compute image embedding
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            img_emb = self.vit_engine.visual_encoder(pixel_values, grid_hw=image_grid_hw)
-            if self.vit_engine.ln_vision is not None:
-                img_emb = self.vit_engine.ln_vision(img_emb)
-            if self.vit_engine.seed_proj is not None:
-                img_emb = self.vit_engine.seed_proj(img_emb)
+            if self.vit_use_xperf_gpt:
+                img_emb = self.vit_engine.visual_encoder(pixel_values, grid_hw=image_grid_hw)
+                if self.vit_engine.ln_vision is not None:
+                    img_emb = self.vit_engine.ln_vision(img_emb)
+                if self.vit_engine.seed_proj is not None:
+                    img_emb = self.vit_engine.seed_proj(img_emb)
+            else:
+                img_emb = self.vit_engine.get_image_features(pixel_values, image_grid_hw)
+
         image_token_id = -100
         image_mask = input_ids == image_token_id
         # fill image tokens to padding tokens, to avoid negative token_ids for text embedding

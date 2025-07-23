@@ -5,6 +5,7 @@ from functools import partial
 from transformers import PretrainedConfig
 from typing import Tuple, Union, List, Dict, Optional, Protocol
 from torch.distributed._tensor import DTensor, Shard, Replicate
+from alpha_seed.workers.xperf_rollout.utils.vit_inferencer import TorchVitInferencer
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,12 @@ class WeightsAdapter:
                  device_mesh: Optional[Dict[str, torch.distributed.ProcessGroup]] = None,
                  prefix: Optional[str] = None) -> None:
 
-        if xperf_vit is not None:
+        # if xperf_vit params is used torch vit(based ):
+        if xperf_vit is not None and isinstance(xperf_vit, TorchVitInferencer):
+            xperf_vit.weights_update(state_dict)
+
+        elif xperf_vit is not None:
+            setattr(xperf_vit, "use_xperf_gpt", True)
             self.vit_adapter.setup_device_mesh(device_mesh)
             self.vit_adapter.get_model_info(xperf_vit)
             self.vit_adapter.load_from_state_dict(state_dict, prefix="")
@@ -750,7 +756,6 @@ class FSDPVLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
         self.use_xperf_gpt = xperf_model.use_xperf_gpt
 
     def load_from_state_dict(self, state_dict: Dict[str, Union[torch.Tensor, DTensor]], prefix: str) -> None:
-
         loader = partial(self._pop_with_fallback, state_dict, prefix)
 
         self.source_weights = {

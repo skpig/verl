@@ -18,7 +18,7 @@ def get_batch(config, tokenizer):
     processor = AutoProcessor.from_pretrained(model_path)
     dataset = RLHFDatasetVL(
         parquet_files=
-        "hdfs://haruna/home/byte_data_seed/hl_lq/iccv/user/lingyue/data/rl/vlm_rl_alphaseed_math_stem_5.0.parquet",
+        "hdfs://haruna/home/byte_data_seed/hl_lq/iccv/user/xiaoboqin/data/rlhf/math/mmathcot_v4_hard_w_sys_for_rl.parquet",
         tokenizer=tokenizer,
         prompt_key="prompt",
         answer_key="answer",
@@ -65,6 +65,7 @@ def test_vlm_gen(monkeypatch, gpu_allocator, ray_fixture):
                 "enable_paged_attention": True,
                 "max_ctx_batch_size": 1,
                 "gpu_memory_utilization": 0.5,
+                "vit_use_xperf_gpt": True
             }
         },
         "trainer": {
@@ -82,6 +83,11 @@ def test_vlm_gen(monkeypatch, gpu_allocator, ray_fixture):
     batch = get_batch(config, tokenizer)
 
     rollout_manager = create_rollout_manager(config)
-    prompt0_len = batch.batch['attention_mask'][0].sum()
     batch = rollout_manager.val_generate(batch)
-    response0 = tokenizer.decode(batch.batch['input_ids'][0, prompt0_len:], skip_special_tokens=True)
+    prompt0_len = batch.batch['attention_mask'][0].sum()
+
+    tokens = batch.batch['input_ids'][0, prompt0_len:].clone()
+    tokens[tokens < 0] = 1
+
+    response0 = tokenizer.decode(tokens, skip_special_tokens=True)
+    print(response0)

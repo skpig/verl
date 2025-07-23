@@ -128,6 +128,7 @@ actor_rollout_ref:
     name: xperf_gpt
     prompt_length: ${data.max_prompt_length}  # for xperf_gpt
     response_length: ${data.max_response_length}
+    vit_use_xperf_gpt: False # if false, vit will use torch vit
     # for vllm rollout
     dtype: bfloat16 # should align with FSDP
     ignore_eos: False
