@@ -25,7 +25,7 @@ from dist_attn.ulysses.parallel_states import set_ulysses_sequence_parallel_grou
 from dist_attn.ulysses.ops import slice_input_tensor
 from typing import Any
 import numpy as np
-
+import os
 import torch
 import torch.distributed
 
@@ -41,7 +41,7 @@ class DataGatherManager(BaseShardingManager):
         self.dp_mesh = dp_gather_mesh['dp']
         self.gather_mesh = gather_mesh
         self.sp_mesh = sp_mesh
-        self.seed_offset = 12345
+        self.seed_offset = int(os.getenv('AS_RANDOM_SEED', '12345'))
 
     def __enter__(self):
         if self.sp_mesh.size() > 1:

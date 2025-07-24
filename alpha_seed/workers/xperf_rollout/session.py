@@ -1106,7 +1106,8 @@ class InferenceSession:
         Returns:
             List of completed Query objects with results by method get_inorder_responses()
         """
-        torch.manual_seed(int(os.getenv('XPERF_RANDOM_SEED', '0')))
+        if "XPERF_RANDOM_SEED" in os.environ:
+            torch.manual_seed(int(os.getenv('XPERF_RANDOM_SEED', '0')))
         input_ids_list = self.truncate_prompts(prompts, False)
         self.find_longest_common_prefix(input_ids_list)
         if not self.is_xperf_custom and not self.is_xperf_triton:
@@ -1170,7 +1171,8 @@ class InferenceSession:
 
     def async_execute(self, update_weight_event):
         import time
-        torch.manual_seed(int(os.getenv('XPERF_RANDOM_SEED', '0')))
+        if "XPERF_RANDOM_SEED" in os.environ:
+            torch.manual_seed(int(os.getenv('XPERF_RANDOM_SEED', '0')))
         self.current_steps = 0
         self.finished_num = 0
         last_time = 0
