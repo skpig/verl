@@ -78,7 +78,6 @@ python3 tasks/main_ppo.py \
     data.max_prompt_length=${max_prompt_length} \
     data.max_response_length=${max_response_length} \
     data.train_batch_size=${train_batch_size} \
-    +data.dataloader_batch_size=1 \
     data.val_batch_size=${val_batch_size} \
     data.truncation='left' \
     data.return_raw_chat=True \
@@ -178,8 +177,10 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.rollout.micro_batch_size=${gen_micro_batch_size} \
     actor_rollout_ref.rollout.log_prob_micro_batch_size=${infer_micro_batch_size} \
     actor_rollout_ref.rollout.mode=${rollout_mode} \
-    +actor_rollout_ref.rollout.async=True \
-    +actor_rollout_ref.rollout.async_concurrency=32 \
+    trainer.queued_rollout_config.enable=True \
+    trainer.queued_rollout_config.chunk_size=4 \
+    trainer.queued_rollout_config.concurrency=32 \
+    trainer.queued_rollout_config.wait_condition=pool_ready_count \
     rollout_server.agent.executor_class='LocalExecutor' \
     rollout_server.agent.max_workers=32 \
     rollout_server.agent.worker_max_concurrency=1024 \

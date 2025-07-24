@@ -12,9 +12,8 @@ import pandas as pd
 import verl.utils.torch_functional as verl_F
 
 from enum import Enum
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Union, List, Dict
-from functools import lru_cache
 from functools import partial
 from concurrent.futures import ThreadPoolExecutor
 from transformers.utils import PaddingStrategy
@@ -23,16 +22,11 @@ from mono_rl import DataProto
 from alpha_seed.utils.dataset.rl_dataset import collate_fn
 from alpha_seed.workers.agents.handlers import register_handler, TaskContext
 from alpha_seed.workers.agents.handlers.base import ThreadedAgent
-from alpha_seed.workers.agents.handlers.agentbench.proxy import proxy_server
+from alpha_seed.workers.agents.handlers.agentbench.proxy import get_metrics_client, get_proxy_client
 from alpha_seed.workers.agents.handlers.agentbench.trajectory_manager import build_training_samples
 from alpha_seed.workers.streaming_service.streaming_utils import internal_call
 from alpha_seed.workers.streaming_service.streaming_utils import DataPack, pack_to_dataproto
 from bytedance import metrics
-
-
-@lru_cache(maxsize=1)
-def get_metrics_client():
-    return metrics.Client(prefix='seed.agentless')
 
 
 @register_handler("agent/agentbench/agentless")
@@ -99,7 +93,7 @@ class Agentless(ThreadedAgent):
         _item.meta_info = copy.copy(meta_info)
         return _item
 
-    def _postprocess(self, completion, item: DataProto, rollout_config: DictConfig) -> DataProto:
+    def _postprocess(self, completion, item: DataProto, rollout_config: DictConfig, tagkv: Dict) -> DataProto:
         data_pack = DataPack.create_from_completion_dict(completion['choices'][0]['message'])
         out = pack_to_dataproto(item, self.tokenizer, data_pack, rollout_config)  # dataproto
 
@@ -111,13 +105,11 @@ class Agentless(ThreadedAgent):
             if self.tokenizer.eos_token_id == raw_output_ids[-1]:
                 raw_output_ids = raw_output_ids[:-1]
             raw_response = ''.join(self.tokenizer.decode(raw_output_ids, skip_special_tokens=False))
-            #  get_metrics_client().emit_store(
-            #  "process_single_batch.agentbench.task_raw_response_len", len(raw_response), tags=_tagkv)
+            get_metrics_client().emit_timer("agentbench.handler.task_raw_response_len", len(raw_response), tags=tagkv)
             if rollout_config.get('remove_think'):
                 raw_response = (lambda x: raw_response
                                 if x not in raw_response else raw_response.split(x)[-1])('</think>')
-            #  get_metrics_client().emit_store(
-            #  "process_single_batch.agentbench.task_response_len", len(raw_response), tags=_tagkv)
+            get_metrics_client().emit_timer("agentbench.handler.task_response_len", len(raw_response), tags=tagkv)
             out.non_tensor_batch['raw_response'] = np.array([raw_response], dtype=object)
 
         extra_fill_datapack()
@@ -155,6 +147,7 @@ class Agentless(ThreadedAgent):
         retry = int(config.rollout_server.get('retry', 3))
         rollout_retry = int(config.rollout_server.get('rollout_retry', 3))
         backoff_interval = float(config.rollout_server.get('backoff_interval', 0.5))
+        wait_for_task_timeout = float(config.rollout_server.get('wait_for_request_timeout', 600))
         wait_for_request_timeout = float(config.rollout_server.get('wait_for_request_timeout', 3600))
 
         prompt_meta = self._extract_prompt_meta(item)
@@ -177,12 +170,11 @@ class Agentless(ThreadedAgent):
         def check_status(task, turn_task):
             if task is None:
                 return None, Status.NON_EXIST, 86400 * 365
-
             if task.finished():
                 return None, Status.FINISHED, task.total_elapsed()
-
-            turn_task = turn_task or task.get_pending_task()
-
+            turn_task_id = get_proxy_client().fetch_pending_turn_task(
+                task.task_id) if not turn_task else turn_task.task_id
+            turn_task = get_proxy_client().get_turn_task_meta(turn_task_id) if turn_task_id else None
             if turn_task:
                 if turn_task.touch_elapsed() is None:
                     return turn_task, Status.WAIT_FOR_ROLLOUT, turn_task.request_elapsed()
@@ -193,124 +185,278 @@ class Agentless(ThreadedAgent):
             else:
                 return None, Status.WAIT_FOR_REQUEST, task.touch_elapsed()
 
-        trajectory = []
+        task = None
         score = None
+        trajectory = []
+        success = False
+
+        @dataclass
+        class TS:
+            trigger_ts: float = None
+            trigger_trial_ts: float = None
+            trigger_completion_ts: float = None
+            finish_completion_ts: float = None
+            trigger_rollout_ts: float = None
+            finish_rollout_ts: float = None
+            finish_trial_ts: float = None
+            finish_ts: float = None
+
+            def _mark(self, name: str) -> bool:
+                if getattr(self, name) is not None:
+                    return False
+                now = time.time()
+                setattr(self, name, now)
+                names = [f.name for f in fields(self)]
+                idx = names.index(name)
+                for prev in names[:idx]:
+                    if getattr(self, prev) is None:
+                        setattr(self, prev, now)
+                return True
+
+            def _reset_from(self, name: str):
+                names = [f.name for f in fields(self)]
+                idx = names.index(name)
+                for n in names[idx:]:
+                    setattr(self, n, None)
+
+            def _interval(self, start_name: str, end_name: str):
+                now = time.time()
+                start = getattr(self, start_name) or now
+                end = getattr(self, end_name) or now
+                return end - start
+
+            def trigger(self):
+                return self._mark('trigger_ts')
+
+            def trigger_trial(self):
+                self._reset_from('trigger_trial_ts')
+                return self._mark('trigger_trial_ts')
+
+            def trigger_completion(self):
+                return self._mark('trigger_completion_ts')
+
+            def finish_completion(self):
+                return self._mark('finish_completion_ts')
+
+            def trigger_rollout(self):
+                return self._mark('trigger_rollout_ts')
+
+            def finish_rollout(self):
+                return self._mark('finish_rollout_ts')
+
+            def finish_trial(self):
+                return self._mark('finish_trial_ts')
+
+            def finish(self):
+                return self._mark('finish_ts')
+
+            def elapsed(self):
+                return self._interval('trigger_ts', 'finish_ts')
+
+            def trial_elapsed(self):
+                return self._interval('trigger_trial_ts', 'finish_trial_ts')
+
+            def completion_elapsed(self):
+                return self._interval('trigger_completion_ts', 'finish_completion_ts')
+
+            def rollout_elapsed(self):
+                return self._interval('trigger_rollout_ts', 'finish_rollout_ts')
+
+            def re_rollout(self):
+                self._reset_from('trigger_rollout_ts')
+
+            def next_turn(self):
+                self._reset_from('trigger_completion_ts')
+                self.trigger_completion()
+
+        ts = TS()
+
+        ts.trigger()
         for trial in range(retry):
             if score is not None:
                 break
             tagkv = {**tagkv_common, **{'trial': str(trial + 1)}}
 
-            get_metrics_client().emit_counter("process_single_batch.agentbench.request", 1, tags=tagkv)
+            get_metrics_client().emit_counter("agentbench.handler.request", 1, tags=tagkv)
 
-            task_id = proxy_server.add_task(**prompt_meta)
+            ts.trigger_trial()
+            task_id = get_proxy_client().produce(**prompt_meta)
 
             task_details = f"{task_id=}, {prompt_meta=}"
             logging.info(f"agentbench_handler: add task[{task_details}]")
 
-            task = proxy_server.get_task(task_id)
-            turn_task = None
+            task_meta_info = None
+            turn_task_meta_info = None
 
             rollout_trial = 0
             trajectory = []
 
             while True:
+                task_meta_info = get_proxy_client().get_task_meta(task_id)
                 _tagkv = {**tagkv, **{'turn': str(len(trajectory) + 1)}}
-                turn_task, status, elapsed = check_status(task, turn_task)
+                turn_task_meta_info, status, elapsed = check_status(task_meta_info, turn_task_meta_info)
                 if status == Status.NON_EXIST:
-                    get_metrics_client().emit_counter("process_single_batch.agentbench.task_non_exist", 1, tags=_tagkv)
-                    logging.exception(f"agentbench_handler: task[{task_details}] doesn't exist, break this trial")
-                    break
+                    elapsed = ts.trial_elapsed()
+                    if elapsed > wait_for_task_timeout:
+                        get_metrics_client().emit_counter("agentbench.handler.trigger_timeout", 1, tags=_tagkv)
+                        logging.exception(f"agentbench_handler: task[{task_details}] doesn't exist, break this trial")
+                        break
+                    time.sleep(backoff_interval)
                 elif status == Status.WAIT_FOR_REQUEST:
+                    if ts.trigger_completion():
+                        get_metrics_client().emit_timer("agentbench.handler.consume_elapsed",
+                                                        ts.trial_elapsed(),
+                                                        tags=tagkv)
                     if elapsed > wait_for_request_timeout:
-                        get_metrics_client().emit_counter("process_single_batch.agentbench.task_wait_timeout",
-                                                          1,
-                                                          tags=_tagkv)
+                        get_metrics_client().emit_counter("agentbench.handler.wait_timeout", 1, tags=_tagkv)
                         logging.exception(
-                            f"agentbench_hadnler: task[{task_details}] wait_for_request {elapsed} seconds, break this trial"
+                            f"agentbench_handler: task[{task_details}] wait_for_request {elapsed} seconds, break this trial"
                         )
                         break
                     time.sleep(backoff_interval)
                 elif status == Status.WAIT_FOR_ROLLOUT:
-                    logging.info(
-                        f"agentbench_handler: task[{task_details}] trigger rollout, turn_task_id[{turn_task.task_id}]")
-                    get_metrics_client().emit_counter("process_single_batch.agentbench.rollout_run", 1, tags=_tagkv)
-                    get_metrics_client().emit_store("process_single_batch.agentbench.task_wait_interval",
-                                                    turn_task.request_elapsed(),
+                    ts.finish_completion()
+                    get_metrics_client().emit_timer("agentbench.handler.completion_elapsed",
+                                                    ts.completion_elapsed(),
                                                     tags=_tagkv)
-                    task.trigger_task(turn_task.task_id)
 
+                    ts.trigger_rollout()
+
+                    logging.info(
+                        f"agentbench_handler: task[{task_details}] trigger rollout, turn_task_id[{turn_task_meta_info.task_id}]"
+                    )
+                    get_metrics_client().emit_counter("agentbench.handler.rollout_run", 1, tags=_tagkv)
+                    get_metrics_client().emit_timer("agentbench.handler.rollout_task_wait_elapsed",
+                                                    turn_task_meta_info.request_elapsed(),
+                                                    tags=_tagkv)
+                    get_proxy_client().trigger_turn(turn_task_meta_info.task_id)
+
+                    turn_task = get_proxy_client().get_turn(turn_task_meta_info.task_id)
                     turn_item = self._preprocess(turn_task.request.messages, prompt_meta, row_dict, meta_info,
                                                  config.data.max_prompt_length, config.data.truncation, len(trajectory))
 
                     try:
-                        rollout_start_ts = time.time()
                         completion = self.llm.complete(turn_item, rollout_config)
-                        rollout_end_ts = time.time()
-                        get_metrics_client().emit_store("process_single_batch.agentbench.task_inner_rollout_interval",
-                                                        rollout_end_ts - rollout_start_ts,
-                                                        tags=_tagkv)
                     except asyncio.CancelledError:
                         logging.exception(
-                            f"agentbench_handler: task[{task_details}] rollout was cancelled, turn_task_id[{turn_task.task_id}]"
+                            f"agentbench_handler: task[{task_details}] rollout was cancelled, turn_task_id[{turn_task_meta_info.task_id}]"
                         )
                         break
                     except Exception as e:
                         logging.exception(
-                            f"agentbench_handler: task[{task_details}] rollout caught exception[{e}], turn_task_id[{turn_task.task_id}]"
+                            f"agentbench_handler: task[{task_details}] rollout caught exception[{e}], turn_task_id[{turn_task_meta_info.task_id}]"
                         )
                         break
 
-                    out = self._postprocess(completion, turn_item, rollout_config)
-                    proxy_server.respond_turn(turn_task.task_id, out)
+                    out = self._postprocess(completion, turn_item, rollout_config, _tagkv)
+                    get_proxy_client().respond_turn(turn_task_meta_info.task_id, out)
                 elif status == Status.RUN_ROLLOUT:
-                    get_metrics_client().emit_counter("process_single_batch.agentbench.rollout_fail", 1, tags=_tagkv)
+                    get_metrics_client().emit_counter("agentbench.handler.rollout_fail", 1, tags=_tagkv)
                     rollout_trial += 1
                     logging.exception(
-                        f"agentbench_hadnler: task[{task_details}] rollout failed, {rollout_trial} {rollout_retry=}, turn_task_id[{turn_task.task_id}]"
+                        f"agentbench_handler: task[{task_details}] rollout failed, {rollout_trial} {rollout_retry=}, turn_task_id[{turn_task_meta_info.task_id}]"
                     )
                     if rollout_trial > rollout_retry:
                         break
-                    task.abort_task(turn_task.task_id)
+                    get_proxy_client().abort_turn(turn_task_meta_info.task_id)
+                    ts.re_rollout()
                 elif status == Status.TURN_FINISHED:
+                    ts.finish_rollout()
+                    get_metrics_client().emit_timer("agentbench.handler.rollout_elapsed",
+                                                    ts.rollout_elapsed(),
+                                                    tags=_tagkv)
+
+                    turn_task = get_proxy_client().get_turn(turn_task_meta_info.task_id)
                     logging.info(
-                        f"agentbench_hadnler: task[{task_details}] turn rollout succeeded, turn_task_id[{turn_task.task_id}]"
+                        f"agentbench_handler: task[{task_details}] turn rollout succeeded, turn_task_id[{turn_task_meta_info.task_id}]"
                     )
-                    get_metrics_client().emit_counter("process_single_batch.agentbench.task_turn_success",
-                                                      1,
-                                                      tags=_tagkv)
-                    get_metrics_client().emit_store("process_single_batch.agentbench.task_rollout_interval",
-                                                    turn_task.touch_elapsed(),
+                    get_metrics_client().emit_counter("agentbench.handler.turn_success", 1, tags=_tagkv)
+                    get_metrics_client().emit_timer("agentbench.handler.rollout_task_rollout_elapsed",
+                                                    turn_task_meta_info.touch_elapsed(),
                                                     tags=_tagkv)
                     trajectory.append(turn_task)
-                    turn_task = None
+                    turn_task_meta_info = None
+                    ts.next_turn()
                 elif status == Status.FINISHED:
-                    logging.info(f"agentbench_hadnler: task[{task_details}] rollout succeeded")
-                    get_metrics_client().emit_counter("process_single_batch.agentbench.task_success", 1, tags=tagkv)
-                    get_metrics_client().emit_store("process_single_batch.agentbench.task_interval",
-                                                    task.total_elapsed(),
-                                                    tags=tagkv)
+                    ts.finish_completion()
+                    get_metrics_client().emit_timer("agentbench.handler.score_elapsed",
+                                                    ts.completion_elapsed(),
+                                                    tags=_tagkv)
+                    ts.finish_trial()
+
+                    task = get_proxy_client().get_task(task_meta_info.task_id)
+                    logging.info(f"agentbench_handler: task[{task_details}] rollout succeeded")
+                    get_metrics_client().emit_counter("agentbench.handler.success", 1, tags=tagkv)
+                    get_metrics_client().emit_timer("agentbench.handler.task_elapsed", task.total_elapsed(), tags=tagkv)
                     score = task.result.score
+                    success = True
                     break
                 else:
-                    get_metrics_client().emit_counter("process_single_batch.agentbench.task_unkonwn_exception",
-                                                      1,
-                                                      tags=_tagkv)
-                    logging.exception(f"agentbench_hadnler: task[{task_details}] hit unknown status, break this trial")
+                    get_metrics_client().emit_counter("agentbench.handler.unkonwn_exception", 1, tags=_tagkv)
+                    logging.exception(f"agentbench_handler: task[{task_details}] hit unknown status, break this trial")
                     break
-            proxy_server.pop_task(task_id)
+            get_proxy_client().pop_task(task_id)
 
+            get_metrics_client().emit_timer("agentbench.handler.trial_elapsed",
+                                            ts.trial_elapsed(),
+                                            tags={
+                                                **tagkv,
+                                                **{
+                                                    'status': 'success' if success else 'fail'
+                                                }
+                                            })
+            get_metrics_client().emit_timer("agentbench.handler.trial_total_turn",
+                                            len(trajectory),
+                                            tags={
+                                                **tagkv,
+                                                **{
+                                                    'status': 'success' if success else 'fail'
+                                                }
+                                            })
+
+        ts.finish()
+        get_metrics_client().emit_timer("agentbench.handler.elapsed",
+                                        ts.elapsed(),
+                                        tags={
+                                            **tagkv_common,
+                                            **{
+                                                'trial': str(trial + 1),
+                                                'status': 'success' if success else 'fail'
+                                            }
+                                        })
+        get_metrics_client().emit_timer("agentbench.handler.trial",
+                                        trial + 1,
+                                        tags={
+                                            **tagkv_common,
+                                            **{
+                                                'status': 'success' if success else 'fail'
+                                            }
+                                        })
+        get_metrics_client().emit_timer("agentbench.handler.total_turn",
+                                        len(trajectory),
+                                        tags={
+                                            **tagkv_common,
+                                            **{
+                                                'trial': str(trial + 1),
+                                                'status': 'success' if success else 'fail'
+                                            }
+                                        })
         if score is not None:
             train_samples = build_training_samples(self._build_records, task, score, trajectory, rollout_config,
                                                    context)
         else:
-            logging.info(f"agentbench_hadnler: task[{prompt_meta=}] score is None")
+            logging.info(f"agentbench_handler: task[{prompt_meta=}] score is None")
             train_samples = []
         return train_samples
 
 
 if __name__ == '__main__':
     import sys
+    import yaml
+    import ray
     import alpha_seed
+    import alpha_seed.workers.agents.handlers.agentbench
+    import importlib
     from mono_rl import DataProto
     from transformers import AutoTokenizer
     from torch.utils.data import DataLoader
@@ -321,8 +467,27 @@ if __name__ == '__main__':
     from alpha_seed.workers.agents.executor import LocalExecutor
     from alpha_seed.workers.agents.handlers import select_handler_fn
 
+    os.environ["AGENTBENCH_ENABLE"] = "True"
+    os.environ["AGENTBENCH_DEBUG_MODE"] = "True"
+    os.environ["AGENTBENCH_STORAGE_MODE"] = "ray"
+    os.environ["AGENTBENCH_STORAGE_MODE"] = "local"
+    os.environ["AGENTBENCH_STORAGE_SHARD_NUM"] = "3"
+
+    importlib.reload(alpha_seed.workers.agents.handlers.agentbench)
+    if os.environ["AGENTBENCH_STORAGE_MODE"] == 'ray':
+        with open(f'{os.path.dirname(os.path.abspath(__file__))}/../../../../../tasks/runtime_env/runtime_env.yaml'
+                 ) as fin:
+            runtime_env = yaml.safe_load(fin)
+            for k in [
+                    "AGENTBENCH_ENABLE", "AGENTBENCH_DEBUG_MODE", "AGENTBENCH_STORAGE_MODE",
+                    "AGENTBENCH_STORAGE_SHARD_NUM"
+            ]:
+                runtime_env[k] = os.environ.get(k)
+            print(runtime_env)
+            ray.init(namespace="alphaseed", runtime_env=runtime_env, address='auto')
+
     def fill_required_fields(batch, config):
-        for key in ["rollout_log_probs", "probs_gt_threshold_num", "probs_lt_threshold_sum", "off_policy_steps"]:
+        for key in ["rollout_behavior_log_probs", "off_policy_steps"]:
             if key not in batch:
                 batch.batch[key] = torch.zeros(
                     batch.batch["input_ids"].shape[0],
@@ -330,6 +495,8 @@ if __name__ == '__main__':
                     dtype=torch.bfloat16,
                     device=batch.batch["input_ids"].device,
                 ).fill_(-1)
+        batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(batch))], dtype=object)
+        batch.non_tensor_batch['rollout_id'] = np.array([str(uuid.uuid4()) for _ in range(len(batch))], dtype=object)
         batch.meta_info["generation_kwargs"] = OmegaConf.to_container(
             config.actor_rollout_ref.rollout.train_generate_kwargs, resolve=True)
         return batch
@@ -337,6 +504,7 @@ if __name__ == '__main__':
     config = OmegaConf.load(
         f'{os.path.dirname(os.path.abspath(__file__))}/../../../../../tasks/config/ppo_trainer.yaml')
     config.data.truncation = 'left'
+    config.rollout_server.agent.direct_submit_query = False
 
     tokenizer_path = copy_local_path_from_hdfs(
         "hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/models/p6dense-0.5B-Instruct")
