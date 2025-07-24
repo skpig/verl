@@ -51,7 +51,7 @@ import logging
 
 from alpha_seed.workers.xperf_rollout.utils import get_xperf_gpt_config
 from alpha_seed.workers.xperf_rollout.utils.custom_xperf_convert_helper import XCustomInferenceModuleAdapter
-from alpha_seed.workers.streaming_service.streaming_utils import is_multihost_model, DataPack, pack_to_dataproto, get_gpus_per_node
+from alpha_seed.workers.streaming_service.streaming_utils import is_multihost_model, DataPack, pack_to_dataproto, get_gpus_per_node, get_gpu_support_nvlink
 from alpha_seed.workers.xperf_rollout.utils.layout_convert_helper import offload_to_device
 from alpha_seed.workers.xperf_rollout.utils.pooled_ucx_weights_communicator import UCXWeightsCommunicator, \
     WeightsUpdatingInterrupt
@@ -60,6 +60,7 @@ from alpha_seed.workers.streaming_service.xperf_model_prophet import XperfModelP
 from alpha_seed.workers.xperf_rollout.utils.logits_manipulate import logits_manipulate_fn_core, logits_manipulate_fn_eta, logits_manipulate_fn_minp, logits_manipulate_fn_clip
 from alpha_seed.utils.observility import get_profiler_context_wrapped, profile_step
 from alpha_seed.models.transformers.modeling_vlm import add_pixel_values_to_inflight_query
+from alpha_seed.workers.xperf_rollout.profiler.visualizer import visualize_metrics
 from alpha_seed.utils.dataset.dist_data_util import get_image_manager, get_local_inputs
 from functools import partial
 import omegaconf
@@ -200,6 +201,8 @@ class AsyncXPerfGPTRollout(object):
         }
         tp_size = self.config.get('tensor_model_parallel_size', 1)
         use_ep = self.config.get('use_ep', False)
+        use_vocab_tp = self.config.get('vocab_tp', False)
+        use_custom_allreduce = tp_size <= 8 and get_gpu_support_nvlink()
         multi_host_tp = is_multihost_model(tp_size)
 
         # TODO(caisonghua): enable XperfModelProphet vit part later
@@ -251,7 +254,7 @@ class AsyncXPerfGPTRollout(object):
                                           max_length=self.config.prompt_length + self.config.response_length,
                                           slot_block_size=slot_block_size,
                                           enable_paged_attn=enable_paged_attn,
-                                          vocab_tp=self.config.get('vocab_tp', False),
+                                          vocab_tp=use_vocab_tp,
                                           enable_truncation=False,
                                           context_limit_bs=max_ctx_batch_size,
                                           enable_cuda_graph=enable_cuda_graph,
@@ -304,7 +307,9 @@ class AsyncXPerfGPTRollout(object):
                         'LOCAL_WORLD_SIZE': str(local_world_size),
                         'MASTER_ADDR': master_addr,
                         'MASTER_PORT': str(int(master_port) - 1),
-                        'XPERF_SESSION_SET_TORCH_DEVICE': '0'
+                        'XPERF_SESSION_SET_TORCH_DEVICE': '0',
+                        'XPERF_CUSTOM_ALL_REDUCE': str(int(use_custom_allreduce)),
+                        'XPERF_CUSTOM_ALL_REDUCE_BUFFER_SIZE': "536870912"
                     }):
                 for start_rank in range(0, gpus_per_node, tp_size):
                     end_rank = start_rank + tp_size
@@ -496,7 +501,7 @@ class AsyncXPerfGPTRollout(object):
         generation_kwargs = prompts.meta_info['generation_kwargs']
 
         prompt_meta_info = [{
-            "off_policy_steps": max(off_policy_step),
+            "off_policy_steps": max(off_policy_step) + 1,
             "generation_kwargs": generation_kwargs,
             "mode": mode,
         } for off_policy_step in off_turn_off_policy_steps.tolist()]
@@ -607,6 +612,7 @@ class AsyncXPerfGPTRollout(object):
                         continue
                     query_metrics_dict[key] += val
             metrics.update(query_metrics_dict)
+            visualize_metrics(metrics)
             self.inference_engine.empty_cache()
             data_pack = DataPack(response_outputs=response_outputs,
                                  response_log_probs=response_log_probs,

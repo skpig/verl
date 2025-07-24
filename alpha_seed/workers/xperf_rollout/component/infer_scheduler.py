@@ -149,6 +149,18 @@ class InferScheduler():
             self.bs_graph_map[bs].replay()
             return self.output_placeholder[bs]
         else:
+            context_max_kv_len = context_total_kv_len = -1
+            decode_max_kv_len = decode_total_kv_len = -1
+            if context_input is not None:
+                context_kv_len = total_length[:context_input.shape[0]] + context_shifts
+                context_max_kv_len = context_kv_len.max().item()
+                context_total_kv_len = context_kv_len.sum().item()
+            if decode_input is not None:
+                context_bs = context_input.shape[0] if context_input is not None else 0
+                decode_kv_len = total_length[context_bs:]
+                decode_max_kv_len = decode_kv_len.max().item()
+                decode_total_kv_len = decode_kv_len.sum().item()
+
             return self.engine.forward_orca(context_input_ids=None,
                                             context_input_embeds=context_input,
                                             decode_input_ids=decode_input,
@@ -158,7 +170,11 @@ class InferScheduler():
                                             context_shifts=context_shifts,
                                             return_full_hidden_states=self.return_full_hidden_states,
                                             return_padding_tensor=self.return_padding_tensor,
-                                            last_token_only=self.last_token_only)
+                                            last_token_only=self.last_token_only,
+                                            context_max_kv_len=context_max_kv_len,
+                                            context_total_kv_len=context_total_kv_len,
+                                            decode_max_kv_len=decode_max_kv_len,
+                                            decode_total_kv_len=decode_total_kv_len)
 
     def forward_and_sample(self,
                            context_input: torch.Tensor,

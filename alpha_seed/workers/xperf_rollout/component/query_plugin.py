@@ -311,6 +311,7 @@ class QueryPlugin:
         plugin_tokens_ids = self.tokenizer(results_str, padding=False, return_tensors="pt",
                                            add_special_tokens=False).input_ids.tolist()[0]
         token_len = len(plugin_tokens_ids)
+        self._update_plugin_metrics({"plugin_token_len": token_len})
         query = self._query
         query.to_context_phase()
         cur_idx = len(query.input_ids) - query.original_input_len

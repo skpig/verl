@@ -4,6 +4,7 @@ import ray
 import random
 import queue
 import logging
+import copy
 
 from mono_rl import DataProto
 from alpha_seed.utils.dataset.dist_data_util import release_ref_counts, get_image_manager
@@ -92,6 +93,7 @@ class RolloutPool:
             for batch in batch_lst:
                 rollout_id = batch.non_tensor_batch['rollout_id'][0]
                 uid = batch.non_tensor_batch['uid'][0]
+                batch.meta_info = copy.deepcopy(batch.meta_info)
                 self.pool.push(rollout_id, batch)
                 self.pool_size += 1
 
@@ -113,6 +115,7 @@ class RolloutPool:
         # get acc
         for item in batch_lst:
             score = item.batch['token_level_scores'].sum(-1).item()
+            item.meta_info = copy.deepcopy(item.meta_info)
             id2acc[item.non_tensor_batch['rollout_id'][0]].append(score)
             id2data[item.non_tensor_batch['rollout_id'][0]].append(item)
         for k, v in id2acc.items():

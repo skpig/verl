@@ -10,6 +10,7 @@ import uuid
 import time
 import threading
 
+from concurrent.futures import ThreadPoolExecutor, wait, ALL_COMPLETED
 from alpha_seed.utils.debug.aiomonitor import get_aiomonitor_cls
 from alpha_seed.workers.actors.rollout_pool import RolloutPool
 from contextlib import suppress, contextmanager, nullcontext
@@ -143,6 +144,8 @@ class RolloutManager:
         self.train_rollout_server = None
         self.val_rollout_server = None
         self._hybrid_wg_lock = threading.Lock()
+        self._save_executor = ThreadPoolExecutor(max_workers=2)
+        self._save_task_pool = []
 
         # off_policy_step counter
         self._task_id_counter = 0
@@ -556,6 +559,9 @@ class RolloutManager:
 
         with Timer(name="async_gen", logger=None) as timer:
             finished_num = 0
+            if len(self._save_task_pool) > 0:
+                wait(self._save_task_pool, return_when=ALL_COMPLETED)
+                self._save_task_pool.clear()
             if len(standalone_batch) > 0:
                 if not self.standalone_gen_batch_output_resume:
                     gen_batch_output = (self.train_standalone_wg.generate_sequences_get())
@@ -566,11 +572,10 @@ class RolloutManager:
                         step != 1):
                     print(f"step {step}, saving... standalone_gen_batch")
                     # save standalone_batch and gen_batch_output
-                    save_dataproto_fn(
-                        gen_batch_output,
-                        prefix="standalone_gen_batch_output",
-                    )
-                    save_dataproto_fn(standalone_batch, prefix="standalone_batch")
+                    save_future1 = self._save_executor.submit(save_dataproto_fn, gen_batch_output,
+                                                              "standalone_gen_batch_output")
+                    save_future2 = self._save_executor.submit(save_dataproto_fn, standalone_batch, "standalone_batch")
+                    self._save_task_pool.extend([save_future1, save_future2])
                 # only report metrics from one generation replica
                 record_xperf_metrics(
                     gen_batch_output,

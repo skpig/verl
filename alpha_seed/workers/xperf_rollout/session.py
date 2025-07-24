@@ -813,34 +813,29 @@ class InferenceSession:
                     is_vlm = query.image_data is not None
                     labels_ids = input_ids + [self.pad_token_id]
                     labels_ids = labels_ids[start + 1:end + 1]
-                    input_ids = torch.tensor(input_ids).cuda()
+                    input_ids = torch.tensor(input_ids).cuda().unsqueeze(0)
                     is_oe = self.oe_max_stride > 1
                     if is_vlm:
-                        input_ids = input_ids.cuda()
                         input_embs = self._prepare_image_embeds(input_ids, query.image_data)
+                        input_embs = input_embs[:, start:end, :]
                     else:
                         if is_oe:
-                            curr_input_ids = input_ids[start:end].unsqueeze(0).cuda()
+                            curr_input_ids = input_ids[:, start:end]
                             step_seq_length = torch.tensor((curr_input_ids.shape[1]),
                                                            device=curr_input_ids.device,
                                                            dtype=torch.int).unsqueeze(0)
                             total_seq_length = torch.tensor((curr_input_ids.shape[1] + start),
                                                             device=curr_input_ids.device,
                                                             dtype=torch.int).unsqueeze(0)
-                            oe_histroy = input_ids[start - self.oe_max_stride + 1:start].unsqueeze(0).cuda()
+                            oe_histroy = input_ids[:, start - self.oe_max_stride + 1:start]
                             pad_len = (self.oe_max_stride - 1) - oe_histroy.shape[1]
                             oe_histroy = F.pad(oe_histroy, (pad_len, 0), value=self.pad_token_id)
                             curr_input_ids = torch.concat([oe_histroy, curr_input_ids], dim=1)
                             input_embs = self.engine.get_input_oe_embeddings(curr_input_ids, step_seq_length,
                                                                              total_seq_length)
                         else:
-                            input_ids = input_ids[start:end]
+                            input_ids = input_ids[:, start:end]
                             input_embs = self.engine.get_input_embeddings(input_ids=input_ids)
-                    if input_embs.ndim == 2:
-                        input_embs = input_embs.unsqueeze(0)
-                    if is_vlm:
-                        assert (input_embs.ndim == 3)
-                        input_embs = input_embs[:, start:end, :]
                     return input_embs, torch.tensor(labels_ids)
 
                 current_context_shift = query.context_shift + query.prefix_already_computed_len
@@ -905,15 +900,10 @@ class InferenceSession:
             context_emb = None
             context_input_ids = None
             for i, query in enumerate(phase0_list):
-                pad_tokens = None if max_context_len - query.shape[1] == 0 else [self.pad_token_id] * (max_context_len -
-                                                                                                       query.shape[1])
-                if pad_tokens is not None:
-                    pad_tokens = torch.tensor(pad_tokens, dtype=torch.int64).unsqueeze(0)
-                    pad_emb = torch.empty((1, pad_tokens.shape[1], query.shape[2]),
-                                          dtype=query.dtype,
-                                          device=query.device)
-                    phase0_list[i] = torch.concat([pad_emb, query], dim=1)
-                    running[phase0_index[i]].cur_batch_pad_token = max_context_len - query.shape[1]
+                pad_tokens_len = max_context_len - query.shape[1]
+                if pad_tokens_len > 0:
+                    phase0_list[i] = F.pad(query, (0, 0, pad_tokens_len, 0))
+                    running[phase0_index[i]].cur_batch_pad_token = pad_tokens_len
                 if context_emb is None:
                     context_emb = phase0_list[i]
                     context_labels_ids = phase0_labels_list[i]

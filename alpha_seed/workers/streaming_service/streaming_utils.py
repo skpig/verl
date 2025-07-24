@@ -3,6 +3,7 @@ import random
 import socket
 import asyncio
 import ray
+import wandb
 import torch
 import numpy as np
 import torch.nn.functional as F
@@ -119,10 +120,19 @@ def record_xperf_metrics(batch_info, metrics, logger, global_step, prefix=''):
             continue
         metrics_key = f"rollout/{prefix}/{key}"
         if isinstance(val, list):
-            import wandb
             metrics[metrics_key] = wandb.Histogram(val)
         else:
             metrics[metrics_key] = val
+
+    # visualizer metrics
+    for key, val in xperf_metrics.items():
+        if not key.startswith('visualize/'):
+            continue
+        if val is None:
+            continue
+        metrics_key = f"rollout/{prefix}/{key}"
+        metrics[metrics_key] = wandb.Image(val)
+
     batch_info.meta_info.pop('xperf_metrics')
     return
 
@@ -137,6 +147,15 @@ def get_gpus_per_node():
         gpu_per_node = int(node['Resources']['GPU'])
         break
     return gpu_per_node
+
+
+def get_gpu_support_nvlink():
+    import pynvml
+    pynvml.nvmlInit()
+    device_0 = pynvml.nvmlDeviceGetHandleByIndex(0)
+    device_1 = pynvml.nvmlDeviceGetHandleByIndex(1)
+    return pynvml.nvmlDeviceGetP2PStatus(device_0, device_1,
+                                         pynvml.NVML_P2P_CAPS_INDEX_NVLINK) == pynvml.NVML_P2P_STATUS_OK
 
 
 def is_multihost_model(model_parallel_size: int) -> bool:
