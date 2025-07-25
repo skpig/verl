@@ -240,11 +240,16 @@ def test_streaming_train_val(set_common_envs, gpu_allocator, ray_fixture, is_ser
         val_step = 0
         while not val_stop.is_set():
             input_batch = copy.deepcopy(val_batch)
-            batch = rollout_manager.val_generate(input_batch, is_async=val_standalone)
+            batch = rollout_manager.val_generate(input_batch, step=val_step, is_async=val_standalone)
             out_text = decode_output(batch, tokenizer)
             print("val:", out_text)
             _check_score(out_text, batch)
-            val_step += 1
+            val_step += 5  # 假设每N step val一次，数字随便
+
+            # sleep 60s and check after every eval
+            now = time.time()
+            while time.time() - now < 60 and not val_stop.is_set():
+                time.sleep(1)
 
     from concurrent.futures import ThreadPoolExecutor
     executor = ThreadPoolExecutor(max_workers=1)

@@ -75,33 +75,34 @@ def get_common_config():
         },
         "actor_rollout_ref": {
             "model": {
-                "path": "hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/M8_680m_SFT_hf"
+                "path": "hdfs://haruna/home/byte_data_seed/lf_lq/user/x.lixiang/models/qwen3_0.6b_p6d",
+                # "path": "hdfs://haruna/home/byte_data_seed/ssd_wlcb/user/jiangchengquan/models/qwen3_8b_p6d",
             },
             "rollout": {
-                "tensor_model_parallel_size": 2,
+                "tensor_model_parallel_size": 1,
                 "mode": "batch",
                 "weights_communicator": "nccl",
                 "complete_ratio": 1.0,
                 "rollout_pool": {
                     "warmup_step": 0,
                 },
-                "gpu_memory_utilization": 0.4
+                "gpu_memory_utilization": 0.7
             },
         },
         "trainer": {
             "nnodes": 1,
-            "n_gpus_per_node": 2,
+            "n_gpus_per_node": 1,
             "project_name": "alpha_seed_test",
             "experiment_name": "rollout_manager",
             "logger": ['console'],
         },
         "streaming_rollout": {
             "nnodes": 0,
-            "n_gpus_per_node": 2,
+            "n_gpus_per_node": 1,
         },
         "streaming_validator": {
             "nnodes": 0,
-            "n_gpus_per_node": 2,
+            "n_gpus_per_node": 1,
         },
     })
     return get_config(override_config)
@@ -159,8 +160,6 @@ def test_train_generate(set_common_envs, gpu_allocator, ray_fixture, complete_ra
     config.streaming_validator.nnodes = 0
 
     # agent related config
-    # config.actor_rollout_ref.model.path = 'hdfs://harunava/home/byte_data_seed_azure/alphaseed/daiweinan/models/qwen3_0.6b_p6d'
-    config.actor_rollout_ref.model.path = 'hdfs://haruna/home/byte_data_seed/ssd_wlcb/user/jiangchengquan/models/qwen3_8b_p6d'
     config.data.max_prompt_length = 8192
     config.data.max_response_length = 8192
     config.data.return_raw_chat = True

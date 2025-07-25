@@ -11,6 +11,7 @@ jobs:
     envs:
       LIBHDFS_OPTS: -Dhadoop.root.logger=warn,console
       SEC_TOKEN_PATH: ${{SEC_TOKEN_PATH}}
+      CI_DEBUG_ENABLE: 1
     timeout: 60
     retry: 2
     steps:

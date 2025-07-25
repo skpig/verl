@@ -60,6 +60,7 @@ jobs:
       ALPHASEED_NIGHTLY_CI_MUTE_SEND_MESSAGE_TO_LARK: ${{ Event.Inputs.mute_send_message_to_lark }}
       BASELINE: ${{ Event.Inputs.baselines }}
       ALPHASEED_NIGHTLY_CI_EXP_OWNER_NAME: ${{ Event.Inputs.exp_owner_name }}
+      CI_JOB_MODE: one_to_one
 
     timeout: 900
     steps:

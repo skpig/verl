@@ -145,7 +145,7 @@ def test_train_elastic_generate(set_common_envs, gpu_allocator, ray_fixture, com
         batch = rollout_manager.train_generate(batch,
                                                step=0,
                                                save_dataproto_fn=mock_save_dataproto,
-                                               is_warmup_step=True)
+                                               is_warmup_step=complete_ratio == 0.)
         # scale up
         elastic_replica = rollout_manager.train_standalone_wg.replicas
 

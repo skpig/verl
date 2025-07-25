@@ -2,7 +2,7 @@ name: unit tests
 trigger:
   change
 jobs:
-  gen_ut2:
+  gen_ut4_elastic_rollout:
     # Merlin - data.aml.verl:v205 
     image: hub.byted.org/reckon/data.reckon.mlx.image_5940:26def500fbbd577bdfd57f100f6aa993
     if: ${{ !contains(Event.Change.Title, "WIP") }}
@@ -12,7 +12,7 @@ jobs:
       LIBHDFS_OPTS: -Dhadoop.root.logger=warn,console
       SEC_TOKEN_PATH: ${{SEC_TOKEN_PATH}}
       CI_DEBUG_ENABLE: 1
-    timeout: 60
+    timeout: 30
     retry: 2
     steps:
       - name: check env
@@ -40,7 +40,6 @@ jobs:
           - ray stop --force
           - ray start --num-cpus=100 --head
           - |
-            pytest -n 4 -v --timeout=600 \
-              tests/rollout/test_rollout_manager.py::test_train_generate \
-              tests/rollout/test_rollout_manager.py::test_val_generate
+            # 这个要2并发跑，4并发总有nccl的segv coredump
+            pytest -n 2 -v -s tests/rollout/test_elastic_rollout.py
           - ray stop --force
