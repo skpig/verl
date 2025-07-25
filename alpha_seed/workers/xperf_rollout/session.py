@@ -998,7 +998,7 @@ class InferenceSession:
         if stop_event is not None:
             # wait for the max_off_policy rollout
             if (not self.unfinished_off_policy_steps_set.is_empty()) and (
-                    self.unfinished_off_policy_steps_set.get_max() >= self.max_off_policy_steps):
+                    self.unfinished_off_policy_steps_set.get_max() > self.max_off_policy_steps):
                 return False
 
             # stop event break
