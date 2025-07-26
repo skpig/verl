@@ -28,6 +28,7 @@ from alpha_seed.workers.xperf_rollout.utils.custom_xperf_convert_helper import X
 
 
 def init_meta(tp_model):
+    import gc
     from alpha_seed.workers.xperf_rollout.utils.xperf_gpt_triton_helper import XPerfTritonInferenceModule
     if isinstance(tp_model, (XCustomInferenceModuleAdapter, XPerfTritonInferenceModule)):
         param_list = tp_model.get_param_list(skip_meta=False)
@@ -44,6 +45,8 @@ def init_meta(tp_model):
 
 
 def offload_param_to_device(tp_model, device):
+    import gc
+    gc.collect()
     from alpha_seed.workers.xperf_rollout.utils.xperf_gpt_triton_helper import XPerfTritonInferenceModule
     if isinstance(tp_model, (XCustomInferenceModuleAdapter, XPerfTritonInferenceModule)):
         param_list = tp_model.get_param_list(skip_meta=True)
@@ -67,7 +70,10 @@ def offload_param_to_device(tp_model, device):
             out = torch.empty_like(param, device=device)
         else:
             out = param.to(device)
-        torch.utils.swap_tensors(param, out)
+        try:
+            torch.utils.swap_tensors(param, out)
+        except Exception as e:
+            pass  # enable torch profiling will lead to a confusion of tensor ref, ignore it
 
 
 def free_kv_cache(tp_model):

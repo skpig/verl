@@ -739,7 +739,7 @@ class RolloutManager:
             # print(f"[INFO] {step} generate streaming[update weights and restart] {timer.last}")
             # metrics["timing/update_rollout_server"] = timer.last
             done, pending = asyncio.run_coroutine_threadsafe(submit_and_wait(), self.loop).result()
-            xperf_metrics = self.finalize_hybrid_server_gen()
+        xperf_metrics = self.finalize_hybrid_server_gen()
         pending = list(pending)
         results = []
         for task in done:
@@ -831,8 +831,8 @@ class RolloutManager:
         xperf_metrics: List[dict] = [{}]
         with nullcontext() if is_standalone else self.enable_hybrid_server_gen_ctx(is_train=False):
             ready_batch = asyncio.run_coroutine_threadsafe(_submit_and_wait(), self.loop).result()
-            if not is_standalone:
-                xperf_metrics = self.finalize_hybrid_server_gen()
+        if not is_standalone:
+            xperf_metrics = self.finalize_hybrid_server_gen()
 
         # flatten ready_batch
         results = []

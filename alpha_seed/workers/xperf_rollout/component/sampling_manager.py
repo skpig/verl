@@ -2,6 +2,8 @@
 
 import torch
 from typing import Dict
+import logging
+from xperf_gpt.utils import logging_rank_only
 
 
 def _sample(probs: torch.Tensor):
@@ -90,10 +92,13 @@ class Sampler:
         def wrap(self, *args, **kwargs):
             scores = kwargs.pop("scores")
             per_query_arg = kwargs.pop("per_query_arg")
-            use_batch = all(element is None for element in per_query_arg)
+            use_batch = all(element is None for element in per_query_arg) or all(
+                x == per_query_arg[0] for x in per_query_arg)
             if use_batch:
-                return func(self, *args, scores=scores, **kwargs)
+                per_query_arg = per_query_arg[0] if len(per_query_arg) > 0 else None
+                return func(self, *args, scores=scores, per_query_arg=per_query_arg, **kwargs)
             else:
+                logging_rank_only(logging.info, f"detected non-batch sampling... per_query_arg: {per_query_arg}")
                 output_scores = []
                 for i in range(len(per_query_arg)):
                     output_scores.append(

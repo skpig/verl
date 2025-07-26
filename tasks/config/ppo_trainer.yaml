@@ -443,7 +443,7 @@ rollout_server:
     executor_class: LocalExecutor  # ["RayActorExecutor", "LocalExecutor"]
     # max_workers * worker_max_concurrency 就是同时运行的task的最大并发数
     max_workers: 4 # 有多少worker
-    worker_max_concurrency: 1024  # 每个worker的并发数，对所有executor类型都生效
+    worker_max_concurrency: 8192  # 每个worker的并发数，对所有executor类型都生效
     llm_request_concurrency: 0  # 每个worker调用llm的并发，默认0表示不限制，如果llm有限制的需要再调这个
     direct_submit_query: True  # 是否直接将query对象发给request manager，跳过http发给openai compatible serve的过程
   tool_call_start_token: "<tool_call>"
