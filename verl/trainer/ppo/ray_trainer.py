@@ -268,6 +268,8 @@ def compute_advantage(
             response_mask=data.batch["response_mask"],
             gamma=gamma,
             lam=lam,
+            variable_lambda_scalar=config.variable_lambda_scalar,
+            critic_lam=config.critic_lam,
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns

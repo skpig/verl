@@ -141,6 +141,10 @@ algorithm:
   # Trade-off between bias and variance in the GAE estimator
   lam: 1.0
 
+  # VAPO
+  variable_lambda_scalar: null
+  critic_lam: null
+
   # Advantage estimator type: "gae", "grpo", "reinforce_plus_plus", etc.
   adv_estimator: gae
 

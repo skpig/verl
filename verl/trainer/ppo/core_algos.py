@@ -197,6 +197,8 @@ def compute_gae_advantage_return(
     response_mask: torch.Tensor,
     gamma: torch.Tensor,
     lam: torch.Tensor,
+    variable_lambda_scalar = None,
+    critic_lam = None,
 ):
     """Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py
 
@@ -218,25 +220,38 @@ def compute_gae_advantage_return(
         Returns: `(torch.Tensor)`
             shape: (bs, response_length)
 
-    """
+    """    
+
+    if variable_lambda_scalar is not None:
+        seq_len_per_sample = torch.clamp(torch.sum(response_mask, dim=1), min=1.0)
+        lam = torch.clamp(1 - 1 / (variable_lambda_scalar * seq_len_per_sample), min=lam)
+
     with torch.no_grad():
         nextvalues = 0
         lastgaelam = 0
         advantages_reversed = []
         gen_len = token_level_rewards.shape[-1]
+        if critic_lam is not None:
+            critic_lastgaelam = 0
+            critic_advantages_reversed = []
 
         for t in reversed(range(gen_len)):
+            cur_nextvalues = values[:, t + 1] if t < gen_len - 1 else 0.0
+            next_eos_mask = response_mask[:, t + 1] if t < gen_len - 1 else 1.0
             delta = token_level_rewards[:, t] + gamma * nextvalues - values[:, t]
-            lastgaelam_ = delta + gamma * lam * lastgaelam
-
-            # skip values and TD-error on observation tokens
-            nextvalues = values[:, t] * response_mask[:, t] + (1 - response_mask[:, t]) * nextvalues
-            lastgaelam = lastgaelam_ * response_mask[:, t] + (1 - response_mask[:, t]) * lastgaelam
-
+            nextvalues = next_eos_mask * cur_nextvalues + (1 - next_eos_mask) * nextvalues
+            lastgaelam = (delta + gamma * lam * lastgaelam) * response_mask[:, t] + lastgaelam * (1 - response_mask[:, t])
             advantages_reversed.append(lastgaelam)
+            if critic_lam is not None:
+                critic_lastgaelam = (delta + gamma * critic_lam *
+                                     critic_lastgaelam) * response_mask[:, t] + critic_lastgaelam * (1 - response_mask[:, t])
+                critic_advantages_reversed.append(critic_lastgaelam)
         advantages = torch.stack(advantages_reversed[::-1], dim=1)
-
         returns = advantages + values
+        if critic_lam is not None:
+            critic_advantages = torch.stack(critic_advantages_reversed[::-1], dim=1)
+            returns = critic_advantages + values
+
         advantages = verl_F.masked_whiten(advantages, response_mask)
     return advantages, returns
 
