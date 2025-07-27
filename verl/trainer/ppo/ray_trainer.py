@@ -256,6 +256,7 @@ def compute_advantage(
         DataProto: The updated data with computed advantages and returns.
     """
     # Back-compatible with trainers that do not compute response mask in fit
+    assert "response_mask" in data.batch.keys(), "response_mask should be computed in fit()"
     if "response_mask" not in data.batch.keys():
         data.batch["response_mask"] = compute_response_mask(data)
     # prepare response group
@@ -649,6 +650,10 @@ class RayPPOTrainer:
             assert config.actor_rollout_ref.rollout.temperature > 0, (
                 "validation gen temperature should be greater than 0 when enabling do_sample"
             )
+        
+        # check sampling related config
+        if config.algorithm.filter_groups.enable:
+            assert not self.config.reward_model.launch_reward_fn_async, "filter_groups(dynamic sampling) is not supported with async reward function"
 
         print("[validate_config] All configuration checks passed successfully!")
 
@@ -702,31 +707,34 @@ class RayPPOTrainer:
             collate_fn=collate_fn,
         )
 
-        assert len(self.train_dataloader) >= 1, "Train dataloader is empty!"
+        # assert len(self.train_dataloader) >= 1, "Train dataloader is empty!"
         assert len(self.val_dataloader) >= 1, "Validation dataloader is empty!"
 
+        # print(
+        #     f"Size of train dataloader: {len(self.train_dataloader)}, Size of val dataloader: "
+        #     f"{len(self.val_dataloader)}"
+        # )
         print(
-            f"Size of train dataloader: {len(self.train_dataloader)}, Size of val dataloader: "
-            f"{len(self.val_dataloader)}"
+            f"Validation dataloader size: {len(self.val_dataloader)}"
         )
 
-        total_training_steps = len(self.train_dataloader) * self.config.trainer.total_epochs
+        # total_training_steps = len(self.train_dataloader) * self.config.trainer.total_epochs
 
-        if self.config.trainer.total_training_steps is not None:
-            total_training_steps = self.config.trainer.total_training_steps
+        # if self.config.trainer.total_training_steps is not None:
+        #     total_training_steps = self.config.trainer.total_training_steps
 
-        self.total_training_steps = total_training_steps
-        print(f"Total training steps: {self.total_training_steps}")
+        # self.total_training_steps = total_training_steps
+        # print(f"Total training steps: {self.total_training_steps}")
 
-        try:
-            OmegaConf.set_struct(self.config, True)
-            with open_dict(self.config):
-                if OmegaConf.select(self.config, "actor_rollout_ref.actor.optim"):
-                    self.config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
-                if OmegaConf.select(self.config, "critic.optim"):
-                    self.config.critic.optim.total_training_steps = total_training_steps
-        except Exception as e:
-            print(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
+        # try:
+        #     OmegaConf.set_struct(self.config, True)
+        #     with open_dict(self.config):
+        #         if OmegaConf.select(self.config, "actor_rollout_ref.actor.optim"):
+        #             self.config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
+        #         if OmegaConf.select(self.config, "critic.optim"):
+        #             self.config.critic.optim.total_training_steps = total_training_steps
+        # except Exception as e:
+        #     print(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
 
     def _dump_generations(self, inputs, outputs, scores, reward_extra_infos_dict, dump_path):
         """Dump rollout/validation samples as JSONL."""
@@ -1275,7 +1283,8 @@ class RayPPOTrainer:
                 return
 
         # add tqdm
-        progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
+        progress_bar = tqdm(initial=self.global_steps, desc="Training Progress")
+        # progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
 
         # we start from step 1
         self.global_steps += 1
@@ -1323,7 +1332,8 @@ class RayPPOTrainer:
                 gen_batch.meta_info["global_steps"] = self.global_steps
                 gen_batch = gen_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
 
-                is_last_step = self.global_steps >= self.total_training_steps
+                # is_last_step = self.global_steps >= self.total_training_steps
+                is_last_step = False
 
                 with marked_timer("step", timing_raw):
                     # generate a batch
@@ -1360,15 +1370,17 @@ class RayPPOTrainer:
                     batch = batch.union(gen_batch_output)
                     batch.batch['rollout_index'] = rollout_index_batch
 
-                    batch.batch['response_mask'] = compute_response_mask(batch)
+                    batch.batch['response_mask'] = compute_response_mask(batch) # TODO: the response_mask here should be handled carefully，可以保持原有的形状，但是需要移除开头的partial rollout的mask，但需要搜索所有使用它的地方是否存在可能的错误
                     metrics['perf/total_dedup_num_response_tokens'] += batch.batch['response_mask'].sum().item()
                     metrics['perf/total_dedup_num_prompt_tokens'] += sum(len(i) for i in gen_batch.non_tensor_batch['raw_prompt_ids'])
                     # compute_rollout_metrics(batch=batch, tokenizer=self.tokenizer)
                     rollout_metrics = compute_rollout_metrics.remote(batch=batch, tokenizer=self.tokenizer)
 
-                    # balance the number of valid tokens on each dp rank.
-                    # Note that this breaks the order of data inside the batch.
-                    # Please take care when you implement group based adv computation such as GRPO and rloo
+                    # Balance the number of valid tokens across DP ranks.
+                    # NOTE: This usually changes the order of data in the `batch`,
+                    # which won't affect the advantage calculation (since it's based on uid),
+                    # but might affect the loss calculation (due to the change of mini-batching).
+                    # TODO: Decouple the DP balancing and mini-batching.
                     if self.config.trainer.balance_batch:
                         self._balance_batch(batch, metrics=metrics)
 
@@ -1385,6 +1397,76 @@ class RayPPOTrainer:
                             future_reward = compute_reward_async.remote(batch, self.config, self.tokenizer)
                         else:
                             reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
+                    
+                    if self.config.algorithm.filter_groups.enable:
+                        # NOTE: When prompts after filtering is less than train batch size,
+                        # we skip to the next generation batch
+                        metric_name = self.config.algorithm.filter_groups.metric
+                        # only score of reward_manager is supported
+                        if metric_name == "acc":
+                            # Turn to numpy for easier filtering
+                            new_batch.non_tensor_batch["filter_groups_metric_seq_score"] = (
+                                new_batch.batch["token_level_scores"].sum(dim=-1).numpy()
+                            )
+                        else:
+                            raise NotImplementedError(
+                                f"Only acc is supported for filter_groups, but got {metric_name}."
+                            )
+
+                        # Collect the sequence reward for each trajectory
+                        prompt_uid2metric_vals = defaultdict(list)
+                        for uid, metric_val in zip(
+                            new_batch.non_tensor_batch["uid"], new_batch.non_tensor_batch[metric_name], strict=True
+                        ):
+                            prompt_uid2metric_vals[uid].append(metric_val)
+
+                        prompt_uid2metric_std = {}
+                        for prompt_uid, metric_vals in prompt_uid2metric_vals.items():
+                            prompt_uid2metric_std[prompt_uid] = np.std(metric_vals)
+
+                        kept_prompt_uids = [
+                            uid
+                            for uid, std in prompt_uid2metric_std.items()
+                            if std > 0 or len(prompt_uid2metric_vals[uid]) == 1
+                        ]
+                        num_prompt_in_batch += len(kept_prompt_uids)
+
+                        kept_traj_idxs = []
+                        for idx, traj_from_prompt_uid in enumerate(new_batch.non_tensor_batch["uid"]):
+                            if traj_from_prompt_uid in kept_prompt_uids:
+                                kept_traj_idxs.append(idx)
+
+                        new_batch = new_batch[kept_traj_idxs]
+                        batch = new_batch if batch is None else DataProto.concat([batch, new_batch])
+
+                        prompt_bsz = self.config.data.train_batch_size
+                        if num_prompt_in_batch < prompt_bsz:
+                            print(f"{num_prompt_in_batch=} < {prompt_bsz=}")
+                            max_num_gen_batches = self.config.algorithm.filter_groups.max_num_gen_batches
+                            if max_num_gen_batches <= 0 or num_gen_batches < max_num_gen_batches:
+                                print(f"{num_gen_batches=}. Keep generating...")
+                                progress_bar.update(1)
+                                continue
+                            else:
+                                raise ValueError(
+                                    f"{num_gen_batches=} >= {max_num_gen_batches=}."
+                                    + " Generated too many. Please check if your data are too difficult."
+                                    + " You could also try set max_num_gen_batches=0 to enable endless trials."
+                                )
+                        else:
+                            # Align the batch
+                            traj_bsz = self.config.data.train_batch_size * self.config.actor_rollout_ref.rollout.n
+                            batch = batch[:traj_bsz]
+
+
+                    # Balance the number of valid tokens across DP ranks.
+                    # NOTE: This usually changes the order of data in the `batch`,
+                    # which won't affect the advantage calculation (since it's based on uid),
+                    # but might affect the loss calculation (due to the change of mini-batching).
+                    # TODO: Decouple the DP balancing and mini-batching.
+                    if self.config.trainer.balance_batch:
+                        self._balance_batch(batch, metrics=metrics)
+
 
                     # recompute old_log_probs
                     with marked_timer("old_log_prob", timing_raw, color="blue"):

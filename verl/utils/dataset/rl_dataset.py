@@ -29,6 +29,7 @@ from omegaconf import DictConfig, ListConfig
 from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizer, ProcessorMixin
 
+from verl.protocol import DataProto
 import verl.utils.torch_functional as verl_F
 from verl.utils.model import compute_position_id_with_mask
 
@@ -165,6 +166,7 @@ class RLHFDataset(Dataset):
         self.image_key = config.get("image_key", "images")
         self.video_key = config.get("video_key", "videos")
         self.max_prompt_length = config.get("max_prompt_length", 1024)
+        self.max_response_length = config.get("max_response_length", 1024 * 5)
         self.return_raw_chat = config.get("return_raw_chat", False)
         self.return_full_prompt = config.get("return_full_prompt", False)
         self.truncation = config.get("truncation", "error")
@@ -205,6 +207,7 @@ class RLHFDataset(Dataset):
             dataframe = datasets.load_dataset("parquet", data_files=parquet_file)["train"]
             dataframes.append(dataframe)
         self.dataframe: datasets.Dataset = datasets.concatenate_datasets(dataframes)
+        # self.dataframe = self.dataframe.select(range(50))
 
         print(f"dataset len: {len(self.dataframe)}")
 
@@ -321,6 +324,7 @@ class RLHFDataset(Dataset):
             input_ids = model_inputs.pop("input_ids")
             attention_mask = model_inputs.pop("attention_mask")
 
+        # TODO: maybe buggy when the input_ids contains previous response
         input_ids, attention_mask = verl_F.postprocess_data(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -345,6 +349,7 @@ class RLHFDataset(Dataset):
             ]  # (1, 3, seq_len)
 
         else:
+            # TODO: implement position ID computation for other processors
             position_ids = compute_position_id_with_mask(attention_mask)
 
         row_dict["input_ids"] = input_ids[0]
@@ -381,6 +386,7 @@ class RLHFDataset(Dataset):
         if need_tools_kwargs and not tools_kwargs:
             logger.warning("tools_kwargs is empty for index {}, data source: {}", index, row_dict["data_source"])
         row_dict["index"] = torch.tensor(index, dtype=torch.int)
+        row_dict['item'] = int(item)  # indicate the index of the item in the dataset
         row_dict["tools_kwargs"] = tools_kwargs
         row_dict["interaction_kwargs"] = interaction_kwargs
         return row_dict
@@ -394,3 +400,139 @@ class RLHFDataset(Dataset):
             return state
 
         return self.__dict__.copy()
+
+
+
+class TreeNode:
+    """
+    A class representing a node in a tree structure.
+    """
+
+    def __init__(self, 
+                 index,
+                 father_node: Optional['TreeNode'] = None,
+                 step_num=0):
+        """
+        Initialize the TreeNode with the given data.
+        """
+        self.index = index # a unique identifier for the node, also the one used to access the node in the dataset
+        self.father_node = father_node  # the parent node of this node, None if it's the root node
+        self.children = []
+
+        self.step_num = step_num  # the number of steps in the training process
+    
+    def get_original_ancestor_item(self):
+        """
+        Get the original ancestor of this node.
+        The original ancestor is the root node of the tree.
+        """
+        if self.step_num == 0:
+            return self.index
+        return self.father_node.get_original_ancestor_item()
+
+    def add_child(self, child_node: 'TreeNode'):
+        """
+        Add a child node to this node.
+        """
+        self.children.append(child_node)
+
+    def __repr__(self):
+        return f"TreeNode(data={self.data})"
+
+class TreeDataset(Dataset):
+    """
+    A dataset class that represents a tree structure.
+    """
+
+    def __init__(self, *args, **kwargs):
+        """
+        Initialize the TreeDataset with the given arguments.
+        """
+        super().__init__(*args, **kwargs)
+        self.original_datalength = len(self.dataframe)
+
+        # Initialize an empty dataset for new data
+        self.new_dataframe = datasets.Dataset.from_dict({})
+
+        self.root = TreeNode(index=-1, father_index=None, step_num=0)
+        self.item2node = {-1: self.root}
+
+        for i in range(self.original_datalength):
+            node = TreeNode(index=i, father_node=self.root, step_num=0)
+            self.root.add_child(node)
+            self.item2node[i] = node
+
+    def __getitem__(self, item):
+        if item <= self.original_datalength:
+            row_dict = super().__getitem__(item)
+            row_dict['partial_rollout_len'] = 0  # no partial rollout for original data
+            return row_dict
+        
+        # If the index is greater than the original data length, it is a newly generated item.
+        node = self.item2node.get(item, None)
+        original_item = node.get_original_ancestor_item()
+
+        # Get the original row dict from the dataframe
+        original_row_dict = super().__getitem__(original_item)
+
+        # TODO: Replace some important fields with the new data
+        # input_ids
+        # attention_mask
+        # position_ids
+        # 上述这三个都是有严格的长度限制的，考虑不修改
+        # raw_prompt_ids改为original prompt + partial rollout，这个是用于rollout作为input的
+        original_row_dict["item"] = item
+        original_row_dict["raw_prompt_ids"] = node.raw_prompt_ids
+
+        # 加上一个partial rollout len (int) OR partial rollout mask (tensor[response_len])
+        original_row_dict["partial_rollout_len"] = node.partial_rollout_len
+        # original_row_dict["rollout_kwargs"] = {
+        #     'max_new_tokens': self.max_response_length - node.partial_rollout_len,
+        #     }
+
+
+        # 并在rollout: 
+        # 1. 更新max_new_tokens
+        # 2. 更新input_ids, attention_mask, position_ids
+        # 还需要更新对应的response_mask
+        return row_dict
+        
+    
+
+    def update(self, batch: DataProto) -> None:
+        """
+        Update the dataset with the current batch.
+        This method is called after each training batch.
+        """
+        items = batch.batch['item']
+        scores = torch.tensor(batch.non_tensor_batch['score']) # raw score
+
+        unique_indices, inverse_indices = torch.unique(items, return_inverse=True)
+
+        # We can select the item with highest score as the new node
+        # if self.use_critic:
+
+
+
+
+        # Update the nodes in the tree
+        for item, score_sum, count in zip(unique_indices.tolist(), score_sums.tolist(), counts.tolist()):
+            # newly added node
+            if item not in self.item2node:
+                node = TreeNode(index=item, father_node=self.item2node[0], step_num=0)
+                self.item2node[item] = node
+                self.root.add_child(node)
+            else:
+                node = self.item2node[item]
+            node.step_num += 1
+
+            # Update the new dataframe with the new data
+            new_data = {
+                "index": item,
+                "score_sum": score_sum,
+                "count": count,
+                "step_num": node.step_num,
+            }
+            self.new_dataframe = datasets.concatenate_datasets([self.new_dataframe, datasets.Dataset.from_dict(new_data)])
+
+

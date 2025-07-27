@@ -65,6 +65,19 @@ class MockDataGenerator(AbstractDataGenerator):
         return dataset.dataframe.select([0])
 
 
+class TrueeDataGenerator(AbstractDataGenerator):
+    """
+    A data gen class that returns the first datapoint.
+    This class is useful as a placeholder and testing.
+    """
+
+    def __init__(self, config: DictConfig = None):
+        super().__init__(config)
+
+    def generate(self, dataset: Dataset) -> datasets.Dataset:
+        print("TrueeDataGenerator: Returning the first datapoint.")
+        return dataset.dataframe.select([0])
+
 class DynamicGenDataset(RLHFDataset):
     """
     A dataset class that uses a data generation strategy to process data.
@@ -79,20 +92,14 @@ class DynamicGenDataset(RLHFDataset):
         processor: Optional[ProcessorMixin] = None,
     ):
         super().__init__(data_files, tokenizer, config, processor)
-        self.datagen: AbstractDataGenerator = config.datagen
         assert "datagen" in config and config.datagen.get("path", None) is not None, (
             f"datagen path is not set in config: {config}"
         )
-        # Dynamically load the custom datagen class
-        datagen_cls = load_extern_type(config.datagen.path, config.datagen.name)
 
-        # Verify that the custom datagen class inherits from AbstractDataGenerator
-        abs_cls = AbstractDataGenerator
-        if not issubclass(datagen_cls, abs_cls):
-            raise TypeError(
-                f"The custom datagen class '{config.datagen.name}' from '{config.datagen.path}'"
-                + " must inherit from {abs_cls}"
-            )
+        # # Dynamically load the custom datagen class
+        # datagen_cls = load_extern_type(config.datagen.path, config.datagen.name)
+
+        datagen_cls = 
 
         self.data_generator = datagen_cls(config.datagen)
         self.on_batch_end()

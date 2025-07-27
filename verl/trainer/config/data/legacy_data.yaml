@@ -93,6 +93,7 @@ return_multi_modal_inputs: True
 
 # settings related to data sampler
 sampler:
+  name: null
 
   # the path to the module containing a curriculum class which implements the
   # AbstractSampler interface
@@ -100,6 +101,9 @@ sampler:
 
   # the name of the curriculum class like `MySampler`
   class_name: null
+
+  # for MoPPS sampler
+  temporal_decay: 0.9
 
 # Data generation configuration for augmenting the dataset.
 datagen:
