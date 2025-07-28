@@ -27,12 +27,11 @@ def make_reqeust_data_and_metadata(item: DataProto, prompt: str, host, port):
         data = {"prompt": prompt_ids}
     else:
         data = {"prompt": prompt}
-    if 'pixel_values_ref' in item.non_tensor_batch:
-        assert len(item.non_tensor_batch['pixel_values_ref']) == 1
-        pixel_values_ref = item.non_tensor_batch['pixel_values_ref'][0]
-        if pixel_values_ref is not None:
-            data['pixel_values_ref'] = pixel_values_ref
-            data['image_grid_hw'] = item.non_tensor_batch['image_grid_hw'][0].tolist()
+    if 'image_data_ref' in item.non_tensor_batch:
+        assert len(item.non_tensor_batch['image_data_ref']) == 1
+        image_data_ref = item.non_tensor_batch['image_data_ref'][0]
+        if image_data_ref is not None:
+            data['image_data_ref'] = image_data_ref
     meta_info = copy.copy(item.meta_info)
     # required for eos callback
     meta_info['uid'] = item.non_tensor_batch['uid'][0]
@@ -109,12 +108,7 @@ class OpenAIAsyncClient(AsyncLLMInterface):
             generation_kwargs = meta_info['generation_kwargs']
 
             # 构建ChatCompletionRolloutMessageParam格式的messages
-            messages = {"prompt": content["prompt"]}
-
-            # 如果有图像数据，添加图像相关字段
-            if 'pixel_values_ref' in content:
-                messages['pixel_values_ref'] = content['pixel_values_ref']
-                messages['image_grid_hw'] = content['image_grid_hw']
+            messages = {"prompt": content["prompt"], 'image_data_ref': content.get('image_data_ref')}
 
             request_data = {
                 "model": "rollout",  # 使用server期望的模型名
@@ -182,8 +176,8 @@ class DirectAsyncClient(AsyncLLMInterface):
 
         # 图像支持
         image_kwargs = None
-        if 'pixel_values_ref' in content:
-            image_kwargs = {'pixel_values_ref': content['pixel_values_ref'], 'image_grid_hw': content['image_grid_hw']}
+        if 'image_data_ref' in content:
+            image_kwargs = {'image_data_ref': content['image_data_ref']}
 
         # 创建Query对象
         query = Query.from_request(input_ids, input_prompt, request_id, sampling_kwargs, meta_info, image_kwargs)
@@ -278,12 +272,7 @@ class OpenAIClient(SyncLLMInterface):
             generation_kwargs = meta_info['generation_kwargs']
 
             # 构建ChatCompletionRolloutMessageParam格式的messages
-            messages = {"prompt": content["prompt"]}
-
-            # 如果有图像数据，添加图像相关字段
-            if 'pixel_values_ref' in content:
-                messages['pixel_values_ref'] = content['pixel_values_ref']
-                messages['image_grid_hw'] = content['image_grid_hw']
+            messages = {"prompt": content["prompt"], 'image_data_ref': content.get('image_data_ref')}
 
             request_data = {
                 "model": "rollout",  # 使用server期望的模型名
@@ -356,8 +345,8 @@ class DirectClient(SyncLLMInterface):
 
         # 图像支持
         image_kwargs = None
-        if 'pixel_values_ref' in content:
-            image_kwargs = {'pixel_values_ref': content['pixel_values_ref'], 'image_grid_hw': content['image_grid_hw']}
+        if 'image_data_ref' in content:
+            image_kwargs = {'image_data_ref': content['image_data_ref']}
 
         # 创建Query对象
         query = Query.from_request(input_ids, input_prompt, request_id, sampling_kwargs, meta_info, image_kwargs)
