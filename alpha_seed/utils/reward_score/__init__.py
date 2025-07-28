@@ -6,6 +6,8 @@ from functools import partial
 
 from alpha_seed.workers.agents import load_external_module
 
+NON_AGENT_PLACE_HOLDER_SCORE = -99.0
+
 
 def _select_rm_score_fn(reward_style, external_lib: str = None):
 
@@ -110,5 +112,8 @@ def _select_rm_score_fn(reward_style, external_lib: str = None):
     elif reward_style == "swe_repair_verifier":
         from . import swe_repair_verifier
         return swe_repair_verifier.compute_score_client
+    elif reward_style == "swalm_agent_verifier":
+        from . import swalm_agent_verifier
+        return swalm_agent_verifier.get_agent_reward
     else:
         raise NotImplementedError

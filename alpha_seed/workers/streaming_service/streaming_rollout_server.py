@@ -68,7 +68,7 @@ class OpenAIProxy(ABC):
         else:
             input_ids = prompt
             input_prompt = ""
-        request_id = uuid.uuid4().hex
+        request_id = request.meta_info.get('uid', uuid.uuid4().hex)
         kwargs = {}
         if 'image_data_ref' in request.messages:
             kwargs['image_kwargs'] = {'image_data_ref': request.messages['image_data_ref']}
@@ -78,6 +78,7 @@ class OpenAIProxy(ABC):
     def create_response(self, query: Query) -> ChatCompletionRollout:
         message = ChatCompletionMessageRollout(role="assistant",
                                                prompt=query.input_prompt + query.output_prompt[0],
+                                               content=query.output_prompt[0],
                                                raw_output_ids=query.output_tokens,
                                                response_log_probs=query.log_probs,
                                                is_finished=query.is_finished,

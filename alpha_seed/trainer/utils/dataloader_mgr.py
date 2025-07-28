@@ -24,9 +24,16 @@ class DataLoaderMgr:
             if config.data.get('task_type') == 'VLM_GUI':
                 from alpha_seed.utils.dataset.vlm_rl_dataset import RLHFDatasetGUI as RLHFDataset
             else:
-                from alpha_seed.utils.dataset.vlm_rl_dataset import RLHFDatasetVL as RLHFDataset
+                if self.config.data.get("enable_swalm_agent", False):
+                    from alpha_seed.utils.dataset.rl_dataset_swalm import RLHFDatasetVLSwalm as RLHFDataset
+                else:
+                    from alpha_seed.utils.dataset.vlm_rl_dataset import RLHFDatasetVL as RLHFDataset
         else:
-            from alpha_seed.utils.dataset.rl_dataset import RLHFDataset, collate_fn
+            from alpha_seed.utils.dataset.rl_dataset import collate_fn
+            if self.config.data.get("enable_swalm_agent", False):
+                from alpha_seed.utils.dataset.rl_dataset_swalm import RLHFDatasetSwalm as RLHFDataset
+            else:
+                from alpha_seed.utils.dataset.rl_dataset import RLHFDataset
 
         self.RLHFDataset = RLHFDataset
         self.collate_fn = collate_fn

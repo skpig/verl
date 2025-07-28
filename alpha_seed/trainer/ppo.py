@@ -22,6 +22,7 @@ from ray import ObjectRef
 from alpha_seed.logging import refine_log
 from alpha_seed.workers.streaming_service.rollout_query_timeline import RolloutQueryTimeline
 from alpha_seed.workers.streaming_service.rollout_request_manager import get_all_request_manager_actors
+from alpha_seed.utils.reward_score import NON_AGENT_PLACE_HOLDER_SCORE
 
 refine_log()
 
@@ -269,14 +270,25 @@ def compute_advantage(data: DataProto, gamma, lam, use_variable_lambda, variable
         adv_metrics = {}
     elif adv_estimator == 'grpo':
         token_level_scores = data.batch['token_level_scores']
+        token_level_scores_mean = data.batch.pop('token_level_scores_mean', None)
+        token_level_scores_std = data.batch.pop('token_level_scores_std', None)
         index = data.non_tensor_batch['index']
+        if (token_level_scores_mean is not None) and (token_level_scores_std is not None):
+            use_pre_computed_stats = [
+                False if token_level_scores_mean[i] == NON_AGENT_PLACE_HOLDER_SCORE else True for i in range(len(data))
+            ]
+        else:
+            use_pre_computed_stats = []
         advantages, returns, adv_metrics = core_algos.compute_grpo_advantage_return(
             token_level_scores=token_level_scores,
             eos_mask=response_mask,
             index=index,
             num_bon=num_bon,
             use_async_gen=use_async_gen,
-            group_mode=group_mode)
+            group_mode=group_mode,
+            token_level_scores_mean=token_level_scores_mean,
+            token_level_scores_std=token_level_scores_std,
+            use_pre_computed_stats=use_pre_computed_stats)
         data.batch['advantages'] = advantages
         data.batch['origin_advantages'] = advantages
         data.batch['returns'] = returns
