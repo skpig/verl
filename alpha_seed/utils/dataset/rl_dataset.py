@@ -30,6 +30,7 @@ import numpy as np
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoTokenizer, PreTrainedTokenizer
 from verl.utils.fs import copy_local_path_from_hdfs
+from hdfs_io import hlist_files, hisdir
 
 from verl.utils.model import compute_position_id_with_mask
 import verl.utils.torch_functional as verl_F
@@ -90,6 +91,21 @@ class RLHFDataset(Dataset):
 
         if not isinstance(parquet_files, (List, ListConfig)):
             parquet_files = [parquet_files]
+
+        # Check if any of the paths are HDFS directories and expand them
+        expanded_files = []
+        for file_path in parquet_files:
+            if hisdir(file_path):
+                # If it's an HDFS directory, list all files in it
+                files_in_dir = hlist_files([file_path])
+                parquet_files_in_dir = [f for f in files_in_dir if f.endswith('.parquet')]
+                expanded_files.extend(parquet_files_in_dir)
+                print(f"Expanded HDFS directory {file_path} to {len(parquet_files_in_dir)} parquet files")
+            else:
+                # If it's not a directory, keep it as is
+                expanded_files.append(file_path)
+
+        parquet_files = expanded_files
 
         self.parquet_files = copy.deepcopy(parquet_files)
         self.original_parquet_files = copy.deepcopy(parquet_files)
