@@ -75,7 +75,7 @@ class MoPPSSampler(AbstractCurriculumSampler):
     
     def update(self, batch: DataProto) -> None:
         """Update the sampler with the current batch."""
-        breakpoint()
+        # breakpoint()
 
         indices = torch.tensor(batch.non_tensor_batch['item'].astype(np.int32)) # item is the index passed to the dataset.__getitem__
         scores = torch.tensor(batch.non_tensor_batch['score'])
@@ -116,7 +116,7 @@ class MoPPSSampler(AbstractCurriculumSampler):
 
     def __iter__(self):
         """Iterate over the sampler."""
-        breakpoint()
+        # breakpoint()
         def dynamic_iter():
             while True:
                 assert len(self.queue) > 0, "Queue should not be empty."
@@ -214,7 +214,7 @@ class PrioritySampler(AbstractCurriculumSampler):
 
     def __iter__(self):
         """Iterate over the sampler."""
-        breakpoint()
+        # breakpoint()
         def dynamic_iter():
             while True:
                 assert len(self.queue) > 0, "Queue should not be empty."
