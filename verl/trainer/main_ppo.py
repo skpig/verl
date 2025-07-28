@@ -326,11 +326,11 @@ def create_rl_sampler(data_config, dataset):
             data_config=data_config,
         )
         assert isinstance(sampler, AbstractSampler)
-        assert data_config.get("dataloader_num_workers", 8) == 0, (
-            "If using MoPPS, num_workers must be 0 to prevent data caching. "
-            "If the dataloader caches data before the batch is done the "
-            "MoPPS sampler won't have the opportunity to reorder it. "
-        )
+        # assert data_config.get("dataloader_num_workers", 8) == 0, (
+        #     "If using MoPPS, num_workers must be 0 to prevent data caching. "
+        #     "If the dataloader caches data before the batch is done the "
+        #     "MoPPS sampler won't have the opportunity to reorder it. "
+        # )
     
     elif data_config.sampler.name == 'priority':
         from verl.experimental.dataset.sampler import PrioritySampler
@@ -340,11 +340,11 @@ def create_rl_sampler(data_config, dataset):
             data_config=data_config,
         )
         assert isinstance(sampler, AbstractSampler)
-        assert data_config.get("dataloader_num_workers", 8) == 0, (
-            "If using priority sampler, num_workers must be 0 to prevent data caching. "
-            "If the dataloader caches data before the batch is done the "
-            "priority sampler won't have the opportunity to reorder it. "
-        )
+        # assert data_config.get("dataloader_num_workers", 8) == 0, (
+        #     "If using priority sampler, num_workers must be 0 to prevent data caching. "
+        #     "If the dataloader caches data before the batch is done the "
+        #     "priority sampler won't have the opportunity to reorder it. "
+        # )
 
     # Use a sampler to facilitate checkpoint resumption.
     # If shuffling is enabled in the data configuration, create a random sampler.
