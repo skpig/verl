@@ -98,7 +98,7 @@ class Sampler:
                 per_query_arg = per_query_arg[0] if len(per_query_arg) > 0 else None
                 return func(self, *args, scores=scores, per_query_arg=per_query_arg, **kwargs)
             else:
-                logging_rank_only(logging.info, f"detected non-batch sampling... per_query_arg: {per_query_arg}")
+                logging_rank_only(logging.info, 0, f"detected non-batch sampling... per_query_arg: {per_query_arg}")
                 output_scores = []
                 for i in range(len(per_query_arg)):
                     output_scores.append(

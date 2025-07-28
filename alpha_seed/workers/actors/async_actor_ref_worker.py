@@ -741,30 +741,21 @@ class AsyncActorRolloutRefWorker(Worker):
                 world_size = world_size // 2
             if self.actor_strategy in ('fsdp', 'vescale-fsdp2'):
                 sp_size = config.actor.ulysses_sequence_parallel_size
-                self.config.actor.ppo_mini_batch_size //= (world_size // sp_size // actor_tp_size)
-                self.config.actor.ppo_micro_batch_size //= (world_size // sp_size // actor_tp_size)
+                tp_size = 1 if self.actor_strategy == 'vescale-fsdp2' else actor_tp_size
+                self.config.actor.ppo_mini_batch_size //= (world_size // sp_size // tp_size)
+                self.config.actor.ppo_micro_batch_size //= (world_size // sp_size // tp_size)
             elif self.actor_strategy == 'megatron':
                 # we import here to remove the mariana as necessary dependency
                 dp_size = mpu.get_data_parallel_world_size()
                 self.config.actor.ppo_mini_batch_size //= dp_size
                 self.config.actor.ppo_micro_batch_size //= dp_size
 
-        # TODO(zhangchi.usc1992): this is useless. correct me if this is wrong
-        # if self._is_rollout or self._is_standalone_rollout:
-        #     if self.actor_strategy == 'fsdp':
-        #         sp_size = config.actor.ulysses_sequence_parallel_size
-        #         self.config.rollout.micro_batch_size //= world_size  # for xperf-gpt
-        #         self.config.rollout.log_prob_micro_batch_size //= (world_size // sp_size // actor_tp_size)
-        #     elif self.actor_strategy == 'megatron':
-        #         dp_size = mpu.get_data_parallel_world_size()
-        #         self.config.rollout.micro_batch_size //= world_size  # for xperf-gpt
-        #         self.config.rollout.log_prob_micro_batch_size //= dp_size
-
         if self._is_ref:
             if self.ref_strategy in ('fsdp', 'vescale-fsdp2'):
                 sp_size = config.ref.ulysses_sequence_parallel_size
-                self.config.ref.log_prob_micro_batch_size //= (world_size // sp_size // ref_tp_size)
-                self.config.ref.ppo_mini_batch_size //= (world_size // sp_size // ref_tp_size)
+                tp_size = 1 if self.actor_strategy == 'vescale-fsdp2' else ref_tp_size
+                self.config.ref.log_prob_micro_batch_size //= (world_size // sp_size // tp_size)
+                self.config.ref.ppo_mini_batch_size //= (world_size // sp_size // tp_size)
             elif self.ref_strategy == 'megatron':
                 dp_size = mpu.get_data_parallel_world_size()
                 self.config.ref.log_prob_micro_batch_size //= dp_size

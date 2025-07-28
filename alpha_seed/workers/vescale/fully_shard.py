@@ -3,9 +3,12 @@ import types
 import functools
 import warnings
 import torch
+import torch.distributed as dist
 from torch.distributed._tensor.placement_types import Placement
+from vescale.parallel.fsdp2.extension.spmd import apply_spmd_extension
 from vescale import CPUOffloadPolicy, DeviceMesh, FSDPModule, MixedPrecisionPolicy, OffloadPolicy
-from vescale.parallel.fsdp2.extension.spmd import fully_shard_with_mp
+from vescale.parallel.fsdp2.extension.spmd import SPMDPolicy
+from vescale.parallel.fsdp2 import auto_wrap
 from vescale.parallel.fsdp2.extension.recompute import patch_recompute
 from vescale.parallel.fsdp2.extension.act_offload import apply_activation_offload, ActOffloadPolicy
 from vescale.initialize.hf_utils import parallel_load_safetensors, parallel_init_module_fn
@@ -79,11 +82,8 @@ def fully_shard(
     # set module wrap class
     if isinstance(block_cls, str):
         block_cls = [block_cls]
-
     assert isinstance(block_cls, list)
-
     block_cls = tuple([get_module_class_from_name(model, block) for block in block_cls])
-
     for block in block_cls:
         if not issubclass(block, torch.nn.Module):
             raise NotImplementedError(f"block cls must be subclass of torch.nn.Module, but got {block_cls}")
@@ -93,13 +93,13 @@ def fully_shard(
     global_mesh = fsdp_mesh._parent_mesh
     default_mp_mesh = global_mesh[tuple(n for n in global_mesh.mesh_dim_names if n not in fsdp_mesh.mesh_dim_names)]
     assert default_mp_mesh.size() == 1
-    # -- set up mesh
+    # -- setup mesh
     named_mesh = {ParallelType.MP: default_mp_mesh}
     if tp_mesh is not None:
         named_mesh["EP"] = tp_mesh
     if oe_mesh is not None:
         named_mesh["OE"] = oe_mesh
-    # -- set up plan
+    # -- setup plan
     plan_name_count = {key: 0 for key in tp_plan}
     spmd_plan = ModuleParallelPlan()
     for fqn, _ in model.named_parameters():
@@ -111,7 +111,8 @@ def fully_shard(
                 spmd_plan.shard_tensor(fqn, [
                     placement,
                 ], mesh=mesh_name)
-                print(f"add shard tensor ({fqn=}): {placement} for {mesh_name}")
+                if dist.get_rank() == 0:
+                    print(f"add shard tensor ({fqn=}): {placement} for {mesh_name}")
                 plan_name_count[plan_name] += 1
                 break
         else:
@@ -125,34 +126,36 @@ def fully_shard(
 
     # set cpu offload
     offload_policy = CPUOffloadPolicy() if param_offload else OffloadPolicy()
-    fully_shard_fn = functools.partial(fully_shard_with_mp,
-                                       mesh=fsdp_mesh,
-                                       reshard_after_forward=True,
-                                       mp_policy=mixed_precision_policy,
-                                       offload_policy=offload_policy,
-                                       verbose=True)
-
+    fsdp_kwargs = {
+        "mesh": fsdp_mesh,
+        "reshard_after_forward": True,
+        "mp_policy": mixed_precision_policy,
+        "offload_policy": offload_policy,
+    }
     # load pretrained weights
     shards = parallel_load_safetensors(weights, device="cpu") if weights else {}
-    module_materialize_fn, _, _ = parallel_init_module_fn(model, shards, pad_state=True, strict=False)
+    materialize, _, _ = parallel_init_module_fn(model, shards, pad_state=True, strict=False)
 
     # wrap to fsdp + prefetch
     last_fsdp_modules = None
     for module in model.modules():
         if isinstance(module, block_cls):
-            module_materialize_fn(module)
-            modules: Tuple[FSDPModule] = fully_shard_fn(module)
+            materialize(module)
+            modules: Tuple[FSDPModule] = auto_wrap(module,
+                                                   SPMDPolicy(),
+                                                   fsdp_kwargs,
+                                                   fuse_fsdp_modules=True,
+                                                   verbose=True)
             if last_fsdp_modules is not None:
                 last_fsdp_modules[0].set_modules_to_forward_prefetch(modules)
                 modules[0].set_modules_to_backward_prefetch(last_fsdp_modules)
             last_fsdp_modules = modules
-    module_materialize_fn(model)
-    fully_shard_fn(model)
+    materialize(model)
+    auto_wrap(model, SPMDPolicy(), fsdp_kwargs, fuse_fsdp_modules=False, verbose=True)
+    model: FSDPModule
     model.set_reshard_after_backward(True)
     model._set_unshard_async_op(True)
-
-    from vescale.parallel.fsdp2.extension.spmd import apply_spmd_extension
-    apply_spmd_extension(model)
+    apply_spmd_extension(model, set_mesh_attr=True)
 
     # apply recompute for each layer
     if enable_training_stats:
@@ -172,9 +175,12 @@ def fully_shard(
         patch_recompute(model)
 
     # compatible to legacy parallelism
-    for name, module in model.named_modules():
-        assert not hasattr(module, "_tp_mesh"), f"{name} already gots _tp_mesh field"
-        module._tp_mesh = tp_mesh
+    for module in model.modules():
+        if len(module._spmd_meshes) > 0:
+            module._tp_mesh = module._spmd_meshes[0]
+        else:
+            module._tp_mesh = None
+    # bumi ep implementation requires param has .mesh attr
     for param in model.parameters():
         if hasattr(param, "_spec"):
             param.mesh = param._spec.mesh

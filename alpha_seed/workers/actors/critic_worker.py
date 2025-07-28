@@ -119,6 +119,7 @@ class CriticWorker(Worker):
                 self.gather_manager = DataGatherManager(self.gather_mesh, self.sp_mesh)
 
             # normalize config
+            tp_size = 1 if self.critic_strategy == 'vescale-fsdp2' else tp_size
             self.config.ppo_mini_batch_size //= (world_size // sp_size // tp_size)
             self.config.ppo_micro_batch_size //= (world_size // sp_size // tp_size)
         elif self.critic_strategy == 'megatron':
