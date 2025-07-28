@@ -185,6 +185,7 @@ class DataParallelPPOActor(BasePPOActor):
                     output_hidden_states=False,
                 )
                 full_log_probs_rmpad = output.loss * (-1.0)
+                acceptance_matrix = output.acceptance_matrix  # list of tensor. [total_nnz // sp,]
             else:
                 output = self.actor_module(input_ids=input_ids_rmpad,
                                            position_ids=position_ids_rmpad,
