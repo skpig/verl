@@ -44,3 +44,41 @@ def compute_chunked_entropy_logprobs(self, hidden_states, labels=None, temperatu
         log_probs = torch.cat(log_probs_chunks, dim=0) if log_probs_chunks else None
 
     return entropy_rmpad, log_probs
+
+
+def compute_chunked_mtp_acceptance_ratio_per_head(self, hidden_states, labels):
+    chunk_size = 2048
+    batch_size, seq_len, hidden_dim = hidden_states.shape
+    assert batch_size == 1
+
+    acceptance_chunks = []
+
+    for start in range(0, seq_len, chunk_size):
+        end = min(start + chunk_size, seq_len)
+        hidden_chunk = hidden_states[:, start:end, :]
+        labels_chunk = labels[start:end]
+        logits_chunk = self.lm_head(hidden_chunk)  # [1, chunk_len, vocab_size]
+        logits_chunk = logits_chunk.squeeze(0)  # [chunk_len, vocab_size]
+
+        # take argmax
+        predicted_labels_chunked = torch.argmax(logits_chunk, dim=-1)
+        # compute acceptance ratio
+        acceptance = predicted_labels_chunked == labels_chunk
+        acceptance_chunks.append(acceptance)
+
+        chunk_len = end - start
+        if chunk_len == 0:
+            continue
+
+        torch.cuda.empty_cache()
+
+    acceptance_chunks = torch.cat(acceptance_chunks, dim=0)
+    return acceptance_chunks
+
+
+def compute_chunked_mtp_acceptance_ratio(self, all_mtp_hidden_states, all_mtp_labels):
+    acceptance_data = []
+    for mtp_hidden_states, labels in zip(all_mtp_hidden_states, all_mtp_labels):
+        acceptance_chunks = compute_chunked_mtp_acceptance_ratio_per_head(self, mtp_hidden_states, labels)
+        acceptance_data.append(acceptance_chunks)
+    return tuple(acceptance_data)

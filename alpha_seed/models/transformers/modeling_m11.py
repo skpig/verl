@@ -16,7 +16,8 @@ from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_worl
 from dist_attn.ulysses.ops import slice_input_tensor
 
 from dist_attn.ulysses.ops import gather_seq_scatter_heads, gather_heads_scatter_seq
-from packaging.version import Version
+
+from .utils import _check_version
 
 import logging
 
@@ -24,17 +25,6 @@ logger = logging.getLogger(__file__)
 
 from functools import partial
 from seed_kernels.transformers.functional import seed_fused_moe
-
-
-def _check_version():
-    import vescale
-    if Version(vescale.__version__) < Version("0.2.19"):
-        raise RuntimeError(f"vescale version must be >= 0.2.19, but got {vescale.__version__}. "
-                           "Please install through pip3 install byted-vescale==0.2.19")
-    import triton
-    if Version(triton.__version__) < Version("3.3.0"):
-        raise RuntimeError(f"triton version must be >= 3.3.0, but got {triton.__version__}. "
-                           "Please install through pip3 install triton==3.3.0")
 
 
 def make_m11_plan():

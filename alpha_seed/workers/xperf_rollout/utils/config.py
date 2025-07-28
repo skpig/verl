@@ -499,7 +499,7 @@ def _get_m10_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
         "is_exp_moe":
             False,
         "share_expert_num":
-            int(config.share_expert_num),
+            int(config.moe_share_expert_num),
         "moe_ffn_has_bias":
             False,
         "model_name":
@@ -507,7 +507,7 @@ def _get_m10_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
         "is_meta":
             True,
         "has_k_layernorm":
-            config.use_key_layernorm,
+            config.use_key_norm,
         "has_context_layernorm":
             config.use_context_groupnorm,
         "has_attn_bias":
@@ -547,15 +547,15 @@ def _get_m10_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
         "mtp_n_heads":
             config.mtp_n_heads,
         "querynorm":
-            config.use_query_layernorm,
+            config.use_query_norm,
         "keynorm":
-            config.use_key_layernorm,
+            config.use_key_norm,
         "valuenorm":
             False,
         "contextnorm":
             config.use_context_groupnorm,
         "attn_outputnorm":
-            config.use_attention_output_layernorm,
+            config.use_attention_output_norm,
         "ffn_outputnorm":
             True,
     }

@@ -1934,6 +1934,18 @@ class RayPPOTrainer(object):
                     with Timer(name='old_log_probs', logger=None) as timer:
                         output_batch = actor_future.get()
                         batch = output_batch.chunk(2)[0] if self.enable_actor_critic_spatial_mux else output_batch
+                        mtp_keys = [k for k in output_batch.batch.keys() if 'acceptance_matrix' in k]
+                        response_length = output_batch.batch['responses'].size(1)
+                        if self.config.algorithm.use_model_output_mask:
+                            acceptance_mask = output_batch.batch['model_output_mask']
+                        else:
+                            acceptance_mask = output_batch.batch['attention_mask']
+                        acceptance_mask = acceptance_mask[:, -response_length:]
+                        for i, k in enumerate(sorted(mtp_keys)):
+                            acceptance_mask_mtp = torch.roll(acceptance_mask, shifts=-i - 1, dims=1) * acceptance_mask
+                            metrics[f'mtp/{k}'] = (output_batch.batch[k].float() *
+                                                   acceptance_mask_mtp).sum().item() / max(
+                                                       acceptance_mask_mtp.sum().item(), 1)
                     metrics['timing/old_log_probs'] = timer.last
 
                     print_dataproto_size(batch, head='After old log probs')

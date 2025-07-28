@@ -53,3 +53,4 @@ class AlphaSeedMoeCausalLMOutputWithPast(ModelOutput):
     router_logits: Optional[Tuple[torch.FloatTensor]] = None
     entropy: Optional[torch.FloatTensor] = None
     log_probs: Optional[torch.FloatTensor] = None
+    acceptance_matrix: Optional[List[torch.BoolTensor]] = None

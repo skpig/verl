@@ -3,6 +3,7 @@ set -x
 ray stop --force
 
 export NCCL_DEBUG=WARN
+export TORCH_NCCL_AVOID_RECORD_STREAMS=1
 
 NUM_STEPS="${NUM_STEPS:-2000}"
 echo $NUM_STEPS
@@ -13,15 +14,15 @@ N_GPUS_PER_NODE="${N_GPUS_PER_NODE:-8}"
 SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/ssd_lq/public/seed_models/m10_680m_new
 RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/rm_p6_moe_400m_0716_sftv27_stage2_hf
 TRAIN_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/train_with_ref_ans.parquet
-TEST_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/test_with_ref_ans_top_100.parquet
+TEST_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/test_with_ref_ans.parquet
 default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/test/m10_680m_grpo
 
 # 训练长度
 max_prompt_length=2048
 max_response_length=2048
 # batch size && 训练epoch
-train_batch_size=512
-ppo_mini_batch_size=1024
+train_batch_size=128
+ppo_mini_batch_size=256
 val_batch_size=5000
 total_epochs=100
 test_freq=5
@@ -42,7 +43,7 @@ clip_ratio2=2.0
 weight_decay=0.1
 adv_estimator=grpo
 kl_loss_weight=0.00
-num_bon=8
+num_bon=16
 bon_strategy=all
 kl_penalty=low_var_kl
 # tracking实验名
@@ -54,8 +55,8 @@ infer_micro_batch_size=512 # use_dynamic_bsz=True时不生效
 train_micro_batch_size=64 # use_dynamic_bsz=True时不生效
 use_dynamic_bsz=True
 
-ppo_max_token_len_per_gpu=18432
-ppo_infer_max_token_len_per_gpu=36864
+ppo_max_token_len_per_gpu=55296
+ppo_infer_max_token_len_per_gpu=73728
 actor_sp_size=2
 critic_sp_size=2
 ref_sp_size=2
@@ -71,6 +72,9 @@ fsdp_size=8
 xperf_tp_size=2
 offload_train_memory=True
 
+# strategy='vescale-fsdp2'
+strategy=fsdp
+
 python3 tasks/main_ppo.py \
     data.train_files=${TRAIN_FILE} \
     data.val_files=${TEST_FILE} \
@@ -83,6 +87,9 @@ python3 tasks/main_ppo.py \
     data.val_batch_size=${val_batch_size} \
     data.truncation='left' \
     +data.chat_template=seed \
+    actor_rollout_ref.actor.strategy=${strategy} \
+    actor_rollout_ref.ref.strategy=${strategy} \
+    critic.strategy=${strategy} \
     actor_rollout_ref.actor.use_dynamic_bsz=${use_dynamic_bsz} \
     actor_rollout_ref.ref.use_dynamic_bsz=${use_dynamic_bsz} \
     actor_rollout_ref.rollout.use_dynamic_bsz=${use_dynamic_bsz} \

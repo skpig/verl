@@ -22,12 +22,10 @@ tokenizer.padding_side = "left"
 apply_liger_kernel_to_p6()
 
 with torch.device('cpu'):
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path,
-        torch_dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2",
-        #  _moe_implementation='fused'
-    )
+    model = AutoModelForCausalLM.from_pretrained(model_path,
+                                                 torch_dtype=torch.bfloat16,
+                                                 attn_implementation="flash_attention_2",
+                                                 _moe_implementation='fused')
 
     config = model.config
 
@@ -36,20 +34,59 @@ model = model.cuda()
 print(model)
 print(model.config)
 
-prompt = "Natalia sold clips to 48 of her friends in April, and then she sold half as many clips in May. How many clips did Natalia sell altogether in April and May?"
+prompts = [
+    "Natalia sold clips to 48 of her friends in April, and then she sold half as many clips in May. How many clips did Natalia sell altogether in April and May?",
+    "Weng earns $12 an hour for babysitting. Yesterday, she just did 50 minutes of babysitting. How much did she earn?"
+]
 
-chat = [{'role': 'user', 'content': prompt}]
+outputs = []
 
-sentences = tokenizer.apply_chat_template(chat, add_generation_prompt=True, tokenize=False)
+for prompt in prompts:
+    chat = [{'role': 'user', 'content': prompt}]
 
-input_data = tokenizer(sentences, return_tensors='pt').to('cuda')
+    sentences = tokenizer.apply_chat_template(chat, add_generation_prompt=True, tokenize=False)
 
-input_ids = input_data['input_ids']
-attention_mask = input_data['attention_mask']
+    input_data = tokenizer(sentences, return_tensors='pt').to('cuda')
 
-data = {'input_ids': input_ids}
+    input_ids = input_data['input_ids']
+    attention_mask = input_data['attention_mask']
 
-# output = model.generate(**data, max_new_tokens=512, do_sample=False, top_p=0.7, use_cache=True)
+    data = {'input_ids': input_ids}
 
-# text_out = tokenizer.batch_decode(output, skip_special_tokens=False)
-# print(text_out[0].replace(tokenizer.pad_token, ''))
+    output = model.generate(**data, max_new_tokens=256, do_sample=False, top_p=0.7, use_cache=True)
+
+    outputs.append(output[0])
+
+text_outs = tokenizer.batch_decode(outputs, skip_special_tokens=False)
+for text_out in text_outs:
+    print(text_out.replace(tokenizer.pad_token, ''))
+
+# create outputs[0] and outputs[1] with position ids. compute the output logits
+
+input_ids = torch.cat(outputs, dim=0)
+cu_seqlens = torch.cumsum(torch.tensor([0] + [output.shape[0] for output in outputs]), dim=0).cuda()
+position_ids = torch.cat([torch.arange(output.shape[0]) for output in outputs]).cuda()
+model_output = model(input_ids=input_ids, position_ids=position_ids)
+
+logits = model_output.logits[0]  # [total_nnz, vocab_size]
+mtp_logits = model_output.mtp_logits[0][0]
+
+# compute ground truth with unpad format
+
+input_ids_rolled = torch.roll(input_ids, shifts=-1)
+
+input_ids_rolled_rolled = torch.roll(input_ids_rolled, shifts=-1)
+
+pretrain_loss = torch.nn.functional.cross_entropy(logits, input_ids_rolled, reduction='none')  # (total_nnz)
+pretrain_loss[cu_seqlens[1:] - 1] = 0
+mean_loss = torch.sum(pretrain_loss) / (pretrain_loss.shape[0] - 2)
+
+mtp_loss = torch.nn.functional.cross_entropy(mtp_logits, input_ids_rolled_rolled, reduction='none')  # (total_nnz)
+mtp_loss[cu_seqlens[1:] - 1] = 0
+mtp_loss[cu_seqlens[1:] - 2] = 0
+mean_mtp_loss = torch.sum(mtp_loss) / (mtp_loss.shape[0] - 4)
+
+print(mean_loss)
+"""
+Load a hf model, generate several sequences, and print the mtp acceptance ratio. Have to done in rmpad format
+"""

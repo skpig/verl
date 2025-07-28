@@ -323,25 +323,24 @@ def release_m8_kv_mirror(self):
     KVMirrorManager.activations_grad_dict.clear()
 
 
-def m8_casual_lm_forward(
-    self,
-    input_ids: torch.LongTensor = None,
-    attention_mask: Optional[torch.Tensor] = None,
-    position_ids: Optional[torch.LongTensor] = None,
-    cu_seqlens: Optional[torch.IntTensor] = None,
-    past_key_values: Optional[List[torch.FloatTensor]] = None,
-    inputs_embeds: Optional[torch.FloatTensor] = None,
-    labels: Optional[torch.LongTensor] = None,
-    use_cache: Optional[bool] = None,
-    output_attentions: Optional[bool] = None,
-    output_hidden_states: Optional[bool] = None,
-    output_router_logits: Optional[bool] = None,
-    output_aux_losses: Optional[bool] = None,
-    return_dict: Optional[bool] = None,
-    fuse_lm_head_ce_loss: Optional[bool] = None,
-    temperature: Optional[float] = None,
-    compute_entropy: Optional[bool] = False,
-) -> Union[Tuple, MoeCausalLMOutputWithPast]:
+def m8_casual_lm_forward(self,
+                         input_ids: torch.LongTensor = None,
+                         attention_mask: Optional[torch.Tensor] = None,
+                         position_ids: Optional[torch.LongTensor] = None,
+                         cu_seqlens: Optional[torch.IntTensor] = None,
+                         past_key_values: Optional[List[torch.FloatTensor]] = None,
+                         inputs_embeds: Optional[torch.FloatTensor] = None,
+                         labels: Optional[torch.LongTensor] = None,
+                         use_cache: Optional[bool] = None,
+                         output_attentions: Optional[bool] = None,
+                         output_hidden_states: Optional[bool] = None,
+                         output_router_logits: Optional[bool] = None,
+                         output_aux_losses: Optional[bool] = None,
+                         return_dict: Optional[bool] = None,
+                         fuse_lm_head_ce_loss: Optional[bool] = None,
+                         temperature: Optional[float] = None,
+                         compute_entropy: Optional[bool] = False,
+                         **kwargs) -> Union[Tuple, MoeCausalLMOutputWithPast]:
     r"""
     Args:
         labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):

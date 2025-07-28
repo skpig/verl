@@ -26,6 +26,8 @@ from collections import defaultdict
 from seed_models import M8Config
 from alpha_seed.utils.functional import get_text_model_type
 
+from functools import partial
+
 
 def get_ignore_modules_in_mixed_precision(model_type):
     from seed_models.models.m8.modeling_m8 import M8TopkCapGate
@@ -63,18 +65,8 @@ def update_gate_ema_m8(fsdp_module):
 
 
 #### Seed Models
-def apply_monkey_patch_to_p6(config):
-    from seed_models.models.p6.modeling_p6 import P6FlashAttention2, P6ForCausalLM
-    from mono_rl.models.transformers.seed_mlp import swiglu_mlp_forward
-    from alpha_seed.models.transformers.modeling_p6 import flash_attn2_rmpad_forward, p6_model_forward
-    P6FlashAttention2.forward = flash_attn2_rmpad_forward
-    P6ForCausalLM.forward = p6_model_forward
-    # P6ExpertMLP.forward = swiglu_mlp_forward
-    from seed_models.integrations import apply_liger_kernel_to_p6
-    apply_liger_kernel_to_p6()
-
-
-def apply_monkey_patch_to_p6_dense(config):
+def apply_monkey_patch_to_p6_dense(config, strategy='fsdp'):
+    assert strategy == 'fsdp'
     from seed_models.models.p6dense.modeling_p6d import P6DenseFlashAttention2, P6DenseForCausalLM, P6DenseMLP
     from alpha_seed.models.transformers.modeling_p6d import flash_attn2_rmpad_forward, p6d_model_forward, mlp_tp_forward
     P6DenseFlashAttention2.forward = flash_attn2_rmpad_forward
@@ -84,16 +76,9 @@ def apply_monkey_patch_to_p6_dense(config):
     apply_liger_kernel_to_p6d()
 
 
-def apply_monkey_patch_to_p7(config):
-    from seed_models.models.p7.modeling_p7 import P7FlashAttention2, P7ForCausalLM
-    from alpha_seed.models.transformers.modeling_p7 import flash_attn2_rmpad_forward, p7_model_forward
-    P7FlashAttention2.forward = flash_attn2_rmpad_forward
-    P7ForCausalLM.forward = p7_model_forward
-    from seed_models.integrations import apply_liger_kernel_to_p7
-    apply_liger_kernel_to_p7()
+def apply_monkey_patch_to_m8(config, strategy='fsdp'):
+    assert strategy == 'fsdp'
 
-
-def apply_monkey_patch_to_m8(config):
     from seed_models.models.m8.modeling_m8 import M8FlashAttention2, M8FusedMoeBlock, M8PreTrainedModel, M8ForCausalLM
     from .modeling_m8 import flash_attn2_rmpad_forward, _fused_moe_ep_forward, release_m8_kv_mirror, m8_casual_lm_forward
     M8FlashAttention2.forward = flash_attn2_rmpad_forward
@@ -104,7 +89,7 @@ def apply_monkey_patch_to_m8(config):
     M8PreTrainedModel.release_act_memory = release_m8_kv_mirror
 
 
-def apply_monkey_patch_to_ds3(config):
+def apply_monkey_patch_to_ds3(config, strategy='fsdp'):
     from seed_models.models.deepseek_v3.modeling_deepseek import DeepseekV3FlashAttention2, DeepseekV3MLP, DeepseekV3FusedMoE, DeepseekV3ForCausalLM
     from seed_models.integrations import apply_liger_kernel_to_deepseek_v3
     from .modeling_ds import flash_attn2_forward, moe_ep_forward, mlp_tp_forward, deepseek_v3_casual_lm_forward
@@ -115,17 +100,27 @@ def apply_monkey_patch_to_ds3(config):
     apply_liger_kernel_to_deepseek_v3()
 
 
-def apply_monkey_patch_to_m10(config):
+def apply_monkey_patch_to_m10(config, strategy='fsdp'):
     from seed_models.integrations import apply_liger_kernel_to_m10
-    from seed_models.models.m10.modeling_m10 import M10FlashAttention2, M10FusedMoeBlock, M10ForCausalLM
-    from .modeling_m10 import flash_attn2_rmpad_forward, _fused_moe_ep_forward
+    from seed_models.models.m10.modeling_m10 import M10FlashAttention2, M10FusedMoeBlock, M10ForCausalLM, M10Model
+    from .modeling_m10 import flash_attn2_rmpad_forward, _fused_moe_ep_forward, m10_casual_lm_forward, m10_model_forward, fused_moe_block_forward, flash_attn2_rmpad_forward_fsdp2
 
-    M10FlashAttention2.forward = flash_attn2_rmpad_forward
-    M10FusedMoeBlock.forward = _fused_moe_ep_forward
+    if strategy == 'fsdp':
+        M10FusedMoeBlock.forward = _fused_moe_ep_forward
+        M10FlashAttention2.forward = flash_attn2_rmpad_forward
+    elif strategy == 'vescale-fsdp2':
+        M10FusedMoeBlock.forward = fused_moe_block_forward
+        M10FlashAttention2.forward = flash_attn2_rmpad_forward_fsdp2
+    else:
+        raise NotImplementedError(f'{strategy} is not supported')
+    M10ForCausalLM.forward = m10_casual_lm_forward
+    M10Model.forward = m10_model_forward
     apply_liger_kernel_to_m10(rope=True, rms=True)
 
 
-def apply_monkey_patch_to_m11(config):
+def apply_monkey_patch_to_m11(config, strategy='fsdp'):
+    assert strategy == 'vescale-fsdp2'
+
     from seed_models.models.m11.modeling_m11 import M11FlashAttention2, M11FusedMoeBlock, M11ForCausalLM
     from .modeling_m11 import flash_attn2_rmpad_forward, fused_moe_block_forward, m11_casual_lm_forward
 
@@ -135,7 +130,7 @@ def apply_monkey_patch_to_m11(config):
     # TODO(zhiqi.0) liger kernel is not supported yet
 
 
-def apply_monkey_patch_to_vlm(config):
+def apply_monkey_patch_to_vlm(config, strategy='fsdp'):
     text_type = get_text_model_type(config)
     _PATCH_NAME_TO_FUNC[text_type](config)
     from seed_models.models.seed_vl.modeling_seed_vl import SeedVLForConditionalGeneration
@@ -146,9 +141,7 @@ def apply_monkey_patch_to_vlm(config):
 
 
 _PATCH_NAME_TO_FUNC = {
-    'seed_p6': apply_monkey_patch_to_p6,
     'seed_p6dense': apply_monkey_patch_to_p6_dense,
-    'seed_p7': apply_monkey_patch_to_p7,
     'seed_m8': apply_monkey_patch_to_m8,
     'deepseek_v3': apply_monkey_patch_to_ds3,
     'seed_vl': apply_monkey_patch_to_vlm,
@@ -159,11 +152,11 @@ _PATCH_NAME_TO_FUNC = {
 from transformers import PretrainedConfig
 
 
-def apply_monkey_patch(config: PretrainedConfig, verbose=True):
+def apply_monkey_patch(config: PretrainedConfig, verbose=True, strategy='fsdp'):
     model_type = config.model_type
     success_apply_monkey_patch = False
     if model_type in _PATCH_NAME_TO_FUNC:
-        _PATCH_NAME_TO_FUNC[model_type](config)
+        _PATCH_NAME_TO_FUNC[model_type](config, strategy=strategy)
         success_apply_monkey_patch = True
 
     if success_apply_monkey_patch and verbose:
@@ -184,13 +177,16 @@ def get_parallel_plan(config, tp_mesh: DeviceMesh, strategy: str = 'fsdp') -> Di
         from .modeling_m8 import make_m8_plan, make_m8_plan_fsdp2
         if strategy == 'fsdp':
             make_plan_fn = make_m8_plan
-        elif strategy == 'vescale-fsdp2':
-            make_plan_fn = make_m8_plan_fsdp2
         else:
             raise ValueError(f"Invalid strategy: {strategy}")
     elif config.model_type == 'seed_m10':
-        from .modeling_m10 import make_m10_plan
-        make_plan_fn = make_m10_plan
+        from .modeling_m10 import make_m10_plan, make_m10_plan_fsdp2
+        if strategy == 'fsdp':
+            make_plan_fn = make_m10_plan
+        elif strategy == 'vescale-fsdp2':
+            make_plan_fn = make_m10_plan_fsdp2
+        else:
+            raise ValueError(f"Invalid strategy: {strategy}")
     elif config.model_type == 'seed_m11':
         from .modeling_m11 import make_m11_plan
         make_plan_fn = make_m11_plan

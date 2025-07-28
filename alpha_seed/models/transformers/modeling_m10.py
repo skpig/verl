@@ -24,6 +24,10 @@ from seed_models.models.m10.modeling_m10 import (apply_rotary_pos_emb, repeat_kv
                                                  M10FlashAttention2, M10ForCausalLM)
 from .modeling_flash_attention_utils import _flash_attention_forward, _flash_supports_window_size
 
+from alpha_seed.models.transformers.ops.memory_efficient_ops import (compute_chunked_entropy_logprobs,
+                                                                     compute_chunked_mtp_acceptance_ratio)
+from alpha_seed.models.transformers import AlphaSeedMoeCausalLMOutputWithPast
+
 import torch
 from torch.distributed._tensor import Shard
 from torch.distributed.device_mesh import DeviceMesh
@@ -33,6 +37,8 @@ from .ops.group_gemm_ep import FusedMoeExpertFunctionEP
 from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
 
 from dist_attn.ulysses.ops import gather_seq_scatter_heads, gather_heads_scatter_seq
+
+from .utils import _check_version
 
 import logging
 
@@ -59,6 +65,18 @@ def make_m10_plan():
     return plan
 
 
+def make_m10_plan_fsdp2():
+    _check_version()
+    plan = {
+        # moe experts (EP)
+        "*.moe.experts.gate_proj": Shard(0),
+        "*.moe.experts.up_proj": Shard(0),
+        "*.moe.experts.down_proj": Shard(0),
+    }
+    return plan
+
+
+
 def flash_attn2_rmpad_forward(
     self: M10FlashAttention2,
     hidden_states: torch.Tensor,
@@ -70,6 +88,7 @@ def flash_attn2_rmpad_forward(
     use_cache: bool = False,
     position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.45
     max_seqlen: int = None,
+    use_tp = True,
     **kwargs,
 ):
     assert (not use_cache) and (not past_key_value)
@@ -84,7 +103,11 @@ def flash_attn2_rmpad_forward(
     if position_ids.size(0) != 1:
         raise RuntimeError(f"You are using an old version of seed models, please upgrade to the latest one.")
 
-    tp_mesh: DeviceMesh = self._tp_mesh
+    if use_tp:
+        tp_mesh: DeviceMesh = self._tp_mesh
+    else:
+        tp_mesh = None
+
     tp_size = 1 if tp_mesh is None else tp_mesh.size()
     tp_group = None if tp_mesh is None else tp_mesh.get_group()
     sp_size = get_ulysses_sequence_parallel_world_size()
@@ -121,13 +144,13 @@ def flash_attn2_rmpad_forward(
     # =============== ulysses sp region ==================
 
     dtype = query_states.dtype
-    if self.config.use_query_layernorm:
+    if self.config.use_query_norm:
         query_states = self.q_norm(query_states)
         # in fsdp training mode, the norm will be autocasted to float32
         if query_states.dtype != dtype:
             query_states = query_states.to(dtype)
 
-    if self.config.use_key_layernorm:
+    if self.config.use_key_norm:
         key_states = self.k_norm(key_states)
         # in fsdp training mode, the norm will be autocasted to float32
         if key_states.dtype != dtype:
@@ -222,7 +245,7 @@ def flash_attn2_rmpad_forward(
         attn_output = allreduce_identity(attn_output, tp_group, "tp-ari")
     # ============== tensor parallel region ================
 
-    if self.config.use_attention_output_layernorm:
+    if self.config.use_attention_output_norm:
         attn_output = self.o_norm(attn_output)
 
     attn_output = self.resid_dropout(attn_output)
@@ -230,6 +253,33 @@ def flash_attn2_rmpad_forward(
         attn_weights = None
 
     return attn_output, attn_weights, past_key_value
+
+
+def flash_attn2_rmpad_forward_fsdp2(
+    self: M10FlashAttention2,
+    hidden_states: torch.Tensor,
+    attention_mask: Optional[torch.Tensor] = None,
+    position_ids: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.IntTensor] = None,
+    past_key_value: Optional[Cache] = None,
+    output_attentions: bool = False,
+    use_cache: bool = False,
+    position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.45
+    max_seqlen: int = None,
+    **kwargs,
+):
+    return flash_attn2_rmpad_forward(self,
+                                     hidden_states,
+                                     attention_mask,
+                                     position_ids,
+                                     cu_seqlens,
+                                     past_key_value,
+                                     output_attentions,
+                                     use_cache,
+                                     position_embeddings,
+                                     max_seqlen,
+                                     use_tp=False,
+                                     **kwargs)
 
 
 def _fused_moe_ep_forward(
@@ -281,24 +331,290 @@ def _fused_moe_ep_forward(
     return final_hidden_states, router_logits, aux_loss
 
 
-def m10_casual_lm_forward(
-    self: M10ForCausalLM,
+from seed_kernels.transformers.functional import seed_fused_moe
+
+
+def fused_moe_block_forward(
+    self: M10FusedMoeBlock,
+    hidden_states: torch.Tensor,
+    output_aux_losses: Optional[bool] = None,
+) -> torch.Tensor:
+
+    batch_size, sequence_length, hidden_dim = hidden_states.shape
+    hidden_states = hidden_states.view(-1, hidden_dim)
+
+    # MOE Step 1: compute each token's weight for all experts.
+    # router_logits shape (batch_size * sequence_len, num_experts)
+    routing_weights, router_logits, aux_loss, _, selected_experts = self.gate(hidden_states, output_aux_losses)
+
+    # MOE Step 2: compute experts with group gemm + shared experts.
+    final_hidden_states = seed_fused_moe(
+        self.num_experts,
+        routing_weights,
+        selected_experts,
+        hidden_states,
+        self.experts.gate_proj,
+        self.experts.up_proj,
+        self.experts.down_proj,
+        ep_group=self.experts.gate_proj.mesh.get_group(),
+        shared_fc1_1_weight=self.shared_experts.gate_proj,
+        shared_fc1_2_weight=self.shared_experts.up_proj,
+        shared_fc2_weight=self.shared_experts.down_proj,
+        ep_implementation="bumi",
+    )
+
+    # reshape output to input shape
+    final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
+
+    return final_hidden_states, router_logits, aux_loss
+
+
+from seed_models.models.m10.modeling_m10 import M10Model, M10MoeModelOutput
+from dist_attn.ulysses.ops import gather_outputs, slice_input_tensor
+
+
+def m10_model_forward(
+    self: M10Model,
     input_ids: torch.LongTensor = None,
     attention_mask: Optional[torch.Tensor] = None,
     position_ids: Optional[torch.LongTensor] = None,
     cu_seqlens: Optional[torch.IntTensor] = None,
     past_key_values: Optional[List[torch.FloatTensor]] = None,
     inputs_embeds: Optional[torch.FloatTensor] = None,
-    labels: Optional[torch.LongTensor] = None,
     use_cache: Optional[bool] = None,
     output_attentions: Optional[bool] = None,
     output_hidden_states: Optional[bool] = None,
     output_router_logits: Optional[bool] = None,
     output_aux_losses: Optional[bool] = None,
     return_dict: Optional[bool] = None,
-    fuse_lm_head_ce_loss: Optional[bool] = None,
-    temperature: Optional[float] = None,
-) -> Union[Tuple, MoeCausalLMOutputWithPast]:
+):
+    output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+    output_router_logits = (output_router_logits
+                            if output_router_logits is not None else self.config.output_router_logits)
+    output_aux_losses = output_aux_losses if output_aux_losses is not None else self.config.output_aux_losses
+    output_hidden_states = (output_hidden_states
+                            if output_hidden_states is not None else self.config.output_hidden_states)
+    use_cache = use_cache if use_cache is not None else self.config.use_cache
+
+    return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+    # retrieve input_ids and inputs_embeds
+    if input_ids is not None and inputs_embeds is not None:
+        raise ValueError("You cannot specify both decoder_input_ids and decoder_inputs_embeds at the same time")
+    elif input_ids is not None:
+        if (cu_seqlens is not None or position_ids is not None) and input_ids.dim() == 1:
+            input_ids = input_ids.unsqueeze(0)
+        batch_size, seq_length = input_ids.shape
+    elif inputs_embeds is not None:
+        if (cu_seqlens is not None or position_ids is not None) and inputs_embeds.dim() == 1:
+            inputs_embeds = inputs_embeds.unsqueeze(0)
+        batch_size, seq_length, _ = inputs_embeds.shape
+    else:
+        raise ValueError("You have to specify either decoder_input_ids or decoder_inputs_embeds")
+
+    max_seqlen = None
+    assert position_ids is not None
+    position_ids = position_ids.view(batch_size, -1).long()
+    max_seqlen = position_ids.max().item() + 1
+
+    # here, we assume the input_ids are spliited in sequence parallel
+
+    # allgather from sequence parallel region
+    input_ids_full = gather_outputs(input_ids, gather_dim=1, padding_dim=0, unpad_dim_size=0)  # (1, total_nnz)
+
+    if inputs_embeds is None:
+        inputs_embeds = self.embed_tokens(input_ids_full)
+
+    inputs_embeds = self.embd_dropout(inputs_embeds)
+
+    # roll inputs_embeds for mtp_heads and slice into sequence parallel region
+    mtp_embeds_lst = []
+    for mtp_idx in range(1, self.mtp_n_heads):
+        mtp_embed = torch.roll(inputs_embeds, shifts=-mtp_idx, dims=-2)  # (1, total_nnz, hidden_size)
+        # slice into sequence parallel region first to avoid peak memory usage
+        mtp_embed = slice_input_tensor(mtp_embed, dim=1, padding=False)
+        mtp_embeds_lst.append(mtp_embed)
+
+    # slice inputs_embeds
+    inputs_embeds = slice_input_tensor(inputs_embeds, dim=1, padding=False)
+
+    if attention_mask is not None and self._attn_implementation == "flash_attention_2" and use_cache:
+        is_padding_right = attention_mask[:, -1].sum().item() != batch_size
+        if is_padding_right:
+            raise ValueError("You are attempting to perform batched generation with padding_side='right'"
+                             " this may lead to unexpected behaviour for Flash Attention version of M10. Make sure to "
+                             " call `tokenizer.padding_side  = 'left'` before tokenizing the input. ")
+
+    assert self._attn_implementation in [
+        "flash_attention_2",
+        "eager",
+        "native-sparse",
+    ], "Only support flash_attention_2 and eager implementation for M10"
+    assert cu_seqlens is None or (self._attn_implementation == "flash_attention_2" or self._attn_implementation
+                                  == "native-sparse"), "`seqlens` is only supported in flash_attention_2"
+
+    assert self._attn_implementation == 'flash_attention_2'
+
+    if self._attn_implementation == "flash_attention_2":
+        # 2d mask is passed through the layers
+        attention_mask = attention_mask if (attention_mask is not None and 0 in attention_mask) else None
+
+    hidden_states = inputs_embeds
+
+    # create position embeddings to be shared across the decoder layers
+    position_embeddings = self.rotary_embedding(hidden_states, position_ids)
+
+    # decoder layers
+    all_hidden_states = () if output_hidden_states else None
+    all_self_attns = () if output_attentions else None
+    all_router_logits = () if output_router_logits else None
+    all_aux_losses = () if output_aux_losses else None
+    next_decoder_cache = None
+
+    # mtp hidden states
+    all_mtp_hidden_states = ()
+
+    for i in range(self.config.num_hidden_layers - (self.mtp_n_heads - 1)):
+        decoder_layer = self.model["layers"][i]
+        if output_hidden_states:
+            all_hidden_states += (hidden_states,)
+
+        if self.gradient_checkpointing and self.training:
+            layer_outputs = self._gradient_checkpointing_func(
+                decoder_layer.__call__,
+                hidden_states,
+                attention_mask,
+                position_ids,
+                cu_seqlens,
+                past_key_values,
+                output_attentions,
+                output_router_logits,
+                output_aux_losses,
+                use_cache,
+                position_embeddings,
+                max_seqlen,
+                True,
+            )
+        else:
+            layer_outputs = decoder_layer(
+                hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                cu_seqlens=cu_seqlens,
+                past_key_value=past_key_values,
+                output_attentions=output_attentions,
+                output_router_logits=output_router_logits,
+                output_aux_losses=output_aux_losses,
+                use_cache=use_cache,
+                position_embeddings=position_embeddings,
+                max_seqlen=max_seqlen,
+            )
+
+        hidden_states = layer_outputs[0]
+
+        if use_cache:
+            next_decoder_cache = layer_outputs[2 if output_attentions else 1]
+
+        if output_attentions:
+            all_self_attns += (layer_outputs[1],)
+
+        if output_router_logits:
+            all_router_logits += (layer_outputs[-2 if output_aux_losses else -1],)
+
+        if output_aux_losses:
+            all_aux_losses += (layer_outputs[-1],)
+
+    if self.mtp_mode is not None:
+        for mtp_idx in range(1, self.mtp_n_heads):
+            decoder_layer = self.model["layers"][self.config.num_hidden_layers + mtp_idx - self.mtp_n_heads]
+            mtp_embs = self.model["mtp_embs"][mtp_idx]
+            mtp_ce_norms = self.model["mtp_ce_norms"][mtp_idx]
+
+            # mtp embedding projection
+            """
+            input_embeds [1, seqlen, hidden_dim]
+            roll so that tokens < n predict n
+            input_ids = [a,b,c,d,e,f,g] cu_seqlens = [0,3,7]
+            mtp_input_ids 1 = [b,c,_,e,f,g,_] cu_seqlens = [0,3,7]
+            mtp_input_ids 2 = [c,_,_,f,g,_,_] cu_seqlens = [0,3,7]
+            """
+
+            mtp_embeds = mtp_embeds_lst[mtp_idx - 1]
+            mtp_hidden_states = mtp_embs(hidden_states, mtp_embeds)
+
+            mtp_outputs = decoder_layer(
+                mtp_hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                cu_seqlens=cu_seqlens,
+                past_key_value=past_key_values,
+                output_attentions=output_attentions,
+                output_router_logits=output_router_logits,
+                output_aux_losses=output_aux_losses,
+                use_cache=use_cache,
+                position_embeddings=position_embeddings,
+                max_seqlen=max_seqlen,
+            )
+
+            mtp_hidden_states = mtp_outputs[0]
+
+            # mtp head norm
+            mtp_hidden_states = mtp_ce_norms(mtp_hidden_states)
+
+            all_mtp_hidden_states += (mtp_hidden_states,)
+
+            if output_attentions:
+                all_self_attns += (mtp_outputs[1],)
+
+            if output_router_logits:
+                all_router_logits += (mtp_outputs[-2 if output_aux_losses else -1],)
+
+            if output_aux_losses:
+                all_aux_losses += (mtp_outputs[-1],)
+
+    if self.mtp_mode is not None:
+        hidden_states = self.model["mtp_ce_norms"][0](hidden_states)
+    else:
+        hidden_states = self.norm(hidden_states)
+
+    # add hidden states from the last decoder layer
+    if output_hidden_states:
+        all_hidden_states += (hidden_states,)
+
+    next_cache = None
+
+    if not return_dict:
+        return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
+    return M10MoeModelOutput(
+        last_hidden_state=hidden_states,
+        mtp_hidden_states=all_mtp_hidden_states,
+        past_key_values=next_cache,
+        hidden_states=all_hidden_states,
+        attentions=all_self_attns,
+        router_logits=all_router_logits,
+        aux_losses=all_aux_losses,
+    )
+
+
+def m10_casual_lm_forward(self: M10ForCausalLM,
+                          input_ids: torch.LongTensor = None,
+                          attention_mask: Optional[torch.Tensor] = None,
+                          position_ids: Optional[torch.LongTensor] = None,
+                          cu_seqlens: Optional[torch.IntTensor] = None,
+                          past_key_values: Optional[List[torch.FloatTensor]] = None,
+                          inputs_embeds: Optional[torch.FloatTensor] = None,
+                          labels: Optional[torch.LongTensor] = None,
+                          use_cache: Optional[bool] = None,
+                          output_attentions: Optional[bool] = None,
+                          output_hidden_states: Optional[bool] = None,
+                          output_router_logits: Optional[bool] = None,
+                          output_aux_losses: Optional[bool] = None,
+                          return_dict: Optional[bool] = None,
+                          fuse_lm_head_ce_loss: Optional[bool] = None,
+                          temperature: Optional[float] = None,
+                          compute_entropy: Optional[bool] = False,
+                          mtp_labels: Optional[torch.LongTensor] = None,
+                          **kwargs) -> Union[Tuple, MoeCausalLMOutputWithPast]:
     r"""
     Args:
         labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
@@ -340,6 +656,8 @@ def m10_casual_lm_forward(
     )
 
     hidden_states = outputs[0]
+
+    loss = None
     if fuse_lm_head_ce_loss:
         assert labels is not None
         if temperature is not None:
@@ -354,34 +672,52 @@ def m10_casual_lm_forward(
         loss, _ = FlashCrossEntropy.apply(hidden_states_2d.bfloat16(), self.lm_head.weight, labels, recompute_level,
                                           compute_accuracy, align_precision)
         logits = None
-    else:
-        logits = self.lm_head(hidden_states)
-        assert temperature is None
-        loss = None
-        if labels is not None:
-            # Upcast to float if we need to compute the loss to avoid potential precision issues
-            logits = logits.float()
-            # Shift so that tokens < n predict n
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            # Flatten the tokens
-            shift_logits = shift_logits.view(-1, self.vocab_size)
-            shift_labels = shift_labels.view(-1)
-            if cu_seqlens is not None:
-                # Mask the last token of each sequence to torch.CrossEntropyLoss ignore_index, default is -100
-                shift_labels[cu_seqlens[1:-1] - 1] = -100
-            elif position_ids is not None and labels.dim() == 1:
-                position_ids_ = position_ids.flatten()
-                indices_q = torch.arange(position_ids_.size(0), device=position_ids_.device, dtype=torch.int32)
-                cu_seq_lens = torch.cat((
-                    indices_q[position_ids_ == 0],
-                    torch.tensor(position_ids_.size(), device=position_ids_.device, dtype=torch.int32),
-                ))
-                shift_labels[cu_seq_lens[1:-1] - 1] = -100
 
-            # Ensure tensors are on the same device
-            shift_labels = shift_labels.to(shift_logits.device)
-            loss = self.loss_fct(shift_logits, shift_labels)
+        # this is training mode. TODO(zhangchi.usc1992) add mtp head training
+        acceptance_matrix = None
+
+    else:
+        # loss computation is skipped
+        entropy, log_probs = compute_chunked_entropy_logprobs(self, hidden_states, labels, temperature, compute_entropy)
+        logits = None
+
+        # this is pure inference mode
+        # we compute mtp acceptance ratio here
+        acceptance_matrix = compute_chunked_mtp_acceptance_ratio(self,
+                                                                 all_mtp_hidden_states=outputs.mtp_hidden_states,
+                                                                 all_mtp_labels=mtp_labels)
+
+        # logits = self.lm_head(hidden_states)
+        # assert temperature is None
+        # loss = None
+        # if labels is not None:
+        #     # Upcast to float if we need to compute the loss to avoid potential precision issues
+        #     logits = logits.float()
+        #     # Shift so that tokens < n predict n
+        #     shift_logits = logits[..., :-1, :].contiguous()
+        #     shift_labels = labels[..., 1:].contiguous()
+        #     # Flatten the tokens
+        #     shift_logits = shift_logits.view(-1, self.vocab_size)
+        #     shift_labels = shift_labels.view(-1)
+        #     if cu_seqlens is not None:
+        #         # Mask the last token of each sequence to torch.CrossEntropyLoss ignore_index, default is -100
+        #         shift_labels[cu_seqlens[1:-1] - 1] = -100
+        #     elif position_ids is not None and labels.dim() == 1:
+        #         position_ids_ = position_ids.flatten()
+        #         indices_q = torch.arange(position_ids_.size(0), device=position_ids_.device, dtype=torch.int32)
+        #         cu_seq_lens = torch.cat((
+        #             indices_q[position_ids_ == 0],
+        #             torch.tensor(position_ids_.size(), device=position_ids_.device, dtype=torch.int32),
+        #         ))
+        #         shift_labels[cu_seq_lens[1:-1] - 1] = -100
+
+        #     # Ensure tensors are on the same device
+        #     shift_labels = shift_labels.to(shift_logits.device)
+        #     loss = self.loss_fct(shift_logits, shift_labels)
+
+    # add mtp here
+    assert len(mtp_labels) == self.config.mtp_n_heads - 1
+    # compute mtp log_probs
 
     aux_loss = None
     if output_aux_losses:
@@ -399,12 +735,13 @@ def m10_casual_lm_forward(
             output = (aux_loss,) + output
         return (loss,) + output if loss is not None else output
 
-    return MoeCausalLMOutputWithPast(
-        loss=loss,
-        aux_loss=aux_loss,
-        logits=logits,
-        past_key_values=outputs.past_key_values,
-        hidden_states=outputs.hidden_states,
-        attentions=outputs.attentions,
-        router_logits=outputs.router_logits,
-    )
+    return AlphaSeedMoeCausalLMOutputWithPast(loss=loss,
+                                              aux_loss=aux_loss,
+                                              logits=logits,
+                                              past_key_values=outputs.past_key_values,
+                                              hidden_states=outputs.hidden_states,
+                                              attentions=outputs.attentions,
+                                              router_logits=outputs.router_logits,
+                                              entropy=entropy,
+                                              log_probs=log_probs,
+                                              acceptance_matrix=acceptance_matrix)

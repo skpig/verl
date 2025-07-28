@@ -37,6 +37,7 @@ def rearrange_micro_data_proto(max_token_len, mini_batch, dp_group=None):
 
 
 def update_model_config(module_config, override_config_kwargs):
+    print('!!!!!!!!!!! module_config', module_config, '###### override_config_kwargs ', override_config_kwargs)
     for key, val in override_config_kwargs.items():
         if isinstance(val, dict):
             update_model_config(getattr(module_config, key), val)

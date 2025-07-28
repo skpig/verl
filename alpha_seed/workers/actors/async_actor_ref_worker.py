@@ -277,11 +277,13 @@ class AsyncActorRolloutRefWorker(Worker):
         if role == "actor" and not self._is_valid_actor or self._is_standalone_rollout or self._is_standalone_validator:
             return actor_module_fsdp, actor_optimizer, actor_lr_scheduler, actor_model_config, metrics_context
 
+        strategy = self.ref_strategy if role == "ref" else self.actor_strategy
+
         if use_rmpad:
             # optimize the model via rmpad
             assert apply_monkey_patch(
-                config=actor_model_config,
-                verbose=self.rank == 0), f'Cannot find rmpad version of {actor_model_config.model_type}'
+                config=actor_model_config, verbose=self.rank == 0,
+                strategy=strategy), f'Cannot find rmpad version of {actor_model_config.model_type}'
 
         with meta_device_init(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -323,7 +325,6 @@ class AsyncActorRolloutRefWorker(Worker):
         oe_mesh = self.ref_oe_mesh if role == 'ref' else self.actor_oe_mesh
         tp_outside = self.config.ref.tp_outside if role == "ref" else self.config.actor.tp_outside
 
-        strategy = self.ref_strategy if role == "ref" else self.actor_strategy
         if strategy == 'fsdp':
             from alpha_seed.workers.fsdp.fully_shard import fully_shard
         elif strategy == 'vescale-fsdp2':
@@ -364,9 +365,10 @@ class AsyncActorRolloutRefWorker(Worker):
         else:
             block_cls = actor_module._no_split_modules
 
+            # TODO(fix me)
             # also wrap MLP for M10
-            if actor_model_config.model_type == 'seed_m10':
-                block_cls = block_cls + ['M10MLP']
+            # if actor_model_config.model_type == 'seed_m10':
+            #     block_cls = ['M10MLP'] + block_cls
 
         if self.rank == 0:
             print(f'FSDP wrap module cls: {block_cls}')
@@ -1088,9 +1090,11 @@ class AsyncActorRolloutRefWorker(Worker):
                 output.meta_info['micro_batch_size'] = self.config.actor.ppo_micro_batch_size
             with self.actor_gather_manager:
                 output = self.actor_gather_manager.preprocess_data(output)
-                old_entropy, old_log_probs = self.actor.compute_log_prob(data=output)
+                old_entropy, old_log_probs, acceptance_matrix = self.actor.compute_log_prob(data=output)
                 output.batch['old_log_probs'] = old_log_probs
                 output.batch['old_entropy'] = old_entropy
+                for j in range(len(acceptance_matrix)):
+                    output.batch[f'acceptance_matrix_{j}'] = acceptance_matrix[j]
                 output = self.actor_gather_manager.postprocess_data(output)
 
             if self.config.actor.train_memory_offload:
@@ -1196,7 +1200,7 @@ class AsyncActorRolloutRefWorker(Worker):
 
         with self.ref_gather_manager:
             data = self.ref_gather_manager.preprocess_data(data)
-            _, output = self.ref_policy.compute_log_prob(data=data)
+            _, output, _ = self.ref_policy.compute_log_prob(data=data)
             output = DataProto.from_dict(tensors={'ref_log_prob': output})
             output = self.ref_gather_manager.postprocess_data(output)
 

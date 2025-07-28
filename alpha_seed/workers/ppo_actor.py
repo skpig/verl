@@ -136,6 +136,14 @@ class DataParallelPPOActor(BasePPOActor):
             position_ids_rmpad = index_first_axis(rearrange(position_ids.unsqueeze(-1), "b s ... -> (b s) ..."),
                                                   indices).transpose(0, 1)
 
+            # add mtp labels
+            mtp_labels = []
+            if hasattr(self.actor_model_config, 'mtp_mode'):
+                mtp_n_heads = self.actor_model_config.mtp_n_heads
+                for i in range(1, mtp_n_heads):
+                    input_ids_rmpad_rolled_mtp = torch.roll(input_ids_rmpad, shifts=-i - 1, dims=1)
+                    mtp_labels.append(input_ids_rmpad_rolled_mtp)
+
             # handle ulysses sequence parallelism
             sp_size = get_ulysses_sequence_parallel_world_size()
             total_nnz = input_ids_rmpad.size(1)
@@ -145,8 +153,15 @@ class DataParallelPPOActor(BasePPOActor):
             else:
                 input_ids_rmpad, position_ids_rmpad, pad_size = ulysses_pad_and_slice_inputs(
                     input_ids_rmpad, position_ids_rmpad, sp_size)
+
+            # slice labels
             input_ids_rmpad_rolled, _, _ = ulysses_pad_and_slice_inputs(input_ids_rmpad_rolled, None, sp_size)
             input_ids_rmpad_rolled = input_ids_rmpad_rolled.squeeze(0)
+
+            # slice mtp labels
+            for i, mtp_label in enumerate(mtp_labels):
+                mtp_labels[i] = ulysses_pad_and_slice_inputs(mtp_label, None, sp_size)[0].squeeze(0)
+
             batch_size, seqlen = input_ids.shape
             seqlen_rmpad = input_ids_rmpad.size(1)
 
@@ -159,6 +174,7 @@ class DataParallelPPOActor(BasePPOActor):
                     'labels': input_ids_rmpad_rolled,
                     'temperature': temperature,
                     'fuse_lm_head_ce_loss': True,
+                    'mtp_labels': mtp_labels
                 }
 
                 # merge two dict
@@ -176,8 +192,10 @@ class DataParallelPPOActor(BasePPOActor):
                                            use_cache=False,
                                            compute_entropy=compute_entropy,
                                            temperature=temperature,
+                                           mtp_labels=mtp_labels,
                                            **image_kwargs)
                 full_entropy_rmpad, full_log_probs_rmpad = output.entropy, output.log_probs
+                acceptance_matrix = output.acceptance_matrix  # list of tensor. [total_nnz // sp,]
 
             if sp_size > 1:
                 full_log_probs_rmpad = gather_outputs(full_log_probs_rmpad,
@@ -203,7 +221,21 @@ class DataParallelPPOActor(BasePPOActor):
                                                                -response_length - 1:-1]  # (batch_size, response_length)
             else:
                 entropy = None
-            return entropy, log_probs, seqlen_rmpad
+
+            if acceptance_matrix is not None:
+                acceptance_matrix_lst = []
+                for i, matrix in enumerate(acceptance_matrix):
+
+                    if sp_size > 1:
+                        matrix = gather_outputs(matrix, gather_dim=0, padding_dim=0, unpad_dim_size=total_nnz)
+                    matrix = pad_input(hidden_states=matrix.unsqueeze(-1),
+                                       indices=indices,
+                                       batch=batch_size,
+                                       seqlen=seqlen).squeeze(-1)[:, -response_length - 1:-1]
+                    acceptance_matrix_lst.append(matrix)
+                acceptance_matrix = tuple(acceptance_matrix_lst)
+
+            return entropy, log_probs, seqlen_rmpad, acceptance_matrix
 
     def _make_minibatch_iterator(self, data: DataProto) -> Iterable[DataProto]:
         select_keys = ['responses', 'input_ids', 'attention_mask', 'old_log_probs', 'advantages', 'upgo_advantages']
@@ -248,8 +280,12 @@ class DataParallelPPOActor(BasePPOActor):
         select_keys = ['responses', 'input_ids', 'attention_mask']
         image_keys = get_image_keys(data.non_tensor_batch)
         selected_data = data.select(batch_keys=select_keys, non_tensor_batch_keys=image_keys)
+
+        mtp_n_heads = getattr(self.actor_model_config, 'mtp_n_heads', 1)
+
         entropy_lst = []
         log_prob_lst = []
+        acceptance_matrix_lst = [[] for _ in range(mtp_n_heads - 1)]
         # Note: mismatched data order (here vs. upldate policy) can lead to
         # mismatched log probs. In order to match them, we need to split
         # batch into mini batches (same with training).
@@ -264,6 +300,8 @@ class DataParallelPPOActor(BasePPOActor):
 
             mini_batch_entropy = []
             mini_batch_log_prob = []
+            mini_batch_acceptance_matrix = [[] for _ in range(mtp_n_heads - 1)]
+
             with torch.no_grad():
                 for i, micro_batch_proto in enumerate(micro_batches):
                     if use_dynamic_bsz:
@@ -274,18 +312,25 @@ class DataParallelPPOActor(BasePPOActor):
                         non_tensor_batch = micro_batch_proto.non_tensor_batch
                         assert micro_batch_proto.batch.device == torch.device('cpu')
                         micro_batch = micro_batch_proto.batch.cuda()
-                    entropy, log_probs, _ = self._forward_micro_batch(micro_batch=micro_batch,
-                                                                      temperature=temperature,
-                                                                      compute_entropy=True,
-                                                                      non_tensor_batch=non_tensor_batch)
+                    entropy, log_probs, _, acceptance_matrix = self._forward_micro_batch(
+                        micro_batch=micro_batch,
+                        temperature=temperature,
+                        compute_entropy=True,
+                        non_tensor_batch=non_tensor_batch)
                     mini_batch_log_prob.append(log_probs)
                     mini_batch_entropy.append(entropy)
+                    for j in range(mtp_n_heads - 1):
+                        mini_batch_acceptance_matrix[j].append(acceptance_matrix[j])
+
             # release root module unshard memory
             if isinstance(self.actor_module, FSDP):
                 self.actor_module._handle.reshard(True)
 
             mini_log_prob = torch.cat(mini_batch_log_prob, dim=0)
             mini_entropy = torch.cat(mini_batch_entropy, dim=0)
+            for j in range(mtp_n_heads - 1):
+                mini_batch_acceptance_matrix[j] = torch.cat(mini_batch_acceptance_matrix[j], dim=0)
+
             if use_dynamic_bsz:
                 indices = list(itertools.chain.from_iterable(indices))
                 assert len(indices) == mini_entropy.size(
@@ -293,13 +338,20 @@ class DataParallelPPOActor(BasePPOActor):
                 revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
                 mini_log_prob = mini_log_prob[revert_indices]
                 mini_entropy = mini_entropy[revert_indices]
+                for j in range(mtp_n_heads - 1):
+                    mini_batch_acceptance_matrix[j] = mini_batch_acceptance_matrix[j][revert_indices]
 
             log_prob_lst.append(mini_log_prob)
             entropy_lst.append(mini_entropy)
+            for j in range(mtp_n_heads - 1):
+                acceptance_matrix_lst[j].append(mini_batch_acceptance_matrix[j])
 
         log_probs = torch.concat(log_prob_lst, dim=0)
         entropy = torch.concat(entropy_lst, dim=0)
-        return entropy, log_probs
+        acceptance_matrix = []
+        for j in range(mtp_n_heads - 1):
+            acceptance_matrix.append(torch.concat(acceptance_matrix_lst[j], dim=0))
+        return entropy, log_probs, tuple(acceptance_matrix)
 
     def set_loss_fn(self, loss_fn):
         self.loss_fn = loss_fn
@@ -333,9 +385,9 @@ class DataParallelPPOActor(BasePPOActor):
             for i, micro_data in enumerate(micro_batches):
                 assert micro_data.device == torch.device('cpu')
                 micro_data = micro_data.cuda()  # actor device is cpu when using offload
-                full_entropy, log_prob, seqlen = self._forward_micro_batch(micro_batch=micro_data,
-                                                                           temperature=temperature,
-                                                                           compute_entropy=compute_entropy)
+                full_entropy, log_prob, seqlen, _ = self._forward_micro_batch(micro_batch=micro_data,
+                                                                              temperature=temperature,
+                                                                              compute_entropy=compute_entropy)
                 loss, micro_data_metric = self.loss_fn(self.config, micro_data, full_entropy, log_prob)
 
                 if self.config.use_dynamic_bsz:
@@ -425,10 +477,10 @@ class DataParallelPPOActor(BasePPOActor):
                     else:
                         compute_entropy = True
 
-                    full_entropy, log_prob, seqlen = self._forward_micro_batch(micro_batch=micro_data,
-                                                                               temperature=temperature,
-                                                                               compute_entropy=compute_entropy,
-                                                                               non_tensor_batch=non_tensor_batch)
+                    full_entropy, log_prob, seqlen, _ = self._forward_micro_batch(micro_batch=micro_data,
+                                                                                  temperature=temperature,
+                                                                                  compute_entropy=compute_entropy,
+                                                                                  non_tensor_batch=non_tensor_batch)
                     policy_loss, micro_data_metric = self.loss_fn(self.config, micro_data, full_entropy, log_prob)
 
                     if self.config.early_stop_by_kl != 0 and micro_data_metric[

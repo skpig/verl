@@ -200,24 +200,23 @@ def mlp_tp_forward(self: P6DenseMLP, x: torch.Tensor):
     return down_proj
 
 
-def p6d_model_forward(
-    self,
-    input_ids: torch.LongTensor = None,
-    attention_mask: Optional[torch.Tensor] = None,
-    position_ids: Optional[torch.LongTensor] = None,
-    cu_seqlens: Optional[torch.IntTensor] = None,
-    past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
-    inputs_embeds: Optional[torch.FloatTensor] = None,
-    labels: Optional[torch.LongTensor] = None,
-    use_cache: Optional[bool] = None,
-    output_attentions: Optional[bool] = None,
-    output_hidden_states: Optional[bool] = None,
-    return_dict: Optional[bool] = None,
-    cache_position: Optional[torch.LongTensor] = None,
-    fuse_lm_head_ce_loss: Optional[bool] = None,
-    temperature: Optional[float] = None,
-    compute_entropy: Optional[bool] = None,
-) -> Union[Tuple, CausalLMOutputWithPast]:
+def p6d_model_forward(self,
+                      input_ids: torch.LongTensor = None,
+                      attention_mask: Optional[torch.Tensor] = None,
+                      position_ids: Optional[torch.LongTensor] = None,
+                      cu_seqlens: Optional[torch.IntTensor] = None,
+                      past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
+                      inputs_embeds: Optional[torch.FloatTensor] = None,
+                      labels: Optional[torch.LongTensor] = None,
+                      use_cache: Optional[bool] = None,
+                      output_attentions: Optional[bool] = None,
+                      output_hidden_states: Optional[bool] = None,
+                      return_dict: Optional[bool] = None,
+                      cache_position: Optional[torch.LongTensor] = None,
+                      fuse_lm_head_ce_loss: Optional[bool] = None,
+                      temperature: Optional[float] = None,
+                      compute_entropy: Optional[bool] = None,
+                      **kwargs) -> Union[Tuple, CausalLMOutputWithPast]:
     r"""
     Args:
         labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
