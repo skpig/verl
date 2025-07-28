@@ -540,6 +540,11 @@ class RewardManager():
             if reward_style not in already_print_data_sources:
                 already_print_data_sources[reward_style] = 0
 
+            if self.config.data.image_key is not None:
+                solution_str_save = solution_str_post_proc.split("boxed{")[-1][-80:]
+            else:
+                solution_str_save = solution_str_post_proc[-32:]
+
             if i % log_table_interval == 0 and already_print_data_sources[
                     reward_style] < static_conf.trainer.num_cases_to_wandb:
                 already_print_data_sources[reward_style] += 1
@@ -552,10 +557,6 @@ class RewardManager():
                         img = None
                 else:
                     img = None
-                if self.config.data.image_key is not None:
-                    solution_str_save = solution_str_post_proc.split("boxed{")[-1][-80:]
-                else:
-                    solution_str_save = solution_str_post_proc[-32:]
 
                 self.log_table.append([
                     global_index, global_step, img, prompt_str, solution_str, ground_truth, score, score_msg,
