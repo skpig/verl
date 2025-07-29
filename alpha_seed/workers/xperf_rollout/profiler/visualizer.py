@@ -18,9 +18,9 @@ def draw_replica_latency_and_step(gather_metrics):
     replica_id = [i for i in range(len(gather_metrics))]
     for metric in gather_metrics:
         replica_latency.append(sum(metric["per_token_latency"]))
-        replica_step.append(metric["cur_steps"][0])
-    if len(replica_latency) == 0:
-        return
+        replica_step.append(metric.get("cur_steps", [0])[0])
+    if len(replica_latency) == 0 or sum(replica_latency) == 0:
+        return None, 0
 
     long_tail_replica_id = np.array(replica_latency).argmax()
 

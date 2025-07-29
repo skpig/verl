@@ -818,6 +818,13 @@ class RemoteAsyncXPerfGPTRollout(Worker):
         # 需要实现的一个接口方法，但现在没什么要做的事情，所以先返回空
         return
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
+    def return_metrics(self):
+        metrics = self.rollout_actor.inference_engine.infer_scheduler.metrics
+        visualize_metrics(metrics)
+        self.rollout_actor.inference_engine.infer_scheduler.empty_cache()
+        return metrics
+
 
 # for type annotation convenience
 def _unwrap_ray_remote(cls) -> Type[RemoteAsyncXPerfGPTRollout]:

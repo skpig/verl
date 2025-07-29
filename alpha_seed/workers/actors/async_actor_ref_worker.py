@@ -51,6 +51,7 @@ from alpha_seed.utils import ndtimeline
 from alpha_seed.workers.hybrid_engine.fsdp_gather import DataGatherManager
 from alpha_seed.workers.fsdp.initialize import (meta_device_init, cleanup_local_tmp_folder_safetensors_files)
 from alpha_seed.workers.ppo_actor import DataParallelPPOActor
+from alpha_seed.workers.xperf_rollout.profiler.visualizer import visualize_metrics
 from alpha_seed.utils.kernels.persist_gemm import deploy_persist_gemm
 from alpha_seed.models.transformers.parallel.collectives import get_memory
 from alpha_seed.models.transformers.modeling_vlm import add_pixel_values_to_inflight_query
@@ -1368,6 +1369,7 @@ class AsyncActorRolloutRefWorker(Worker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
     def release_running_queries_and_return_metrics(self):
         metrics = self.rollout.inference_engine.infer_scheduler.metrics
+        visualize_metrics(metrics)
         self.rollout.inference_engine.empty_cache()
         return metrics
 

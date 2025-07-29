@@ -668,9 +668,12 @@ class RolloutManager:
         """streaming gen with server, only for train"""
         if self.train_standalone_wg is not None:
             with Timer(name="update_rollout_server", logger=None) as timer:
-                self.update_standalone_server_weights(is_train=True)
+                xperf_metrics = self.update_standalone_server_weights(is_train=True)
             print(f"[INFO] {step} generate streaming[update weights and restart] {timer.last}")
             metrics["timing/update_rollout_server"] = timer.last
+
+            dummy_batch = DataProto(meta_info={"xperf_metrics": xperf_metrics[0]})
+            record_xperf_metrics(dummy_batch, metrics, self.logger, step, prefix="standalone")
 
         global_handler = select_handler_fn(self.config.rollout_server.handler,
                                            external_lib=self.config.rollout_server.external_lib)
@@ -757,7 +760,7 @@ class RolloutManager:
             # print(f"[INFO] {step} generate streaming[update weights and restart] {timer.last}")
             # metrics["timing/update_rollout_server"] = timer.last
             done, pending = asyncio.run_coroutine_threadsafe(submit_and_wait(), self.loop).result()
-        xperf_metrics = self.finalize_hybrid_server_gen()
+        xperf_metrics = self.finalize_server_gen("hybrid")
         pending = list(pending)
         results = []
         for task in done:
@@ -777,11 +780,7 @@ class RolloutManager:
         finished_num = len(ready_batch)
 
         dummy_batch = DataProto(meta_info={"xperf_metrics": self._merge_xperf_metrics(ready_batch, xperf_metrics[0])})
-        record_xperf_metrics(dummy_batch,
-                             metrics,
-                             self.logger,
-                             step,
-                             prefix="standalone" if complete_ratio == 0.0 else "hybrid")
+        record_xperf_metrics(dummy_batch, metrics, self.logger, step, prefix="hybrid")
         metrics["rollout/standalone_completed_batch"] = finished_num
         metrics["rollout/standalone_incompleted_batch"] = len(pending_batch) + len(gen_batch) - finished_num
         return ready_batch, pending
@@ -850,7 +849,7 @@ class RolloutManager:
         with nullcontext() if is_standalone else self.enable_hybrid_server_gen_ctx(is_train=False):
             ready_batch = asyncio.run_coroutine_threadsafe(_submit_and_wait(), self.loop).result()
         if not is_standalone:
-            xperf_metrics = self.finalize_hybrid_server_gen()
+            xperf_metrics = self.finalize_server_gen("hybrid")
 
         # flatten ready_batch
         results = []
@@ -1015,9 +1014,13 @@ class RolloutManager:
                 yield
         replicas.set_replica_ready_state(name='hybrid', ready=False)
 
-    def finalize_hybrid_server_gen(self):
+    def finalize_server_gen(self, role: str = "hybrid"):
         """After exiting ctx, collect metrics"""
-        return self.hybrid_wg.release_running_queries_and_return_metrics()
+        if role == "hybrid":
+            return self.hybrid_wg.release_running_queries_and_return_metrics()
+        elif role == "standalone" and not self._rollout_elastic_enabled and self.train_standalone_wg is not None:
+            return self.train_standalone_wg.return_metrics()
+        return [{}]
 
     def update_standalone_server_weights(self, is_train: bool):
         standalone_wg = self.train_standalone_wg if is_train else self.val_standalone_wg
@@ -1027,3 +1030,5 @@ class RolloutManager:
             with self._hybrid_wg_lock:
                 _update_standalone_weights(self.hybrid_wg, standalone_wg, standalone_role,
                                            self.threadsafe_nccl_comm if not is_train else None)
+                standalone_metric = self.finalize_server_gen("standalone")
+        return standalone_metric
