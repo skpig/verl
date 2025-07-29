@@ -115,5 +115,8 @@ def _select_rm_score_fn(reward_style, external_lib: str = None):
     elif reward_style == "swalm_agent_verifier":
         from . import swalm_agent_verifier
         return swalm_agent_verifier.get_agent_reward
+    elif reward_style == "tool_use_verifier":
+        from . import websearch_verifier
+        return websearch_verifier.agent_env_score
     else:
         raise NotImplementedError

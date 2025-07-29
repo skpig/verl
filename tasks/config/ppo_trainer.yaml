@@ -163,6 +163,37 @@ actor_rollout_ref:
       edit_history: null  # [null]
       timeout: 300
       execution_mode: sequential # ['concurrent', 'sequential'], how to exec multiple plugin calls
+      remote_verify_config:
+        enable: False
+        base_url: ["http://[2605:340:cd51:a00:ddd5:7c23:6bbf:884f]:8010/v1/chat/completions"]
+        model: 'Qwen2.5-32B-Instruct'
+        max_concurrency: 1024
+        max_batch_size: 1024
+        max_try: 1
+        judge_prompt_ver: "v1"
+        async: False
+        enable_think_format: False
+        think_format_coef: 0
+        ans_begin_str: "<ans>"
+        ans_end_str: "</ans>"
+      search_engine: "toutiao"
+      search_psm: 'rlhf_horizon'
+      max_env_response: null
+      max_turn: 10
+      adaptive_max_turn:
+        enable: False
+        type: "ema"
+        alpha: 0.6
+        beta: 1.5
+        discount: 0.5
+        step_interval: 25
+        max_turn_limit: 64
+      turn_max_new_tokens: 2048
+      fc_type: 'function'
+      server_type: 'independent'
+      jupyter_server_id: 46390435
+      external_llm_psm: "http://[2605:340:cd51:a00:d25b:c6fb:3eeb:6f18]:8010/v1/chat/completions"
+      external_llm_type: "Qwen2.5-32B-Instruct"
     train_generate_kwargs: &train_gen_config
       top_k: -1 # 0 for hf rollout, -1 for vllm rollout
       top_p: 1.0

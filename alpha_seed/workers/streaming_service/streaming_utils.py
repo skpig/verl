@@ -286,7 +286,8 @@ def pack_to_dataproto(prompts, tokenizer, data_pack: DataPack, config) -> DataPr
     out.meta_info["xperf_metrics"] = data_pack.metrics
     out.meta_info["generation_kwargs"] = prompts.meta_info['generation_kwargs']
     out.non_tensor_batch = copy.deepcopy(prompts.non_tensor_batch)
-    out.non_tensor_batch['extra_data'] = np.array(data_pack.extra_data, dtype=object)
+    if data_pack.extra_data is not None:
+        out.non_tensor_batch['extra_data'] = np.array(data_pack.extra_data, dtype=object)
     return out
 
 
