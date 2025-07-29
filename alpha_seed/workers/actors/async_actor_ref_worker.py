@@ -405,12 +405,17 @@ class AsyncActorRolloutRefWorker(Worker):
                 actor_optimizer.register_step_post_hook(lambda optim, args, kwargs: offload_fsdp_optimizer(optim))
             elif strategy == 'vescale-fsdp2':
                 from alpha_seed.workers.vescale.fully_shard import register_dtensor_hook
-                from vescale.parallel.fsdp2.extension.optimizer_offload import apply_optimizer_offload
+                from vescale.parallel.fsdp2.extension.optimizer_offload import apply_optimizer_offload, OptimizerOffloadPolicy
                 register_dtensor_hook(actor_module_fsdp, actor_optimizer)
                 if not param_offload:
-                    apply_optimizer_offload(actor_module_fsdp,
-                                            actor_optimizer,
-                                            get_seqlen_fn=lambda args, kwargs: kwargs["input_ids"].numel())
+                    policy = OptimizerOffloadPolicy(gpu_reserved_size=0, overlap_with_forward=False)
+                    apply_optimizer_offload(
+                        actor_module_fsdp,
+                        actor_optimizer,
+                        get_seqlen_fn=lambda args,
+                        kwargs: kwargs["input_ids"].numel(),
+                        offload_policy=policy,
+                    )
 
             total_steps = optim_config.get('total_training_steps', 0)
             num_warmup_steps = int(optim_config.get('lr_warmup_steps', -1))

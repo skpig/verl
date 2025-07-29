@@ -243,6 +243,7 @@ class CriticWorker(Worker):
             tp_plan=get_parallel_plan(critic_model_config, self.tp_mesh),
             tp_mesh=self.tp_mesh,
             tp_outside=config.tp_outside,
+            oe_mesh=self.oe_mesh,
             recompute=config.model.enable_gradient_checkpointing,
             act_offload=config.act_offload,
             param_offload=config.model.fsdp_config.param_offload,
@@ -263,12 +264,14 @@ class CriticWorker(Worker):
             critic_optimizer.register_step_post_hook(lambda optim, args, kwargs: offload_fsdp_optimizer(optim))
         elif strategy == 'vescale-fsdp2':
             from alpha_seed.workers.vescale.fully_shard import register_dtensor_hook
-            from vescale.parallel.fsdp2.extension.optimizer_offload import apply_optimizer_offload
+            from vescale.parallel.fsdp2.extension.optimizer_offload import apply_optimizer_offload, OptimizerOffloadPolicy
             register_dtensor_hook(critic_module, critic_optimizer)
             if not config.model.fsdp_config.param_offload:
+                policy = OptimizerOffloadPolicy(gpu_reserved_size=0, overlap_with_forward=False)
                 apply_optimizer_offload(critic_module,
                                         critic_optimizer,
-                                        get_seqlen_fn=lambda args, kwargs: kwargs["input_ids"].numel())
+                                        get_seqlen_fn=lambda args, kwargs: kwargs["input_ids"].numel(),
+                                        offload_policy=policy)
 
         total_steps = config.optim.get('total_training_steps', 0)
         num_warmup_steps = int(config.optim.get('lr_warmup_steps', -1))

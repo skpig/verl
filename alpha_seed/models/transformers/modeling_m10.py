@@ -657,7 +657,7 @@ def m10_casual_lm_forward(self: M10ForCausalLM,
 
     hidden_states = outputs[0]
 
-    loss = None
+    loss = entropy = log_probs = None
     if fuse_lm_head_ce_loss:
         assert labels is not None
         if temperature is not None:
@@ -686,34 +686,6 @@ def m10_casual_lm_forward(self: M10ForCausalLM,
         acceptance_matrix = compute_chunked_mtp_acceptance_ratio(self,
                                                                  all_mtp_hidden_states=outputs.mtp_hidden_states,
                                                                  all_mtp_labels=mtp_labels)
-
-        # logits = self.lm_head(hidden_states)
-        # assert temperature is None
-        # loss = None
-        # if labels is not None:
-        #     # Upcast to float if we need to compute the loss to avoid potential precision issues
-        #     logits = logits.float()
-        #     # Shift so that tokens < n predict n
-        #     shift_logits = logits[..., :-1, :].contiguous()
-        #     shift_labels = labels[..., 1:].contiguous()
-        #     # Flatten the tokens
-        #     shift_logits = shift_logits.view(-1, self.vocab_size)
-        #     shift_labels = shift_labels.view(-1)
-        #     if cu_seqlens is not None:
-        #         # Mask the last token of each sequence to torch.CrossEntropyLoss ignore_index, default is -100
-        #         shift_labels[cu_seqlens[1:-1] - 1] = -100
-        #     elif position_ids is not None and labels.dim() == 1:
-        #         position_ids_ = position_ids.flatten()
-        #         indices_q = torch.arange(position_ids_.size(0), device=position_ids_.device, dtype=torch.int32)
-        #         cu_seq_lens = torch.cat((
-        #             indices_q[position_ids_ == 0],
-        #             torch.tensor(position_ids_.size(), device=position_ids_.device, dtype=torch.int32),
-        #         ))
-        #         shift_labels[cu_seq_lens[1:-1] - 1] = -100
-
-        #     # Ensure tensors are on the same device
-        #     shift_labels = shift_labels.to(shift_logits.device)
-        #     loss = self.loss_fct(shift_logits, shift_labels)
 
     # add mtp here
     assert len(mtp_labels) == self.config.mtp_n_heads - 1

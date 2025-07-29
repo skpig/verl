@@ -122,7 +122,13 @@ def fully_shard(
     if len(missing_keys) > 0:
         raise RuntimeError(f"Cannot find sharding plans of {missing_keys} in model")
     # partition model
+    nparams = sum(p.numel() for p in model.parameters())
+    if dist.get_rank() == 0:
+        print(f"before parallelize module: model params# {nparams / (1e9):.2f} B")
     model = parallelize_module(model, named_mesh, spmd_plan, init_only=True)
+    nparams = sum(p.numel() for p in model.parameters())
+    if dist.get_rank() == 0:
+        print(f"after parallelize module: model params# {nparams / (1e9):.2f} B")
 
     # set cpu offload
     offload_policy = CPUOffloadPolicy() if param_offload else OffloadPolicy()
@@ -132,9 +138,29 @@ def fully_shard(
         "mp_policy": mixed_precision_policy,
         "offload_policy": offload_policy,
     }
+
     # load pretrained weights
-    shards = parallel_load_safetensors(weights, device="cpu") if weights else {}
-    materialize, _, _ = parallel_init_module_fn(model, shards, pad_state=True, strict=False)
+    oe_size = 1 if oe_mesh is None else oe_mesh.size()
+    device = "cuda" if oe_size == 1 else "cpu"
+    shards = parallel_load_safetensors(weights, device=device) if weights else {}
+
+    def extra_init(fqn: str, state: torch.Tensor):
+        """Initialize parameters that are missing in the checkpoint"""
+        nonlocal weights, device
+        if weights is None:  # will resume, so use empty init
+            return torch.zeros_like(state, device=device)
+        else:
+            warnings.warn(f"detected {fqn} not in loaded HF checkpoint, will init it randomly")
+            initializer_range = (2.5 * max(state.shape))**-0.5
+            ret = torch.randn_like(state, device=device, requires_grad=False) * initializer_range
+            ret.requires_grad_(state.requires_grad)
+            return ret
+
+    materialize, _, _ = parallel_init_module_fn(model,
+                                                shards,
+                                                pad_state=oe_size > 1,
+                                                strict=False,
+                                                state_init_fn=extra_init)
 
     # wrap to fsdp + prefetch
     last_fsdp_modules = None

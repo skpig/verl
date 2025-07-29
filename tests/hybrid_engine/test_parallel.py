@@ -2,18 +2,18 @@
 torchrun --nproc_per_node=$ARNOLD_WORKER_GPU --nnodes=$ARNOLD_WORKER_NUM --node_rank=$ARNOLD_ID \
     --master_addr=$ARNOLD_WORKER_0_HOST --master_port=12321 \
     -m tests.hybrid_engine.test_parallel \
-    --model hdfs://haruna/home/byte_data_seed/ssd_lq/public/seed_models/m11 \
+    --model hdfs://haruna/home/byte_data_seed/ssd_lq/public/seed_models/m10_680m_new \
     --strategy vescale-fsdp2 \
     --tp-size 4 \
-    --oe-size 8 \
-    --sp-size 2 \
-    --grad-accum 4 \
+    --sp-size 8 \
+    --grad-accum 1 \
     --max-token 8192 \
     --seqlen 8192 \
     --ce-loss-fusion \
     --act-offload \
     --optim-offload \
-    2>&1 | tee fsdp.txt
+    --profile-to-mlx \
+    2>&1 | tee fsdp2.txt
 """
 import warnings
 
@@ -46,13 +46,12 @@ from torch.distributed._tensor import DTensor, Shard
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import StateDictType
 from transformers import AutoConfig, AutoModelForCausalLM
-from alpha_seed.workers.fsdp.initialize import create_mesh, meta_device_init
+from alpha_seed.workers.fsdp.initialize import meta_device_init
 from alpha_seed.workers.hybrid_engine.fsdp_gather import ulysses_pad_and_slice_inputs
 from dist_attn.ulysses.parallel_states import set_ulysses_sequence_parallel_group
 from dist_attn.ulysses.ops import gather_outputs
 from alpha_seed.models.transformers.monkey_patch import apply_monkey_patch, get_parallel_plan
 from alpha_seed.workers.fsdp.offload import offload_fsdp_optimizer, load_fsdp_optimizer
-from alpha_seed.workers.fsdp.offload import activation_offload
 from alpha_seed.trainer.optim import get_optimizer_from_config
 
 from mono_rl.utils.debug import get_profiler_context, MemoryProfiler
@@ -68,6 +67,7 @@ import verl.utils.torch_functional as verl_F
 
 # p7_path = 'hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/20241123/1118a2_2.5b'
 # m8_path = 'hdfs://harunava/home/byte_data_seed_us/hdd_va/user/zhiqi.0/rlhf/m8_2B5_sft'
+# m10_path = 'hdfs://haruna/home/byte_data_seed/ssd_lq/public/seed_models/m10_680m_new'
 
 
 def init_model(model_path: str, fsdp_size: int, tp_size: int, oe_size: int, sp_size: int, optimizer_type: str):
@@ -95,7 +95,7 @@ def init_model(model_path: str, fsdp_size: int, tp_size: int, oe_size: int, sp_s
         # setattr(config, "pre_post_layernorm_layers", list(range(0, 10)))
 
         # monkey patch
-        apply_monkey_patch(config)
+        apply_monkey_patch(config, strategy=args.strategy)
         model = AutoModelForCausalLM.from_config(config=config,
                                                  torch_dtype=torch.float32,
                                                  attn_implementation="flash_attention_2")
@@ -107,12 +107,12 @@ def init_model(model_path: str, fsdp_size: int, tp_size: int, oe_size: int, sp_s
     elif args.strategy == 'vescale-fsdp2':
         from alpha_seed.workers.vescale import fully_shard
         from alpha_seed.workers.vescale.fully_shard import register_dtensor_hook
-        from vescale.parallel.fsdp2.extension.optimizer_offload import apply_optimizer_offload
+        from vescale.parallel.fsdp2.extension.optimizer_offload import apply_optimizer_offload, OptimizerOffloadPolicy
 
     model, _ = fully_shard(model=model,
                            block_cls=model._no_split_modules[0],
                            fsdp_mesh=fsdp_mesh,
-                           tp_plan=get_parallel_plan(config, tp_mesh),
+                           tp_plan=get_parallel_plan(config, tp_mesh, strategy=args.strategy),
                            tp_mesh=tp_mesh,
                            oe_mesh=oe_mesh,
                            recompute=True,
@@ -137,7 +137,14 @@ def init_model(model_path: str, fsdp_size: int, tp_size: int, oe_size: int, sp_s
     elif args.strategy == 'vescale-fsdp2':
         register_dtensor_hook(model, optimizer)
         if args.optim_offload:
-            apply_optimizer_offload(model, optimizer, get_seqlen_fn=lambda args, kwargs: kwargs["input_ids"].numel())
+            policy = OptimizerOffloadPolicy(
+                gpu_reserved_size=0,
+                overlap_with_forward=False,
+            )
+            apply_optimizer_offload(model,
+                                    optimizer,
+                                    get_seqlen_fn=lambda args, kwargs: kwargs["input_ids"].numel(),
+                                    offload_policy=policy)
 
     print_each_rank(f"After FSDP init: memory: {torch.cuda.memory_allocated() / (1024**3):.2f} GB")
     torch.cuda.reset_peak_memory_stats()
@@ -171,7 +178,7 @@ def gather_inputs(tensor: torch.Tensor, gather_mesh, gather_dim: int):
 
 def train(model, optimizer, meshes, steps: int = 20, profile_to_mlx: bool = False):
 
-    fsdp_mesh, tp_mesh, oe_mesh, sp_mesh, gather_mesh = meshes
+    fsdp_mesh, tp_mesh, oe_mesh, sp_mesh, gather_mesh, _ = meshes
     if sp_mesh.size() > 1:
         set_ulysses_sequence_parallel_group(sp_mesh.get_group())
 
@@ -219,18 +226,26 @@ def train(model, optimizer, meshes, steps: int = 20, profile_to_mlx: bool = Fals
                 masks = gather_inputs(masks, gather_mesh, gather_dim=0)
                 unpad_size = input_ids.size(1)
                 input_ids, position_ids, _ = ulysses_pad_and_slice_inputs(input_ids, position_ids, sp_mesh.size())
-                input_ids_rolled, _, _ = ulysses_pad_and_slice_inputs(input_ids_rolled.unsqueeze(0), None,
-                                                                      sp_mesh.size())
-                input_ids_rolled = input_ids_rolled.squeeze(0)
+                labels, _, _ = ulysses_pad_and_slice_inputs(input_ids_rolled.unsqueeze(0), None, sp_mesh.size())
+                labels = labels.squeeze(0)
+
+            # add mtp labels
+            mtp_labels = []  # mimic, not real
+            if hasattr(model.config, 'mtp_mode'):
+                mtp_n_heads = model.config.mtp_n_heads
+                for i in range(1, mtp_n_heads):
+                    input_ids_rolled_mtp = torch.roll(input_ids, shifts=-i - 1, dims=1)
+                    mtp_labels.append(input_ids_rolled_mtp)
 
             # forward
             if args.ce_loss_fusion:
                 output = model(input_ids=input_ids,
                                position_ids=position_ids,
                                use_cache=False,
-                               labels=input_ids_rolled,
+                               labels=labels,
                                temperature=1.0,
-                               fuse_lm_head_ce_loss=True)
+                               fuse_lm_head_ce_loss=True,
+                               mtp_labels=mtp_labels)
                 log_probs = output.loss
             else:
                 output = model(input_ids=input_ids, position_ids=position_ids, use_cache=False)
@@ -248,6 +263,8 @@ def train(model, optimizer, meshes, steps: int = 20, profile_to_mlx: bool = Fals
                 gnorm = model.clip_grad_norm_(max_norm=1.0).item()
                 optimizer.step()
                 optimizer.zero_grad()
+                if args.strategy == 'vescale-fsdp2':
+                    model.zero_grad()
                 if isinstance(model, FSDP):
                     for module in FSDP.fsdp_modules(model):
                         module._flat_param.grad = None

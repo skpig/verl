@@ -266,6 +266,8 @@ class DataParallelPPOActor(BasePPOActor):
         if isinstance(self.actor_module, FSDP):
             for module in FSDP.fsdp_modules(self.actor_module):
                 module._flat_param.grad = None
+        else:
+            self.actor_module.zero_grad()
 
     def compute_log_prob(self, data: DataProto) -> DataProto:
         # set to eval

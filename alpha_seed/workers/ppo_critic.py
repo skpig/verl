@@ -186,6 +186,8 @@ class DataParallelPPOCritic(BasePPOCritic):
         if isinstance(self.critic_module, FSDP):
             for module in FSDP.fsdp_modules(self.critic_module):
                 module._flat_param.grad = None
+        else:
+            self.critic_module.zero_grad()
 
     def compute_values(self, data: DataProto) -> torch.Tensor:
         self.critic_module.eval()
