@@ -65,6 +65,8 @@ class ElasticRolloutManager:
         res_shape = [self.config.streaming_rollout.n_gpus_per_node] * self.config.streaming_rollout.nnodes
         stable_pool_name = self.config.streaming_rollout.elastic.stable_pool_name
         elastic_pool_name = self.config.streaming_rollout.elastic.elastic_pool_name
+        assert stable_pool_name is not None and stable_pool_name != '', \
+            'streaming_rollout.elastic.stable_pool_name is not set'
         stable_pool_res = [stable_pool_name]
         elastic_pool_res = [elastic_pool_name]
         if is_local_ray_instance():

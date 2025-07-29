@@ -143,6 +143,8 @@ def test_train_generate(set_common_envs, gpu_allocator, ray_fixture, complete_ra
     config.actor_rollout_ref.rollout.weights_communicator = weights_communicator
     config.actor_rollout_ref.rollout.complete_ratio = complete_ratio
     config.streaming_rollout.elastic.enable = elastic
+    if elastic:
+        config.streaming_rollout.elastic.stable_pool_name = 'worker'
     config.streaming_rollout.elastic.min_replicas = 1
     config.streaming_rollout.elastic.max_replicas = 1  # 资源有限，这个UT里先不扩
     config.streaming_rollout.nnodes = 1 if has_standalone else 0
