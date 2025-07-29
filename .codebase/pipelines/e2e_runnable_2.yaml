@@ -31,6 +31,8 @@ jobs:
           - sudo pip3 install pylatexenc
           - sudo pip3 install openai
           - sudo pip3 install pydantic==1.10.15
+          - sudo pip3 install bytedloadbalance==0.0.14a9
+          - sudo pip3 install bytedagi==0.0.37a7
 
       - name: math v1 ppo async and grpo
         commands:

@@ -494,6 +494,7 @@ class AsyncXPerfGPTRollout(object):
 
         complete_ratio = prompts.meta_info.get('complete_ratio', 1)
         prompt_ids = prompts.batch['input_ids']  # (bs, prompt_length)
+        batch_size = prompt_ids.shape[0]
         # left-padded attention_mask
         off_turn_off_policy_steps = prompts.batch["off_policy_steps"]
         first_non_one_indices = (prompt_ids != self.tokenizer.pad_token_id).int().argmax(dim=1)
@@ -505,6 +506,17 @@ class AsyncXPerfGPTRollout(object):
             "generation_kwargs": generation_kwargs,
             "mode": mode,
         } for off_policy_step in off_turn_off_policy_steps.tolist()]
+
+        # GRM
+        grm_keys = ['grm_pre_ids', 'grm_post_ids']
+        grm_data = {key: prompts.batch.get(key, None) for key in grm_keys}
+        for i in range(batch_size):
+            current_meta = prompt_meta_info[i]  # 获取当前元数据引用
+            for key in grm_keys:
+                data = grm_data[key]
+                if data is not None:  # 当且仅当数据存在时赋值
+                    current_meta[key] = data[i]
+
         batch_size = len(prompts)
         if 'image_data_ref' in prompts.non_tensor_batch:
             image_data = get_local_inputs(prompts.non_tensor_batch, 'image_data_ref', self.image_manager)

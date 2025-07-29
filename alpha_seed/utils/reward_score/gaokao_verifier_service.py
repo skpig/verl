@@ -81,7 +81,7 @@ def compute_score(solution_str, ground_truth, gaokao_verifier_service_psm, **arg
     problem = ground_truth["problem"]
     reference_answer = ground_truth["reference_answer"]
     verify_principles = ground_truth.get("verify_principles", "")
-    full_score = float(ground_truth["full_score"])
+    full_score = float(ground_truth.get("full_score", 1.0))
     env = {
         "arnold_trial_id": os.environ.get("ARNOLD_TRIAL_ID", "0"),
         "arnold_trial_owner": os.environ.get("ARNOLD_TRIAL_OWNER", "0")

@@ -391,6 +391,17 @@ class RLHFDatasetVL(RLHFDataset):
             if key in row_dict_ret:
                 row_dict_ret[key] = row_dict_ret[key].to(dtype)
 
+        # Add grm input on VLM dataset
+        if self.use_grm:
+            grm_input = self._prepare_grm_input(conversation,
+                                                answer,
+                                                max_prompt_len=self.max_prompt_length,
+                                                max_resp_len=self.max_response_length)
+            row_dict_ret.update(grm_input)
+            # type cast for grm input
+            cast_type('grm_input_ids', torch.int32)
+            cast_type('grm_attention_mask', torch.int8)
+
         row_dict_ret['data_source'] = row_dict['data_source']
         row_dict_ret['off_policy_steps'] = torch.zeros([1]).to(torch.int8)
         row_dict_ret['images_bytes_ref'] = row_dict['images_bytes_ref']

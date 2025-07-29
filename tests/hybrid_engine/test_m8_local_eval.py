@@ -64,6 +64,7 @@ def create_dataloader(config, tokenizer):
         answer_key=config.data.answer_key,
         use_ref_answer=config.data.use_ref_answer,
         max_prompt_length=config.data.max_prompt_length,
+        max_response_length=config.data.max_response_length,
         filter_prompts=True,
         return_raw_chat=True,
         truncation=config.data.get("truncation", "error"),

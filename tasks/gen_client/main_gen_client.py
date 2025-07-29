@@ -530,6 +530,7 @@ class GenClient:
                                   answer_key=self.config.data.answer_key,
                                   use_ref_answer=False,
                                   max_prompt_length=self.config.data.max_prompt_length,
+                                  max_response_length=self.config.data.max_response_length,
                                   filter_prompts=True,
                                   return_raw_chat=self.config.data.get('return_raw_chat', False),
                                   truncation=self.config.data.get('truncation', 'error'),

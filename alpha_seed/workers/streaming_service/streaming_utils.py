@@ -281,6 +281,14 @@ def pack_to_dataproto(prompts, tokenizer, data_pack: DataPack, config) -> DataPr
     if response_model_output_mask is not None:
         batch['model_output_mask'] = response_model_output_mask.to(torch.int8)
     from mono_rl import DataProto
+
+    restored_tensor_batch = {}
+    grm_keys = ['grm_pre_ids', 'grm_post_ids']
+    for key in grm_keys:
+        if key in prompts.batch:
+            restored_tensor_batch[key] = prompts.batch[key]
+    batch.update(restored_tensor_batch)
+
     out = DataProto.from_dict(batch)
     data_pack.metrics["max_off_policy_steps"] = [response_off_policy.max().item()]
     out.meta_info["xperf_metrics"] = data_pack.metrics

@@ -72,6 +72,8 @@ class DataLoaderMgr:
                                               total_epochs=self.config.trainer.total_epochs,
                                               shuffle_per_epoch=self.config.data.shuffle,
                                               data_auto_repeat=data_auto_repeat,
+                                              use_grm=self.config.trainer.use_grm,
+                                              max_response_length=self.config.data.max_response_length,
                                               **kwargs)
 
         self.val_dataset = self.RLHFDataset(parquet_files=self.config.data.val_files,
@@ -86,6 +88,8 @@ class DataLoaderMgr:
                                             multi_prompts=self.config.data.get("multi_prompts", "none"),
                                             num_prompts_per_data=1,
                                             is_eval=True,
+                                            use_grm=self.config.trainer.use_grm,
+                                            max_response_length=self.config.data.max_response_length,
                                             **kwargs)
 
     def _create_dataloaders(self):

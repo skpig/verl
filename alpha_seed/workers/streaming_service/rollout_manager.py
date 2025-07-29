@@ -232,6 +232,10 @@ class RolloutManager:
 
         # set the eos_callback_fn of actor_rollout
         from alpha_seed.workers.xperf_rollout.component.query import Query
+        use_remote_sandbox = self.config.trainer.use_remote_sandbox
+        use_remote_verifier = self.config.trainer.use_remote_verifier
+        use_remote_swe_sandbox = self.config.trainer.use_remote_swe_sandbox
+        use_remote_grm = self.config.trainer.use_remote_grm and self.config.trainer.use_grm
 
         def sandbox_callback_fn(query: Query):
             input_ids = query.input_ids + query.new_token_ids
@@ -240,7 +244,6 @@ class RolloutManager:
             reward_style = reward_model['style']
             ground_truth = reward_model['ground_truth']
 
-            # note that the uid of padding dataproto should be None
             if reward_style in remote_reward_style and req_id is not None:
                 # get the sandbox ray handler
                 handler = ray.get_actor('remote_client')
@@ -250,7 +253,22 @@ class RolloutManager:
                                             ground_truth=ground_truth,
                                             reward_style=reward_style)
 
-        if len(remote_reward_style) > 0:
+            if use_remote_grm and req_id is not None:
+                grm_args = {}
+                for grm_key in ["grm_pre_ids", "grm_post_ids"]:
+                    grm_value = query.meta_info.get(grm_key, None)
+                    if grm_value is not None:
+                        grm_value = grm_value.cpu() if isinstance(grm_value, torch.Tensor) else grm_value
+                    grm_args[grm_key] = grm_value
+
+                grm_remote_client = ray.get_actor('grm_remote_client')
+                ray.get(
+                    grm_remote_client.add_requests.remote(req_id=req_id,
+                                                          response_ids=input_ids,
+                                                          grm_pre_ids=grm_args['grm_pre_ids'],
+                                                          grm_post_ids=grm_args['grm_post_ids']))
+
+        if len(remote_reward_style) > 0 or use_remote_grm:
             self.hybrid_wg.set_eos_callback_fn(sandbox_callback_fn)
             if self.train_standalone_wg is not None:
                 self.train_standalone_wg.set_eos_callback_fn(sandbox_callback_fn)
@@ -877,6 +895,10 @@ class RolloutManager:
             if (key := "model_output_mask") not in batch:
                 batch.batch[key] = _get_response_tensor(dtype=torch.int8, pad_val=-1)
             gen_batch_required_keys.append(key)
+
+        if self.config.trainer.use_grm:
+            gen_batch_required_keys.extend(["grm_pre_ids", "grm_post_ids"])
+
         gen_batch = batch.pop(batch_keys=gen_batch_required_keys)
         gen_batch.non_tensor_batch = batch.non_tensor_batch
         # pack fields into extra_data (for tool calling...)
