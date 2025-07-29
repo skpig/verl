@@ -261,7 +261,9 @@ class AsyncXPerfGPTRollout(object):
                                           standalone=self.is_standalone,
                                           schedule_strategy=self.config.schedule_strategy,
                                           step_profiler=step_profiler,
-                                          vit_use_xperf_gpt=self.config.vit_use_xperf_gpt)
+                                          vit_use_xperf_gpt=self.config.vit_use_xperf_gpt,
+                                          prefix_cache_slot_num=self.config.prefix_cache_slot_num,
+                                          prefix_cache_max_length=self.config.prefix_cache_max_length)
         inference_sess.max_off_policy_steps = self.config.get('max_off_policy_steps', 5)
         with tempfile.NamedTemporaryFile(mode='w', suffix=".json") as f:
             print(f"load xperf config ... {text_cfg}")
@@ -369,6 +371,14 @@ class AsyncXPerfGPTRollout(object):
         # 将要abort的放进去，后面等待engine自己内部的循环同步点abort
         with self.inference_engine.update_weights_lock:
             self.inference_engine.abort(query_ids, not_after)
+
+    def get_valid_history_ids(self):
+        """
+        Get all history ids of the queries that have been processed by this rollout engine.
+        This is used to check if the query has been processed before.
+        """
+        assert self.process_thread.is_alive(), "process thread is not alive, please check the traceback in log"
+        return self.inference_engine.get_valid_history_ids()
 
     def get_all_queries(self, query_type: str) -> List[Query]:
         if not self.process_thread.is_alive():
@@ -706,6 +716,11 @@ class RemoteAsyncXPerfGPTRollout(Worker):
     def abort_queries(self, query_ids: List[str], not_after: float):
         # 只abort那些在abort_before之前分到engine的
         self.rollout_actor.abort_queries(query_ids, not_after)
+
+    # 只在dp_size=1的情况下调用，所以这里rank0执行即可
+    @register(execute_mode=Execute.RANK_ZERO, blocking=True)
+    def get_history_ids(self):
+        return self.rollout_actor.get_valid_history_ids()
 
     # 只在dp_size=1的情况下调用，所以这里rank0执行即可
     @register(execute_mode=Execute.RANK_ZERO, blocking=True)

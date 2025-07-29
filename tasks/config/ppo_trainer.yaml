@@ -155,6 +155,8 @@ actor_rollout_ref:
     schedule_strategy: default # [default,fifo]
     mode: "batch" # [batch, server]
     weights_communicator: "nccl" # [nccl, ucx], elastic模式下只能用ucx
+    prefix_cache_slot_num: -1
+    prefix_cache_max_length: -1
     plugin: &plugin_config
       enable: False
       plugin_external_lib: null # [null, '/opt/tiger/agents_extension/plugins']

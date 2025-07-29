@@ -145,7 +145,11 @@ class RequestPool:
                 count += 1
             return count
 
-    def get_next_pending_requests(self, batch_size, engine_id: str, wg_name: str) -> Dict[str, Request]:
+    def get_next_pending_requests_with_cache(self,
+                                             batch_size,
+                                             engine_id: str,
+                                             wg_name: str,
+                                             cache_ids: List[str] = None) -> Dict[str, Request]:
         # 每个engine实例来这里pull空闲的请求
         # 简单处理，暂不允许并发获取请求
         cool_down_seconds = 10
@@ -158,6 +162,9 @@ class RequestPool:
                     continue
                 # 跳过最近abort
                 if request.is_recent_aborted_from(engine_id, cool_down_seconds):
+                    continue
+                # 如果有cache_ids，且当前request不在cache_ids中，则跳过
+                if cache_ids is not None and request.query.id not in cache_ids:
                     continue
                 # 标记请求已被认领了再分发出去
                 now = time.time()
@@ -495,7 +502,12 @@ class RequestManager:
         return self.req_pool.requests, self.req_pool.finished_requests
 
     def get_next_pending_requests(self, batch_size: int, engine_id: str, wg_name: str) -> List[Query]:
-        next_reqs = self.req_pool.get_next_pending_requests(batch_size, engine_id, wg_name)
+        next_reqs = self.req_pool.get_next_pending_requests_with_cache(batch_size, engine_id, wg_name)
+        return [r.query for r in next_reqs.values()]
+
+    def get_next_pending_requests_with_cache(self, batch_size: int, engine_id: str, wg_name: str,
+                                             cache_ids: List[str]) -> List[Query]:
+        next_reqs = self.req_pool.get_next_pending_requests_with_cache(batch_size, engine_id, wg_name, cache_ids)
         return [r.query for r in next_reqs.values()]
 
     # 释放掉给定的query_ids，返回确定释放的query_id

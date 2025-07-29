@@ -16,6 +16,7 @@ from xperf_gpt.inference import init_inference
 from alpha_seed.workers.xperf_rollout.component.cache_manager import CacheManager
 from alpha_seed.workers.xperf_rollout.component.infer_scheduler import InferScheduler
 from alpha_seed.workers.xperf_rollout.component.sampling_manager import Sampler
+from alpha_seed.workers.xperf_rollout.component.prefix_cache import PrefixCache
 from alpha_seed.workers.xperf_rollout.utils.custom_xperf_convert_helper import XCustomInferenceModuleAdapter
 from xperf_gpt.multi_models.visual.inferencer import VITInferencer
 from xperf_gpt.multi_models.visual.eva_vit import EVA_VIT_CONFIGS
@@ -162,31 +163,32 @@ class InferenceSession:
     """
 
     def __init__(
-        self,
-        num_slots,
-        max_batch_size,
-        max_length=4096,
-        enable_paged_attn=False,
-        context_split_len=4 * 1024,
-        vit_use_xperf_gpt=True,
-        max_prompt_length=None,
-        context_limit_bs=1,
-        max_context_shift=0,
-        slot_block_size=1,
-        vocab_tp=False,
-        enable_truncation=True,
-        ctx_shift_intra_micro_batch=True,
-        is_prefill_decode_split=False,
-        enable_ngrams_decoding=False,
-        enable_ngrams_when_bs_below=32,
-        max_ngram_size=3,
-        num_pred_tokens=6,
-        enable_cuda_graph=False,
-        standalone=False,
-        schedule_strategy="default", # ['default','fifo']
-        step_profiler: StepProfiler = None,
-        enable_mtp_decoding=False,
-    ):
+            self,
+            num_slots,
+            max_batch_size,
+            max_length=4096,
+            enable_paged_attn=False,
+            context_split_len=4 * 1024,
+            vit_use_xperf_gpt=True,
+            max_prompt_length=None,
+            context_limit_bs=1,
+            max_context_shift=0,
+            slot_block_size=1,
+            vocab_tp=False,
+            enable_truncation=True,
+            ctx_shift_intra_micro_batch=True,
+            is_prefill_decode_split=False,
+            enable_ngrams_decoding=False,
+            enable_ngrams_when_bs_below=32,
+            max_ngram_size=3,
+            num_pred_tokens=6,
+            enable_cuda_graph=False,
+            standalone=False,
+            schedule_strategy="default",  # ['default','fifo']
+            step_profiler: StepProfiler = None,
+            enable_mtp_decoding=False,
+            prefix_cache_slot_num=-1,
+            prefix_cache_max_length=-1):
         """Initialize inference session with hardware/performance parameters"""
         # Memory management
         self.enable_paged_attn = enable_paged_attn
@@ -281,6 +283,9 @@ class InferenceSession:
         self.update_weights_lock = Lock()
         self._accepted_queries_mutex = Lock()
         self.tp_group = None
+        self.prefix_cache = None
+        self.prefix_cache_slot_num = prefix_cache_slot_num
+        self.prefix_cache_max_length = prefix_cache_max_length
 
     def switch_inference_mode(self, mode):
         self.mode = mode
@@ -429,6 +434,21 @@ class InferenceSession:
                                           num_pred_tokens=self.num_pred_tokens,
                                           moving_avg_length=self.max_length,
                                           schedule_strategy=self.schedule_strategy)
+        if self.prefix_cache_slot_num > 0:
+            num_kv_heads = self.engine.module.config.tp_kv_heads
+            if self.engine.module.quant_mode in ["NO_QUANT", "WFP8"]:
+                kv_cache_dtype = torch.bfloat16
+            elif "C8" in self.engine.module.quant_mode or self.engine.module.quant_mode == "W8A8":
+                kv_cache_dtype = torch.int8
+            else:
+                raise RuntimeError(f"Unsupported quant mode {self.engine.module.quant_mode} for prefix cache")
+            kv_mirror_layers = 0
+            if hasattr(self.engine.module.config, "kv_mirror_layers"):
+                kv_mirror_layers = len(getattr(self.engine.module.config, "kv_mirror_layers"))
+            valid_num_layers = self.engine.module.num_layers - kv_mirror_layers
+            self.prefix_cache = PrefixCache(num_kv_heads, self.engine.module.head_dim, valid_num_layers, kv_cache_dtype,
+                                            self.prefix_cache_slot_num, self.prefix_cache_max_length,
+                                            self.enable_paged_attn, self.slot_block_size)
         self.infer_scheduler = InferScheduler(
             cache_manager=self.cache_manager,
             engine=self.engine,
@@ -654,6 +674,13 @@ class InferenceSession:
         else:
             return ordered_query
 
+    def get_valid_history_ids(self) -> List[str]:
+        history_ids = []
+        if self.prefix_cache is not None:
+            self.prefix_cache: PrefixCache
+            history_ids.extend(self.prefix_cache.req_id_to_slot_id.keys())
+        return history_ids
+
     def get_all_queries(self, query_type: str, retain_finished: bool = True) -> List[Query]:
         """
         在async streaming模式下，读取所有query的状态和生成结果(包括中间结果)，并把完成的剔除掉
@@ -707,6 +734,11 @@ class InferenceSession:
         if self.eos_callback_fn:
             self.eos_callback_fn(query)
         query.set_finished()
+        if self.prefix_cache is not None:
+            self.prefix_cache: PrefixCache
+            full_input_ids = torch.tensor(query.input_ids + query.new_token_ids).cuda()
+            self.prefix_cache.save_to_cache(query.id, full_input_ids,
+                                            torch.tensor(query.kv_slot_ids).cuda(), self.engine.module)
         self.unfinished_off_policy_steps_set.remove_one(query.off_policy_steps)
         self.finished_num += 1
         self.cache_manager.release_query(query)
@@ -837,6 +869,21 @@ class InferenceSession:
                             input_ids = input_ids[:, start:end]
                             input_embs = self.engine.get_input_embeddings(input_ids=input_ids)
                     return input_embs, torch.tensor(labels_ids)
+
+                self.infer_scheduler.record("prefill_token_num", [len(query.input_ids)])
+                if self.prefix_cache is not None:
+                    self.prefix_cache: PrefixCache
+                    # note: only query prefix cache once (context_shift == 0)
+                    if query.context_shift == 0:
+                        input_ids_cuda = torch.tensor(query.input_ids).cuda()
+                        prefix_hit_length = self.prefix_cache.calc_prefix_length(query.id, input_ids_cuda)
+                        self.infer_scheduler.record("prefix_cache_hit_length", [prefix_hit_length])
+                        if prefix_hit_length > query.prefix_already_computed_len:
+                            self.prefix_cache.load_from_cache(query.id, input_ids_cuda,
+                                                              torch.tensor(query.kv_slot_ids).cuda(),
+                                                              self.engine.module, prefix_hit_length)
+                            query.prefix_already_computed_len = prefix_hit_length
+                            context_len = len(query.input_ids) - query.prefix_already_computed_len
 
                 current_context_shift = query.context_shift + query.prefix_already_computed_len
                 # start from context_shift pos
@@ -1150,13 +1197,16 @@ class InferenceSession:
                                        index_in_running_batch=forward_inputs['forward_index'],
                                        log_probs=log_probs,
                                        hidden_states=hidden_states)
-            self.infer_scheduler.next_step()
+            has_prefill_input = context_input is not None
+            self.infer_scheduler.next_step(has_prefill_input)
             if self.step_profiler is not None:
                 ctx_tokens = context_input.shape[0] if context_input is not None else 0
                 dec_tokens = decode_input.shape[0] if decode_input is not None else 0
                 self.step_profiler.record_step(ctx_tokens=ctx_tokens, dec_tokens=dec_tokens)
 
         self._wait_all_paused_resume()
+        if self.prefix_cache is not None:
+            self.prefix_cache.clear_cache()
         torch.cuda.synchronize()
         self.infer_scheduler.record("cur_steps", [self.current_steps])
 
@@ -1176,6 +1226,8 @@ class InferenceSession:
                     query.reset_compute()
                     self.waiting.append(query)
                 self.running = []
+                if self.prefix_cache is not None:
+                    self.prefix_cache.clear_cache()
                 update_weight_event_is_set = update_weight_event.is_set()  # noqa: for py-spy
                 time.sleep(0.01)
                 return True
@@ -1235,7 +1287,8 @@ class InferenceSession:
                                            index_in_running_batch=forward_inputs['forward_index'],
                                            log_probs=log_probs,
                                            hidden_states=hidden_states)
-                self.infer_scheduler.next_step()
+                has_prefill_input = context_input is not None
+                self.infer_scheduler.next_step(has_prefill_input)
                 if self.step_profiler is not None:
                     ctx_tokens = context_input.shape[0] if context_input is not None else 0
                     dec_tokens = decode_input.shape[0] if decode_input is not None else 0

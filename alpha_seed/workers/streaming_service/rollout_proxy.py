@@ -505,7 +505,19 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
             # 只将请求dispatch给ready worker group，每次循环都是最新的ready状态
             # 在dispatch过程中，worker group死了也没关系，这个request会之后被标记为stale
             t0 = time.time()
-            for engine_id, wg in self.replicas.get_ready_worker_groups().items():
+            ready_wg_items = list(self.replicas.get_ready_worker_groups().items())
+
+            wg_history_map = {}
+            wg_queries = {}
+            for engine_id, wg in ready_wg_items:
+                try:
+                    history_ids = wg.get_history_ids()
+                    wg_history_map[engine_id] = set(history_ids) if history_ids else set()
+                except Exception as e:
+                    print(f"Failed to get history IDs from wg {engine_id}: {e}")
+                    wg_history_map[engine_id] = set()
+
+            for engine_id, wg in ready_wg_items:
                 wg: Union[RayWorkerGroup, RemoteAsyncXPerfGPTRollout, AsyncActorRolloutRefWorker]  # type anno
                 wg_name = wg.group_name
                 try:
@@ -525,21 +537,45 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
                     # 如果gmem不够了就不发了
                     if short > 0 and not gmem_insufficient:
                         queries: List[Query] = ray.get(
-                            self.request_manager.get_next_pending_requests.remote(short, engine_id, wg_name))
+                            self.request_manager.get_next_pending_requests_with_cache.remote(
+                                short, engine_id, wg_name, wg_history_map[engine_id]))
                         if len(queries) > 0:
-                            for q in queries:
-                                # query的分类，区分一下是hybrid_rollout/standalone_rollout/validation，避免共用engine时不知道怎么update回去对应的来源
-                                q.meta_info['query_type'] = self._request_manager_name
-                            wg.add_inflight_queries(queries)
-                            pending_size -= len(queries)
-                            fmt = (
-                                "dispatch {accumulated_value} "
-                                f"(remain={pending_size}) queries from({self._request_manager_name}) to wg({wg_name}, "
-                                f"pending={load.num_pending}, W={load.num_waiting}/P={load.num_prefilling}/D={load.num_decoding}, "
-                                f"kv={load.kv_cache_util:.2f})")
-                            self._progress_logger.log(wg_name, len(queries), fmt)
+                            wg_queries[engine_id] = queries
 
                     loads[(engine_id, wg_name)] = load
+
+                except ray.exceptions.ActorDiedError as e:
+                    # ignore actor died error, underlying replicated worker group will handle
+                    # worker group and actors lifecycle
+                    pass
+
+            for engine_id, wg in ready_wg_items:
+                wg: Union[RayWorkerGroup, RemoteAsyncXPerfGPTRollout, AsyncActorRolloutRefWorker]  # type anno
+                wg_name = wg.group_name
+                try:
+                    load = loads[(engine_id, wg_name)]
+                    gmem_insufficient = load.kv_cache_util > 0.9
+
+                    # note(hongbin): 始终让engine处于一个固定满并发的状态即可，减少动态插入新的具体进行prefill打断decode的case
+                    short = max_concurrency - load.num_prefilling - load.num_decoding - load.num_pending - load.num_waiting - len(
+                        wg_queries.get(engine_id, []))
+                    queries = wg_queries.get(engine_id, [])
+                    # 如果gmem不够了就不发了
+                    if short > 0 and not gmem_insufficient:
+                        queries.extend(
+                            ray.get(self.request_manager.get_next_pending_requests.remote(short, engine_id, wg_name)))
+                    if len(queries) > 0:
+                        for q in queries:
+                            # query的分类，区分一下是hybrid_rollout/standalone_rollout/validation，避免共用engine时不知道怎么update回去对应的来源
+                            q.meta_info['query_type'] = self._request_manager_name
+                        wg.add_inflight_queries(queries)
+                        pending_size -= len(queries)
+                        fmt = (
+                            "dispatch {accumulated_value} "
+                            f"(remain={pending_size}) queries from({self._request_manager_name}) to wg({wg_name}, "
+                            f"pending={load.num_pending}, W={load.num_waiting}/P={load.num_prefilling}/D={load.num_decoding}, "
+                            f"kv={load.kv_cache_util:.2f})")
+                        self._progress_logger.log(wg_name, len(queries), fmt)
 
                 except ray.exceptions.ActorDiedError as e:
                     # ignore actor died error, underlying replicated worker group will handle

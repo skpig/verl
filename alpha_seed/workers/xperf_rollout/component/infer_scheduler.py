@@ -71,17 +71,25 @@ class InferScheduler():
         self.metrics['page_swap_out_bs'] = 0
         self.metrics['page_swap_out_token'] = 0
         self.metrics['per_token_latency'] = []
+        self.metrics['prefill_latency'] = []
+        self.metrics['decode_latency'] = []
+        self.metrics['prefill_token_num'] = []
+        self.metrics['prefix_cache_hit_length'] = []
         self.sampler.metrics = self.metrics
         self.step_time = None
 
     def empty_cache(self):
         self.init_metrics()
 
-    def next_step(self):
+    def next_step(self, has_prefill):
         if self.enable_metrics:
             if self.step_time is not None:
                 duration = (time.time() - self.step_time) * 1000
                 self.metrics['per_token_latency'].append(duration)
+                if has_prefill:
+                    self.metrics['prefill_latency'].append(duration)
+                else:
+                    self.metrics['decode_latency'].append(duration)
             self.step_time = time.time()
 
     def init_cuda_graph(self):
