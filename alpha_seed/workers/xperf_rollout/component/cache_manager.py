@@ -137,7 +137,9 @@ class CacheManager:
                 phase0_running.append(query)
                 self.cur_context_bs_this_run += int(query.is_context_computing)
                 self.cur_bs_this_run += 1
-                query.first_scheduled_time = time.time() * 1000
+                query.recent_scheduled_time = time.time() * 1000
+                if not query.first_scheduled_time:
+                    query.first_scheduled_time = query.recent_scheduled_time
             else:
                 waiting.append(query)
 
@@ -210,8 +212,10 @@ class CacheManager:
                 status = self._update_query(query, thresold=threshold)
 
             if status == UpdateQueryStatus.SUCCESS:
-                if not query.first_scheduled_time:
-                    query.first_scheduled_time = time.time() * 1000
+                if not query.recent_scheduled_time:
+                    query.recent_scheduled_time = time.time() * 1000
+                    if not query.first_scheduled_time:
+                        query.first_scheduled_time = query.recent_scheduled_time
                 # move to running
                 phase0_running.append(query)
                 waiting.pop()

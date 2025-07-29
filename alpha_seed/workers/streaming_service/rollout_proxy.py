@@ -412,6 +412,7 @@ class ProxyMetricsLogger:
     def __init__(self):
         self.metrics = defaultdict(list)  # name -> val
         self._last_step_metrics = {}
+        self.global_step = 0
 
     def log(self, kv: dict):
         for k, v in kv.items():
@@ -419,6 +420,7 @@ class ProxyMetricsLogger:
 
     def step(self, global_step: int):
         # go to next step
+        self.global_step = global_step
         self._last_step_metrics = self.metrics
         self.metrics = defaultdict(list)
 
@@ -498,7 +500,7 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
             max_concurrency = min(max(max_concurrency, 1), 512)  # 限制在1-512范围内
 
             # 纪录负载指标
-            loads = {}
+            loads = {}  # (engine_id, wg_name) -> LoadMetric
 
             # 只将请求dispatch给ready worker group，每次循环都是最新的ready状态
             # 在dispatch过程中，worker group死了也没关系，这个request会之后被标记为stale
@@ -511,7 +513,8 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
                     # get result(including partial) from engine, update to centralized request pool
                     queries: List[Query] = wg.get_all_queries(self._request_manager_name)
                     if len(queries) > 0:
-                        self.request_manager.update_intermediate_queries.remote(queries, engine_id, time.time())
+                        self.request_manager.update_intermediate_queries.remote(queries, engine_id, wg_name,
+                                                                                time.time())
 
                     # 2. send new request to worker group (engine)
                     load: LoadMetric = wg.get_load_metrics()[0]  # noqa, dp_size always =1
@@ -522,7 +525,7 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
                     # 如果gmem不够了就不发了
                     if short > 0 and not gmem_insufficient:
                         queries: List[Query] = ray.get(
-                            self.request_manager.get_next_pending_requests.remote(short, engine_id))
+                            self.request_manager.get_next_pending_requests.remote(short, engine_id, wg_name))
                         if len(queries) > 0:
                             for q in queries:
                                 # query的分类，区分一下是hybrid_rollout/standalone_rollout/validation，避免共用engine时不知道怎么update回去对应的来源
@@ -536,7 +539,7 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
                                 f"kv={load.kv_cache_util:.2f})")
                             self._progress_logger.log(wg_name, len(queries), fmt)
 
-                    loads[engine_id] = load
+                    loads[(engine_id, wg_name)] = load
 
                 except ray.exceptions.ActorDiedError as e:
                     # ignore actor died error, underlying replicated worker group will handle
@@ -568,15 +571,15 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
     def get_step_metrics(self):
         return {}
 
-    def _trace_load_metrics(self, loads: Dict[str, LoadMetric], throughput: Dict[str, float], total: int,
+    def _trace_load_metrics(self, loads: Dict[Tuple[str, str], LoadMetric], throughput: Dict[str, float], total: int,
                             global_pending: int):
         total_decoding_num = 0
-        for wg_id, metric in loads.items():
+        for (wg_id, wg_name), metric in loads.items():
             total_decoding_num += metric.num_decoding
             tp = throughput.get(wg_id) or 0
             evt = CounterEvent(
                 name='load metrics:',
-                pid=f'{self._request_manager_name} {wg_id}',
+                pid=f'{self._request_manager_name} {wg_name}',
                 ts=metric.ts * 1e6,
                 data={
                     'kv cache%': metric.kv_cache_util,
@@ -584,7 +587,7 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
                     'decoding': metric.num_decoding,
                     'pending': metric.num_pending,
                     'waiting': metric.num_waiting,
-                    'decode throughput': tp,
+                    'decode TPS': tp,
                 },
             )
             self._tracer.trace(evt)
@@ -652,7 +655,7 @@ class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
             max_concurrency = min(max(max_concurrency, 1), 512)  # 限制在1-512范围内
 
             # 记录负载指标
-            loads = {}
+            loads = {}  # (engine_id, wg_name) -> LoadMetric
             engine_concurrency_cap = defaultdict(int)  # engine_id -> 最大可并发数
 
             # internal metrics
@@ -679,7 +682,8 @@ class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
                     # get result(including partial) from engine, update to centralized request pool
                     queries: List[Query] = wg.get_all_queries(self._request_manager_name)
                     if len(queries) > 0:
-                        self.request_manager.update_intermediate_queries.remote(queries, engine_id, time.time())
+                        self.request_manager.update_intermediate_queries.remote(queries, engine_id, wg_name,
+                                                                                time.time())
 
                     # 2. send new request to worker group (engine)
                     load: LoadMetric = wg.get_load_metrics()[0]  # noqa, dp_size always =1
@@ -705,7 +709,7 @@ class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
                     # 优先让各个wg都均匀得到相等的query，内存满了就不再放过去
                     if short > 0 and not gmem_high_water_level:
                         queries: List[Query] = ray.get(
-                            self.request_manager.get_next_pending_requests.remote(short, engine_id))
+                            self.request_manager.get_next_pending_requests.remote(short, engine_id, wg_name))
                         if len(queries) > 0:
                             for q in queries:
                                 # query的分类，区分一下是hybrid_rollout/standalone_rollout/validation，避免共用engine时不知道怎么update回去对应的来源
@@ -766,7 +770,7 @@ class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
                                 f'engine({wg_name}) W={load.num_waiting}/P={load.num_prefilling}/D={load.num_decoding}')
                             self.abort_logger.log(wg_name, len(to_abort), fmt)
 
-                    loads[engine_id] = load
+                    loads[(engine_id, wg_name)] = load
 
                 except ray.exceptions.ActorDiedError as e:
                     # ignore actor died error, underlying replicated worker group will handle
@@ -782,9 +786,10 @@ class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
                 ray.get(self.request_manager.handle_stale_requests.remote(ready_wg_ids1))
 
             # observability
-            total, pending_size = ray.get(self.request_manager.get_size.remote())  # noqa: for py-spy
-            num_ready_replicas = len(self.replicas.ready_worker_group_ids)  # noqa: for py-spy
+            total, pending_size = ray.get(self.request_manager.get_size.remote())
+            num_ready_replicas = len(self.replicas.ready_worker_group_ids)
             throughput = ray.get(self.request_manager.get_estimated_throughput.remote())
+            finished_stats = ray.get(self.request_manager.get_finished_stats.remote(self._metrics_logger.global_step))
             self._trace_load_metrics(loads, throughput, total, pending_size)
 
             loop_cost = time.time() - t0
@@ -815,7 +820,12 @@ class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
                 'loop_cost': loop_cost,
                 'gmem_insufficient_rebalanced_count': gmem_insufficient_relabenced_count,
                 'load_rebalanced_count': load_rebalanced_count,
+                'total_token_TPS': sum(throughput.values()),
+                'total_processes_queries': finished_stats.finished_size,
             })
+
+    def _aggregate_throughput(self, throughput: Dict[str, float]):
+        return
 
     def get_step_metrics(self) -> dict:
         metrics = self._metrics_logger.get_last_step_metrics()
@@ -831,6 +841,8 @@ class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
                 'rollout/proxy/loop_cost': loop_cost.mean,
                 'rollout/proxy/gmem_insufficient_rebalanced_count_total': gmem_insufficient_rebalanced_count.sum,
                 'rollout/proxy/load_rebalanced_count_total': load_rebalanced_count.sum,
+                'rollout/proxy/total_token_TPS': metrics['total_token_TPS'].mean,
+                'rollout/proxy/total_processes_queries': metrics['total_processes_queries'].maximum,
             }
         except KeyError as e:
             return {}

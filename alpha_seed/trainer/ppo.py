@@ -2227,6 +2227,12 @@ class RayPPOTrainer(object):
                 self._timeline_futures = futs
             if self.config.streaming_rollout.query_trace.enable:
                 self._rollout_query_tl.step(step)
+
+        # step on request managers
+        refs = []
         for req_mgr in self.request_managers:
-            ray.get(req_mgr.set_global_step.remote(self.global_step))
+            refs.append(req_mgr.set_global_step.remote(self.global_step))
+        if refs:
+            ray.get(refs)
+
         self._global_step = step

@@ -103,7 +103,7 @@ def _render_progress_lines(stats: List[dict]) -> str:
 
 
 def list_running_queries_str(request_manager):
-    from alpha_seed.workers.streaming_service.rollout_request_manager import RequestDigest
+    from alpha_seed.workers.streaming_service.rollout_request_manager_diagnosis import RequestDigest
     running_query_digest: List[RequestDigest] = ray.get(request_manager.get_inflight_query_digest.remote())
 
     if not running_query_digest:
@@ -112,7 +112,7 @@ def list_running_queries_str(request_manager):
     # Create rich table (3-line table style: no vertical lines)
     table = Table(show_header=True, header_style="bold magenta", box=box.SIMPLE_HEAD, width=200)
     table.add_column("Query ID", style="cyan", no_wrap=True, width=26)
-    table.add_column("Engine ID", style="green", no_wrap=True, width=26)
+    table.add_column("Engine Name", style="green", no_wrap=True, width=26)
     table.add_column("Input", style="blue", justify="right", no_wrap=True)
     table.add_column("Output", style="blue", justify="right", no_wrap=True)
     table.add_column("Aborted", style="red", justify="right", no_wrap=True)
@@ -130,12 +130,17 @@ def list_running_queries_str(request_manager):
         dt = datetime.datetime.fromtimestamp(timestamp)
         return humanize.naturaltime(dt)
 
+    # 排序
+    # 默认按照assigned (越旧越前)
+    running_query_digest.sort(key=lambda row: row.assigned_at)
+
+    # 开始渲染
     for digest in running_query_digest:
         assigned_time = format_relative_time(digest.assigned_at)
         updated_time = format_relative_time(digest.updated_at)
 
         # Use original content without truncation - let rich handle overflow
-        table.add_row(digest.query_id, digest.assigned_engine_id or 'N/A', str(digest.input_length),
+        table.add_row(digest.query_id, digest.assigned_engine_name or '-', str(digest.input_length),
                       str(digest.output_length), str(digest.aborted_count), str(digest.stale_count), assigned_time,
                       updated_time)
 
@@ -194,9 +199,39 @@ def list_all_pools_str():
 
 
 def get_statistics_str(request_manager):
-    throughput = ray.get(request_manager.get_estimated_throughput.remote())
+    from alpha_seed.workers.streaming_service.rollout_request_manager_diagnosis import FinishedEventStats
+    throughput = ray.get(request_manager.get_estimated_throughput.remote()).values() or [0]
     concurrency = ray.get(request_manager.get_concurrency.remote())
-    return f"\nEstimated Throughput: {throughput}\nConcurrency: {concurrency}\n"
+    concurrency_values = concurrency.values() or [0]
+    finished_stats: FinishedEventStats = ray.get(request_manager.get_finished_stats.remote())
+
+    # Create rich table for statistics display
+    table = Table(show_header=True, header_style="bold cyan", box=box.ROUNDED, width=80)
+    table.add_column("Metric", style="bold white", no_wrap=True, width=25)
+    table.add_column("Value", style="green", justify="right", width=20)
+    table.add_column("Unit", style="dim", width=15)
+
+    # Add throughput and concurrency rows
+    table.add_row("Active engines", f"{len(concurrency)}", "")
+    table.add_row("Rollout throughput(min)", f"{min(throughput)}", "TPS")
+    table.add_row("Rollout throughput(max)", f"{max(throughput)}", "TPS")
+    table.add_row("Rollout throughput(total)", f"{sum(throughput)}", "TPS")
+    table.add_row("Rollout concurrency(min)", f"{min(concurrency_values)}", "requests")
+    table.add_row("Rollout concurrency(max)", f"{max(concurrency_values)}", "requests")
+    table.add_row("Rollout concurrency(total)", f"{sum(concurrency_values)}", "requests")
+    table.add_row("Rollout finished events(done)", f"{finished_stats.done_count}", "requests")
+    table.add_row("Rollout finished events(wait)", f"{finished_stats.waiting_count}", "requests")
+    table.add_row("Rollout finished staging", f"{finished_stats.finished_staging_size}", "requests")
+    table.add_row("Rollout finished total", f"{finished_stats.finished_accumulated_size}", "requests")
+
+    # Render table to string
+    console = Console(width=80)
+    with console.capture() as capture:
+        console.print("\n[bold yellow]📊 Request Manager Statistics[/bold yellow]")
+        console.print(table)
+        console.print("")
+
+    return capture.get()
 
 
 def handle_client(conn, server):
@@ -342,7 +377,8 @@ def main():
 
     subparsers = parser.add_subparsers(dest='command', required=True)
 
-    subparsers.add_parser('daemon', help='start the daemon')
+    daemon_cmd = subparsers.add_parser('daemon', help='start the daemon')
+    daemon_cmd.add_argument('--namespace', default='alphaseed', help='ray cluster namespace')
     subparsers.add_parser('stop-daemon', help='start the daemon')
     subparsers.add_parser('check-daemon', help='check the daemon liveness')
 
@@ -350,13 +386,13 @@ def main():
     subparsers.add_parser('list-pools', help='List all available pools')
 
     # list running queries (requires --pool)
-    list_parser = subparsers.add_parser('list', help='List running queries')
+    subparsers.add_parser('list', help='List running queries')
 
     # list finished queries
-    finished_parser = subparsers.add_parser('list-finished', help='List finished queries')
+    subparsers.add_parser('list-finished', help='List finished queries')
 
     # watch queries
-    finished_parser = subparsers.add_parser('watch-all', help='watch query processing progress')
+    subparsers.add_parser('watch-all', help='watch query processing progress')
 
     # get query details
     get_parser = subparsers.add_parser('get', help='Get details of a query')
@@ -367,13 +403,13 @@ def main():
     evict.add_argument('query_id', help='ID of the query')
 
     # show stats
-    stats_parser = subparsers.add_parser('show-stats', help='Show statistics')
+    subparsers.add_parser('show-stats', help='Show statistics')
 
     args = parser.parse_args()
     if args.command == 'daemon':
         from alpha_seed.utils.server_client import is_local_ray_instance
         if ray.is_initialized() is False:
-            ray.init(namespace="alphaseed")
+            ray.init(namespace=args.namespace)
         if is_local_ray_instance():
             ray.get(start_server.remote())
         else:

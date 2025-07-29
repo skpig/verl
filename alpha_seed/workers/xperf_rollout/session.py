@@ -996,6 +996,7 @@ class InferenceSession:
         if stop_event is None and self.finished_num >= int(complete_ratio * len(prompts)):
             return True
         if stop_event is not None:
+            stop_event_is_set = stop_event.is_set()  # noqa: py-spy
             # wait for the max_off_policy rollout
             if (not self.unfinished_off_policy_steps_set.is_empty()) and (
                     self.unfinished_off_policy_steps_set.get_max() > self.max_off_policy_steps):
@@ -1316,7 +1317,9 @@ class InferenceSession:
                     for token_idx in range(query_next_tokens_len):
                         next_token = query_next_tokens[token_idx]
                         if len(query.new_token_ids) == 0:
-                            query.first_token_time = time.time() * 1000
+                            query.recent_first_token_time = time.time() * 1000
+                            if not query.first_token_time:
+                                query.first_token_time = query.recent_first_token_time
                         query.add_token(token_id=next_token,
                                         accepted_len=accepted_len[i] if accepted_len is not None else 0,
                                         log_prob=log_probs[i] if log_probs is not None else 0)

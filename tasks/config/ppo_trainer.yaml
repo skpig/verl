@@ -452,7 +452,7 @@ rollout_server:
 streaming_rollout:
   n_gpus_per_node: 0
   nnodes: 0  # elastic模式下这个表示1个dp group所要的node，非elastic模式下，这个表示整个静态的standalone rollout总共要的nodes，里面包含所有的dp groups
-  warmup_step: 0
+  warmup_step: 0  # 这个字段似乎没被用到
   force_eos: False # only works for batch mode
   elastic:
     enable: false
@@ -469,6 +469,7 @@ streaming_rollout:
     enable: True
     from_step: 0
     to_step: 10
+    store_decoding_output: False
     upload_to_mlx: True
   proxy:
     # 只对非elastic的server mode起作用，elastic一定是dynamic-balancing

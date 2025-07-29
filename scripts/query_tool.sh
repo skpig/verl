@@ -30,6 +30,7 @@
 export RAY_BACKEND_LOG_LEVEL=error
 SCRIPT_DIR=$(dirname "${BASH_SOURCE[0]}")
 export SOCKET_PATH=/tmp/query_tool.sock
+ALPHASEED_RAY_NAMESPACE=${ALPHASEED_RAY_NAMESPACE:-alphaseed}
 
 python3 "$SCRIPT_DIR/query_tool.py" check-daemon
 if [ ! "$?" == "0" ]; then
@@ -41,7 +42,7 @@ if [ ! -S "${SOCKET_PATH}" ]; then
   ray job submit --no-wait \
     --runtime-env="tasks/runtime_env/runtime_env_headonly.yaml" \
     -- \
-    python3 "$SCRIPT_DIR/query_tool.py" daemon
+    python3 "$SCRIPT_DIR/query_tool.py" daemon --namespace "${ALPHASEED_RAY_NAMESPACE}"
 
   MAX_WAIT=60  # 最多等待时间（秒）
   WAITED=0

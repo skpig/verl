@@ -47,11 +47,14 @@ class Query:
     # 下面几个time的单位都是ms
     created_time: float  # 此对象在client侧创建时间
     enqueue_time: float  # 对象放入request pool的时间
-    dispatch_time: float  # 从request pool取出来分配给某个engine的时刻
+    dispatch_time: float  # 最近一次从request pool取出来分配给某个engine的时刻
     received_time: float  # 在engine侧第一次收到进入队列的时间
     first_scheduled_time: float  # 开始prefill的时间
     first_token_time: float  # prefill完的时间
+    recent_scheduled_time: float  # 最近一次重新prefill时间
+    recent_first_token_time: float  # 最近一次重新prefill完的时间
     finished_time: float  # decode完的时间
+    release_count: int  # 在decode或者prefill过程中因kv cache满了或者weights变了需要重新prefill的次数
     hidden_states: Optional[torch.Tensor]
     logits: Optional[torch.Tensor]
     cur_batch_pad_token: int
@@ -100,7 +103,9 @@ class Query:
         self.meta_info = {}
 
         # timestamp units are all milliseconds
+        self.init_timestamp()
         self.reset_timestamp()
+        self.release_count = 0
         self.is_jumping = False
         self.jump_tokens = 0
         self.off_policy_steps = 0
@@ -151,6 +156,7 @@ class Query:
         self.context_shift = 0
         self.prefix_already_computed_len = 0
         self.hidden_states = None
+        self.release_count += 1
         return
 
     @call_once_method
@@ -223,18 +229,24 @@ class Query:
                 ret[f"plugin/{key}"] = val
         return ret
 
+    def init_timestamp(self):
+        """
+        query生命周期时间戳，初始化时只调用一次，中途无论发生任何调度都不改变
+        """
+        self.dispatch_time = 0  # 最近一次的调度时间戳，即使reset_compute也不改变这个值
+        self.enqueue_time = 0
+        self.created_time = time.time() * 1000
+
     def reset_timestamp(self):
         """
-        重置跟engine相关的时间戳，query生命周期时间戳不变
+        重置跟engine相关的时间戳，query生命周期时间戳不改变
         """
         self.received_time = 0
         self.first_scheduled_time = 0
         self.first_token_time = 0
+        self.recent_scheduled_time = 0
+        self.recent_first_token_time = 0
         self.finished_time = 0
-        # not yet dispatch and not yet enqueued
-        self.dispatch_time = -1
-        self.enqueue_time = -1
-        self.created_time = time.time() * 1000
 
     def clone(self) -> 'Query':
         ret = copy.copy(self)

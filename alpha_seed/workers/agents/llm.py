@@ -65,13 +65,17 @@ class AsyncLLMInterface(ABC):
 
     async def complete(self, item: DataProto, config: DictConfig, prompt: str = ''):
         completion = None
+        data, meta_info = make_reqeust_data_and_metadata(item, prompt, self.host, self.port)
         try:
-            data, meta_info = make_reqeust_data_and_metadata(item, prompt, self.host, self.port)
             completion = await self.chat_completions(data, meta_info, config)
         except asyncio.CancelledError:
             # Handle task cancellation (e.g., cleanup)
             print("Request was cancelled!!!!!!!!!!!!!!!!!!!!!!!!!!!")
             raise  # Re-raise to propagate the cancellation
+        except asyncio.TimeoutError as e:
+            uid = meta_info['uid']
+            print(f"request timeout {uid=}, {data=}")
+            raise
         except Exception as e:
             print(f"Error occurred!!!!!!!!!!!!!!!!!!", e)
             raise  # Re-raise the exception to propagate it further

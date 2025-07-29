@@ -132,6 +132,19 @@ class CompleteEvent(TracingEvent):
         return self.ts
 
 
+class CoherentCompleteEventArgs:
+
+    def __init__(self, events: List[CompleteEvent]):
+        self.events = events
+
+    def __getitem__(self, item):
+        for evt in self.events:
+            val = evt.args.get(item)
+            if val is not None:
+                return val
+        raise KeyError(f'cannot find key({item}) in events({self.events})')
+
+
 class CoherentCompleteEvent(TracingEvent):
     """
     用于表示一组连贯的CompleteEvent，他们拥有同样的pid和tid，并拼在一起
@@ -175,6 +188,10 @@ class CoherentCompleteEvent(TracingEvent):
         # 必须这样算，忽略中间的空隙，已最后一个边界为准
         end_ts = max(e.ts + e.dur for e in self.events)
         return end_ts - self.ts
+
+    @property
+    def args(self):
+        return CoherentCompleteEventArgs(self.events)
 
     def to_objects(self) -> List[dict]:
         obj = []

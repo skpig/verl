@@ -780,7 +780,7 @@ def main(config):
             check_arnold_resources(config=config)
 
     # RequestManager register center
-    rm_reg = RequestManagerRegisterCenter.init()
+    rm_reg = RequestManagerRegisterCenter.init(config)
 
     # server 模式下，gen的架构均为RequestManager+Proxy+ReplicatedWorker，所以这里把RequestManager启动起来
     if config.actor_rollout_ref.rollout.mode == "server":
