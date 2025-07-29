@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from functools import cache, partial
 from pprint import pprint
-from typing import Counter, Dict, Optional, Type
+from typing import Counter, Dict, List, Optional, Type
 
 import numpy as np
 import pandas as pd
@@ -43,7 +43,7 @@ from traitlets import default
 
 import wandb
 from verl import DataProto
-from verl.experimental.dataset.sampler import AbstractCurriculumSampler
+from verl.experimental.dataset.sampler import AbstractCurriculumSampler, AbstractBatchSampler
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.base import Worker
 from verl.single_controller.ray import (RayClassWithInitArgs, RayResourcePool,
@@ -686,14 +686,25 @@ class RayPPOTrainer:
 
         num_workers = self.config.data["dataloader_num_workers"]
 
-        self.train_dataloader = StatefulDataLoader(
-            dataset=self.train_dataset,
-            batch_size=self.config.data.get("gen_batch_size", self.config.data.train_batch_size),
-            num_workers=num_workers,
-            drop_last=True,
-            collate_fn=collate_fn,
-            sampler=train_sampler,
-        )
+        if isinstance(train_sampler, AbstractBatchSampler):
+            print("[INFO] use batch sampler")
+            self.train_dataloader = StatefulDataLoader(
+                dataset=self.train_dataset,
+                # batch_size=self.config.data.get("gen_batch_size", self.config.data.train_batch_size),
+                num_workers=num_workers,
+                collate_fn=collate_fn,
+                batch_sampler=train_sampler,
+                prefetch_factor=None,
+            )
+        else:
+            self.train_dataloader = StatefulDataLoader(
+                dataset=self.train_dataset,
+                batch_size=self.config.data.get("gen_batch_size", self.config.data.train_batch_size),
+                num_workers=num_workers,
+                drop_last=True,
+                collate_fn=collate_fn,
+                sampler=train_sampler,
+            )
 
         val_batch_size = self.config.data.val_batch_size  # Prefer config value if set
 

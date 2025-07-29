@@ -14,12 +14,15 @@
 from abc import abstractmethod
 from collections import deque
 from collections.abc import Sized
+import pprint
 from regex import F
 import torch
 from omegaconf import DictConfig
 from torch.utils.data import Sampler
 from traitlets import default
 import numpy as np
+from typing import Deque, List, Dict
+import traceback
 
 from verl import DataProto
 
@@ -43,115 +46,130 @@ class AbstractCurriculumSampler(AbstractSampler):
     def update(self, batch: DataProto) -> None:
         pass
 
+class AbstractBatchSampler(Sampler[List[int]]):
+    @abstractmethod
+    def __init__(*args, **kargs):
+        pass
 
-class MoPPSSampler(AbstractCurriculumSampler):
-    """Experimental interface for MoPPS samplers."""
+class MoPPSSampler(AbstractBatchSampler):
+    """
+    MoPPS 版 BatchSampler:
+    - 每次 __iter__ 直接返回一个长度 bsz 的索引列表
+    - 仍然暴露 update / state_dict / load_state_dict，方便训练闭环
+    """
 
-    def __init__(
-        self,
-        data_source: Sized,
-        data_config: DictConfig,
-    ):
-        super().__init__(data_source, data_config)
+    def __init__(self, data_source: Sized, data_config: DictConfig):
+        super().__init__(data_source)
+        self.data_source = data_source
         self.bsz = data_config.train_batch_size
-        print("Initializing MoPPS sampler with batch size:", self.bsz)
-
-        # some hyper
         self.temporal_decay = data_config.sampler.temporal_decay
 
-        # # assert each item has a unique index
-        # index_lst = [i['index'] for i in self.data_source]
-        # assert len(index_lst) == len(set(index_lst)), "Each item must have a unique index."
-
-        # initialize posterior weights for all prompts
+        # 后验参数
         self.alpha = torch.ones(len(data_source))
-        self.beta = torch.ones(len(data_source))
+        self.beta  = torch.ones(len(data_source))
 
-
-        self.queue = deque(maxlen=self.bsz)
+        # 这里 queue 还是存“单条索引”，方便 fill_queue 逻辑复用
+        self.queue: Deque[int] = deque(maxlen=self.bsz)
+        self.index2acc = {}
         self.fill_queue()
 
-
-    
+    # ---------- 训练后更新 ----------
     def update(self, batch: DataProto) -> None:
-        """Update the sampler with the current batch."""
-        # breakpoint()
+        """batch 内必须带 'item' (索引) 和 'score' (0/1 or 回归分数)"""
+        indices = torch.tensor(batch.non_tensor_batch["item"].astype(np.int32))
+        scores  = torch.tensor(batch.non_tensor_batch["score"])
 
-        indices = torch.tensor(batch.non_tensor_batch['item'].astype(np.int32)) # item is the index passed to the dataset.__getitem__
-        scores = torch.tensor(batch.non_tensor_batch['score'])
+        unique_idx, inverse = torch.unique(indices, return_inverse=True)
+        counts = torch.bincount(inverse, minlength=len(unique_idx))
+        score_sum = torch.bincount(inverse, weights=scores, minlength=len(unique_idx))
+        score_comp = counts.to(torch.float32) - score_sum
 
-        unique_indices, inverse_indices = torch.unique(indices, return_inverse=True)
-
-        counts = torch.bincount(inverse_indices, minlength=len(unique_indices))
-
-        score_sums = torch.bincount(inverse_indices, weights=scores, minlength=len(unique_indices))
-        score_complements = counts.to(torch.float32) - score_sums
-
-        self.alpha[unique_indices] = (
-            self.temporal_decay * self.alpha[unique_indices]
+        # 指数衰减 + 观测更新
+        self.alpha[unique_idx] = (
+            self.temporal_decay * self.alpha[unique_idx]
             + (1 - self.temporal_decay) * 1.0
-            + score_sums
+            + score_sum
         ).float()
 
-        self.beta[unique_indices] = (
-            self.temporal_decay * self.beta[unique_indices]
+        self.beta[unique_idx] = (
+            self.temporal_decay * self.beta[unique_idx]
             + (1 - self.temporal_decay) * 1.0
-            + score_complements
+            + score_comp
         ).float()
 
+        # update the accuracy tracking with the new indices and scores
+        for index, score_sum, count in zip(unique_idx.tolist(), score_sum.tolist(), counts.tolist()):
+            self.index2acc[index] = score_sum / count
+
+        # 补货
         self.fill_queue()
-    
-    def fill_queue(self) -> None:
-        k = self.bsz - len(self.queue) 
 
-        # sample from the posterior distribution
+
+    # ---------- 采样核心 ----------
+    def fill_queue(self):
+        k = self.bsz - len(self.queue)
+        if k <= 0:
+            return
+
+        print("[Sampler] fill queue")
+        # 1) 抽 posterior
         posterior = torch.distributions.Beta(self.alpha, self.beta)
-        rates = posterior.sample()
-        weights = (rates - 0.5).abs()
+        rates = posterior.sample()                 # [N]
+        weights = (rates - 0.5).abs()              # 不确定度
 
-        # sample the smallest k indices based on the weights
-        sorted_indices = torch.topk(weights, k=k, largest=False).indices
+        # 2) 选最小权重的 k 个样本补入队列
+        #    注意：可能出现重复，为避免刷屏可随机打乱或加去重
+        new_indices = torch.topk(weights, k=k, largest=False).indices
+        print("[Sampler] rates:")
+        pprint.pprint(rates[new_indices].tolist())
+        print("[Sampler] acc:")
+        pprint.pprint([self.index2acc.get(idx, -1) for idx in new_indices])
+        self.queue.extend(new_indices.tolist())
 
-        self.queue.extend(sorted_indices.tolist())
-
+    # ---------- 迭代 ----------
     def __iter__(self):
-        """Iterate over the sampler."""
-        # breakpoint()
-        def dynamic_iter():
-            while True:
-                assert len(self.queue) > 0, "Queue should not be empty."
-                yield self.queue.popleft()
-        
-        return iter(dynamic_iter())
-    
+        while True:
+            # # 若不够一个 batch 就补货
+            if len(self.queue) < self.bsz:
+                print("[Sampler] Not enough items in queue, filling...")
+                # print current runtime stack
+                traceback.print_stack()
+                self.fill_queue()
+            # assert len(self.queue) >= self.bsz
+
+            # 组装一个 batch
+            print("[Sampler] Pop queue")
+            batch = [self.queue.popleft() for _ in range(self.bsz)]
+            yield batch
+
+    # ---------- 状态保存 / 恢复 ----------
     def state_dict(self):
         return {
             "alpha": self.alpha,
-            "beta": self.beta,
+            "beta":  self.beta,
             "queue": list(self.queue),
-            "bsz": self.bsz,
-            "temporal_decay": self.temporal_decay
+            "bsz":   self.bsz,
+            "temporal_decay": self.temporal_decay,
         }
-    
+
     def load_state_dict(self, state):
-        self.alpha = state['alpha']
-        self.beta = state['beta']
-        self.queue = deque(state['queue'], maxlen=self.bsz)
-        self.bsz = state['bsz']
-        self.temporal_decay = state['temporal_decay']
+        self.alpha = state["alpha"]
+        self.beta  = state["beta"]
+        self.queue = deque(state["queue"], maxlen=self.bsz)
+        # 其余字段按需加载
+        # self.bsz = state['bsz']
+        # self.temporal_decay = state['temporal_decay']
 
-
-class PrioritySampler(AbstractCurriculumSampler):
-    """Experimental interface for priority samplers."""
+class PrioritySampler(AbstractBatchSampler):
+    """Priority-based BatchSampler that returns batches of indices."""
 
     def __init__(
         self,
         data_source: Sized,
         data_config: DictConfig,
     ):
-        super().__init__(data_source, data_config)
         self.bsz = data_config.train_batch_size
-        print("Initializing Priority sampler with batch size:", self.bsz)
+        print("Initializing Priority BatchSampler with batch size:", self.bsz)
 
         self.index2acc = {}
         # we always assert drop last
@@ -176,7 +194,7 @@ class PrioritySampler(AbstractCurriculumSampler):
         score_sums = torch.bincount(inverse_indices, weights=scores, minlength=len(unique_indices))
         score_complements = counts.to(torch.float32) - score_sums
 
-        # update the queue with the new indices and scores
+        # update the accuracy tracking with the new indices and scores
         for index, score_sum, count in zip(unique_indices.tolist(), score_sums.tolist(), counts.tolist()):
             if index not in self.index2acc:
                 self.index2acc[index] = score_sum / count
@@ -187,11 +205,11 @@ class PrioritySampler(AbstractCurriculumSampler):
         
     def fill_queue(self) -> None:
         """Fill the queue with the highest priority items."""
-
-        if len(self.queue) >= self.bsz:
+        k = self.bsz - len(self.queue)
+        if k <= 0:
             return
 
-        k = self.bsz - len(self.queue)
+        assert len(self.index2acc) == self.data_item_num, "Should not fill queue before calculate acc for all indices"
 
         id_tensor = np.array(list(self.index2acc.keys()))
         acc_tensor = np.array(list(self.index2acc.values()))
@@ -213,14 +231,16 @@ class PrioritySampler(AbstractCurriculumSampler):
             self.queue.append(item.item())
 
     def __iter__(self):
-        """Iterate over the sampler."""
-        # breakpoint()
-        def dynamic_iter():
-            while True:
-                assert len(self.queue) > 0, "Queue should not be empty."
-                yield self.queue.popleft()
-        
-        return iter(dynamic_iter())
+        """Iterate over the sampler, yielding batches of indices."""
+        while True:
+            # Ensure we have enough items in the queue for a full batch
+            # if len(self.queue) < self.bsz:
+            #     self.fill_queue()
+            assert len(self.queue) >= self.bsz
+            
+            # Create a batch by popping bsz items from the queue
+            batch = [self.queue.popleft() for _ in range(self.bsz)]
+            yield batch
     
     def state_dict(self):
         return {
