@@ -844,9 +844,9 @@ def main(config):
 
     # elastic resource pool managers
     # FIXME(lixiang): arnold 扩缩容api不能并发调用，这里先假设只有1个弹性池，之后再改
-    if config.elastic.enable:
+    if config.elastic.hpa.enable:
         elastic_res_managers = []
-        for elastic_pool in config.elastic.pools:
+        for elastic_pool in config.elastic.hpa.pools:
             name = elastic_pool.name
             mgr = ArnoldTrialResourceManager(name, elastic_pool)
             elastic_res_managers.append(mgr)
@@ -899,15 +899,15 @@ def check_arnold_resources(config):
         # maybe not on arnold environment? skip the check
         return
 
-    traner_resources = config.trainer.nnodes * config.trainer.n_gpus_per_node
+    trainer_resources = config.trainer.nnodes * config.trainer.n_gpus_per_node
     r = config.streaming_rollout
     if r.elastic.enable:
-        # compute minimum requets
+        # compute minimum requests
         rollout_resources = r.nnodes * r.n_gpus_per_node * r.elastic.min_replicas
     else:
         rollout_resources = r.nnodes * r.n_gpus_per_node
     validator_resources = config.streaming_validator.nnodes * config.streaming_validator.n_gpus_per_node
-    total_required_gpus = traner_resources + rollout_resources + validator_resources
+    total_required_gpus = trainer_resources + rollout_resources + validator_resources
 
     assert total_required_gpus <= total_gpus, f'Require {total_required_gpus} GPUs, but only have {total_gpus} GPUs'
 
@@ -1187,7 +1187,12 @@ def config_to_trainer_kwargs(config):
 
         grm_remote_client = None
         if config.trainer.use_grm and config.trainer.use_remote_grm:
-            grm_remote_client = GRMService.options(name='grm_remote_client').remote(
+            grm_resources = {}
+            stable_pool_names = config.elastic.resource_pools.stable_pool_names
+            stable_pool_name = stable_pool_names[0] if stable_pool_names else ''
+            if stable_pool_name and not is_local_ray_instance():
+                grm_resources = {stable_pool_name: 1}
+            grm_remote_client = GRMService.options(name='grm_remote_client', resources=grm_resources).remote(
                 config=config, tokenizer_path=config.actor_rollout_ref.model.path)
 
         reward_fn = RewardManager(tokenizer=tokenizer,

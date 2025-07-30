@@ -8,7 +8,7 @@ import copy
 import torch
 
 from mono_rl import DataProto
-from alpha_seed.utils.dataset.dist_data_util import release_ref_counts, get_image_manager
+from alpha_seed.utils.dataset.dist_data_util import release_ref_counts, get_image_manager, init_or_get_image_manager
 from alpha_seed.utils.reward_score import NON_AGENT_PLACE_HOLDER_SCORE
 
 logger = logging.getLogger(__file__)
@@ -100,7 +100,9 @@ class RolloutPool:
         self.rid2score_std = dict()
 
         self.pool_with_grad = queue.Queue()
-        self.image_manager = get_image_manager()
+        stable_pool_names = self.config.elastic.resource_pools.stable_pool_names
+        stable_pool_name = stable_pool_names[0] if stable_pool_names else ''
+        self.image_manager = init_or_get_image_manager(stable_pool_name)
         # self.pool_with_grad_ready_batch = queue.Queue()
 
     def get_ready_pool_size(self):

@@ -14,6 +14,7 @@ from transformers import AutoImageProcessor
 from alpha_seed.utils.ckpt.hdfs import download_config_and_tokenizer
 from .utils import convert_tensor_to_numpy
 from verl.utils.fs import copy_local_path_from_hdfs
+from ..server_client import is_local_ray_instance
 
 
 def write_objects_to_bin(objects_list, filename="data.bin"):
@@ -318,8 +319,15 @@ class ImageManager:
         return refs
 
 
+def init_or_get_image_manager(stable_pool_name: str):
+    resources = {}
+    if stable_pool_name and not is_local_ray_instance():
+        resources = {stable_pool_name: 1}
+    return ImageManager.options(name="ImageManager", get_if_exists=True, resources=resources).remote()
+
+
 def get_image_manager():
-    return ImageManager.options(name="ImageManager", get_if_exists=True).remote()
+    return ray.get_actor("ImageManager")
 
 
 def load_image_data_dist(non_tensor_batch):

@@ -150,7 +150,6 @@ python3 tasks/main_ppo.py \
     +actor_rollout_ref.rollout.max_off_policy_steps=5 \
     actor_rollout_ref.rollout.rollout_pool.warmup_step=1 \
     actor_rollout_ref.rollout.mode=server \
-    elastic.enable=False \
     streaming_rollout.elastic.enable=False \
     streaming_rollout.nnodes=0 \
     streaming_rollout.n_gpus_per_node=${N_GPUS_PER_NODE_STREAMING}

@@ -3,7 +3,7 @@ import pytest
 from omegaconf import OmegaConf
 from tests.test_utils import ray_fixture, gpu_allocator, get_config, get_tokenizer, create_rollout_manager
 from alpha_seed.utils.dataset.vlm_rl_dataset import load_and_transform_save_image
-from alpha_seed.utils.dataset.dist_data_util import get_image_manager
+from alpha_seed.utils.dataset.dist_data_util import get_image_manager, init_or_get_image_manager
 from transformers import AutoProcessor
 from verl.utils.fs import copy_local_path_from_hdfs
 from mono_rl import DataProto
@@ -80,7 +80,7 @@ def test_vlm_gen(monkeypatch, gpu_allocator, ray_fixture):
     config = get_config(override_config)
     tokenizer = get_tokenizer(config)
     tokenizer.padding_side = 'left'
-    image_manager = get_image_manager()
+    image_manager = init_or_get_image_manager('')
     model_path = copy_local_path_from_hdfs(config.actor_rollout_ref.model.path)
     processor = AutoProcessor.from_pretrained(model_path)
     batch = get_batch(config, tokenizer, processor, model_path)

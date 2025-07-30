@@ -15,7 +15,7 @@ import cupy as cp
 import numpy as np
 import torch
 import torch.distributed as dist
-from ucxx.exceptions import UCXConnectionResetError, UCXCanceledError
+from ucxx.exceptions import UCXConnectionResetError, UCXCanceledError, UCXEndpointTimeoutError
 
 from alpha_seed.utils.debug.aiomonitor import get_aiomonitor_cls
 from alpha_seed.workers.xperf_rollout.utils.base_weights_communicator import WeightsCommunicator
@@ -305,7 +305,10 @@ class UCXWeightsCommunicator(WeightsCommunicator):
                         del send_buf
 
                     cp.get_default_memory_pool().free_all_blocks()
-            except (UCXConnectionResetError, UCXCanceledError) as e:
+            except (UCXConnectionResetError, UCXCanceledError, UCXEndpointTimeoutError) as e:
+                # ignore client side error and break the dead loop
+                #   UCXEndpointTimeoutError: any potential hand in client side
+                #   (others): client crashed
                 if self.standalone:
                     await self.relay_server_update_lock.release_read(ep)
                 break

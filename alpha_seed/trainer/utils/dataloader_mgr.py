@@ -54,7 +54,8 @@ class DataLoaderMgr:
             "processor": self.processor,
             'image_key': self.config.data.image_key,
             'tokenizer_file': self.config.actor_rollout_ref.model.path,
-            'dist_image': self.config.data.dist_image
+            'dist_image': self.config.data.dist_image,
+            'stable_pool_names': self.config.elastic.resource_pools.stable_pool_names,
         } if self.is_vlm else {}
         data_auto_repeat = self.config.data.get('data_auto_repeat', False)
 

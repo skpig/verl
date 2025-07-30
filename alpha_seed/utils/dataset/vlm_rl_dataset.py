@@ -27,11 +27,14 @@ import verl.utils.torch_functional as verl_F
 from PIL import Image
 
 from alpha_seed.utils.dataset.rl_dataset import RLHFDataset
-from alpha_seed.utils.dataset.dist_data_util import DistImageLoader, get_image_manager, get_local_inputs, save_dataproto_image_data_dist
+from alpha_seed.utils.dataset.dist_data_util import DistImageLoader, get_image_manager, get_local_inputs, \
+    save_dataproto_image_data_dist, init_or_get_image_manager
 
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.image_utils import ImageInput
 from transformers.utils import TensorType
+
+from alpha_seed.utils.server_client import is_local_ray_instance
 
 
 def convert_prompts_into_input_ids(prompts,
@@ -202,7 +205,9 @@ class RLHFDatasetVL(RLHFDataset):
         self.image_key = kwargs.pop('image_key', 'image')
         self.tokenizer_file = kwargs.pop('tokenizer_file', None)
         self.dist_image = kwargs.pop('dist_image', True)
-        self.image_manager = get_image_manager()
+        self.stable_pool_names = kwargs.pop('stable_pool_names', [])
+        stable_pool_name = self.stable_pool_names[0] if self.stable_pool_names else ''
+        self.image_manager = init_or_get_image_manager(stable_pool_name)
         super().__init__(*args, **kwargs)
 
     def process(self,
@@ -261,7 +266,22 @@ class RLHFDatasetVL(RLHFDataset):
         return BatchFeature(data={"input_ids": input_ids, "attention_mask": attention_mask, **image_inputs})
 
     def _read_files_and_tokenize_dist(self):
-        nodes = [node for node in ray.nodes() if node["Alive"] and node['Resources'].get('GPU', 0) > 0]
+        is_local_ray = is_local_ray_instance()
+
+        def satisfied(node):
+            # 这个约束是为了不要让DistImageLoader调度到spot资源上
+            res = node['Resources']
+            if res.get('GPU') <= 0:
+                return False
+            if is_local_ray or not self.stable_pool_names:
+                # local或没有pool约束则不检查是否有对应的pool资源
+                return True
+            # 否则满足任意一个pool的都要
+            return any(res.get(pool, 0) > 0 for pool in self.stable_pool_names)
+
+        nodes = [node for node in ray.nodes() if node["Alive"] and satisfied(node)]
+        assert len(nodes) > 0, (f"should have at least one satisfied node in the cluster. "
+                                f"total {len(ray.nodes())} nodes. check the criteria whether too strict")
         self.image_loaders = []
         image_keys = [self.image_key]
         for i, node in enumerate(nodes):
@@ -423,7 +443,8 @@ class RLHFDatasetVL(RLHFDataset):
         self.new_dataset_flag = True if hasattr(self, 'original_parquet_files') else False
         # resume dataframe if not it's serialized in data.pt
         if self.new_dataset_flag:
-            self.image_manager = get_image_manager()
+            stable_pool_name = self.stable_pool_names[0] if self.stable_pool_names else ''
+            self.image_manager = init_or_get_image_manager(stable_pool_name)
             self._download(origin=True)
             self._read_files_and_tokenize()
         else:

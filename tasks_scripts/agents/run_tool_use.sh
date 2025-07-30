@@ -198,4 +198,3 @@ python3 tasks/main_ppo.py \
     # streaming_rollout.elastic.min_replicas=12 \
     # streaming_rollout.elastic.max_replicas=12 \
     # streaming_rollout.proxy.poll_internal_seconds=1 \
-    # elastic.enable=False

@@ -29,7 +29,8 @@ class ValidateManager(object):
     The workergroup fetches latest weights from main task when it finishes the last iteration of validation
     """
 
-    def __init__(self, config, logger, val_dataloader, tokenizer, use_rm, val_reward_fn, rollout_manager) -> None:
+    def __init__(self, config, logger, val_dataloader, tokenizer, use_rm, val_reward_fn, rollout_manager,
+                 image_manager) -> None:
         self.config = config
         self.is_vlm = self.config.data['image_key'] is not None
         self.logger = logger
@@ -45,7 +46,7 @@ class ValidateManager(object):
             print('Using fast result on wandb mode.')
         assert len(self.val_dataloader) == 1, "for bon metrics computation"
         self.rollout_manager = rollout_manager
-        self.image_manager = get_image_manager()
+        self.image_manager = image_manager
 
     def validate(self,
                  val_epoch=1,

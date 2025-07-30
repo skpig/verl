@@ -9,6 +9,7 @@ import ray
 from omegaconf import DictConfig
 from transformers import PreTrainedTokenizer
 
+from alpha_seed.utils.server_client import is_local_ray_instance
 from alpha_seed.utils.tokenizer.async_tokenizer import AsyncTokenizer
 from alpha_seed.workers.agents.handlers import TaskContext, GlobalState
 from alpha_seed.workers.agents.handlers.base import AsyncAgent, functional_agent, ThreadedAgent
@@ -98,10 +99,16 @@ class RayActorExecutor(ExecutorBase):
         self.max_workers = config.rollout_server.agent.max_workers
         self.worker_max_concurrency = config.rollout_server.agent.worker_max_concurrency
         worker_oob_concurrency = 10  # 允许worker额外的并发度，用于控制指令和其他非rollout调用
+        resources = {}
+        stable_pool_names = config.elastic.resource_pools.stable_pool_names
+        stable_pool_name = stable_pool_names[0] if stable_pool_names else ''
+        if stable_pool_name and not is_local_ray_instance():
+            resources = {stable_pool_name: 1}
         RemoteAgentWorker = ray.remote(AgentWorker)
         self.workers = [
             RemoteAgentWorker.options(scheduling_strategy="SPREAD",
                                       max_concurrency=self.worker_max_concurrency + worker_oob_concurrency,
+                                      resources=resources,
                                       name=f"{name}-agent_worker_{idx}").remote(config, tokenizer, host, port,
                                                                                 request_manager_name, idx)
             for idx in range(self.max_workers)

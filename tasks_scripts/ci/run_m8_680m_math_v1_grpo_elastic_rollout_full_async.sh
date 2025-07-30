@@ -192,5 +192,5 @@ python3 tasks/main_ppo.py \
     streaming_rollout.elastic.enable=True \
     streaming_rollout.elastic.min_replicas=1 \
     streaming_rollout.elastic.max_replicas=1 \
-    streaming_rollout.elastic.stable_pool_name=worker \
-    elastic.enable=False
+    streaming_rollout.elastic.stable_pool_name=worker
+

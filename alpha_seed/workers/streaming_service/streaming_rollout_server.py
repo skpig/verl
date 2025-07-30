@@ -35,8 +35,7 @@ from alpha_seed.workers.streaming_service.protocol import (ChatCompletionRequest
                                                            ErrorResponse)
 from alpha_seed.workers.streaming_service.rollout_request_manager import RequestManagerRegisterCenter
 from alpha_seed.workers.streaming_service.streaming_utils import get_node_ip, get_free_port
-from alpha_seed.workers.xperf_rollout.component.query import AsyncQuery, Query
-from alpha_seed.utils.dataset.dist_data_util import save_query_image_data_dist, get_image_manager
+from alpha_seed.workers.xperf_rollout.component.query import Query
 
 
 class OpenAIProxy(ABC):
@@ -44,7 +43,6 @@ class OpenAIProxy(ABC):
     def __init__(self):
         self.app = FastAPI()
         self.setup_routes()
-        self.image_manager = get_image_manager()
 
     @abstractmethod
     async def create_chat_completion(self, request: ChatCompletionRequest, raw_request: Request):

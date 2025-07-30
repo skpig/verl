@@ -554,16 +554,23 @@ streaming_validator:
     enable: false
     stable_pool_name: ""
 
-# 这是资源池的弹性伸缩
+# 这是资源池的配置伸缩
 elastic:
-  enable: false
-  pools:
-    - name: elasticworker # merlin trial弹性伸缩池的role
-      gpu_type: L20  # 从ray resource里读不到的时候会从这里读，暂时影响不大
-      n_gpus_per_node: 0  # 从ray resource里读不到的时候会从这里读
-      hard_min: 1 # 缩容时可缩到的最小值
-      hard_max: 200  # 扩容时可缩到的物理最大值，一般是一个不太会达到的很大的值，暂时写一个数字避免扩爆
-      buffer_size: 1  # extra idle buffer nodes
+  # 这里只定义资源池名称，用于全局各个actor调度时指定label用，如果不需要指定任何资源池，改成空list
+  resource_pools:
+    stable_pool_names: ['byted_stable_resource']  # merlin里默认会用这两个名字
+    elastic_pool_names: ['byted_unstable_resource']
+
+  # HPA相关定义
+  hpa:
+    enable: false  # node HPA总开关
+    pools:
+      - name: elasticworker # merlin trial弹性伸缩池的role
+        gpu_type: L20  # 从ray resource里读不到的时候会从这里读，暂时影响不大
+        n_gpus_per_node: 0  # 从ray resource里读不到的时候会从这里读
+        hard_min: 1 # 缩容时可缩到的最小值
+        hard_max: 200  # 扩容时可缩到的物理最大值，一般是一个不太会达到的很大的值，暂时写一个数字避免扩爆
+        buffer_size: 1  # extra idle buffer nodes
 
 convert_ckpt_to_omnistore_task:
   enable: False

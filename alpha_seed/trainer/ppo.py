@@ -58,7 +58,7 @@ from alpha_seed.utils import ndtimeline
 from alpha_seed.utils.functional import print_dataproto_size
 from alpha_seed.utils.tracking_utils import async_process_batch_samples_to_wandb
 from alpha_seed.utils.multithreads import ThreadPoolManager
-from alpha_seed.utils.dataset.dist_data_util import load_image_data_dist, get_image_manager
+from alpha_seed.utils.dataset.dist_data_util import load_image_data_dist, get_image_manager, init_or_get_image_manager
 from alpha_seed.workers.actors.checkpoint.utils import find_latest_ckpt_path_
 from alpha_seed.trainer.utils.dataloader_mgr import DataLoaderMgr
 from alpha_seed.workers.actors.sample_pool import SamplePool
@@ -827,7 +827,9 @@ class RayPPOTrainer(object):
             self.request_managers = get_all_request_manager_actors()
 
         self.enable_actor_critic_spatial_mux = self.config.trainer.get("enable_actor_critic_spatial_mux", False)
-        self.image_manager = get_image_manager()
+        stable_pool_names = self.config.elastic.resource_pools.stable_pool_names
+        stable_pool_name = stable_pool_names[0] if stable_pool_names else ''
+        self.image_manager = init_or_get_image_manager(stable_pool_name)
 
         safely_do(lambda: report_job_config(config), rank=0)()
 
@@ -869,7 +871,8 @@ class RayPPOTrainer(object):
 
     def _create_validation_manager(self):
         self.validation_manager = ValidateManager(self.config, self.logger, self.val_dataloader, self.tokenizer,
-                                                  self.use_rm, self.val_reward_fn, self.rollout_manager)
+                                                  self.use_rm, self.val_reward_fn, self.rollout_manager,
+                                                  self.image_manager)
 
     def init_workers(self, kv_store=None, ckpt_global_uploader=None, from_step=0, resume_folder=None):
         """Init resource pool and worker group"""
