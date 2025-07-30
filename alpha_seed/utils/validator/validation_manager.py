@@ -112,7 +112,13 @@ class ValidateManager(object):
             for val_idx, test_data in enumerate(self.val_dataloader):
                 test_batch = DataProto.from_single_dict(test_data)
                 if 'images_bytes_ref' in test_batch.non_tensor_batch:
-                    test_batch = self.rollout_manager.hybrid_wg.load_and_transform_save_image(test_batch)
+                    test_batch_padded, pad_size = pad_dataproto_to_divisor(
+                        test_batch, size_divisor=self.rollout_manager.hybrid_wg.world_size)
+                    test_batch_padded = self.rollout_manager.hybrid_wg.load_and_transform_save_image(test_batch_padded)
+                    if pad_size > 0:
+                        test_batch = test_batch_padded.slice(end=-pad_size)
+                    else:
+                        test_batch = test_batch_padded
 
                 prompt_names = test_batch.non_tensor_batch['prompt_names'][0]
                 num_prompts_per_data = len(prompt_names)
