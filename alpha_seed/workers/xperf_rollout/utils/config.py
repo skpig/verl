@@ -163,7 +163,8 @@ def _get_p6dense_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
         "tokenizer_path": tokenizer.name_or_path,
         "rope_mode": config.rope_scaling['rope_type'],
         "rope_base": int(config.rope_theta),
-        "rope_scale": int(config.rope_scaling['factor'])
+        "rope_scale": int(config.rope_scaling['factor']),
+        "q_head_times": 1 if not hasattr(config, 'query_head_scale_factor') else config.query_head_scale_factor,
     }
     if (head_dim := getattr(config, 'head_dim', None)) is not None:
         xperf_config['head_dim'] = head_dim
