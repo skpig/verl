@@ -21,6 +21,7 @@ data:
   BITWISE_RESUME: True  # this enables by default. If you seed checkpoint load fails, set to false
   data_auto_repeat: False # Set to true and automatically repeat the dataset by total_epochs times, mainly for no drop_last
   actor_training_batch_size: ${data.train_batch_size}
+  num_workers: 0 # number of subprocess for dataloader, 0 for using main process
 
   special_tokens:
     think_begin: <think>
@@ -484,6 +485,12 @@ trainer:
     strategy: hard
     min_score: -1.0
     max_score: 1.0
+  queued_rollout_config: # train-gen split style rollout
+    enable: False
+    chunk_size: 32
+    concurrency: ${data.train_batch_size}
+    wait_condition: pool_ready_count # [pool_ready_count]
+    max_buffer_size: -1
   offload_train_memory: False
   load_train_batch_path: null
   save_train_batch_dir: null

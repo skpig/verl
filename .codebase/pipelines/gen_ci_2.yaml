@@ -42,5 +42,6 @@ jobs:
           - |
             pytest -n 4 -v --timeout=600 \
               tests/rollout/test_rollout_manager.py::test_train_generate \
-              tests/rollout/test_rollout_manager.py::test_val_generate
+              tests/rollout/test_rollout_manager.py::test_val_generate \
+              tests/rollout/test_rollout_manager.py::test_queued_generate
           - ray stop --force

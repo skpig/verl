@@ -98,21 +98,28 @@ class DataLoaderMgr:
         train_batch_size = self.config.data.train_batch_size if (
             not self.config.algorithm.priority_sample
         ) else self.config.data.train_batch_size * self.config.algorithm.get('priority_buffer_size', 4)
+        assert not (self.config.trainer.league_training_config.enable and
+                    self.config.trainer.queued_rollout_config.enable)
         if self.config.trainer.league_training_config.enable:
             train_batch_size *= self.config.trainer.league_training_config.buffer_size
+        if self.config.trainer.queued_rollout_config.enable:
+            assert not self.config.algorithm.priority_sample, "queued rollout incompatible with priority sample"
+            train_batch_size = self.config.trainer.queued_rollout_config.chunk_size
 
         sampler = self._get_train_sampler()
         self.train_dataloader = DataLoader(dataset=self.train_dataset,
                                            batch_size=train_batch_size,
                                            sampler=sampler,
                                            drop_last=True,
-                                           collate_fn=self.collate_fn)
+                                           collate_fn=self.collate_fn,
+                                           num_workers=self.config.data.num_workers)
 
         self.val_dataloader = DataLoader(dataset=self.val_dataset,
                                          batch_size=len(self.val_dataset),
                                          shuffle=self.config.data.shuffle,
                                          drop_last=True,
-                                         collate_fn=self.collate_fn)
+                                         collate_fn=self.collate_fn,
+                                         num_workers=self.config.data.num_workers)
 
         assert len(self.train_dataloader) >= 1
         assert len(self.val_dataloader) >= 1

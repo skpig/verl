@@ -82,6 +82,11 @@ def get_common_config():
             "project_name": "alpha_seed_test",
             "experiment_name": "rollout_manager",
             "logger": ['console'],
+            "queued_rollout_config": {
+                "enable": False,
+                "chunk_size": 1,
+                "concurrency": 4,
+            }
         },
         "streaming_rollout": {
             "nnodes": 0,
@@ -142,6 +147,7 @@ def test_train_generate(set_common_envs, gpu_allocator, ray_fixture, complete_ra
     config.actor_rollout_ref.rollout.mode = 'server' if is_server else 'batch'
     config.actor_rollout_ref.rollout.weights_communicator = weights_communicator
     config.actor_rollout_ref.rollout.complete_ratio = complete_ratio
+    config.actor_rollout_ref.rollout.rollout_pool.warmup_step = 1 if complete_ratio == 0.0 else 0
     config.streaming_rollout.elastic.enable = elastic
     if elastic:
         config.streaming_rollout.elastic.stable_pool_name = 'worker'
@@ -218,6 +224,7 @@ def test_streaming_train_val(set_common_envs, gpu_allocator, ray_fixture, is_ser
     config.actor_rollout_ref.rollout.mode = 'server' if is_server else 'batch'
     config.actor_rollout_ref.rollout.complete_ratio = 0.0 if train_standalone else 1.0
     config.actor_rollout_ref.rollout.tensor_model_parallel_size = 1
+    config.actor_rollout_ref.rollout.rollout_pool.warmup_step = 1 if train_standalone else 0
     config.streaming_rollout.nnodes = 1 if train_standalone else 0
     config.streaming_rollout.n_gpus_per_node = 1
     config.streaming_validator.nnodes = 1 if val_standalone else 0
@@ -276,6 +283,44 @@ def test_streaming_train_val(set_common_envs, gpu_allocator, ray_fixture, is_ser
     finally:
         val_stop.set()
         val_fut.result()
+        rollout_manager.stop_servers()
+
+
+@pytest.mark.parametrize("gpu_allocator", [4], indirect=True)
+def test_queued_generate(set_common_envs, gpu_allocator, ray_fixture):
+    config = get_common_config()
+    config.trainer.queued_rollout_config.enable = True
+    config.actor_rollout_ref.rollout.mode = 'server'
+    config.actor_rollout_ref.rollout.weights_communicator = "nccl"
+    config.actor_rollout_ref.rollout.complete_ratio = 0.0
+    config.streaming_rollout.elastic.enable = False
+    config.streaming_rollout.nnodes = 1
+    config.streaming_validator.nnodes = 0
+
+    tokenizer = get_tokenizer(config)
+    batch = get_dataproto(config, tokenizer)
+    rollout_manager = create_rollout_manager(config)
+
+    input_batch = copy.deepcopy(batch)
+
+    def train_batch_iter_fn():
+        while True:
+            for item in input_batch.chunk(len(input_batch)):
+                yield item
+
+    train_batch_iter = train_batch_iter_fn()
+
+    try:
+        for i in range(2):
+            batch = copy.deepcopy(input_batch)
+            batch = rollout_manager.train_generate_queued(train_batch_iter, step=i)
+            print('batch:', batch)
+            out_text = decode_output(batch, tokenizer)
+            print(out_text)
+            _check_score(out_text, batch)
+    except:
+        raise
+    finally:
         rollout_manager.stop_servers()
 
 

@@ -128,6 +128,7 @@ def test_train_elastic_generate(set_common_envs, gpu_allocator, ray_fixture, com
     config.actor_rollout_ref.rollout.mode = 'server'
     config.actor_rollout_ref.rollout.weights_communicator = weights_communicator
     config.actor_rollout_ref.rollout.complete_ratio = complete_ratio
+    config.actor_rollout_ref.rollout.rollout_pool.warmup_step = 1 if complete_ratio == 0.0 else 0
     config.streaming_rollout.elastic.enable = True
     config.streaming_rollout.elastic.stable_pool_name = 'worker'
     config.streaming_rollout.elastic.min_replicas = 1

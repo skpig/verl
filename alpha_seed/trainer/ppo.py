@@ -1697,19 +1697,46 @@ class RayPPOTrainer(object):
         start_step = self.global_step
         rollout_counter = 0
         rollout_pool_metrics = {}
+
+        def train_batch_generator_fn():
+            while True:
+                for batch_dict in self.train_dataloader:
+                    batch: DataProto = DataProto.from_single_dict(batch_dict)
+                    yield batch
+
+        def image_preprocess(batch, metrics):
+            if 'images_bytes_ref' in batch.non_tensor_batch:
+                with Timer(name='image_process', logger=None) as image_process_timer:
+                    batch = self.actor_rollout_wg.load_and_transform_save_image(batch)
+                metrics['timing/image_process'] = image_process_timer.last
+            return batch
+
+        train_batch_generator = train_batch_generator_fn()
+
         while True:
             start_data_time = time.time()
-            for batch_dict in self.train_dataloader:
-                metrics = {}
-                metrics['timing/dataloader'] = time.time() - start_data_time
-                with Timer(name='step', logger=None) as step_timer:
-                    # hybrid generate (on policy)
-                    if self.config.trainer.load_train_batch_path is None:
-                        batch: DataProto = DataProto.from_single_dict(batch_dict)
-                        if 'images_bytes_ref' in batch.non_tensor_batch:
-                            with Timer(name='image_process', logger=None) as image_process_timer:
-                                batch = self.actor_rollout_wg.load_and_transform_save_image(batch)
-                            metrics['timing/image_process'] = image_process_timer.last
+            metrics = {}
+            with Timer(name='step', logger=None) as step_timer:
+                # hybrid generate (on policy)
+                if self.config.trainer.load_train_batch_path is None:
+                    if self.config.trainer.queued_rollout_config.enable:
+
+                        def train_batch_generator_with_preprocess_fn():
+                            for batch in train_batch_generator:
+                                batch = self._preprocess_batch_before_gen(batch, metrics, start_step)
+                                batch = image_preprocess(batch, metrics)
+                                yield batch
+
+                        train_batch_generator_with_preprocess = train_batch_generator_with_preprocess_fn()
+                        with Timer(name='generate', logger=None) as timer:
+                            batch = self.rollout_manager.train_generate_queued(train_batch_generator_with_preprocess,
+                                                                               step=self.global_step,
+                                                                               metrics=metrics)
+                        metrics['timing/generate'] = timer.last
+                    else:
+                        batch: DataProto = next(train_batch_generator)
+                        batch = image_preprocess(batch, metrics)
+                        metrics['timing/dataloader'] = time.time() - start_data_time
 
                         if self.config.algorithm.priority_sample:
                             self.sample_pool.fill_sample_pool(batch)
@@ -1744,11 +1771,12 @@ class RayPPOTrainer(object):
                             batch.save_to_disk(local_path)
                             hput(local_path, self.config.trainer.save_train_batch_dir)
                             print(f'Saving train batch from {local_path} to {self.config.trainer.save_train_batch_dir}')
-                    else:
-                        print(f'Using loaded train batch {self.config.trainer.load_train_batch_path} for training')
-                        batch_local_filepath = copy_local_path_from_hdfs(self.config.trainer.load_train_batch_path)
-                        batch = DataProto.load_from_disk(batch_local_filepath)
+                else:
+                    print(f'Using loaded train batch {self.config.trainer.load_train_batch_path} for training')
+                    batch_local_filepath = copy_local_path_from_hdfs(self.config.trainer.load_train_batch_path)
+                    batch = DataProto.load_from_disk(batch_local_filepath)
 
+                with Timer(name='train', logger=None) as train_timer:
                     batch.meta_info['global_step'] = self.global_step
                     self.update_len_per_query(batch, metrics)
                     # xperf rollout engine: use current policy to compute log probs
@@ -2163,29 +2191,30 @@ class RayPPOTrainer(object):
                         remote_client = ray.get_actor('remote_client')
                         num_remaining_results = ray.get(remote_client.get_num_pending_outputs.remote())
                         metrics['remote_client/remaining_results'] = num_remaining_results
+                metrics['timing/train'] = train_timer.last
 
-                metrics['timing/step'] = step_timer.last + metrics['timing/dataloader']
-                # TODO: make a canonical logger that supports various backend
-                self.logger.log(data=metrics, step=self.global_step)
-                release_object(self.image_manager)
-                start_data_time = time.time()
+            metrics['timing/step'] = step_timer.last + metrics['timing/dataloader']
+            # TODO: make a canonical logger that supports various backend
+            self.logger.log(data=metrics, step=self.global_step)
+            release_object(self.image_manager)
+            start_data_time = time.time()
 
-                self.global_step += 1
-                if self.global_step >= self.total_training_steps:
+            self.global_step += 1
+            if self.global_step >= self.total_training_steps:
 
-                    # perform validation after training
-                    if self.val_reward_fn is not None:
-                        val_metrics = self.validation_manager.validate(is_async=False, global_step=self.global_step)
-                        pprint(f'Final validation metrics: {val_metrics}')
+                # perform validation after training
+                if self.val_reward_fn is not None:
+                    val_metrics = self.validation_manager.validate(is_async=False, global_step=self.global_step)
+                    pprint(f'Final validation metrics: {val_metrics}')
 
-                    # wait for the last ckpt to finish uploading if there are any
-                    ray.get(self.ckpt_global_uploader.final_wait_all_steps.remote())
+                # wait for the last ckpt to finish uploading if there are any
+                ray.get(self.ckpt_global_uploader.final_wait_all_steps.remote())
 
-                    # wait for async tracking
-                    for t in self.async_tracking_running_tasks:
-                        t.result()  # call this to collect the result(including error traceback)
-                    wandb.finish()
-                    return
+                # wait for async tracking
+                for t in self.async_tracking_running_tasks:
+                    t.result()  # call this to collect the result(including error traceback)
+                wandb.finish()
+                return
 
     def do_ndtimeline_action(self, *args, **kwargs):
         """Call a function on each actor.

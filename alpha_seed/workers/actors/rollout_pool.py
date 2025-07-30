@@ -103,6 +103,9 @@ class RolloutPool:
         self.image_manager = get_image_manager()
         # self.pool_with_grad_ready_batch = queue.Queue()
 
+    def get_ready_pool_size(self):
+        return self.bon_ready_batch.qsize() * self.num_bon
+
     def get_train_batch(self):
         return self.fn_map[self.strategy]()
 

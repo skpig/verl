@@ -326,23 +326,39 @@ class RolloutManager:
                                                                         prefix="standalone_gen_batch_output")
             self.standalone_batch_resume = load_dataproto_fn(path=remote_global_step_folder, prefix="standalone_batch")
 
-    def train_generate(
+    def _normalize_done_tasks(self, done_tasks: List[asyncio.Task]) -> List[DataProto]:
+        """Parse done tasks to ready batch"""
+        ready_batch = []
+        for task in done_tasks:
+            if task.exception():
+                raise task.exception()
+            else:
+                task_result = task.result()
+                if isinstance(task_result, DataProto):
+                    ready_batch.append(task_result)
+                elif isinstance(task_result, list):
+                    ready_batch.extend(task_result)
+                else:
+                    raise ValueError(
+                        f"AgentLoop only support DataProto or list[DataProto] at this moment, got {type(task_result)}")
+        return ready_batch
+
+    def train_generate_fill(
         self,
         batch: DataProto,
         step: int,
         save_dataproto_fn: SaveDataProtoFunc,
         is_warmup_step: bool,
         metrics: Dict = None,
-    ) -> DataProto:
+    ) -> None:
         """
         :param batch: current training input batch
         :param step: current training step
         :param save_dataproto_fn: function for saving dataproto in hdfs for resuming
         :param is_warmup_step: if True, batch is used to warmup rollout pool
         :param metrics: metrics dict
-        :return: batch to be train after generation
+        :return: None
         """
-        step_start = time.time()
         assert self._initialized
 
         assert (prompt_len := batch.batch['input_ids'].shape[1]
@@ -388,9 +404,25 @@ class RolloutManager:
         if len(ready_batch) > 0:
             RolloutPool.dynamic_call(self.rollout_pool, "fill_rollout_pool", ready_batch)
 
+    def train_generate_fetch(
+        self,
+        step: int,
+        is_warmup_step: bool,
+        metrics: Dict = None,
+    ) -> DataProto:
+        """
+        :param is_warmup_step: if True, wait all running batch to finish
+        :param metrics: metrics dict
+        :param step: current train step
+        :return: batch to be train after generation
+        """
+        assert self._initialized
+
+        metrics = {} if metrics is None else metrics
+
         if is_warmup_step:
-            print(f"warmup gen step #{step}, elapsed: {time.time() - step_start}")
             return None
+
         # get the training batch
         train_batch = RolloutPool.dynamic_call(self.rollout_pool, "get_train_batch")
         batch = DataProto.concat(train_batch)
@@ -426,8 +458,120 @@ class RolloutManager:
             proxy_metrics = self.train_rollout_proxy.get_step_metrics()
             metrics.update(proxy_metrics)
 
+        if 'step' in batch.non_tensor_batch:
+            min_gen_start_step = batch.non_tensor_batch['step'].min()
+            mean_gen_start_step = batch.non_tensor_batch['step'].mean()
+            metrics["rollout/max_off_policy_steps"] = step - min_gen_start_step
+            metrics["rollout/mean_off_policy_steps"] = step - mean_gen_start_step
+
         pprint(f"training batches {len(batch)}.")
-        print(f"gen step #{step}, elapsed: {time.time() - step_start}")
+        return batch
+
+    def train_generate(
+        self,
+        batch: DataProto,
+        step: int,
+        save_dataproto_fn: SaveDataProtoFunc,
+        is_warmup_step: bool,
+        metrics: Dict = None,
+    ) -> DataProto:
+        """
+        :param batch: current training input batch
+        :param step: current training step
+        :param save_dataproto_fn: function for saving dataproto in hdfs for resuming
+        :param is_warmup_step: if True, wait all running batch to finish
+        :param metrics: metrics dict
+        :return: batch to be train after generation
+        """
+
+        if self.config.actor_rollout_ref.rollout.get("complete_ratio", 1.0) == 0.0:
+            assert self.rollout_pool_warmup_step >= 1, "fully async must have warmup_step>0"
+
+        step_start = time.time()
+        self.train_generate_fill(batch, step, save_dataproto_fn, is_warmup_step, metrics)
+        batch = self.train_generate_fetch(step, is_warmup_step, metrics)
+        print(f"[INFO] gen step #{step}, elapsed: {time.time() - step_start}")
+        return batch
+
+    def train_generate_queued(self, train_batch_iter, step: int, metrics: Dict = None) -> DataProto:
+        """Train generation in queued style 
+        :param train_batch_iter: generator to get gen input batch
+        :param step: current training step
+        :param metrics: metrics dict
+        :return: batch to be train after generation
+        """
+        if metrics is None:
+            metrics = {}
+
+        queued_rollout_config = self.config.trainer.queued_rollout_config
+        assert self._use_server, "train_generate_queued only valid for server mode"
+        assert self.train_standalone_wg is not None, "train_generate_queued only valid with standalone rollout"
+        complete_ratio = self.config.actor_rollout_ref.rollout.get("complete_ratio", 1.0)
+        assert complete_ratio == 0.0, "train_generate_queued only valid for complete_ratio=0.0"
+        assert not self.config.actor_rollout_ref.rollout.rollout_pool.clear_rollout_pool, "train_generate_queued incompatible with clear_rollout_pool=True"
+
+        def check_condition():
+            wait_condition = queued_rollout_config.wait_condition
+            if wait_condition == 'pool_ready_count':
+                return_batch_size = self.config.data.train_batch_size * self.config.trainer.league_training_config.buffer_size * self.config.actor_rollout_ref.rollout.get(
+                    "num_bon", 1)
+                ready_count = RolloutPool.dynamic_call(self.rollout_pool, "get_ready_pool_size")
+                return ready_count >= return_batch_size
+            else:
+                raise ValueError(f'Invalid wait_condition={wait_condition}')
+
+        async def wait_for_pending():
+            assert isinstance(self.pending_batch,
+                              list), f"expect pending_batch to be list, got {type(self.pending_batch)}"
+            done, pending = await asyncio.wait(self.pending_batch, return_when=asyncio.FIRST_COMPLETED)
+            self.pending_batch = list(pending)
+            return self._normalize_done_tasks(done)
+
+        max_concurrency = queued_rollout_config.concurrency
+        max_buffer_size = queued_rollout_config.max_buffer_size
+
+        dataloader_time = 0
+        if self.train_standalone_wg is not None:
+            with Timer(name="update_rollout_server_queued", logger=None) as timer:
+                xperf_metrics = self.update_standalone_server_weights(is_train=True)
+                dummy_batch = DataProto(meta_info={"xperf_metrics": xperf_metrics[0]})
+                record_xperf_metrics(dummy_batch, metrics, self.logger, step, prefix="standalone")
+            print(f"[INFO] {step} train generate queued[update weights and restart] {timer.last}")
+            metrics["timing/update_rollout_server_queued"] = timer.last
+        with self.suppress_update_standalone(is_train=True):
+            xperf_metrics = []
+            with self.enable_hybrid_server_gen_ctx(is_train=True, xperf_metrics=xperf_metrics):
+                while True:
+                    if len(self.pending_batch) >= max_concurrency:
+                        # at maximum concurrency, check condition to start training
+                        if check_condition():
+                            break
+                        ready_batch = asyncio.run_coroutine_threadsafe(wait_for_pending(), self.loop).result()
+                        RolloutPool.dynamic_call(self.rollout_pool, "fill_rollout_pool", ready_batch)
+                    else:
+                        # if ready count in the pool is greater than max_buffer_size, stop adding new gen batch
+                        if max_buffer_size > 0:
+                            ready_count = RolloutPool.dynamic_call(self.rollout_pool, "get_ready_pool_size")
+                            if ready_count > max_buffer_size:
+                                assert check_condition(
+                                ), "ready_count > max_buffer_size but wait_condition not satisfied, please increase max_buffer_size"
+                                break
+
+                        # push new data to rollout server
+                        with Timer(name='dataloader', logger=None) as timer:
+                            batch: DataProto = next(train_batch_iter)
+                        dataloader_time += timer.last
+
+                        self.train_generate_fill(batch,
+                                                 step=step,
+                                                 save_dataproto_fn=None,
+                                                 is_warmup_step=True,
+                                                 metrics=metrics)
+
+            dummy_batch = DataProto(meta_info={"xperf_metrics": xperf_metrics[0]})
+            record_xperf_metrics(dummy_batch, metrics, self.logger, step, prefix="hybrid")
+        metrics['timing/dataloader'] = dataloader_time
+        batch: DataProto = self.train_generate_fetch(step, is_warmup_step=False, metrics=metrics)
         return batch
 
     def val_generate(self, batch: DataProto, step: int = 0, is_async: bool = False, metrics: Dict = None) -> DataProto:
@@ -672,8 +816,9 @@ class RolloutManager:
             print(f"[INFO] {step} generate streaming[update weights and restart] {timer.last}")
             metrics["timing/update_rollout_server"] = timer.last
 
-            dummy_batch = DataProto(meta_info={"xperf_metrics": xperf_metrics[0]})
-            record_xperf_metrics(dummy_batch, metrics, self.logger, step, prefix="standalone")
+            if xperf_metrics is not None:
+                dummy_batch = DataProto(meta_info={"xperf_metrics": xperf_metrics[0]})
+                record_xperf_metrics(dummy_batch, metrics, self.logger, step, prefix="standalone")
 
         global_handler = select_handler_fn(self.config.rollout_server.handler,
                                            external_lib=self.config.rollout_server.external_lib)
@@ -756,31 +901,19 @@ class RolloutManager:
             done, pending = list(done), list(pending)
             return done, pending
 
-        with self.enable_hybrid_server_gen_ctx(is_train=True):
+        xperf_metrics: List = []
+        with self.enable_hybrid_server_gen_ctx(is_train=True, xperf_metrics=xperf_metrics):
             # print(f"[INFO] {step} generate streaming[update weights and restart] {timer.last}")
             # metrics["timing/update_rollout_server"] = timer.last
             done, pending = asyncio.run_coroutine_threadsafe(submit_and_wait(), self.loop).result()
-        xperf_metrics = self.finalize_server_gen("hybrid")
         pending = list(pending)
-        results = []
-        for task in done:
-            if task.exception():
-                raise task.exception()
-            else:
-                task_result = task.result()
-                if isinstance(task_result, DataProto):
-                    results.append(task_result)
-                elif isinstance(task_result, list):
-                    results.extend(task_result)
-                else:
-                    raise ValueError(
-                        f"AgentLoop only support DataProto or list[DataProto] at this moment, got {type(task_result)}")
-
-        ready_batch = results
+        ready_batch = self._normalize_done_tasks(done)
         finished_num = len(ready_batch)
 
-        dummy_batch = DataProto(meta_info={"xperf_metrics": self._merge_xperf_metrics(ready_batch, xperf_metrics[0])})
-        record_xperf_metrics(dummy_batch, metrics, self.logger, step, prefix="hybrid")
+        if len(xperf_metrics) > 0:
+            dummy_batch = DataProto(
+                meta_info={"xperf_metrics": self._merge_xperf_metrics(ready_batch, xperf_metrics[0])})
+            record_xperf_metrics(dummy_batch, metrics, self.logger, step, prefix="hybrid")
         metrics["rollout/standalone_completed_batch"] = finished_num
         metrics["rollout/standalone_incompleted_batch"] = len(pending_batch) + len(gen_batch) - finished_num
         return ready_batch, pending
@@ -846,10 +979,9 @@ class RolloutManager:
             return ready_batch
 
         xperf_metrics: List[dict] = [{}]
-        with nullcontext() if is_standalone else self.enable_hybrid_server_gen_ctx(is_train=False):
+        with nullcontext() if is_standalone else self.enable_hybrid_server_gen_ctx(is_train=False,
+                                                                                   xperf_metrics=xperf_metrics):
             ready_batch = asyncio.run_coroutine_threadsafe(_submit_and_wait(), self.loop).result()
-        if not is_standalone:
-            xperf_metrics = self.finalize_server_gen("hybrid")
 
         # flatten ready_batch
         results = []
@@ -922,6 +1054,7 @@ class RolloutManager:
                 text = self.tokenizer.decode(filtered_ids, skip_special_tokens=False)
                 decoded.append(text)
             gen_batch.non_tensor_batch[key] = np.array(decoded, dtype=object)
+        gen_batch.non_tensor_batch['step'] = np.array([step] * len(gen_batch), dtype=object)
         sample_kwargs = (self.config.actor_rollout_ref.rollout.train_generate_kwargs
                          if is_train else self.config.actor_rollout_ref.rollout.val_generate_kwargs)
         sample_kwargs_dict = OmegaConf.to_container(sample_kwargs, resolve=True)
@@ -1005,30 +1138,55 @@ class RolloutManager:
         await asyncio.Future()
 
     @contextmanager
-    def enable_hybrid_server_gen_ctx(self, is_train: bool):
+    def enable_hybrid_server_gen_ctx(self, is_train: bool, xperf_metrics: List = None):
         """Set hybrid server to be ready for gen"""
+        flag_key = f'_hybrid_server_enabled__is_train_{is_train}'
+        if getattr(self, flag_key, False):
+            # No effect if already enabled
+            yield
+            return
+        setattr(self, flag_key, True)
         replicas = self.train_replicas if is_train else self.val_replicas
         replicas.set_replica_ready_state(name='hybrid', ready=True)
         with self._hybrid_wg_lock:
             with hybrid_enable_server_ctx(self.hybrid_wg):
                 yield
         replicas.set_replica_ready_state(name='hybrid', ready=False)
+        ret_xperf_metrics = self.stop_hybrid_server_and_get_metrics()
+        if xperf_metrics is not None:
+            xperf_metrics[:] = ret_xperf_metrics
+        setattr(self, flag_key, False)
 
-    def finalize_server_gen(self, role: str = "hybrid"):
+    @contextmanager
+    def suppress_update_standalone(self, is_train: bool):
+        flag_key = f"suppress_update_standalone__is_train_{is_train}"
+        setattr(self, flag_key, True)
+        yield
+        setattr(self, flag_key, False)
+
+    def stop_hybrid_server_and_get_metrics(self):
         """After exiting ctx, collect metrics"""
-        if role == "hybrid":
-            return self.hybrid_wg.release_running_queries_and_return_metrics()
-        elif role == "standalone" and not self._rollout_elastic_enabled and self.train_standalone_wg is not None:
-            return self.train_standalone_wg.return_metrics()
+        return self.hybrid_wg.release_running_queries_and_return_metrics()
+
+    def get_standalone_metrics(self, standalone_wg):
+        if not self._rollout_elastic_enabled and standalone_wg is not None:
+            return standalone_wg.return_metrics()
         return [{}]
 
-    def update_standalone_server_weights(self, is_train: bool):
+    def update_standalone_server_weights(self, is_train: bool) -> Union[List, None]:
+        flag_key = f"suppress_update_standalone__is_train_{is_train}"
+        if getattr(self, flag_key, False):
+            # suppressed update, do nothing
+            return None
         standalone_wg = self.train_standalone_wg if is_train else self.val_standalone_wg
         standalone_role = "standalone_rollout" if is_train else "standalone_validator"
+
+        if standalone_wg is None:
+            return None
 
         with server_update_weights_ctx(standalone_wg):
             with self._hybrid_wg_lock:
                 _update_standalone_weights(self.hybrid_wg, standalone_wg, standalone_role,
                                            self.threadsafe_nccl_comm if not is_train else None)
-                standalone_metric = self.finalize_server_gen("standalone")
+                standalone_metric = self.get_standalone_metrics(standalone_wg)
         return standalone_metric
