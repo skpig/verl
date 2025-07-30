@@ -164,6 +164,7 @@ class DataParallelPPOActor(BasePPOActor):
 
             batch_size, seqlen = input_ids.shape
             seqlen_rmpad = input_ids_rmpad.size(1)
+            acceptance_matrix = None
 
             # forward
             if self.use_ce_loss_fusion and not compute_entropy:

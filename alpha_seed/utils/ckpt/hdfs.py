@@ -41,6 +41,9 @@ def get_local_dir(hdfs_path: str, cache_dir: str) -> str:
 
 
 def copy_local_path_from_hdfs_files(src: str, files: list, cache_dir=None, filelock='.file.lock', verbose=False) -> str:
+    # when use hdfs fuse & hot update, cp to local path will cause error in run >= 1
+    if isinstance(src, str) and src.startswith('/mnt/hdfs'):
+        return src
     assert src[-1] != '/', f'Make sure the last char in src is not / because it will cause error. Got {src}'
     os.makedirs(cache_dir, exist_ok=True)
     assert os.path.exists(cache_dir)

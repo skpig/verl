@@ -153,7 +153,7 @@ class AsyncXPerfGPTRollout(object):
         from omegaconf import OmegaConf
         print(f'local_path: {local_path}')
 
-        from seed_models import P4Config, P5Config, P6Config
+        from seed_models import P4Config, P5Config, P6Config, M8Config
 
         # tokenizer_path = os.path.join(local_path, 'tokenizer')
         self.tokenizer = AutoTokenizer.from_pretrained(local_path, trust_remote_code=False)

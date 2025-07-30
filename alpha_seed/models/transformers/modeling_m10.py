@@ -525,52 +525,57 @@ def m10_model_forward(
             all_aux_losses += (layer_outputs[-1],)
 
     if self.mtp_mode is not None:
-        for mtp_idx in range(1, self.mtp_n_heads):
-            decoder_layer = self.model["layers"][self.config.num_hidden_layers + mtp_idx - self.mtp_n_heads]
-            mtp_embs = self.model["mtp_embs"][mtp_idx]
-            mtp_ce_norms = self.model["mtp_ce_norms"][mtp_idx]
+        grad_condition = getattr(self.config, "mtp_next_head_decay", 0.0) > 0
+        if grad_condition:
+            grad_condition = False
+            assert not grad_condition, "mtp loss not supported yet"
+        with torch.set_grad_enabled(grad_condition):
+            for mtp_idx in range(1, self.mtp_n_heads):
+                decoder_layer = self.model["layers"][self.config.num_hidden_layers + mtp_idx - self.mtp_n_heads]
+                mtp_embs = self.model["mtp_embs"][mtp_idx]
+                mtp_ce_norms = self.model["mtp_ce_norms"][mtp_idx]
 
-            # mtp embedding projection
-            """
-            input_embeds [1, seqlen, hidden_dim]
-            roll so that tokens < n predict n
-            input_ids = [a,b,c,d,e,f,g] cu_seqlens = [0,3,7]
-            mtp_input_ids 1 = [b,c,_,e,f,g,_] cu_seqlens = [0,3,7]
-            mtp_input_ids 2 = [c,_,_,f,g,_,_] cu_seqlens = [0,3,7]
-            """
+                # mtp embedding projection
+                """
+                input_embeds [1, seqlen, hidden_dim]
+                roll so that tokens < n predict n
+                input_ids = [a,b,c,d,e,f,g] cu_seqlens = [0,3,7]
+                mtp_input_ids 1 = [b,c,_,e,f,g,_] cu_seqlens = [0,3,7]
+                mtp_input_ids 2 = [c,_,_,f,g,_,_] cu_seqlens = [0,3,7]
+                """
 
-            mtp_embeds = mtp_embeds_lst[mtp_idx - 1]
-            mtp_hidden_states = mtp_embs(hidden_states, mtp_embeds)
+                mtp_embeds = mtp_embeds_lst[mtp_idx - 1]
+                mtp_hidden_states = mtp_embs(hidden_states, mtp_embeds)
 
-            mtp_outputs = decoder_layer(
-                mtp_hidden_states,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                cu_seqlens=cu_seqlens,
-                past_key_value=past_key_values,
-                output_attentions=output_attentions,
-                output_router_logits=output_router_logits,
-                output_aux_losses=output_aux_losses,
-                use_cache=use_cache,
-                position_embeddings=position_embeddings,
-                max_seqlen=max_seqlen,
-            )
+                mtp_outputs = decoder_layer(
+                    mtp_hidden_states,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    cu_seqlens=cu_seqlens,
+                    past_key_value=past_key_values,
+                    output_attentions=output_attentions,
+                    output_router_logits=output_router_logits,
+                    output_aux_losses=output_aux_losses,
+                    use_cache=use_cache,
+                    position_embeddings=position_embeddings,
+                    max_seqlen=max_seqlen,
+                )
 
-            mtp_hidden_states = mtp_outputs[0]
+                mtp_hidden_states = mtp_outputs[0]
 
-            # mtp head norm
-            mtp_hidden_states = mtp_ce_norms(mtp_hidden_states)
+                # mtp head norm
+                mtp_hidden_states = mtp_ce_norms(mtp_hidden_states)
 
-            all_mtp_hidden_states += (mtp_hidden_states,)
+                all_mtp_hidden_states += (mtp_hidden_states,)
 
-            if output_attentions:
-                all_self_attns += (mtp_outputs[1],)
+                if output_attentions:
+                    all_self_attns += (mtp_outputs[1],)
 
-            if output_router_logits:
-                all_router_logits += (mtp_outputs[-2 if output_aux_losses else -1],)
+                if output_router_logits:
+                    all_router_logits += (mtp_outputs[-2 if output_aux_losses else -1],)
 
-            if output_aux_losses:
-                all_aux_losses += (mtp_outputs[-1],)
+                if output_aux_losses:
+                    all_aux_losses += (mtp_outputs[-1],)
 
     if self.mtp_mode is not None:
         hidden_states = self.model["mtp_ce_norms"][0](hidden_states)
