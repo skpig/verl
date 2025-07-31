@@ -14,6 +14,7 @@
 """
 Create a XPerfGPT Rollout
 """
+import traceback
 
 from alpha_seed.workers.xperf_rollout.utils.base_weights_communicator import WeightsCommunicator
 from mono_rl import DataProto
@@ -113,6 +114,9 @@ class AsyncXPerfGPTRollout(object):
         self.stop_event = threading.Event()
         self.exit_event = threading.Event()
         self.is_async_generate = self.config.mode == "server" or self.role == "rollout_server"
+        self.process_thread = None
+        self._process_thread_last_error = None
+        self._process_thread_last_tb = None
 
     def switch_mode(self, to_async: bool):
         """
@@ -377,13 +381,15 @@ class AsyncXPerfGPTRollout(object):
         Get all history ids of the queries that have been processed by this rollout engine.
         This is used to check if the query has been processed before.
         """
-        assert self.process_thread.is_alive(), "process thread is not alive, please check the traceback in log"
+        assert self._process_thread_last_error is None, \
+            (f"process thread has error({self._process_thread_last_error}), please check the traceback in log.\n"
+             f"{self._process_thread_last_tb}")
         return self.inference_engine.get_valid_history_ids()
 
     def get_all_queries(self, query_type: str) -> List[Query]:
-        if not self.process_thread.is_alive():
-            return []
-        assert self.process_thread.is_alive(), "process thread is not alive, please check the traceback in log"
+        assert self._process_thread_last_error is None, \
+            (f"process thread has error({self._process_thread_last_error}), please check the traceback in log.\n"
+             f"{self._process_thread_last_tb}")
         return self.inference_engine.get_all_queries(query_type=query_type, retain_finished=False)
 
     def get_load_metrics(self) -> LoadMetric:
@@ -577,7 +583,9 @@ class AsyncXPerfGPTRollout(object):
                     self.gen_loop_exited.set()
                 except Exception as e:
                     self._dump_context()
-                    raise (e)
+                    self._process_thread_last_error = e
+                    self._process_thread_last_tb = traceback.format_exc()
+                    raise
 
     def generate(self):
         torch.cuda.set_device(int(os.getenv('LOCAL_RANK', '0')))
@@ -602,7 +610,9 @@ class AsyncXPerfGPTRollout(object):
                     self.gen_loop_exited.set()
                 except Exception as e:
                     self._dump_context()
-                    raise (e)
+                    self._process_thread_last_error = e
+                    self._process_thread_last_tb = traceback.format_exc()
+                    raise
 
             response_outputs = []
             response_log_probs = []
@@ -650,7 +660,9 @@ class AsyncXPerfGPTRollout(object):
             try:
                 return self.output_queue.get(timeout=1)
             except Exception:
-                assert self.process_thread.is_alive()
+                assert self._process_thread_last_error is None, \
+                    (f"process thread has error({self._process_thread_last_error}), please check the traceback in log.\n"
+                     f"{self._process_thread_last_tb}")
 
 
 from omegaconf import DictConfig

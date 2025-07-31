@@ -2,7 +2,7 @@ import asyncio
 import copy
 import threading
 import time
-from typing import Dict, List, Optional, Tuple, Union, Container
+from typing import Dict, List, Optional, Tuple, Union, Container, Set
 from dataclasses import dataclass, field
 from collections import defaultdict
 
@@ -149,7 +149,7 @@ class RequestPool:
                                              batch_size,
                                              engine_id: str,
                                              wg_name: str,
-                                             cache_ids: List[str] = None) -> Dict[str, Request]:
+                                             cache_ids: Set[str] = None) -> Dict[str, Request]:
         # 每个engine实例来这里pull空闲的请求
         # 简单处理，暂不允许并发获取请求
         cool_down_seconds = 10
@@ -506,7 +506,7 @@ class RequestManager:
         return [r.query for r in next_reqs.values()]
 
     def get_next_pending_requests_with_cache(self, batch_size: int, engine_id: str, wg_name: str,
-                                             cache_ids: List[str]) -> List[Query]:
+                                             cache_ids: Set[str]) -> List[Query]:
         next_reqs = self.req_pool.get_next_pending_requests_with_cache(batch_size, engine_id, wg_name, cache_ids)
         return [r.query for r in next_reqs.values()]
 

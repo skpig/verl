@@ -25,7 +25,7 @@ class ElasticRolloutManager:
         self._hybrid_rollout_addresses_fut = hybrid_rollout_address
 
     def init_elastic_rollout(self, hybrid_replica: ReplicatedRayWorkerGroup):
-        rollout_proxy_config = self.config.streaming_rollout.proxy
+        rollout_config = self.config.streaming_rollout
         # 每个rollout_worker用1个gpu，每个gpu对应1个rank
         res_shape = [self.config.streaming_rollout.n_gpus_per_node] * self.config.streaming_rollout.nnodes
         tp_size = sum(res_shape)
@@ -65,14 +65,15 @@ class ElasticRolloutManager:
         res_shape = [self.config.streaming_rollout.n_gpus_per_node] * self.config.streaming_rollout.nnodes
         stable_pool_name = self.config.streaming_rollout.elastic.stable_pool_name
         elastic_pool_name = self.config.streaming_rollout.elastic.elastic_pool_name
-        assert stable_pool_name is not None and stable_pool_name != '', \
-            'streaming_rollout.elastic.stable_pool_name is not set'
         stable_pool_res = [stable_pool_name]
         elastic_pool_res = [elastic_pool_name]
         if is_local_ray_instance():
             # local ray的debug trial因为没有那些role的定义，所以这里不额外指定调度
             stable_pool_res = []
             elastic_pool_res = []
+        else:
+            assert stable_pool_name is not None and stable_pool_name != '', \
+                'you have enabled the elastic rollout, but streaming_rollout.elastic.stable_pool_name is not set'
 
         # 稳定池资源和副本配置
         stable_res_pool = RayResourcePool(
@@ -116,8 +117,7 @@ class ElasticRolloutManager:
             persistent={'elastic': elastic_replicas},
         )
         # 封装给worker group的接口代理
-        rollout_proxy = BalancedRolloutWorkerGroupProxy(replicas, hybrid_rollout_addrs, 'train_rollout',
-                                                        rollout_proxy_config)
+        rollout_proxy = BalancedRolloutWorkerGroupProxy(replicas, hybrid_rollout_addrs, 'train_rollout', rollout_config)
 
         # initialize rollout horizontal auto scaling control handle
         elastic_pool_name = self.config.streaming_rollout.elastic.elastic_pool_name

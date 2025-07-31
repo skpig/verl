@@ -499,7 +499,7 @@ trainer:
 
   elastic:
     enable: false
-    stable_pool_name: ""
+    stable_pool_name: byted_stable_resource
 
 rollout_server:
   handler: "math/aiohttp" # ["math/aiohttp"]
@@ -523,8 +523,8 @@ streaming_rollout:
   force_eos: False # only works for batch mode
   elastic:
     enable: false
-    stable_pool_name: ""
-    elastic_pool_name: elasticworker
+    stable_pool_name: byted_stable_resource
+    elastic_pool_name: byted_unstable_resource
     min_replicas: 1  # 最少的副本数，最小值会放在稳定资源池上跑，超过最小值的部分会放到弹性资源池上跑
     max_replicas: 100
     metrics_sampling_seconds: 5
@@ -552,7 +552,7 @@ streaming_validator:
   nnodes: 0
   elastic:
     enable: false
-    stable_pool_name: ""
+    stable_pool_name: byted_stable_resource
 
 # 这是资源池的配置伸缩
 elastic:

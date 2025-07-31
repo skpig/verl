@@ -1,8 +1,11 @@
 import asyncio
 import inspect
+import os
 import random
+import sys
 import threading
 import time
+import traceback
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass
@@ -454,7 +457,7 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
         self._stop_server_ts = 0
         self._update_worker_start_ts = 0
         self._request_manager_name = request_manager_name
-        self.poll_interval = config.poll_internal_seconds
+        self.poll_interval = self.config.proxy.poll_internal_seconds
         self._progress_logger = DebounceAccumulatedLogger()
         self._metrics_logger = ProxyMetricsLogger()
 
@@ -507,16 +510,20 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
             t0 = time.time()
             ready_wg_items = list(self.replicas.get_ready_worker_groups().items())
 
-            wg_history_map = {}
-            wg_queries = {}
+            wg_history_map: Dict[str, Set[str]] = {}
+            wg_queries: Dict[str, List[Query]] = {}  # engine_id -> 记录分给engine的queries
             for engine_id, wg in ready_wg_items:
                 try:
                     history_ids = wg.get_history_ids()
                     wg_history_map[engine_id] = set(history_ids) if history_ids else set()
-                except Exception as e:
-                    print(f"Failed to get history IDs from wg {engine_id}: {e}")
-                    wg_history_map[engine_id] = set()
+                except ray.exceptions.ActorDiedError as e:
+                    # ignore actor died error, underlying replicated worker group will handle
+                    # worker group and actors lifecycle
+                    pass
+                except ray.exceptions.RayTaskError as e:
+                    self._teardown(wg, e)
 
+            # 第一轮先按照kvcache亲和性分发
             for engine_id, wg in ready_wg_items:
                 wg: Union[RayWorkerGroup, RemoteAsyncXPerfGPTRollout, AsyncActorRolloutRefWorker]  # type anno
                 wg_name = wg.group_name
@@ -530,9 +537,8 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
 
                     # 2. send new request to worker group (engine)
                     load: LoadMetric = wg.get_load_metrics()[0]  # noqa, dp_size always =1
-                    gmem_insufficient = load.kv_cache_util > self.config.gmem_insufficient_threshold
+                    gmem_insufficient = load.kv_cache_util > self.config.proxy.gmem_insufficient_threshold
 
-                    # note(hongbin): 始终让engine处于一个固定满并发的状态即可，减少动态插入新的具体进行prefill打断decode的case
                     short = max_concurrency - load.num_prefilling - load.num_decoding - load.num_pending - load.num_waiting
                     # 如果gmem不够了就不发了
                     if short > 0 and not gmem_insufficient:
@@ -548,7 +554,10 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
                     # ignore actor died error, underlying replicated worker group will handle
                     # worker group and actors lifecycle
                     pass
+                except ray.exceptions.RayTaskError as e:
+                    self._teardown(wg, e)
 
+            # 如果engine还有空闲则再分其他的一些
             for engine_id, wg in ready_wg_items:
                 wg: Union[RayWorkerGroup, RemoteAsyncXPerfGPTRollout, AsyncActorRolloutRefWorker]  # type anno
                 wg_name = wg.group_name
@@ -556,7 +565,6 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
                     load = loads[(engine_id, wg_name)]
                     gmem_insufficient = load.kv_cache_util > 0.9
 
-                    # note(hongbin): 始终让engine处于一个固定满并发的状态即可，减少动态插入新的具体进行prefill打断decode的case
                     short = max_concurrency - load.num_prefilling - load.num_decoding - load.num_pending - load.num_waiting - len(
                         wg_queries.get(engine_id, []))
                     queries = wg_queries.get(engine_id, [])
@@ -581,6 +589,8 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
                     # ignore actor died error, underlying replicated worker group will handle
                     # worker group and actors lifecycle
                     pass
+                except ray.exceptions.RayTaskError as e:
+                    self._teardown(wg, e)
 
             total, pending_size = ray.get(self.request_manager.get_size.remote())
             throughput = ray.get(self.request_manager.get_estimated_throughput.remote())
@@ -606,6 +616,24 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
 
     def get_step_metrics(self):
         return {}
+
+    def _teardown(self, wg: RayWorkerGroup, e: Exception):
+        # proactively kill the actor who causes any RayTaskErrors
+        # let underlying replicated worker group to handle the ready/alive of worker group
+        #   in elastic scenario, there won't be any impact to task runner's proxy thread
+        #   in static server scenario, any actor deadness could cause the other rpc call failure from
+        #   main thread
+        traceback.print_exc()
+        print(f'show stack trace of task error of remote worker group only, {wg=}, {type(e)=}')
+        try:
+            wg.destroy()
+        except Exception:
+            pass
+        if not self.config.elastic.enable:
+            # teardown the task_runner process in static server mode
+            print('due to some worker group failed to execute tasks in non-elastic mode, '
+                  'will teardown to process to propagate errors in time')
+            os._exit(11)  # noqa
 
     def _trace_load_metrics(self, loads: Dict[Tuple[str, str], LoadMetric], throughput: Dict[str, float], total: int,
                             global_pending: int):
@@ -657,7 +685,7 @@ class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
     def __init__(self, replicas: Union[ReplicatedRayWorkerGroup, ScalingRayWorkerGroup], actor_addresses: List[str],
                  request_manager_name: str, config: DictConfig):
         super().__init__(replicas, actor_addresses, request_manager_name, config)
-        self._rebalance_threshold = config.rebalance_threshold
+        self._rebalance_threshold = self.config.proxy.rebalance_threshold
         self.abort_logger = DebounceAccumulatedLogger()
 
     def _dispatch_loop(self):
@@ -723,9 +751,9 @@ class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
 
                     # 2. send new request to worker group (engine)
                     load: LoadMetric = wg.get_load_metrics()[0]  # noqa, dp_size always =1
-                    gmem_insufficient = load.kv_cache_util > self.config.gmem_insufficient_threshold
-                    gmem_high_water_level = load.kv_cache_util > self.config.gmem_high_water_level_threshold
-                    gmem_abundant = load.kv_cache_util < self.config.gmem_abundant_threshold
+                    gmem_insufficient = load.kv_cache_util > self.config.proxy.gmem_insufficient_threshold
+                    gmem_high_water_level = load.kv_cache_util > self.config.proxy.gmem_high_water_level_threshold
+                    gmem_abundant = load.kv_cache_util < self.config.proxy.gmem_abundant_threshold
 
                     short = max_concurrency - load.num_prefilling - load.num_decoding - load.num_pending - load.num_waiting
                     if gmem_high_water_level:
@@ -812,8 +840,10 @@ class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
                     # ignore actor died error, underlying replicated worker group will handle
                     # worker group and actors lifecycle
                     pass
+                except ray.exceptions.RayTaskError as e:
+                    self._teardown(wg, e)
 
-            # handle dead engines during the loop to avoid request from staling for too long
+                    # handle dead engines during the loop to avoid request from staling for too long
             ready_wg_ids1 = self.replicas.ready_worker_group_ids
             dead_wg_ids_during_loop = ready_wg_ids0 - ready_wg_ids1
             dead_wg_ids_between_loop = ready_wg_ids_prev - ready_wg_ids1

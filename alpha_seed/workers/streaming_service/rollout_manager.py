@@ -1081,8 +1081,8 @@ class RolloutManager:
             return server
 
         gen_tp_size = self.config.actor_rollout_ref.rollout.tensor_model_parallel_size
-        rollout_proxy_config = self.config.streaming_rollout.proxy
-        lb_mode = rollout_proxy_config.lb_mode
+        rollout_config = self.config.streaming_rollout
+        lb_mode = rollout_config.proxy.lb_mode
         if lb_mode == "even-distribution":
             ProxyClass = RolloutWorkerGroupProxy
         elif lb_mode == "dynamic-balancing":
@@ -1107,7 +1107,7 @@ class RolloutManager:
                 train_persistent_replicas['standalone'] = FixedReplicatedRayWorkerGroupAdapter(
                     self.train_standalone_wg, gen_tp_size, 'standalone_rollout')
             self.train_replicas = CombinedRayWorkerGroupAdapter(train_intermittent_replicas, train_persistent_replicas)
-            self.train_rollout_proxy = ProxyClass(self.train_replicas, [], 'train_rollout', rollout_proxy_config)
+            self.train_rollout_proxy = ProxyClass(self.train_replicas, [], 'train_rollout', rollout_config)
 
         # Turn off hybrid for gen by default (i.e. train mode initially)
         self.train_replicas.set_replica_ready_state(name='hybrid', ready=False)
@@ -1128,7 +1128,7 @@ class RolloutManager:
         # Turn off hybrid for gen by default (i.e. train mode initially)
         self.val_replicas.set_replica_ready_state(name='hybrid', ready=False)
 
-        self.val_rollout_proxy = ProxyClass(self.val_replicas, [], 'val_rollout', rollout_proxy_config)
+        self.val_rollout_proxy = ProxyClass(self.val_replicas, [], 'val_rollout', rollout_config)
         self.val_rollout_server = await listen('val_rollout')
 
         self.rollout_server_started.set()
