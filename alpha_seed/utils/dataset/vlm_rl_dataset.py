@@ -271,7 +271,7 @@ class RLHFDatasetVL(RLHFDataset):
         def satisfied(node):
             # 这个约束是为了不要让DistImageLoader调度到spot资源上
             res = node['Resources']
-            if res.get('GPU') <= 0:
+            if res.get('GPU') is None or res.get('GPU') <= 0:
                 return False
             if is_local_ray or not self.stable_pool_names:
                 # local或没有pool约束则不检查是否有对应的pool资源
