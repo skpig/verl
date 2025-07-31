@@ -185,9 +185,22 @@ class ValidateManager(object):
                 if need_log:
                     input_ids = test_batch.batch['input_ids'].cpu().numpy()
                     prompt_ids = input_ids[:, :self.config.data.max_prompt_length]
-                    response_ids = input_ids[:, self.config.data.max_prompt_length:]
-                    prompts = self.tokenizer.batch_decode(prompt_ids, skip_special_tokens=True)
-                    responses = self.tokenizer.batch_decode(response_ids, skip_special_tokens=True)
+                    decode_batch_prompt = []
+                    for i in range(prompt_ids.shape[0]):
+                        valid_prompt_idx = prompt_ids[i]
+                        # remove potential special tokens(-100)
+                        valid_prompt_idx = valid_prompt_idx[valid_prompt_idx != -100]
+                        decode_batch_prompt.append(valid_prompt_idx)
+                    decode_batch_response = []
+                    for i in range(test_batch.batch['responses'].shape[0]):
+                        valid_response_length = test_batch.batch['attention_mask'][
+                            i, self.config.data.max_prompt_length:].sum().item()
+                        valid_response_idx = test_batch.batch['responses'][i, :valid_response_length]
+                        # remove potential special tokens(-100)
+                        valid_response_idx = valid_response_idx[valid_response_idx != -100]
+                        decode_batch_response.append(valid_response_idx)
+                    prompts = self.tokenizer.batch_decode(decode_batch_prompt, skip_special_tokens=True)
+                    responses = self.tokenizer.batch_decode(decode_batch_response, skip_special_tokens=False)
                     reward_tensor_before_select = reward_tensor_before_select.sum(-1).cpu()
                     for reward, prompt, response in zip(reward_tensor_before_select, prompts, responses):
                         data = {"reward": reward.item(), "prompt": prompt, "response": response}

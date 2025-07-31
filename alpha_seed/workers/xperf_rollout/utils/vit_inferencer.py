@@ -19,13 +19,22 @@ class TorchVitInferencer(PreTrainedModel):
         super().__init__(config)
         # model
         self.visual_encoder = SeedVisionTransformer(config)
+        # for mlp pooling, compute input_dim
+        input_dim = self.visual_encoder.num_features
+        if hasattr(config, 'use_mlp_pooling'):
+            use_mlp_pooling = config.use_mlp_pooling
+        else:
+            use_mlp_pooling = False
+        if use_mlp_pooling:
+            pooling_factor = self.visual_encoder.adapooling_factor**2
+            input_dim = self.visual_encoder.num_features * pooling_factor
         # layer norm
-        self.ln_vision = nn.LayerNorm(self.visual_encoder.num_features)
+        self.ln_vision = nn.LayerNorm(input_dim)
         self.vision_config = config
         bridge_activation_func = nn.ReLU if self.vision_config.bridge_activation_type == "ReLU" else nn.GELU
         # seed proj
         self.seed_proj = nn.Sequential(
-            nn.Linear(self.visual_encoder.num_features, self.vision_config.projector_hidden_dim),
+            nn.Linear(input_dim, self.vision_config.projector_hidden_dim),
             bridge_activation_func(),
             nn.Linear(self.vision_config.projector_hidden_dim, self.vision_config.projector_embed_dim),
         )
