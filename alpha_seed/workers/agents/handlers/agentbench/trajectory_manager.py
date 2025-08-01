@@ -90,18 +90,18 @@ def get_turn_scores(request_id_model, score, extra, assign_test_reward):
     return turn_scores
 
 
-def agentless_training_samples(task: Task, score, trajectory, config, context):
+def agentless_training_samples(build_record_fn, task: Task, score, trajectory, config, context):
     fix_score = score if score == 1 else -1
     turn_scores = get_turn_scores(task.task_id, score, task.result.extra, config.get('assign_test_reward', False))
     train_samples = []
     for item in trajectory:
-        turn_score = turn_scores.get(item.task_id, fix_score)
-        score_dp = DataProto.from_single_dict(
-            collate_fn([{
-                'original_agentbench_score': score,
-                'agentbench_score': torch.Tensor([turn_score]).to(torch.bfloat16),
-            }]))
-        train_samples.append(item.response.payload.union(score_dp))
+        turn_score = turn_scores.get(item.task_id, score if score == 1 else -1)
+        record = build_record_fn(item.response.payload,
+                                 turn_score,
+                                 original_agentbench_score=score,
+                                 num_turns=len(trajectory),
+                                 num_tool_calls=len(trajectory))
+        train_samples.append(record)
 
     #  if train_samples:
     #  local_path = f'/opt/tiger/train_samples_{task.task_id}.pkl'
@@ -117,7 +117,7 @@ BUILD_FN = {
 }
 
 
-def build_training_samples(task: Task, score, trajectory, config, context):
+def build_training_samples(build_record_fn, task: Task, score, trajectory, config, context):
     build_fn = BUILD_FN[task.task_args.framework]
-    train_samples = build_fn(task, score, trajectory, config, context)
+    train_samples = build_fn(build_record_fn, task, score, trajectory, config, context)
     return train_samples

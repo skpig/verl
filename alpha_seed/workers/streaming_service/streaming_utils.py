@@ -117,10 +117,14 @@ def record_xperf_metrics(batch_info, metrics, logger, global_step, prefix=''):
     metrics[f'rollout/{prefix}/prefill_latency'] = prefill_latency
     decode_latency = sum(xperf_metrics.get('decode_latency', []))
     metrics[f'rollout/{prefix}/decode_latency'] = decode_latency
-    prefill_token_num = sum(xperf_metrics.get('prefill_token_num', []))
-    prefix_cache_hit_length = sum(xperf_metrics.get('prefix_cache_hit_length', []))
-    metrics[f'rollout/{prefix}/prefix_cache_hit_rate'] = 0 if prefill_token_num == 0 else (prefix_cache_hit_length /
-                                                                                           prefill_token_num)
+    prefill_token_num = xperf_metrics.get('prefill_token_num', [])
+    prefix_cache_hit_length = xperf_metrics.get('prefix_cache_hit_length', [])
+    metrics[f'rollout/{prefix}/prefix_cache_token_hit_rate'] = 0 if sum(prefill_token_num) == 0 else \
+        sum(prefix_cache_hit_length) / sum(prefill_token_num)
+    metrics[f'rollout/{prefix}/prefix_cache_hit_rate'] = 0 if len(prefill_token_num) == 0 else \
+        len(prefix_cache_hit_length) / len(prefill_token_num)
+    metrics[f'rollout/{prefix}/prefix_cache_hit_count'] = len(prefix_cache_hit_length)
+    metrics[f'rollout/{prefix}/prefix_cache_evict_count'] = xperf_metrics.get('evict_count', 0)
 
     # plugin metrics
     for key, val in xperf_metrics.items():

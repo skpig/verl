@@ -20,6 +20,7 @@ import io
 import re
 
 import ray
+import copy
 import numpy as np
 import pandas as pd
 import torch
@@ -344,8 +345,19 @@ class RLHFDatasetVL(RLHFDataset):
             row_dict = self.dataframe.iloc[item].to_dict()
 
         row_dict_ret = {}
+        row_dict_ret["agent_handler"] = row_dict.get("agent_handler", "")
 
         chat = row_dict[self.prompt_key]
+        # encode prompts without chat template
+        if self.return_raw_chat:
+            if isinstance(chat[0], str):
+                row_dict_ret['raw_prompt'] = [{"role": "user", "content": chat[0]}]
+            elif isinstance(chat[0], dict):
+                row_dict_ret['raw_prompt'] = copy.deepcopy(chat)
+            else:
+                raise NotImplementedError("raw_prompt must be str or dict")
+        if isinstance(chat[0], dict):
+            chat = [c["content"] for c in chat]
 
         user_contents = [{"type": "text", "text": f"{self.tokenizer.bos_token}user\n "}]
         prompt_chunks = re.split(r"(<image>)", chat[0])
@@ -360,7 +372,7 @@ class RLHFDatasetVL(RLHFDataset):
             "type": "text",
             "text": f"{self.tokenizer.eos_token}{self.tokenizer.bos_token}assistant\n"
         })
-        system_prompt = row_dict['system_prompt'].strip()
+        system_prompt = row_dict.get('system_prompt', '').strip()
         conversation = []
         if system_prompt:
             conversation.append({
@@ -386,9 +398,12 @@ class RLHFDatasetVL(RLHFDataset):
         prompt = convert_conversation_to_prompt(conversation)
 
         # reward_model is required
-        row_dict_ret['reward_model'] = {}
-        row_dict_ret['reward_model']['style'] = row_dict['ability']
-        row_dict_ret['reward_model']['ground_truth'] = row_dict['verifier_feature']
+        if 'reward_model' in row_dict:
+            row_dict_ret['reward_model'] = row_dict['reward_model']
+        else:
+            row_dict_ret['reward_model'] = {}
+            row_dict_ret['reward_model']['style'] = row_dict['ability']
+            row_dict_ret['reward_model']['ground_truth'] = row_dict['verifier_feature']
 
         # 添加answer
         if self.use_ref_answer:
@@ -397,10 +412,6 @@ class RLHFDatasetVL(RLHFDataset):
             answer = ""
         if answer and not pd.isna(answer):
             raise NotImplementedError("ref answer is not supported now")
-
-        # encode prompts without chat template
-        if self.return_raw_chat:
-            row_dict_ret['raw_prompt'] = [{"role": "user", "content": chat[0]}]
 
         index = row_dict.get("extra_info", {}).get("index", item)  ## important for grpo to group info
         row_dict_ret["index"] = index
@@ -556,7 +567,7 @@ def load_and_transform_save_image(prompts, tokenizer, processor, image_manager, 
                                         image_bytes[i],
                                         tokenizer,
                                         processor,
-                                        truncation="error",
+                                        truncation="left",
                                         max_prompt_length=max_prompt_length)
             processed_list.append(processed)
         processed_dict = collate_fn(processed_list)

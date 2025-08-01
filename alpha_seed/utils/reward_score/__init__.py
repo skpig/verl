@@ -112,6 +112,9 @@ def _select_rm_score_fn(reward_style, external_lib: str = None):
     elif reward_style == "swe_repair_verifier":
         from . import swe_repair_verifier
         return swe_repair_verifier.compute_score_client
+    elif reward_style == 'euler_verifier':
+        from . import euler_verifier
+        return euler_verifier.compute_score
     elif reward_style == "swalm_agent_verifier":
         from . import swalm_agent_verifier
         return swalm_agent_verifier.get_agent_reward

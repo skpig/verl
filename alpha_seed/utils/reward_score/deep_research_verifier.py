@@ -179,7 +179,7 @@ SCORE_INCORRECT = os.getenv('DEEP_RESEARCH_SCORE_INCORRECT', '-1')  # incorrect 
 SCORE_PENALTY = os.getenv('DEEP_RESEARCH_SCORE_PENALTY', '-1')  # penalty for format errors
 SCORE_ERROR = os.getenv('DEEP_RESEARCH_SCORE_ERROR', '-2')  # llm_judge error
 
-THINK_TEMPLATE = os.getenv("THINK_TEMPLATE", "v2")
+THINK_TEMPLATE = os.getenv("THINK_TEMPLATE", "v3")
 ANSWER_BEGIN_TAG = os.getenv("ANSWER_BEGIN_TAG", "<tool_response>")
 ANSWER_END_TAG = os.getenv("ANSWER_END_TAG", "</tool_response>")
 
@@ -187,6 +187,8 @@ if THINK_TEMPLATE == "v2":
     THINK_BEGIN_TAG, THINK_END_TAG = "<think>", "</think>"
 elif THINK_TEMPLATE == "v1":
     THINK_BEGIN_TAG, THINK_END_TAG = "<doubaothinking>", "</doubaothinking>"
+elif THINK_TEMPLATE == "v3":
+    THINK_BEGIN_TAG, THINK_END_TAG = "<think_never_used_51bce0c785ca2f68081bfa7d91973934>", "</think_never_used_51bce0c785ca2f68081bfa7d91973934>"
 else:
     raise ValueError(f"THINK_TEMPLATE {THINK_TEMPLATE} not supported")
 
@@ -195,8 +197,8 @@ def check_response_structure(answer) -> Optional[str]:
     # matched = re.findall(rf'{re.escape(ANSWER_BEGIN_TAG)}(.*?){re.escape(ANSWER_END_TAG)}', answer, re.DOTALL)
     # if matched:
     #     return matched[-1]
-    if '</think>' in answer:
-        return answer.split('</think>')[-1]
+    if THINK_END_TAG in answer:
+        return answer.split(THINK_END_TAG)[-1]
     return None
 
 

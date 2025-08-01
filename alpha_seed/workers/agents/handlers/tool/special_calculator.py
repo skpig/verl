@@ -78,7 +78,7 @@ class ToolAgent(AsyncAgent):
     def __init__(self, tokenizer: AsyncTokenizer | PreTrainedTokenizer, llm: AsyncLLMInterface, **kwargs):
         super().__init__(tokenizer, llm, **kwargs)
         self.calculator = Calculator()
-        self.tool_parser = HermesToolParser(tokenizer)
+        self.tool_parser = HermesToolParser(tokenizer, self.config)
         self.tools = {"calculate": self.calculator}
         # Get tool schema for the calculator
         self.tool_schemas = [self.calculator.get_openai_tool_schema().model_dump(exclude_unset=True, exclude_none=True)]
@@ -214,6 +214,16 @@ class ToolAgent(AsyncAgent):
                 messages.append(tool_response)
 
             num_turns += 1
+
+            # break if length is exceed the max length limit
+            prompt_with_tools = self.tokenizer.apply_chat_template(messages,
+                                                                   tools=self.tool_schemas,
+                                                                   add_generation_prompt=True,
+                                                                   tokenize=False)
+
+            prompt_data = await self.tokenizer.batch_encode_plus_async([prompt_with_tools], add_special_tokens=False)
+            if len(prompt_data.input_ids[0]) >= max_length:
+                break
 
         # extract all outputs and logprobs
         latest_output_ids = completion['choices'][0]['message']['raw_output_ids']

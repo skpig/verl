@@ -588,13 +588,12 @@ class RolloutManager:
             gen_batch.union(batch)
             self.rollout_server_started.wait()
             self.val_client_executor.set_global_step(step)
-            gen_out_batch = self._val_server_gen(gen_batch, step=step, metrics=metrics, is_standalone=is_async)
+            batch = self._val_server_gen(gen_batch, step=step, metrics=metrics, is_standalone=is_async)
         else:
             gen_out_batch = self._val_batch_gen(gen_batch, step=step, metrics=metrics, is_standalone=is_async)
-
-        same_keys = batch.non_tensor_batch.keys() & gen_out_batch.non_tensor_batch.keys()
-        batch.pop(non_tensor_batch_keys=list(same_keys))
-        batch.union(gen_out_batch)
+            same_keys = batch.non_tensor_batch.keys() & gen_out_batch.non_tensor_batch.keys()
+            batch.pop(non_tensor_batch_keys=list(same_keys))
+            batch.union(gen_out_batch)
 
         if self._use_server:
             # maintain keys not handled in server mode
@@ -837,7 +836,9 @@ class RolloutManager:
 
             for item in gen_batch.chunk(len(gen_batch)):
                 handler = None
-                if 'agent_handler' in item.non_tensor_batch and not pd.isna(item.non_tensor_batch['agent_handler'][0]):
+                if 'agent_handler' in item.non_tensor_batch and not pd.isna(
+                        item.non_tensor_batch['agent_handler'][0]) and item.non_tensor_batch['agent_handler'][0].strip(
+                        ):
                     handler = select_handler_fn(item.non_tensor_batch['agent_handler'][0],
                                                 external_lib=self.config.rollout_server.external_lib)
 
@@ -968,7 +969,13 @@ class RolloutManager:
             start = time.time()
             running_batch = []
             for item in gen_batch.chunk(len(gen_batch)):
-                task = asyncio.create_task(self.val_client_executor.submit(global_handler, item, context))
+                handler = None
+                if 'agent_handler' in item.non_tensor_batch and not pd.isna(
+                        item.non_tensor_batch['agent_handler'][0]) and item.non_tensor_batch['agent_handler'][0].strip(
+                        ):
+                    handler = select_handler_fn(item.non_tensor_batch['agent_handler'][0],
+                                                external_lib=self.config.rollout_server.external_lib)
+                task = asyncio.create_task(self.val_client_executor.submit(handler or global_handler, item, context))
                 running_batch.append(task)
             print(f"[INFO] {step} val generate streaming[submit], batch size: {len(gen_batch)}, {time.time() - start}")
             start = time.time()

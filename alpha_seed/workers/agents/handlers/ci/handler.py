@@ -9,7 +9,7 @@ from transformers import PreTrainedTokenizer
 from alpha_seed.utils.tokenizer.async_tokenizer import AsyncTokenizer
 from alpha_seed.workers.agents.handlers import register_handler, TaskContext
 from alpha_seed.workers.agents.handlers.base import AsyncAgent
-from alpha_seed.workers.agents.handlers.tool.special_calculator import HermesToolParser
+from alpha_seed.workers.agents.handlers.tool.special_calculator import FunctionCall
 from mono_rl import DataProto
 from typing import List, Dict, Tuple
 import ast
@@ -18,39 +18,64 @@ import torch
 import regex as re
 from uuid import uuid4
 import numpy as np
-from alpha_seed.workers.agents.handlers.ci.tool import JupyterCI
+from alpha_seed.workers.agents.handlers.ci.tool import JupyterCI, JupyterCI_stateful
 
 
-async def parse_func_call_kwargs(response_text: str) -> Tuple[str, Dict]:
-    tool_call_regex = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
-    matches = tool_call_regex.findall(response_text)
-    function_calls = []
+class ToolParser:
+    """Tool parser for Hermes format, adapted from verl"""
 
-    for func_call_str in matches:
-        try:
-            tree = ast.parse(func_call_str)
-            expr = tree.body[0].value
-            assert isinstance(expr, ast.Call), "expr is not a ast.Call"
-            func_name = expr.func.id
-            kwargs_dict = {}
-            for kw in expr.keywords:
-                key = kw.arg
-                if isinstance(kw.value, ast.Constant):
-                    value = kw.value.value
-                elif isinstance(kw.value, ast.List):
-                    value = [ast.literal_eval(item) for item in kw.value.elts]
-                elif isinstance(kw.value, ast.Dict):
-                    keys = [ast.literal_eval(k) for k in kw.value.keys]
-                    values = [ast.literal_eval(v) for v in kw.value.values]
-                    value = dict(zip(keys, values))
-                else:
-                    value = ast.literal_eval(ast.dump(kw.value))
-                kwargs_dict[key] = value
-            function_calls.append(FunctionCall(name=func_name, arguments=json.dumps(kwargs_dict, ensure_ascii=False)))
-        except Exception as e:
-            print(f"Error parsing function call: {func_call_str}. Error: {e}")
-            pass
-    return function_calls
+    def __init__(self, tokenizer, config):
+        self.tokenizer = tokenizer
+        self.tool_call_start_token = config.rollout_server.tool_call_start_token
+        self.tool_call_end_token = config.rollout_server.tool_call_end_token
+        self.tool_call_regex = re.compile(
+            re.escape(self.tool_call_start_token) + r"(.*?)" + re.escape(self.tool_call_end_token), re.DOTALL)
+
+    async def extract_tool_calls(self, response_text: str) -> List[FunctionCall]:
+        """Extract tool calls from response text"""
+        if self.tool_call_start_token not in response_text or self.tool_call_end_token not in response_text:
+            return []
+
+        matches = self.tool_call_regex.findall(response_text)
+        function_calls = []
+        for match in matches:
+            try:
+                tree = ast.parse(match)
+                expr = tree.body[0].value
+                assert isinstance(expr, ast.Call), "expr is not a ast.Call"
+                func_name = expr.func.id
+                kwargs_dict = {}
+                for kw in expr.keywords:
+                    key = kw.arg
+                    if isinstance(kw.value, ast.Constant):
+                        value = kw.value.value
+                    elif isinstance(kw.value, ast.List):
+                        value = [ast.literal_eval(item) for item in kw.value.elts]
+                    elif isinstance(kw.value, ast.Dict):
+                        keys = [ast.literal_eval(k) for k in kw.value.keys]
+                        values = [ast.literal_eval(v) for v in kw.value.values]
+                        value = dict(zip(keys, values))
+                    else:
+                        value = ast.literal_eval(ast.dump(kw.value))
+                    kwargs_dict[key] = value
+                function_calls.append(
+                    FunctionCall(name=func_name, arguments=json.dumps(kwargs_dict, ensure_ascii=False)))
+            except:
+                try:
+                    function_call = json.loads(match)
+                    if isinstance(function_call, list):
+                        function_call = function_call[0]
+                    if 'arguments' in function_call:
+                        name, arguments = function_call["name"], function_call["arguments"]
+                    elif 'parameters' in function_call:
+                        name, arguments = function_call["name"], function_call["parameters"]
+                    else:
+                        raise ValueError(f"Invalid function call format: {match}")
+                    function_calls.append(FunctionCall(name=name, arguments=json.dumps(arguments, ensure_ascii=False)))
+                except Exception as e:
+                    print(f"Error parsing function call: {match}. Error: {e}")
+                    pass
+        return function_calls
 
 
 class FunctionCall:
@@ -60,17 +85,27 @@ class FunctionCall:
         self.arguments = arguments
 
 
+CODING_SNIPET_REGEX = (r'<escapeShell\s+type=["\']code["\']\s*,?\s*id=["\'](?P<id>\d+)["\']\s*,?\s*'
+                       r'(name=["\'](?P<name>[^"\']+)["\']\s*)?>'
+                       r'(?P<code>[\s\S]*?)</escapeShell>')
+
+RAW_CODE_REGEX = r"```(?P<language>.*?)\s*\n(?P<code>[\s\S]*?)```"
+
+
 @register_handler("agent/ci")
 class ToolAsyncAgent(AsyncAgent):
 
     def __init__(self, tokenizer, llm, **kwargs):
         super().__init__(tokenizer, llm, **kwargs)
         self.ci = JupyterCI()
-        self.tool_parser = parse_func_call_kwargs
-        self.tool_parser = HermesToolParser(tokenizer)
-        self.tools = {"jupyter_ci": self.ci}
+        self.ci_stateful = JupyterCI_stateful()
+        self.tool_parser = ToolParser(tokenizer, self.config)
+        self.tools = {"jupyter_ci": self.ci, "JupyterCI_new": self.ci, "JupyterCI_stateful": self.ci_stateful}
         # Get tool schema for the calculator
         self.tool_schemas = [self.ci.get_openai_tool_schema().model_dump(exclude_unset=True, exclude_none=True)]
+        self.tool_schemas = [tool['function'] for tool in self.tool_schemas]
+
+        self.ci_mode = None
 
         assert hasattr(tokenizer, 'pad_token'), 'we need `pad_token` to substitute the rollout ids'
 
@@ -82,10 +117,11 @@ class ToolAsyncAgent(AsyncAgent):
         max_turns = context.config.actor_rollout_ref.rollout.agent.max_turns
         max_new_tokens_per_turn = context.config.actor_rollout_ref.rollout.agent.max_new_tokens_per_turn
         ci_sandbox_psm = context.config.trainer.ci_sandbox_psm
+        self.ci_mode = context.config.rollout_server.agent.ci_mode
         item.meta_info = copy.deepcopy(item.meta_info)
 
         # Extract initial messages from DataProto
-        messages = await self._extract_messages_from_dataproto(item)
+        messages = await self._extract_messages_from_dataproto(item, max_prompt_length)
         initial_input_ids = None
         initial_attn_mask = None
         model_out_mask_list = []  # 记录每次llm输出的token长度和input长度， (True or False, length)
@@ -105,6 +141,29 @@ class ToolAsyncAgent(AsyncAgent):
         all_prompts = []
 
         response_info = []
+
+        def _parse_code_blocks(model_output: str):
+            all_added_code_files = []
+
+            code_matches = list(re.finditer(CODING_SNIPET_REGEX, model_output))
+
+            for code_match in code_matches:
+                raw_insert_item = code_match.group('code')
+                idx = int(code_match.group('id'))
+                name = str(code_match.group('name'))
+                raw_code_match = re.search(RAW_CODE_REGEX, raw_insert_item)
+
+                if raw_code_match:
+                    language = raw_code_match.group('language')
+
+                    code = raw_code_match.group('code')
+                    if not (code.strip() == ''):
+                        if name != '' and name is not None:
+                            name = name.replace('"', '').replace("'", '')
+                        all_added_code_files.append({'idx': idx, 'file_name': name, 'language': language, 'code': code})
+            return all_added_code_files
+
+        self.file_properties = {}
 
         while num_turns <= max_turns:
             # Generate response using LLM
@@ -181,13 +240,31 @@ class ToolAsyncAgent(AsyncAgent):
             if last_turn_prompt_model_output_length - len(initial_input_ids) > max_response_length:
                 break
 
+            # 添加assistant的对话, 不能使用response_message['prompt']，这个会截断，可能是rebalance导致的，还在查
+            # response_text = self.tokenizer.decode(response_message['raw_output_ids'])
+            # response_text = """<escapeShell type="code" id="0">```python\nprint("hello world")\n```</escapeShell><|FunctionCallBegin|>[{"name": "DoubaoCodeInterpreter", "parameters": {"id": "0"}}]<|FunctionCallEnd|>"""
+            # response_text = "<|FunctionCallBegin|>" + json.dumps([{"name": "JupyterCI", "parameters": {"code": "print('hello world')"}}], ensure_ascii=False) + "<|FunctionCallEnd|>"
+            # breakpoint()
+            all_added_code_files = _parse_code_blocks(response_text)
+
+            for i in range(len(all_added_code_files)):
+                code_block_id = all_added_code_files[i]['idx']
+                file_name = all_added_code_files[i]['file_name']
+                code = all_added_code_files[i]['code']
+
+                self.file_properties['id_' + str(code_block_id)] = {
+                    'content': code,
+                    'language': all_added_code_files[i]['language'],
+                    'called': False
+                }
+
             messages.append({
                 "role": "assistant",
                 "content": self.tokenizer.pad_token * len(response_message['raw_output_ids'])
+                # "content": response_text,
             })
 
             # Parse tool calls from response
-            # response_text = """test<tool_call>JupyterCI(code='print("hello world")')</tool_call>"""
             tool_calls = await self.tool_parser.extract_tool_calls(response_text)
             num_tool_calls += len(tool_calls)
 
@@ -208,6 +285,16 @@ class ToolAsyncAgent(AsyncAgent):
                 messages.append(tool_response)
 
             num_turns += 1
+
+            # break if length is exceed the max length limit
+            prompt_with_tools = self.tokenizer.apply_chat_template(messages,
+                                                                   tools=self.tool_schemas,
+                                                                   add_generation_prompt=True,
+                                                                   tokenize=False)
+
+            prompt_data = await self.tokenizer.batch_encode_plus_async([prompt_with_tools], add_special_tokens=False)
+            if len(prompt_data.input_ids[0]) >= max_length:
+                break
 
         # extract all outputs and logprobs
         latest_output_ids = completion['choices'][0]['message']['raw_output_ids']
@@ -263,11 +350,35 @@ class ToolAsyncAgent(AsyncAgent):
 
         return out
 
-    async def _extract_messages_from_dataproto(self, item: DataProto) -> List[Dict]:
+    async def _extract_messages_from_dataproto(self, item, max_prompt_length) -> List[Dict]:
         """Extract messages from DataProto for chat template"""
         # For simplicity, assume it's a user message
         # In practice, you might need more sophisticated parsing
-        messages = [{"role": "user", "content": item.non_tensor_batch['raw_prompt'][0][0]['content']}]
+        empty_prompt = self.tokenizer.apply_chat_template([{
+            "role": "user",
+            "content": ""
+        }],
+                                                          tools=self.tool_schemas,
+                                                          add_generation_prompt=True,
+                                                          tokenize=False)
+        empty_prompt_data = await self.tokenizer.batch_encode_plus_async([empty_prompt], add_special_tokens=False)
+        remain_length = max(0, max_prompt_length - len(empty_prompt_data.input_ids[0]))
+        if remain_length == 0:
+            prompt = ""
+        else:
+            # Here combine all user prompts and system prompts if there exists more than one in dataset
+            if len(item.non_tensor_batch['raw_prompt'][0]) > 1:
+                full_prompt = ''
+                for prompt in item.non_tensor_batch['raw_prompt'][0]:
+                    full_prompt += prompt['content']
+                initial_prompt = full_prompt
+            else:
+                initial_prompt = item.non_tensor_batch['raw_prompt'][0][0]['content']
+            prompt_data = await self.tokenizer.batch_encode_plus_async([initial_prompt], add_special_tokens=False)
+            prompt_data = prompt_data.input_ids[0][-remain_length:]
+            prompt = self.tokenizer.decode(prompt_data)
+        messages = [{"role": "user", "content": prompt}]
+
         return messages
 
     async def _generate_with_tools(self, messages: List[Dict], item: DataProto, context, max_length, max_prompt_length,
@@ -320,6 +431,30 @@ class ToolAsyncAgent(AsyncAgent):
         try:
             tool_name = tool_call.name
             tool_args = json.loads(tool_call.arguments)
+
+            if "id" in tool_args:
+                idx = tool_args['id']
+                if not ('id_' + str(idx) in self.file_properties):
+                    return {
+                        "role": "tool",
+                        "content": "plugin_error (code block not found): Code block {str(idx)} not found"
+                    }
+
+                elif self.file_properties[f'id_{idx}']['called']:
+                    return {
+                        "role":
+                            "tool",
+                        "content":
+                            f"plugin_error (repeat call): Code block {str(idx)} has been called before and no change is detected. Please do not repeat running the same code block"
+                    }
+                else:
+                    code_block = self.file_properties[f'id_{idx}']['content']
+                    self.file_properties[f'id_{idx}']['called'] = True
+                    if self.ci_mode == 'stateful':
+                        tool_name = "JupyterCI_stateful"
+                    else:
+                        tool_name = "JupyterCI_new"
+                    tool_args = {"code": [code_block]}
 
             if tool_name not in self.tools:
                 return {"role": "tool", "content": f"Error: Unknown tool {tool_name}"}

@@ -104,7 +104,7 @@ class PrefixCache(object):
             self.req_id_to_slot_id[request_id] = free_slot_id
             logging_rank_only(logging.warning, 0,
                               f"allocate cache slot, request_id: {request_id}, slot_id: {free_slot_id}")
-            return free_slot_id
+            return free_slot_id, False
         else:
             # evict an existing slot
             slot_evict, request_id_evict = self.lru_cache.popitem(last=False)
@@ -115,7 +115,7 @@ class PrefixCache(object):
             logging_rank_only(
                 logging.warning, 0, f"evict cache slot, request_id: {request_id}, slot_id: {slot_evict}, "
                 f"evicted request_id: {request_id_evict}")
-            return slot_evict
+            return slot_evict, True
 
     def calc_prefix_length(self, request_id: str, full_input_ids: torch.Tensor):
         if request_id not in self.req_id_to_slot_id:
@@ -137,7 +137,8 @@ class PrefixCache(object):
             return 0
         else:
             slot_id = self.req_id_to_slot_id[request_id]
-            _ = self.lru_cache[slot_id]
+            del self.lru_cache[slot_id]
+            self.lru_cache[slot_id] = request_id
 
         if start_pos is None:
             prefix_length = self.calc_prefix_length(request_id, input_ids)
@@ -180,9 +181,10 @@ class PrefixCache(object):
 
     def save_to_cache(self, request_id: str, full_input_ids: torch.Tensor, kv_cache_table: torch.Tensor, xperf_module):
         if request_id not in self.req_id_to_slot_id:
-            slot_id = self._get_free_slot(request_id)
+            slot_id, is_evict = self._get_free_slot(request_id)
         else:
             slot_id = self.req_id_to_slot_id[request_id]
+            is_evict = False
 
         prefix_length = self.calc_prefix_length(request_id, full_input_ids)
 
@@ -222,3 +224,5 @@ class PrefixCache(object):
                 kv_cache = xperf_module._get_kv_cache(layer_id, is_cache_quant)
                 self.cache_slots[slot_id, layer_id, prefix_length: total_length] = \
                     kv_cache[:, :, kv_slot_id, prefix_length: total_length].permute(2, 1, 0, 3)
+
+        return is_evict

@@ -99,6 +99,12 @@ class ValidateManager(object):
                     self.logger.log(data=val_log, step=global_step, backend="tracking")
         return
 
+    def temp_unpad_dataproto(self, data: DataProto, pad_size):
+        if pad_size != 0:
+            # data = data[:-pad_size]
+            data = data.select_idxs(list(range(len(data) - pad_size)))
+        return data
+
     def _validate(self, val_epoch, need_log, log_file, is_async, global_step):
         print(f'{time.time()} start validate with fast_result={self.fast_result}')
         metric_dict = {}
@@ -129,7 +135,8 @@ class ValidateManager(object):
                         num_prompts_per_data, split_keys=['input_ids', 'attention_mask', 'prompt_names'])
 
                 eval_bon = self.config.actor_rollout_ref.rollout.get("eval_bon", 1)
-                test_batch = test_batch.repeat(eval_bon)
+                if eval_bon != 1:
+                    test_batch = test_batch.repeat(eval_bon)
 
                 # create a uid for each data inside the batch
                 test_batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(test_batch))],
@@ -283,6 +290,8 @@ class ValidateManager(object):
                 for n in [4, 8, 16, 32]:
                     total = len(rwds) * 128
                     correct = 0
+                    if n > len(rwds[0]):
+                        continue
                     for rwd in rwds:
                         for _ in range(128):
                             sample_n = random.sample(rwd, k=n)
@@ -294,6 +303,8 @@ class ValidateManager(object):
                 for n in [4, 8, 16, 32]:
                     total = len(rwds) * 128
                     correct = 0
+                    if n > len(rwds[0]):
+                        continue
                     for rwd in rwds:
                         for _ in range(128):
                             sample_n = random.sample(rwd, k=n)

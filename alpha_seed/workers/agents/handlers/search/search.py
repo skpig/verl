@@ -11,6 +11,7 @@ from alpha_seed.workers.agents.handlers import register_handler, TaskContext
 from alpha_seed.workers.agents.handlers.base import AsyncAgent, AsyncLLMInterface
 from alpha_seed.workers.agents.envs.textbrowser import create_from_env_str as create_textbrowser_env_from_env_str
 from alpha_seed.workers.agents.envs.search import create_from_env_str as create_search_env_from_env_str
+from alpha_seed.workers.agents.handlers.tool.parser import FunctionCall, HermesToolParser
 from mono_rl import DataProto
 from typing import Any, List, Dict
 import json
@@ -22,47 +23,6 @@ import numpy as np
 import ray
 
 
-class FunctionCall:
-
-    def __init__(self, name: str, arguments: str):
-        self.name = name
-        self.arguments = arguments
-
-
-class HermesToolParser:
-    """Tool parser for Hermes format, adapted from verl"""
-
-    def __init__(self, tokenizer, config):
-        self.tokenizer = tokenizer
-        self.tool_call_start_token = config.rollout_server.tool_call_start_token
-        self.tool_call_end_token = config.rollout_server.tool_call_end_token
-        self.tool_call_regex = re.compile(
-            f"{self.tool_call_start_token}(.*?){self.tool_call_end_token}".replace("|", "\|"), re.DOTALL)
-
-    async def extract_tool_calls(self, response_text: str) -> List[FunctionCall]:
-        """Extract tool calls from response text"""
-        if self.tool_call_start_token not in response_text or self.tool_call_end_token not in response_text:
-            return []
-
-        matches = self.tool_call_regex.findall(response_text)
-        function_calls = []
-        for match in matches:
-            try:
-                function_call = json.loads(match)
-                if isinstance(function_call, list):
-                    for f in function_call:
-                        name, arguments = f["name"], f["arguments"] if "arguments" in f else f["parameters"]
-                        function_calls.append(
-                            FunctionCall(name=name, arguments=json.dumps(arguments, ensure_ascii=False)))
-                else:
-                    name, arguments = function_call["name"], function_call[
-                        "arguments"] if "arguments" in function_call else function_call["parameters"]
-                    function_calls.append(FunctionCall(name=name, arguments=json.dumps(arguments, ensure_ascii=False)))
-            except Exception as e:
-                pass  # Skip invalid tool calls
-        return function_calls
-
-
 @register_handler("agent/tool/search_and_text_browser")
 class ToolAgent(AsyncAgent):
 
@@ -71,12 +31,19 @@ class ToolAgent(AsyncAgent):
         self.search = create_search_env_from_env_str("deep_research/search@{}", tokenizer=tokenizer)
         self.textbrowser = create_textbrowser_env_from_env_str("deep_research/textbrowser@{}", tokenizer=tokenizer)
         self.tool_parser = HermesToolParser(tokenizer, self.config)
-        self.tools = {"Search": self.search, "TextBrowser": self.textbrowser}
+        self.tools = {
+            "Search": self.search,
+            "GlobalSearch": self.search,
+            "TextBrowser": self.textbrowser,
+            "linkreader": self.textbrowser,
+            "TextBrowserView": self.textbrowser
+        }
         # Get tool schema for the calculator
         self.tool_schemas = [
             self.search.get_openai_tool_schema().model_dump(exclude_unset=True, exclude_none=True),
             self.textbrowser.get_openai_tool_schema().model_dump(exclude_unset=True, exclude_none=True)
         ]
+        self.tool_schemas = [tool['function'] for tool in self.tool_schemas]
         assert hasattr(tokenizer, 'pad_token'), 'we need `pad_token` to substitute the rollout ids'
 
     async def __call__(self, item: DataProto, context: TaskContext, **kwargs):
@@ -87,6 +54,7 @@ class ToolAgent(AsyncAgent):
         max_turns = context.config.actor_rollout_ref.rollout.agent.max_turns
         max_new_tokens_per_turn = context.config.actor_rollout_ref.rollout.agent.max_new_tokens_per_turn
         item.meta_info = copy.deepcopy(item.meta_info)
+        global_step = context.global_step
 
         # Extract initial messages from DataProto
         messages = await self._extract_messages_from_dataproto(item, max_prompt_length)
@@ -178,7 +146,7 @@ class ToolAgent(AsyncAgent):
             # Execute tool calls
             tool_responses = []
             for tool_call in tool_calls:
-                tool_response = await self._call_tool(tool_call)
+                tool_response = await self._call_tool(tool_call, global_step)
                 if isinstance(tool_response, Exception):
                     break
                 tool_responses.append(tool_response)
@@ -321,7 +289,7 @@ class ToolAgent(AsyncAgent):
 
         return completion, prompt_with_tools
 
-    async def _call_tool(self, tool_call: FunctionCall) -> Dict[str, str]:
+    async def _call_tool(self, tool_call: FunctionCall, global_step: int) -> Dict[str, str]:
         """Execute a tool call and return the response"""
         try:
             tool_name = tool_call.name
@@ -334,7 +302,7 @@ class ToolAgent(AsyncAgent):
             instance_id = str(uuid4())
 
             # Execute the tool
-            tool_response = await tool.step(instance_id, tool_name, tool_args)
+            tool_response = await tool.step(instance_id, tool_name, tool_args, global_step)
 
             return {"role": "tool", "content": tool_response, "name": tool_name}
 

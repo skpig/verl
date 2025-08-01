@@ -737,8 +737,10 @@ class InferenceSession:
         if self.prefix_cache is not None:
             self.prefix_cache: PrefixCache
             full_input_ids = torch.tensor(query.input_ids + query.new_token_ids).cuda()
-            self.prefix_cache.save_to_cache(query.id, full_input_ids,
-                                            torch.tensor(query.kv_slot_ids).cuda(), self.engine.module)
+            is_evict = self.prefix_cache.save_to_cache(query.id, full_input_ids,
+                                                       torch.tensor(query.kv_slot_ids).cuda(), self.engine.module)
+            if is_evict:
+                self.infer_scheduler.incr("evict_count")
         self.unfinished_off_policy_steps_set.remove_one(query.off_policy_steps)
         self.finished_num += 1
         self.cache_manager.release_query(query)

@@ -174,6 +174,9 @@ class RLHFDataset(Dataset):
         print(f'filter dataset len: {len(self.dataframe)}')
 
         # Apply epoch replication if needed
+        if self.shuffle_per_epoch:
+            self.dataframe = self.dataframe.sample(frac=1.0).reset_index(drop=True)
+            print('dataset shuffled')
         if hasattr(self, 'data_auto_repeat') and self.data_auto_repeat:
             self._replicate_for_epochs()
 

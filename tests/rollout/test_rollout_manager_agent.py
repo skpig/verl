@@ -167,7 +167,7 @@ def test_train_generate(set_common_envs, gpu_allocator, ray_fixture, complete_ra
     config.data.return_raw_chat = True
     config.actor_rollout_ref.rollout.agent.max_turns = 10
     config.actor_rollout_ref.rollout.agent.max_new_tokens_per_turn = 2048
-    config.data.chat_template = 'chatml_tool'
+    config.data.chat_template = 'chatml'
     config.data.dataloader_raw_template = True
     config.reward_model.last_characters = 300
     config.rollout_server.handler = 'agent/ci'

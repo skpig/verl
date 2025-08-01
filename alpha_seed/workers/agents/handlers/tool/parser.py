@@ -14,11 +14,12 @@ class FunctionCall:
 class HermesToolParser:
     """Tool parser for Hermes format, adapted from verl"""
 
-    def __init__(self, tokenizer):
+    def __init__(self, tokenizer, config):
         self.tokenizer = tokenizer
-        self.tool_call_start_token = "<tool_call>"
-        self.tool_call_end_token = "</tool_call>"
-        self.tool_call_regex = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
+        self.tool_call_start_token = config.rollout_server.tool_call_start_token
+        self.tool_call_end_token = config.rollout_server.tool_call_end_token
+        self.tool_call_regex = re.compile(
+            re.escape(self.tool_call_start_token) + r"(.*?)" + re.escape(self.tool_call_end_token), re.DOTALL)
 
     async def extract_tool_calls(self, response_text: str) -> List[FunctionCall]:
         """Extract tool calls from response text"""
@@ -30,8 +31,15 @@ class HermesToolParser:
         for match in matches:
             try:
                 function_call = json.loads(match)
-                name, arguments = function_call["name"], function_call["arguments"]
-                function_calls.append(FunctionCall(name=name, arguments=json.dumps(arguments, ensure_ascii=False)))
+                if isinstance(function_call, list):
+                    for f in function_call:
+                        name, arguments = f["name"], f["arguments"] if "arguments" in f else f["parameters"]
+                        function_calls.append(
+                            FunctionCall(name=name, arguments=json.dumps(arguments, ensure_ascii=False)))
+                else:
+                    name, arguments = function_call["name"], function_call[
+                        "arguments"] if "arguments" in function_call else function_call["parameters"]
+                    function_calls.append(FunctionCall(name=name, arguments=json.dumps(arguments, ensure_ascii=False)))
             except Exception as e:
                 pass  # Skip invalid tool calls
         return function_calls

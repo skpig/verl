@@ -1955,6 +1955,9 @@ class RayPPOTrainer(object):
                             # compute reference log_prob
                             with Timer(name='ref', logger=None) as timer:
                                 ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
+                                for k in ref_log_prob.meta_info:
+                                    if k in batch.meta_info:
+                                        del batch.meta_info[k]
                                 batch = batch.union(ref_log_prob)
                             metrics['timing/ref'] = timer.last
                             metrics['memory/ref_max_allocated'] = batch.meta_info.pop('memory/ref_max_allocated')

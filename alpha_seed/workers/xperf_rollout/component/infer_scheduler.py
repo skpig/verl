@@ -40,6 +40,13 @@ class InferScheduler():
             self.metrics[key] = []
         self.metrics[key].extend(value)
 
+    def incr(self, key, value=1):
+        if not self.enable_metrics:
+            return
+        if key not in self.metrics.keys():
+            self.metrics[key] = 0
+        self.metrics[key] += value
+
     def switch_mode(self, mode):
         if mode == "rollout":
             self.return_full_hidden_states = False
@@ -75,6 +82,7 @@ class InferScheduler():
         self.metrics['decode_latency'] = []
         self.metrics['prefill_token_num'] = []
         self.metrics['prefix_cache_hit_length'] = []
+        self.metrics['evict_count'] = 0
         self.sampler.metrics = self.metrics
         self.step_time = None
 

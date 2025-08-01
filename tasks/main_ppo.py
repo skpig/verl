@@ -64,7 +64,7 @@ from alpha_seed.utils.alarm.lark_util import send_message_to_employee
 from alpha_seed.utils.reward_score.grm_service import GRMService, GRM_INVALID_SCORE
 from alpha_seed.utils.server_client import validate_client_config, KVStore, ServerHealthCheck, TaskRunner, ClientTaskRunner, check_all_workers_alive, recreate_actor
 from alpha_seed.utils.ckpt import download_minimal_required_files
-from alpha_seed.utils.chat_template import CHATML, CHATML_TOOL, CHATML_TOOL_V2, CHATML_TOOL_V3
+from alpha_seed.utils.chat_template import CHATML, CHATML_TOOL, CHATML_TOOL_V2, CHATML_TOOL_V3, CHATML_TOOL_V4
 from alpha_seed.workers.streaming_service.rollout_request_manager import RequestManager, RequestManagerRegisterCenter
 from databus import collect_array
 
@@ -77,20 +77,27 @@ ENABLE_REDIS_TRITON_CACHE = int(os.getenv("ENABLE_REDIS_TRITON_CACHE", '1'))
 CHANNEL = "llm_channel"
 
 
-def post_process_solution_str(config, solution_str, eos_token):
+def post_process_solution_str(config, solution_str, reward_style, eos_token):
     solution_str = solution_str.rsplit(eos_token, 1)[0]
-    if config.reward_model.use_last_response == 'summarize':
-        solution_str_post_proc = response_post_proc.summary_postprocess(
-            solution_str,
-            last_response_sep=config.reward_model.last_response_sep,
-            last_response_strict=config.reward_model.last_response_strict)
-    elif config.reward_model.use_last_response == 'lastcodeblock':
+    if reward_style == "code-sandbox" and config.reward_model.use_last_response == 'lastcodeblock':
         solution_str_post_proc = response_post_proc.last_codeblock_postprocess(
             solution_str,
             codeblock_seps=config.reward_model.last_response_sep,
             last_response_strict=config.reward_model.last_response_strict)
     else:
         solution_str_post_proc = solution_str
+    # if config.reward_model.use_last_response == 'summarize':
+    #     solution_str_post_proc = response_post_proc.summary_postprocess(
+    #         solution_str,
+    #         last_response_sep=config.reward_model.last_response_sep,
+    #         last_response_strict=config.reward_model.last_response_strict)
+    # elif config.reward_model.use_last_response == 'lastcodeblock':
+    #     solution_str_post_proc = response_post_proc.last_codeblock_postprocess(
+    #         solution_str,
+    #         codeblock_seps=config.reward_model.last_response_sep,
+    #         last_response_strict=config.reward_model.last_response_strict)
+    # else:
+    #     solution_str_post_proc = solution_str
     return solution_str_post_proc
 
 
@@ -139,6 +146,7 @@ class RemoteClient:
         solution_str = solution_str.split("assistant\n")[-1]
         solution_str_post_proc = post_process_solution_str(self.config,
                                                            solution_str,
+                                                           reward_style,
                                                            eos_token=self.tokenizer.eos_token)
 
         if reward_style == 'code-sandbox':
@@ -162,7 +170,7 @@ class RemoteClient:
         else:
             raise NotImplementedError(f'Unsupported reward_style {reward_style}')
 
-        assert req_id not in self.results, f"{req_id} already exists"
+        assert req_id not in self.results, f"{req_id} already exists, reward_style: {reward_style}"
         self.results[req_id] = result_future
 
     async def get_results(self, req_id):
@@ -277,7 +285,7 @@ class RewardManager():
         already_print_data_sources = {}
         save_to_hdfs = []
         rm_res_future_list = []
-        if global_step is not None and global_step % self.config.trainer.logger_step_interval == 0:
+        if (global_step is not None and global_step % self.config.trainer.logger_step_interval == 0) or is_validation:
             self.log_table = []  # 清空self.log_table
 
         mean_len_per_prompt = self.update_len_ema(data)
@@ -306,9 +314,11 @@ class RewardManager():
             prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=False)
             solution_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=False)
 
-            solution_str_post_proc = post_process_solution_str(config=self.config,
-                                                               solution_str=solution_str,
-                                                               eos_token=self.tokenizer.eos_token)
+            solution_str_post_proc = post_process_solution_str(
+                config=self.config,
+                solution_str=solution_str,
+                reward_style=data_item.non_tensor_batch['reward_model']['style'],
+                eos_token=self.tokenizer.eos_token)
 
             format_reward = 0  # 默认是0
             pause_tokens_index = None
@@ -332,6 +342,7 @@ class RewardManager():
             ground_truth = data_item.non_tensor_batch['reward_model']['ground_truth']
             score_fn_inputs = {
                 "batch_info": data_item.batch,
+                "non_tensor_batch_info": data_item.non_tensor_batch,
                 "tokenizer": self.tokenizer,
                 "solution_str": solution_str_post_proc,
                 "ground_truth": ground_truth,
@@ -731,7 +742,8 @@ class RewardManager():
                     ],
                                 data=self.log_table)
             }
-            if (not is_validation and global_step % self.config.trainer.logger_step_interval == 0) or global_step == 1:
+            if (not is_validation and
+                    global_step % self.config.trainer.logger_step_interval == 0) or global_step == 1 or is_validation:
                 # logger_step = global_step - global_step % self.config.trainer.logger_step_interval
                 self.logger.log(log_table, step=global_step, backend='wandb')
 
@@ -933,7 +945,6 @@ def init_ray(config: DictConfig):
                 'TOKENIZERS_PARALLELISM': 'true',
                 'BPEX_NO_WARN_ON_UNTUNED_CASE': '1',
                 'WANDB_IGNORE_STEP_ORDER': '1',
-                "THINK_TEMPLATE": os.getenv("THINK_TEMPLATE", "v2"),
                 # 'NCCL_DEBUG': 'WARN'
             }
         }
@@ -1093,6 +1104,8 @@ def config_to_trainer_kwargs(config):
         tokenizer.chat_template = CHATML_TOOL_V2
     if config.data.get('chat_template', None) == 'chatml_tool_v3':
         tokenizer.chat_template = CHATML_TOOL_V3
+    if config.data.get('chat_template', None) == 'chatml_tool_v4':
+        tokenizer.chat_template = CHATML_TOOL_V4
 
     if config.data.image_key:
         processor = AutoProcessor.from_pretrained(local_path)

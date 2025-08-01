@@ -13,13 +13,21 @@ from transformers import AutoTokenizer
 
 PRINT_ERROR = os.getenv("AGENT_SEARCH_PRINT_ERROR", "0") == "1"
 SUBMITTER = os.getenv("ARNOLD_TRIAL_OWNER", "")
+TRIAL_ID = os.getenv("MERLIN_JOB_ID", "0")
+ARNOLD_TRIAL_OWNER = os.getenv("ARNOLD_TRIAL_OWNER", "zuoxiaochen.221")
 
 
-async def apihub(query, search_engine, max_pages):
+async def apihub(query, search_engine, max_pages, global_step=0):
     if not query:
         return ''
 
-    headers = {"api-key": "deadf37f-f228-45a3-8a8d-1c948415fd4a", "Content-Type": "application/json"}
+    headers = {
+        "api-key": "deadf37f-f228-45a3-8a8d-1c948415fd4a",
+        "Content-Type": "application/json",
+        "project_id": TRIAL_ID,
+        "step": str(global_step),
+        "user": f"{ARNOLD_TRIAL_OWNER}@bytedance.com"
+    }
     input_params = {'search_engine': search_engine}
 
     if search_engine == "toutiao":
@@ -27,7 +35,7 @@ async def apihub(query, search_engine, max_pages):
         body = {"api_id": "6232", "name": "GlobalSearch", "input_params": json.dumps(input_params, ensure_ascii=False)}
     else:
         input_params["input_query"] = [query]
-        input_params["search_engine"] = "bing"
+        input_params["search_engine"] = "usbing"
         body = {
             "api_id": "6228",
             "name": "SeedSearchTraining",
@@ -64,18 +72,21 @@ async def apihub(query, search_engine, max_pages):
     return pages[:max_pages]
 
 
-def Search(query: str) -> str:
+def GlobalSearch(query: str) -> str:
     """
-    Access search engines to obtain information.
+    这是一个联网搜索工具，输入搜索问题，返回网页列表与对应的摘要信息。搜索问题应该简洁清晰，复杂问题应该拆解成多步并一步一步搜索。如果没有搜索到有用的页面，可以调整问题描述（如减少限定词、更换搜索思路）后再次搜索。搜索结果质量和语种有关，对于中文资源可以尝试输入中文问题，非中资源可以尝试使用英文或对应语种。
 
     Args:
-        query: the search query
+        query: 搜索问题
+
+    Returns:
+        str: 网页列表与对应的摘要信息
     """
-    return ""
+    pass
 
 
 async def SearchAPI(query: str, max_pages: int, search_engine: str, max_token_len: int, tokenizer: AutoTokenizer,
-                    metrics: dict, **kwargs) -> str:
+                    metrics: dict, global_step: int, **kwargs) -> str:
     """
     Access search engines to obtain information.
 
@@ -87,8 +98,9 @@ async def SearchAPI(query: str, max_pages: int, search_engine: str, max_token_le
     snippets = f"Result from search query: {query}\nNo results found."
 
     if search_engine == "mix":
-        pages_usbing, pages_toutiao = await asyncio.gather(apihub(query, search_engine="usbing", max_pages=max_pages),
-                                                           apihub(query, search_engine="toutiao", max_pages=max_pages))
+        pages_usbing, pages_toutiao = await asyncio.gather(
+            apihub(query, search_engine="usbing", max_pages=max_pages, global_step=global_step),
+            apihub(query, search_engine="toutiao", max_pages=max_pages, global_step=global_step))
         pages = []
         url_set = set()
         for page in pages_usbing + pages_toutiao:
@@ -100,7 +112,7 @@ async def SearchAPI(query: str, max_pages: int, search_engine: str, max_token_le
 
     if pages:
         snippets = f"Result from search query: {query}\n"
-        for page_idx, page in enumerate(pages[:max_pages]):
+        for page_idx, page in enumerate(pages):
             snippets += "<page{}>:\ntitle:{}\nsitename:{}\npublish_time:{}\nurl:{}\nsnippet:{}\n".format(
                 page_idx, page["title"], page["sitename"], page["publish_time"], page["url"], page["snippet"])
 
@@ -130,10 +142,10 @@ class SearchEnv(BaseEnv):
 
     def action_supported(self, action: str) -> bool:
         func_name, _ = parse_func_call_kwargs(action)
-        return func_name == "TextBrowser"
+        return func_name in ["Search", "GlobalSearch"]
 
-    async def step(self, instance_id, tool_name, tool_args: dict) -> str:
-        assert tool_name == "Search"
+    async def step(self, instance_id, tool_name, tool_args: dict, global_step: int) -> str:
+        assert tool_name in ["Search", "GlobalSearch"]
         action = tool_args["query"]
         self._call_count += 1
         if action in self._call_history:
@@ -147,6 +159,7 @@ class SearchEnv(BaseEnv):
                 "max_token_len": self.max_token_len,
                 "search_engine": self.search_engine,
                 "metrics": self._metrics,
+                "global_step": global_step,
             })
 
             response = await SearchAPI(**tool_args)
@@ -161,7 +174,7 @@ class SearchEnv(BaseEnv):
 
     def get_openai_tool_schema(self) -> OpenAIFunctionToolSchema:
         from transformers.utils import get_json_schema
-        schema = get_json_schema(Search)
+        schema = get_json_schema(GlobalSearch)
         tool_schema = OpenAIFunctionToolSchema.model_validate(schema)
         return tool_schema
 

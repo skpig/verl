@@ -56,8 +56,8 @@ class Agentless(ThreadedAgent):
             }
         }
 
-    def _preprocess(self, messages: List[Dict], row_dict: Dict, meta_info: Dict, max_prompt_length: int,
-                    truncation: str, sub_index: int) -> DataProto:
+    def _preprocess(self, messages: List[Dict], prompt_meta: Dict, row_dict: Dict, meta_info: Dict,
+                    max_prompt_length: int, truncation: str, sub_index: int) -> DataProto:
         prompt_with_chat_template = self.tokenizer.apply_chat_template(messages,
                                                                        add_generation_prompt=True,
                                                                        tokenize=False)
@@ -77,16 +77,22 @@ class Agentless(ThreadedAgent):
         _row_dict = {
             **row_dict,
             **prompt,
+            **({
+                'uid': str(uuid.uuid4())
+            } if 'uid' in row_dict else {}),
+            **({
+                'rollout_id': str(uuid.uuid4())
+            } if 'rollout_id' in row_dict else {}),
             **{
-                'uid': str(uuid.uuid4()),
-                'rollout_id': str(uuid.uuid4()),
                 'reward_model': {
                     **row_dict.get('reward_model', {}),
                     **{
                         'ground_truth': row_dict.get('reward_model', {}).get('ground_truth', '')
                     }
                 },
-                'index': int(row_dict.get('index', 0)) * 1024 + sub_index
+                'index': (lambda x, y: int(x if str(x).isdigit() else (x.split('-')[1] if (len(x.split('-')) == 2 and x.split('-')[1].isdigit(
+                                                                                           )) else y)))(str(
+                             row_dict.get('index')).strip(), prompt_meta.get('index', 0))
             },
         }
         _item = DataProto.from_single_dict(collate_fn([_row_dict]))
@@ -117,6 +123,28 @@ class Agentless(ThreadedAgent):
         extra_fill_datapack()
         extra_fill_raw_response()
         return out
+
+    def _build_records(self, item: DataProto, agentbench_score, **kwargs):
+        item.pop(non_tensor_batch_keys=['data_pack', 'raw_response'])
+        item.non_tensor_batch['reward_model'] = np.array([{
+            **(item.non_tensor_batch.get('reward_model', [{}])[0]),
+            **{
+                'agentbench_score': agentbench_score
+            },
+            **kwargs
+        }],
+                                                         dtype=object)
+        item.non_tensor_batch['raw_prompt'] = np.array([[{
+            **item.non_tensor_batch['raw_prompt'][0][-1],
+            **{
+                'meta': None,
+                'name': None
+            }
+        }]],
+                                                       dtype=object)
+        item.non_tensor_batch['agent_num_turns'] = np.array([kwargs.get('num_turns', 0)], dtype=object)
+        item.non_tensor_batch['agent_num_tool_calls'] = np.array([kwargs.get('num_tool_calls', 0)], dtype=object)
+        return item
 
     def __call__(self, item: DataProto, context: TaskContext, **kwargs):
         os.environ["no_proxy"] = ""
@@ -211,7 +239,7 @@ class Agentless(ThreadedAgent):
                                                     tags=_tagkv)
                     task.trigger_task(turn_task.task_id)
 
-                    turn_item = self._preprocess(turn_task.request.messages, row_dict, meta_info,
+                    turn_item = self._preprocess(turn_task.request.messages, prompt_meta, row_dict, meta_info,
                                                  config.data.max_prompt_length, config.data.truncation, len(trajectory))
 
                     try:
@@ -272,7 +300,8 @@ class Agentless(ThreadedAgent):
             proxy_server.pop_task(task_id)
 
         if score is not None:
-            train_samples = build_training_samples(task, score, trajectory, rollout_config, context)
+            train_samples = build_training_samples(self._build_records, task, score, trajectory, rollout_config,
+                                                   context)
         else:
             logging.info(f"agentbench_hadnler: task[{prompt_meta=}] score is None")
             train_samples = []
