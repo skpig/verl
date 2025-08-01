@@ -238,8 +238,8 @@ def compute_gae_advantage_return(
         for t in reversed(range(gen_len)):
             cur_nextvalues = values[:, t + 1] if t < gen_len - 1 else 0.0
             next_eos_mask = response_mask[:, t + 1] if t < gen_len - 1 else 1.0
-            delta = token_level_rewards[:, t] + gamma * nextvalues - values[:, t]
             nextvalues = next_eos_mask * cur_nextvalues + (1 - next_eos_mask) * nextvalues
+            delta = token_level_rewards[:, t] + gamma * nextvalues - values[:, t]
             lastgaelam = (delta + gamma * lam * lastgaelam) * response_mask[:, t] + lastgaelam * (1 - response_mask[:, t])
             advantages_reversed.append(lastgaelam)
             if critic_lam is not None:
@@ -247,10 +247,11 @@ def compute_gae_advantage_return(
                                      critic_lastgaelam) * response_mask[:, t] + critic_lastgaelam * (1 - response_mask[:, t])
                 critic_advantages_reversed.append(critic_lastgaelam)
         advantages = torch.stack(advantages_reversed[::-1], dim=1)
-        returns = advantages + values
         if critic_lam is not None:
             critic_advantages = torch.stack(critic_advantages_reversed[::-1], dim=1)
             returns = critic_advantages + values
+        else:
+            returns = advantages + values
 
         advantages = verl_F.masked_whiten(advantages, response_mask)
     return advantages, returns
