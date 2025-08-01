@@ -358,6 +358,10 @@ class RewardManager():
                 score_fn_inputs['env_state_bytes'] = base64.b64decode(env_state_bytes) if isinstance(
                     env_state_bytes, str) else env_state_bytes
 
+            raw_score = 0
+            score_msg = ''
+            grm_response = ""
+            grm_score = GRM_INVALID_SCORE
             if isinstance(extra_data, dict) and (cached_score := extra_data.get('score', None)) is not None:
                 # score already calculated and is passed in extra_data
                 score = cached_score
@@ -367,13 +371,10 @@ class RewardManager():
                 raw_score = compute_score_fn(**score_fn_inputs)
                 score_fn_inputs["raw_score"] = raw_score
 
-                score_msg = ''
                 if isinstance(raw_score, dict) and all([key in raw_score for key in ['score', 'msg']]):
                     score_msg = raw_score['msg']
                     raw_score = raw_score['score']
 
-                grm_response = ""
-                grm_score = GRM_INVALID_SCORE
                 if (not is_validation
                    ) and self.config.trainer.use_grm and self.config.trainer.use_remote_grm and self.rm_name == 'train':
                     grm_response, grm_score = ray.get(self.grm_remote_client.get_results.remote(data_uid))
