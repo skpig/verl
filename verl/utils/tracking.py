@@ -108,7 +108,7 @@ def async_tracking_log_samples(train_batch, tokenizer, global_step):
                     per_token_info[k] = v
 
             sample_info = {
-                "raw_score": train_batch.non_tensor_batch['score'][i],
+                "raw_score": int(train_batch.non_tensor_batch['score'][i]),
                 "response_length": real_response_lens[i],
             }
             samples[i] = [future, per_token_info, sample_info]

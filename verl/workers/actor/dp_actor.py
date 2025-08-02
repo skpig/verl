@@ -376,6 +376,7 @@ class DataParallelPPOActor(BasePPOActor):
         # Split to make minibatch iterator for updating the actor
         # See PPO paper for details. https://arxiv.org/abs/1707.06347
         mini_batches = data.split(self.config.ppo_mini_batch_size)
+        print("[INFO] mini batch size is ", self.config.ppo_mini_batch_size)
 
         metrics = {}
         for _ in range(self.config.ppo_epochs):

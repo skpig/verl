@@ -353,7 +353,7 @@ def compute_validation_metrics(test_batch, step, val_reward_fn, tokenizer):
 
     test_samples = []
     for i in range(len(sample_inputs)):
-        sample = wandb.RlSample(sample_inputs[i], sample_outputs[i], [], [], {'score': scores[i]})
+        sample = wandb.RlSample(sample_inputs[i], sample_outputs[i], [], {}, {'score': scores[i]})
         test_samples.append(sample)
     # wandb.log({"test_samples": test_samples}, step=step)
 
@@ -460,6 +460,7 @@ class RayPPOTrainer:
         self.ray_worker_group_cls = ray_worker_group_cls
         self.device_name = device_name
         self.validation_generations_logger = ValidationGenerationsLogger()
+        self.async_tracking_pool = ProcessPoolExecutor(max_workers=8)
         self.async_tracking_running_tasks = set()
 
         # if ref_in_actor is True, the reference policy will be actor without lora applied

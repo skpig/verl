@@ -103,7 +103,7 @@ def extract_answer(model_output: str, prompt_id: int) -> str:
         raise NotImplementedError(f"Prompt ID {prompt_id} is not supported for answer extraction in math verify.")
     if len(extraction) == 0:
         if random.random() < 0.01:
-            pprint(f"Warning: No answer extracted from the model output.\n\n======", model_output)
+            pprint(f"Warning: No answer extracted from the model output.\n\n======{model_output}")
         return "None extraction"
     else:
         return extraction[-1].strip() # use the last extracted answer
@@ -295,19 +295,28 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None, is_v
 
 
         # during training
-        if not is_valid and data_source == "dapomath":
-            extracted_predictions = extract_answer(solution_str, prompt_id) # only verify the answer part wrapped in <answer>...</answer>
-            gold_extraction_target=(ExprExtractionConfig(),) # reduce computation time for training, since DAPOmath only requires ExprExtractionConfig
+        if not is_valid:
+            if data_source == "dapomath":
+                extracted_predictions = extract_answer(solution_str, prompt_id) # only verify the answer part wrapped in <answer>...</answer>
+                gold_extraction_target=(ExprExtractionConfig(),) # reduce computation time for training, since DAPOmath only requires ExprExtractionConfig
+            else:
+                raise NotImplementedError(f"Data source {data_source} is not supported for answer extraction during training in math verify.")
         # during validation
         else:
+            if data_source in ['amc12', 'aime24', 'dapomath']:
+                extracted_predictions = solution_str
+                gold_extraction_target = (ExprExtractionConfig(),) # golden_truth is always number
             # Wrap the ground truth in \boxed{} format for verification
-            ground_truth = "\\boxed{" + ground_truth + "}"
-            extracted_predictions = solution_str
-            gold_extraction_target = (LatexExtractionConfig(), ExprExtractionConfig()) 
+            elif data_source in ['math500']:
+                ground_truth = "\\boxed{" + ground_truth + "}"
+                extracted_predictions = solution_str
+                gold_extraction_target = (LatexExtractionConfig(), ExprExtractionConfig()) 
+            else:
+                raise NotImplementedError(f"Data source {data_source} is not supported for answer extraction during inference in math verify.")
         pred_extraction_target=(
             ExprExtractionConfig(), 
             LatexExtractionConfig(),
-            )
+        )
 
         # reduce computation time for training
         with open(".cache/current_solution.log", 'w') as f:

@@ -18,6 +18,8 @@ Preprocess the MATH-lighteval dataset to parquet format
 import argparse
 import os
 
+import test
+
 from math_verify import parse
 from math_verify.errors import TimeoutException
 from math_verify.metric import math_metric
@@ -108,7 +110,7 @@ def process_math500_dataset():
     test_path = os.path.join(MY_DATA_DIR, local_dir, "test.parquet")
     # skip if the file already exists
     if RESUME and os.path.exists(test_path):
-        return
+        return datasets.load_dataset("parquet", data_files=test_path)["train"]
 
     print(f"Loading the {data_source} dataset from huggingface...", flush=True)
     dataset = datasets.load_dataset(data_source, trust_remote_code=True)
@@ -137,6 +139,8 @@ def process_math500_dataset():
     test_dataset.to_parquet(test_path)
     print("Size of MATH-500 test dataset:", len(test_dataset))
 
+    return test_dataset
+
 def process_amc_dataset():
     # 数据源为 AI-MO/aimo-validation-amc
     data_source = "AI-MO/aimo-validation-amc"
@@ -144,7 +148,7 @@ def process_amc_dataset():
     test_path = os.path.join(MY_DATA_DIR, local_dir, "test.parquet")
     # 如果文件已存在且设置了恢复标志，则跳过处理
     if RESUME and os.path.exists(test_path):
-        return
+        return datasets.load_dataset("parquet", data_files=test_path)["train"]
 
     print(f"Loading the {data_source} dataset from huggingface...", flush=True)
     dataset = datasets.load_dataset(data_source, trust_remote_code=True)
@@ -172,6 +176,46 @@ def process_amc_dataset():
 
     test_dataset.to_parquet(test_path)
     print("Size of AMC-12 test dataset:", len(test_dataset))
+
+    return test_dataset
+
+def process_aime24_dataset():
+    data_source = "Maxwell-Jia/AIME_2024"
+    local_dir = os.path.basename(data_source)
+    test_path = os.path.join(MY_DATA_DIR, local_dir, "test.parquet")
+    # 如果文件已存在且设置了恢复标志，则跳过处理
+    if RESUME and os.path.exists(test_path):
+        return datasets.load_dataset("parquet", data_files=test_path)["train"]
+
+    print(f"Loading the {data_source} dataset from huggingface...", flush=True)
+    dataset = datasets.load_dataset(data_source, trust_remote_code=True)
+
+    test_dataset = dataset["train"]
+
+    # 为每个数据项添加一个表示唯一ID的行
+    def make_map_fn(split):
+        def process_fn(example, idx):
+            # 这里需要根据实际数据结构调整键名，假设与MATH-500类似
+            question = example.pop("Problem")
+            answer = example.pop("Answer")
+            data = {
+                "data_source": "aime24",
+                "prompt": format_question_to_prompt(question),
+                "ability": "math",
+                "reward_model": {"style": "rule", "ground_truth": str(answer)},
+                "extra_info": {"split": split, "index": idx},
+            }
+            return data
+
+        return process_fn
+
+    test_dataset = test_dataset.map(function=make_map_fn("test"), with_indices=True)
+
+    test_dataset.to_parquet(test_path)
+    print("Size of AIME24 test dataset:", len(test_dataset))
+
+    return test_dataset
+
 
 
 def process_limr_dataset():
@@ -402,11 +446,26 @@ if __name__ == "__main__":
     RESUME = argsort.parse_args().resume
     MY_DATA_DIR = os.getenv("MY_DATA_DIR")
 
+    # aime_dataset = process_aime24_dataset()
+    # math500_dataset = process_math500_dataset()
+    # amc_dataset = process_amc_dataset()
+
+    # # Repeat datasets
+    # aime_repeated = datasets.concatenate_datasets([aime_dataset] * 32)
+    # amc_repeated = datasets.concatenate_datasets([amc_dataset] * 16)
+    # merged_dataset = datasets.concatenate_datasets([aime_repeated, amc_repeated])
+
+    # # Save the merged dataset
+    # merged_path = os.path.join(MY_DATA_DIR, "merged_math_datasets", "merged_test.parquet")
+    # os.makedirs(os.path.dirname(merged_path), exist_ok=True)
+    # merged_dataset.to_parquet(merged_path)
+
+    # print(f"Merged dataset saved to {merged_path}")
+    # print(f"Size of merged dataset: {len(merged_dataset)}")
+    # print("Done Preprocessing!")
+
+    """Train dataset"""
     # process_numinamath_dataset()
-    # process_math500_dataset()
-    # process_amc_dataset()
-    process_dapomath_dataset()
+    # process_dapomath_dataset()
     # process_math_dataset()
     # process_limr_dataset()
-
-    print("Done Preprocessing!")
