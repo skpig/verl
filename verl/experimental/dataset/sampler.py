@@ -51,7 +51,14 @@ class AbstractBatchSampler(Sampler[List[int]]):
     def __init__(*args, **kargs):
         pass
 
-class MoPPSSampler(AbstractBatchSampler):
+class AbstractCurriculumBatchSampler(AbstractBatchSampler):
+    """Experimental interface for curriculum learning samplers."""
+
+    @abstractmethod
+    def update(self, batch: DataProto) -> None:
+        pass
+
+class MoPPSSampler(AbstractCurriculumBatchSampler):
     """
     MoPPS 版 BatchSampler:
     - 每次 __iter__ 直接返回一个长度 bsz 的索引列表
