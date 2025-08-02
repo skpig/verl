@@ -18,6 +18,8 @@ PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
 
+from concurrent.futures import ProcessPoolExecutor
+import multiprocessing
 import time
 import json
 import os
@@ -69,7 +71,7 @@ from verl.utils.metric import (
 from verl.utils.seqlen_balancing import (get_seqlen_balanced_partitions,
                                          log_seqlen_unbalance)
 from verl.utils.torch_functional import masked_mean
-from verl.utils.tracking import ValidationGenerationsLogger
+from verl.utils.tracking import ValidationGenerationsLogger, async_tracking_log_samples
 
 WorkerType = type[Worker]
 
@@ -334,6 +336,7 @@ def compute_advantage(
 def compute_validation_metrics(test_batch, step, val_reward_fn, tokenizer):
     # sample_inputs
     sample_inputs = tokenizer.batch_decode(test_batch.batch['prompts'], skip_special_tokens=True)
+    sample_outputs = tokenizer.batch_decode(test_batch.batch['responses'], skip_special_tokens=True)
 
     # evaluate using reward_function
     result = val_reward_fn(test_batch, return_dict=True)
@@ -347,6 +350,12 @@ def compute_validation_metrics(test_batch, step, val_reward_fn, tokenizer):
             reward_extra_infos_dict[key].extend(lst)
     
     data_sources = test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0])
+
+    test_samples = []
+    for i in range(len(sample_inputs)):
+        sample = wandb.RlSample(sample_inputs[i], sample_outputs[i], [], [], {'score': scores[i]})
+        test_samples.append(sample)
+    # wandb.log({"test_samples": test_samples}, step=step)
 
     # # log generation
     # self._maybe_log_val_generations(test_batch)
@@ -381,8 +390,8 @@ def compute_validation_metrics(test_batch, step, val_reward_fn, tokenizer):
                 metric_dict[pfx] = metric_val
 
     metric_dict['val_step'] = step
+    metric_dict['test_samples'] = test_samples
     return metric_dict, step
-
 
 
 class RayPPOTrainer:
@@ -451,6 +460,7 @@ class RayPPOTrainer:
         self.ray_worker_group_cls = ray_worker_group_cls
         self.device_name = device_name
         self.validation_generations_logger = ValidationGenerationsLogger()
+        self.async_tracking_running_tasks = set()
 
         # if ref_in_actor is True, the reference policy will be actor without lora applied
         self.ref_in_actor = config.actor_rollout_ref.model.get("lora_rank", 0) > 0
@@ -1490,7 +1500,7 @@ class RayPPOTrainer:
                         entropy_agg = agg_loss(loss_mat=entropys, loss_mask=response_masks, loss_agg_mode=loss_agg_mode)
                         old_log_prob_metrics = {"actor/entropy": entropy_agg.detach().item()}
                         metrics.update(old_log_prob_metrics)
-                        old_log_prob.batch.pop("entropys")
+                        # old_log_prob.batch.pop("entropys")
                         batch = batch.union(old_log_prob)
 
                         if "rollout_log_probs" in batch.batch.keys():
@@ -1664,6 +1674,20 @@ class RayPPOTrainer:
                     n_gpus = self.resource_pool_manager.get_n_gpus()
                     metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
                     metrics['perf/total_dedup_num_tokens'] = metrics['perf/total_dedup_num_response_tokens'] + metrics['perf/total_dedup_num_prompt_tokens']
+
+                    # async log samples
+                    finished = set()
+                    for t in self.async_tracking_running_tasks:
+                        if t.done():
+                            t.result()  # call this to collect the result(including error traceback)
+                            finished.add(t)
+                    for t in finished:
+                        self.async_tracking_running_tasks.remove(t)
+                    print(f"remaining async tracking tasks {len(self.async_tracking_running_tasks)}")
+
+                    task = self.async_tracking_pool.submit(async_tracking_log_samples, *(batch.select_idxs(list(range(50))), self.tokenizer, self.global_steps))
+                    self.async_tracking_running_tasks.add(task)
+
 
                     # update global metrics
                     self.global_metrics['perf/global_cumsum_total_dedup_num_prompt_tokens'] += metrics['perf/total_dedup_num_prompt_tokens']

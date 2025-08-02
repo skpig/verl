@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
+from pprint import pprint
 import random
 import time
 import traceback
@@ -100,6 +102,8 @@ def extract_answer(model_output: str, prompt_id: int) -> str:
     else:
         raise NotImplementedError(f"Prompt ID {prompt_id} is not supported for answer extraction in math verify.")
     if len(extraction) == 0:
+        if random.random() < 0.01:
+            pprint(f"Warning: No answer extracted from the model output.\n\n======", model_output)
         return "None extraction"
     else:
         return extraction[-1].strip() # use the last extracted answer
