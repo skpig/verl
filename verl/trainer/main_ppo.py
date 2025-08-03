@@ -205,8 +205,13 @@ class TaskRunner:
         from verl.utils.dataset.rl_dataset import collate_fn
 
         # Create training and validation datasets.
-        train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor, is_train=True)
-        val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor, is_train=False)
+        if 'Qwen3' in config.actor_rollout_ref.model.path:
+            print("Using thinking tokenizer for Qwen3 model.")
+            is_thinking_tokenizer = True
+        else:
+            is_thinking_tokenizer = False
+        train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor, is_train=True, is_thinking_tokenizer=is_thinking_tokenizer)
+        val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor, is_train=False, is_thinking_tokenizer=is_thinking_tokenizer)
         train_sampler = create_rl_sampler(config.data, train_dataset)
 
         # Initialize the PPO trainer.
@@ -239,7 +244,7 @@ class TaskRunner:
             
 
 
-def create_rl_dataset(data_paths, data_config, tokenizer, processor, is_train=True):
+def create_rl_dataset(data_paths, data_config, tokenizer, processor, is_train=True, is_thinking_tokenizer=False):
     """Create a dataset.
 
     Arguments:
@@ -284,6 +289,7 @@ def create_rl_dataset(data_paths, data_config, tokenizer, processor, is_train=Tr
         tokenizer=tokenizer,
         processor=processor,
         config=data_config,
+        is_thinking_tokenizer=is_thinking_tokenizer,
     )
 
     return dataset

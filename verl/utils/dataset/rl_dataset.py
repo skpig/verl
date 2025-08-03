@@ -117,13 +117,15 @@ The reasoning process is enclosed within <think> </think> and answer is enclosed
 system_prompt3 = """Please reason step by step, put your reasoning process within <think> </think> tags, and put your final answer within <answer> </answer> tags, respectively, i.e., 
 <think> reasoning process here </think> <answer> answer here </answer>.
 """
+system_prompt4 = """Please reason step by step, and put your final answer within <answer> </answer> tags"""
 # NOTE: always wrap answer within <answer> </answer> tags, related to "math_verify.extract_answer()"
 # system_prompt3 = """Please reason step by step.  Put your final answer within <answer> </answer> tags, i.e., <answer> your answer here </answer>"""
 all_prompts = [
     system_prompt0,
     system_prompt1,
     system_prompt2,
-    system_prompt3
+    system_prompt3,
+    system_prompt4,
 ]
 
 
@@ -151,6 +153,7 @@ class RLHFDataset(Dataset):
         tokenizer: PreTrainedTokenizer,
         config: DictConfig, # config.data
         processor: Optional[ProcessorMixin] = None,
+        is_thinking_tokenizer: bool = False,
     ):
         if not isinstance(data_files, list | ListConfig):
             data_files = [data_files]
@@ -160,6 +163,7 @@ class RLHFDataset(Dataset):
         self.tokenizer = tokenizer
         self.processor = processor
         self.config = config
+        self.is_thinking_tokenizer = is_thinking_tokenizer
 
         self.cache_dir = os.path.expanduser(config.get("cache_dir", "~/.cache/verl/rlhf"))
         self.prompt_key = config.get("prompt_key", "prompt")
@@ -197,6 +201,8 @@ class RLHFDataset(Dataset):
         """
         assert doc['prompt'][0]['role'] != "system", "The first message should not be a system message."
         doc['prompt'].insert(0, {"role": "system", "content": all_prompts[self.config.prompt_id]})
+        if self.is_thinking_tokenizer:
+            doc['prompt'].pop(-1) # remove the last message, which is the "<think>" prefix
 
         return doc
 
@@ -224,7 +230,7 @@ class RLHFDataset(Dataset):
             processor = self.processor
             prompt_key = self.prompt_key
             self.dataframe = self.dataframe.filter(
-                lambda doc: len(tokenizer.apply_chat_template(doc[prompt_key], continue_final_message=True))
+                lambda doc: len(tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=self.is_thinking_tokenizer, continue_final_message=not self.is_thinking_tokenizer, tokenize=False))
                 <= self.max_prompt_length,
                 num_proc=self.num_workers,
                 desc=f"Filtering prompts longer than {self.max_prompt_length} tokens",
@@ -280,7 +286,7 @@ class RLHFDataset(Dataset):
             from verl.utils.dataset.vision_utils import (process_image,
                                                          process_video)
 
-            raw_prompt = self.processor.apply_chat_template(messages, continue_final_message=True, tokenize=False)
+            raw_prompt = self.processor.apply_chat_template(messages, add_generation_prompt=self.is_thinking_tokenizer, continue_final_message=not self.is_thinking_tokenizer, tokenize=False)
             multi_modal_data = {}
 
             images = None
@@ -319,7 +325,7 @@ class RLHFDataset(Dataset):
                 row_dict["multi_modal_inputs"].pop("second_per_grid_ts", None)
 
         else:
-            raw_prompt = self.tokenizer.apply_chat_template(messages, continue_final_message=True, tokenize=False)
+            raw_prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=self.is_thinking_tokenizer, continue_final_message=not self.is_thinking_tokenizer, tokenize=False)
             model_inputs = self.tokenizer(raw_prompt, return_tensors="pt", add_special_tokens=False)
             input_ids = model_inputs.pop("input_ids")
             attention_mask = model_inputs.pop("attention_mask")
@@ -409,13 +415,13 @@ class TreeNode:
     """
 
     def __init__(self, 
-                 index,
+                 item,
                  father_node: Optional['TreeNode'] = None,
                  step_num=0):
         """
         Initialize the TreeNode with the given data.
         """
-        self.index = index # a unique identifier for the node, also the one used to access the node in the dataset
+        self.item = item # a unique identifier for the node, also the one used to access the node in the dataset
         self.father_node = father_node  # the parent node of this node, None if it's the root node
         self.children = []
 
@@ -427,7 +433,7 @@ class TreeNode:
         The original ancestor is the root node of the tree.
         """
         if self.step_num == 0:
-            return self.index
+            return self.item
         return self.father_node.get_original_ancestor_item()
 
     def add_child(self, child_node: 'TreeNode'):
@@ -454,11 +460,11 @@ class TreeDataset(Dataset):
         # Initialize an empty dataset for new data
         self.new_dataframe = datasets.Dataset.from_dict({})
 
-        self.root = TreeNode(index=-1, father_index=None, step_num=0)
+        self.root = TreeNode(item=-1, father_index=None, step_num=0)
         self.item2node = {-1: self.root}
 
         for i in range(self.original_datalength):
-            node = TreeNode(index=i, father_node=self.root, step_num=0)
+            node = TreeNode(item=i, father_node=self.root, step_num=0)
             self.root.add_child(node)
             self.item2node[i] = node
 
@@ -508,10 +514,13 @@ class TreeDataset(Dataset):
         scores = torch.tensor(batch.non_tensor_batch['score']) # raw score
 
         unique_indices, inverse_indices = torch.unique(items, return_inverse=True)
+        assert len(unique_indices) == len(set(items)), "Currently, items should be unique in the batch."
 
         # We can select the item with highest score as the new node
         # if self.use_critic:
+        assert self.use_critic, "Currently only support use_critic=True for TreeDataset"
 
+        
 
 
 
@@ -519,7 +528,7 @@ class TreeDataset(Dataset):
         for item, score_sum, count in zip(unique_indices.tolist(), score_sums.tolist(), counts.tolist()):
             # newly added node
             if item not in self.item2node:
-                node = TreeNode(index=item, father_node=self.item2node[0], step_num=0)
+                node = TreeNode(item=item, father_node=self.item2node[0], step_num=0)
                 self.item2node[item] = node
                 self.root.add_child(node)
             else:
