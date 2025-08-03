@@ -30,7 +30,7 @@ from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
 from verl.utils.profiler import GPUMemoryLogger
 from verl.utils.py_functional import append_to_dict
 from verl.utils.seqlen_balancing import prepare_dynamic_batch, restore_dynamic_batch
-from verl.utils.torch_functional import masked_mean
+from verl.utils.torch_functional import masked_mean, masked_var
 from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad_and_slice_inputs
 from verl.workers.critic import BasePPOCritic
 
@@ -244,6 +244,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                             "critic/vf_loss": vf_loss.detach().item(),
                             "critic/vf_clipfrac": vf_clipfrac.detach().item(),
                             "critic/vpred_mean": masked_mean(vpreds, response_mask).detach().item(),
+                            "critic/vpred_std": masked_var(vpreds, response_mask).sqrt().detach().item(),
                         }
                     )
 
