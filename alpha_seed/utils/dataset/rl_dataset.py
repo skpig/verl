@@ -377,7 +377,7 @@ class RLHFDataset(Dataset):
             row_dict['raw_prompt'] = chat.tolist()
 
         extra_info = row_dict.get("extra_info")
-        if extra_info is None or pd.isna(extra_info):
+        if extra_info is None or pd.isna(extra_info) or 'index' not in extra_info:
             index = item
         else:
             index = extra_info['index']
