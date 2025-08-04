@@ -97,16 +97,19 @@ def verify_format(model_output: str, prompt_id: int):
 #     return result, num_steps
 
 def extract_answer(model_output: str, prompt_id: int) -> str:
-    if prompt_id in [0, 1, 2, 3]:
-        extraction = re.findall(r'<answer>(.*?)</answer>', model_output, re.DOTALL)
-    else:
-        raise NotImplementedError(f"Prompt ID {prompt_id} is not supported for answer extraction in math verify.")
+    # if prompt_id in [0, 1, 2, 3]:
+    #     extraction = re.findall(r'<answer>(.*?)</answer>', model_output, re.DOTALL)
+    # else:
+    #     raise NotImplementedError(f"Prompt ID {prompt_id} is not supported for answer extraction in math verify.")
+    extraction = re.findall(r'<answer>(.*?)</answer>', model_output, re.DOTALL)
     if len(extraction) == 0:
-        if random.random() < 0.01:
-            pprint(f"Warning: No answer extracted from the model output.\n\n======{model_output}")
-        return "None extraction"
-    else:
-        return extraction[-1].strip() # use the last extracted answer
+        extraction = re.findall(r'\\boxed{(.*?)}', model_output, re.DOTALL)
+        if len(extraction) == 0:
+            if random.random() < 0.01:
+                pprint(f"Warning: No answer extracted from the model output.\n\n======{model_output}")
+            return "None extraction"
+
+    return extraction[-1].strip() # use the last extracted answer
 
 
 total_time1 = 0
