@@ -1034,7 +1034,9 @@ def validate_config(config):
     # assert real_train_batch_size % config.actor_rollout_ref.rollout.micro_batch_size == 0
     complete_ratio = config.actor_rollout_ref.rollout.get("complete_ratio", 1.0)
     if config.streaming_rollout.nnodes == 0:
-        assert complete_ratio == 1.0, f'When streaming rollout (server) is not enabled, complete_ratio must be 1. Got {complete_ratio}'
+        assert config.trainer.queued_rollout_config.enable or complete_ratio == 1.0, \
+            f'When streaming rollout (server) is not enabled, queued_rollout must be enabled or complete_ratio must be 1. ' \
+            f'Got {config.trainer.queued_rollout_config.enable=} {complete_ratio=}'
     else:
         assert complete_ratio < 1.0, f'When streaming rollout (server) is enabled, complete_ratio must be smaller than 1. Got {complete_ratio}.'
         assert config.streaming_rollout.n_gpus_per_node > 0, f'When streaming rollout (server) is enabled, n_gpus_per_node must be larger than 0'

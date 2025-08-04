@@ -524,7 +524,6 @@ class RolloutManager:
 
         queued_rollout_config = self.config.trainer.queued_rollout_config
         assert self._use_server, "train_generate_queued only valid for server mode"
-        assert self.train_standalone_wg is not None, "train_generate_queued only valid with standalone rollout"
         complete_ratio = self.config.actor_rollout_ref.rollout.get("complete_ratio", 1.0)
         assert complete_ratio == 0.0, "train_generate_queued only valid for complete_ratio=0.0"
         assert not self.config.actor_rollout_ref.rollout.rollout_pool.clear_rollout_pool, "train_generate_queued incompatible with clear_rollout_pool=True"
@@ -1238,13 +1237,16 @@ class RolloutManager:
             yield
             return
         setattr(self, flag_key, True)
+
+        has_standalone = self.train_standalone_wg is not None
         replicas = self.train_replicas if is_train else self.val_replicas
         with self._hybrid_wg_lock:
             with hybrid_enable_server_ctx(self.hybrid_wg):
                 replicas.set_replica_ready_state(name='hybrid', ready=True)
                 yield
-                replicas.set_replica_ready_state(name='hybrid', ready=False)
-        ret_xperf_metrics = self.stop_hybrid_server_and_get_metrics()
+                if has_standalone:
+                    replicas.set_replica_ready_state(name='hybrid', ready=False)
+        ret_xperf_metrics = self.stop_hybrid_server_and_get_metrics() if has_standalone else self.get_metrics()
         if xperf_metrics is not None:
             xperf_metrics[:] = ret_xperf_metrics
         setattr(self, flag_key, False)
@@ -1255,6 +1257,10 @@ class RolloutManager:
         setattr(self, flag_key, True)
         yield
         setattr(self, flag_key, False)
+
+    def get_metrics(self):
+        """After exiting ctx, collect metrics"""
+        return self.hybrid_wg.get_metrics()
 
     def stop_hybrid_server_and_get_metrics(self):
         """After exiting ctx, collect metrics"""

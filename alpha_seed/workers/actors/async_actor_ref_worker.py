@@ -1018,6 +1018,12 @@ class AsyncActorRolloutRefWorker(Worker):
         return self.rollout.get_all_queries(query_type)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
+    def get_metrics(self):
+        metrics = self.rollout.inference_engine.infer_scheduler.metrics
+        visualize_metrics(metrics)
+        return metrics
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
     def release_running_queries_and_return_metrics(self):
         metrics = self.rollout.inference_engine.infer_scheduler.metrics
         visualize_metrics(metrics)
