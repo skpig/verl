@@ -40,7 +40,7 @@ async def TextBrowserAPI(url: str, description: str, metrics: Dict[str, List], g
     headers = {
         "api-key": "deadf37f-f228-45a3-8a8d-1c948415fd4a",
         "Content-Type": "application/json",
-        "project_id": TRIAL_ID,
+        "project-id": TRIAL_ID,
         "step": str(global_step),
         "user": f"{ARNOLD_TRIAL_OWNER}@bytedance.com"
     }

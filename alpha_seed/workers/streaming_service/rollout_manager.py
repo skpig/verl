@@ -9,6 +9,7 @@ import pandas as pd
 import uuid
 import time
 import threading
+import json
 
 from concurrent.futures import ThreadPoolExecutor, wait, ALL_COMPLETED
 from alpha_seed.utils.debug.aiomonitor import get_aiomonitor_cls
@@ -1048,6 +1049,12 @@ class RolloutManager:
                 if isinstance(agent_env, np.ndarray):
                     agent_env = agent_env.tolist()
                 gen_batch.non_tensor_batch['extra_data'][i].update({'agent_env': agent_env})
+        if (key := "initial_files") in gen_batch.non_tensor_batch:
+            #Here some CI tasks need initial files to upload to sandbox
+            for i in range(len(gen_batch)):
+                agent_env_initial_files = gen_batch.non_tensor_batch['initial_files'][i]
+                gen_batch.non_tensor_batch['extra_data'][i].update(
+                    {'agent_env_initial_files': json.loads(agent_env_initial_files)['initial_files']})
         for i in range(len(gen_batch)):
             gen_batch.non_tensor_batch['extra_data'][i].update({'config': self.config_dict})
         # More efficient for server-client interaction

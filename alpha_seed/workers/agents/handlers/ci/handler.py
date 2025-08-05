@@ -245,7 +245,23 @@ class ToolAsyncAgent(AsyncAgent):
             # response_text = """<escapeShell type="code" id="0">```python\nprint("hello world")\n```</escapeShell><|FunctionCallBegin|>[{"name": "DoubaoCodeInterpreter", "parameters": {"id": "0"}}]<|FunctionCallEnd|>"""
             # response_text = "<|FunctionCallBegin|>" + json.dumps([{"name": "JupyterCI", "parameters": {"code": "print('hello world')"}}], ensure_ascii=False) + "<|FunctionCallEnd|>"
             # breakpoint()
-            all_added_code_files = _parse_code_blocks(response_text)
+
+            #Chen: Here is the implementation of exculding all function call within thinking cot
+            #FIXME: need to fix the hard code od thinking token
+            def remove_think_block(text):
+                start_tag = "<think_never_used_51bce0c785ca2f68081bfa7d91973934>"
+                end_tag = "</think_never_used_51bce0c785ca2f68081bfa7d91973934>"
+
+                start = text.find(start_tag)
+                end = text.rfind(end_tag)
+
+                if start != -1 and end != -1 and end > start:
+                    end += len(end_tag)
+                    return text[:start] + text[end:]
+                return text
+
+            response_text_excluded_thinking_cot = remove_think_block(response_text)
+            all_added_code_files = _parse_code_blocks(response_text_excluded_thinking_cot)
 
             for i in range(len(all_added_code_files)):
                 code_block_id = all_added_code_files[i]['idx']
@@ -265,7 +281,7 @@ class ToolAsyncAgent(AsyncAgent):
             })
 
             # Parse tool calls from response
-            tool_calls = await self.tool_parser.extract_tool_calls(response_text)
+            tool_calls = await self.tool_parser.extract_tool_calls(response_text_excluded_thinking_cot)
             num_tool_calls += len(tool_calls)
 
             if not tool_calls:
@@ -275,7 +291,10 @@ class ToolAsyncAgent(AsyncAgent):
             # Execute tool calls
             tool_responses = []
             for tool_call in tool_calls:
-                tool_response = await self._call_tool(tool_call, ci_sandbox_psm)
+                tool_response = await self._call_tool(
+                    tool_call,
+                    ci_sandbox_psm,
+                    initial_files=item.non_tensor_batch['extra_data'][0]['agent_env_initial_files'])
                 if isinstance(tool_response, Exception):
                     break
                 tool_responses.append(tool_response)
@@ -426,7 +445,7 @@ class ToolAsyncAgent(AsyncAgent):
 
         return completion, prompt_with_tools
 
-    async def _call_tool(self, tool_call: FunctionCall, ci_sandbox_psm) -> Dict[str, str]:
+    async def _call_tool(self, tool_call: FunctionCall, ci_sandbox_psm, initial_files=None) -> Dict[str, str]:
         """Execute a tool call and return the response"""
         try:
             tool_name = tool_call.name
@@ -465,7 +484,8 @@ class ToolAsyncAgent(AsyncAgent):
             # Execute the tool
             tool_response, tool_reward_score, tool_metrics = await tool.execute(instance_id,
                                                                                 tool_args,
-                                                                                ci_sandbox_psm=ci_sandbox_psm)
+                                                                                ci_sandbox_psm=ci_sandbox_psm,
+                                                                                initial_files=initial_files)
 
             return {"role": "tool", "content": tool_response}
 

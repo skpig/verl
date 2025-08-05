@@ -121,5 +121,8 @@ def _select_rm_score_fn(reward_style, external_lib: str = None):
     elif reward_style == "tool_use_verifier":
         from . import websearch_verifier
         return websearch_verifier.agent_env_score
+    elif reward_style == 'DSUT_verifier':
+        from . import dsut_verifier
+        return dsut_verifier.compute_score
     else:
-        raise NotImplementedError
+        raise NotImplementedError(f"{reward_style=} not implemented")

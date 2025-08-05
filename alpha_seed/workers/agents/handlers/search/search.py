@@ -135,8 +135,23 @@ class ToolAgent(AsyncAgent):
                 "content": self.tokenizer.pad_token * len(response_message['raw_output_ids'])
             })
 
+            #Chen: Here is the implementation of exculding all function call within thinking cot
+            #FIXME: need to fix the hard code od thinking token
+            def remove_think_block(text):
+                start_tag = "<think_never_used_51bce0c785ca2f68081bfa7d91973934>"
+                end_tag = "</think_never_used_51bce0c785ca2f68081bfa7d91973934>"
+
+                start = text.find(start_tag)
+                end = text.rfind(end_tag)
+
+                if start != -1 and end != -1 and end > start:
+                    end += len(end_tag)
+                    return text[:start] + text[end:]
+                return text
+
+            response_text_excluded_thinking_cot = remove_think_block(response_text)
             # Parse tool calls from response
-            tool_calls = await self.tool_parser.extract_tool_calls(response_text)
+            tool_calls = await self.tool_parser.extract_tool_calls(response_text_excluded_thinking_cot)
             num_tool_calls += len(tool_calls)
 
             if not tool_calls:

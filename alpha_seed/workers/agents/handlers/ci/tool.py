@@ -217,11 +217,12 @@ class JupyterCI_stateful(BaseTool):
         tool_schema = OpenAIFunctionToolSchema.model_validate(schema)
         return tool_schema
 
-    async def execute(self, instance_id: str, parameters: dict[str, Any], **kwargs) -> Tuple[str, float, dict]:
+    async def execute(self, instance_id: str, parameters: dict[str, Any], initial_files,
+                      **kwargs) -> Tuple[str, float, dict]:
         _start_time = time.time()
         # try:
         if self.jupyter_env_id is None:
-            await self.start_up_jupyter_w_state()
+            await self.start_up_jupyter_w_state(initial_files)
         response = await self.submit_python_jupyter_w_state({'code_blocks': parameters['code']},
                                                             env_id=self.jupyter_env_id)
         if "⚠️ Jupyter Sandbox Restarted" in response:
@@ -241,7 +242,7 @@ class JupyterCI_stateful(BaseTool):
         #     print(f"[CI] Error: {e}")
         #     return f"CI Error: {e}", 0, {}
 
-    async def start_up_jupyter_w_state(self):
+    async def start_up_jupyter_w_state(self, initial_files):
         max_total_retries = 3
         for total_attempt in range(1, max_total_retries + 1):
             # try:
@@ -293,7 +294,7 @@ class JupyterCI_stateful(BaseTool):
             start_up_test_action_dict = {'code_blocks': ['print("sucess start up")']}
             start_up_test_response = await self.submit_python_jupyter_w_state(start_up_test_action_dict,
                                                                               env_id=text['env_id'],
-                                                                              files={})
+                                                                              files=initial_files)
             if 'sucess start up' in start_up_test_response:
                 self.jupyter_env_id = text['env_id']
                 print('jupyter start up sucess')
