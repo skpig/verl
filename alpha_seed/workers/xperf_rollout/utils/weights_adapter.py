@@ -80,8 +80,6 @@ class WeightsAdapter:
 
     def _get_full_tensor(self, tensor: DTensor) -> torch.Tensor:
 
-        if isinstance(tensor, DTensor) or isinstance(tensor, torch.Tensor):
-            tensor = tensor.cuda()
         if isinstance(tensor, DTensor):
             tensor = tensor.full_tensor()
 
@@ -323,7 +321,6 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
                 self._assign_and_validate(src=weight, dst=dst, name=name)
 
         wte_weight, lm_head_weight, ln_f_weight, oe_weight, oe_proj = self._process_top_level_weights()
-        wte_weight, lm_head_weight, ln_f_weight = wte_weight.cpu(), lm_head_weight.cpu(), ln_f_weight.cpu()
         binding_weights = [(xperf_weights.module_weight, wte_weight, "wte_weight"),
                            (xperf_weights.module_weight, lm_head_weight, "lm_head_weight"),
                            (xperf_weights.module_weight, ln_f_weight, "ln_f_weight"),
@@ -338,15 +335,7 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
             fc1_weight, share_fc1_weight, fc2_weight, share_fc2_weight = self._process_ffn_weights(layer_idx)
             qkv_weight, o_weight, fc1_weight, fc2_weight, share_fc1_weight, share_fc2_weight, wfp8_qscale = self._process_quant_wfp8(
                 qkv_weight, o_weight, fc1_weight, fc2_weight, share_fc1_weight, share_fc2_weight)
-            qkv_weight, o_weight, fc1_weight, fc2_weight = qkv_weight.cpu(), o_weight.cpu(), fc1_weight.cpu(
-            ), fc2_weight.cpu()
-            if share_fc1_weight is not None:
-                share_fc1_weight = share_fc1_weight.cpu()
-            if share_fc2_weight is not None:
-                share_fc2_weight = share_fc2_weight.cpu()
             gate_wg_weight = self._process_gate_weights(layer_idx)
-            if gate_wg_weight is not None:
-                gate_wg_weight = gate_wg_weight.cpu()
             vwn0_static_alpha, vwn0_static_beta, vwn0_dynamic_alpha, vwn0_dynamic_alpha_scale, vwn0_dynamic_beta, vwn0_dynamic_beta_scale, vwn0_layer_norm, \
             vwn1_static_alpha, vwn1_static_beta, vwn1_dynamic_alpha, vwn1_dynamic_alpha_scale, vwn1_dynamic_beta, vwn1_dynamic_beta_scale, vwn1_layer_norm = self._process_vwn_weights(layer_idx)
 
@@ -585,66 +574,59 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
     def _process_ffn_weights(self, layer_idx: int) -> Tuple[torch.Tensor, ...]:
 
         fc1_1 = self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['fc1_1']), torch.bfloat16)
-        if self.device_mesh is not None:
-            fc1_1 = self._redistribute_dtensor(
-                DTensor.from_local(fc1_1, self.device_mesh, [Replicate(), Replicate()]),
-                [Replicate(), Shard(0 if self.use_ep or self.moe_num_expert == 0 else 1)])
         fc1_2 = self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['fc1_2']), torch.bfloat16)
-        if self.device_mesh is not None:
-            fc1_2 = self._redistribute_dtensor(
-                DTensor.from_local(fc1_2, self.device_mesh, [Replicate(), Replicate()]),
-                [Replicate(), Shard(0 if self.use_ep or self.moe_num_expert == 0 else 1)])
         fc2 = self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['fc2']), torch.bfloat16)
-        if self.device_mesh is not None:
-            fc2 = self._redistribute_dtensor(
-                DTensor.from_local(fc2, self.device_mesh, [Replicate(), Replicate()]),
-                [Replicate(), Shard(0 if self.use_ep else 1 if self.moe_num_expert == 0 else 2)])
 
         if self.share_expert_num > 0:
             share_fc1_1 = self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['share_fc1_1']),
                                         torch.bfloat16)
+            share_fc1_2 = self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['share_fc1_2']),
+                                        torch.bfloat16)
+            share_fc2 = self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['share_fc2']),
+                                      torch.bfloat16)
             share_fc1_1 = share_fc1_1.view(2, -1, share_fc1_1.shape[-1])
-            if self.device_mesh is not None:
+            share_fc1_2 = share_fc1_2.view(2, -1, share_fc1_2.shape[-1])
+            share_fc2 = share_fc2.view(share_fc2.shape[-2], 2, -1).transpose(0, 1)
+
+        if self.device_mesh is not None:
+            fc1_1 = self._redistribute_dtensor(
+                DTensor.from_local(fc1_1, self.device_mesh, [Replicate(), Replicate()]),
+                [Replicate(), Shard(0 if self.use_ep or self.moe_num_expert == 0 else 1)])
+            fc1_2 = self._redistribute_dtensor(
+                DTensor.from_local(fc1_2, self.device_mesh, [Replicate(), Replicate()]),
+                [Replicate(), Shard(0 if self.use_ep or self.moe_num_expert == 0 else 1)])
+            fc2 = self._redistribute_dtensor(
+                DTensor.from_local(fc2, self.device_mesh, [Replicate(), Replicate()]),
+                [Replicate(), Shard(0 if self.use_ep else 1 if self.moe_num_expert == 0 else 2)])
+
+            if self.share_expert_num > 0:
                 share_fc1_1 = self._redistribute_dtensor(
                     DTensor.from_local(share_fc1_1, self.device_mesh, [Replicate(), Replicate()]),
                     [Replicate(), Shard(1)])
-            share_fc1_2 = self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['share_fc1_2']),
-                                        torch.bfloat16)
-            share_fc1_2 = share_fc1_2.view(2, -1, share_fc1_2.shape[-1])
-            if self.device_mesh is not None:
                 share_fc1_2 = self._redistribute_dtensor(
                     DTensor.from_local(share_fc1_2, self.device_mesh, [Replicate(), Replicate()]),
                     [Replicate(), Shard(1)])
-            share_fc2 = self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['share_fc2']),
-                                      torch.bfloat16)
-            share_fc2 = share_fc2.view(share_fc2.shape[-2], 2, -1).transpose(0, 1)
-            if self.device_mesh is not None:
                 share_fc2 = self._redistribute_dtensor(
                     DTensor.from_local(share_fc2, self.device_mesh, [Replicate(), Replicate()]),
                     [Replicate(), Shard(2)])
 
         fc1 = torch.cat((fc1_1, fc1_2), dim=0 if self.moe_num_expert == 0 else 1)
-        del fc1_1, fc1_2
         if self.share_expert_num > 0:
             share_fc1 = torch.cat((share_fc1_1, share_fc1_2), dim=1)
-            del share_fc1_1, share_fc1_2
 
         if self.moe_num_expert == 0:
             fc1_weight = fc1.contiguous()
             fc2_weight = fc2.contiguous()
             share_fc1_weight = None
             share_fc2_weight = None
-            del fc1, fc2
         else:
             if self.use_ep:
                 fc1_weight = fc1.contiguous()
                 fc2_weight = fc2.contiguous()
-                del fc1, fc2
                 if self.share_expert_num > 0:
                     share_fc1_weight = share_fc1.reshape(share_fc1.shape[0], 2, -1, share_fc1.shape[-1]).transpose(
                         0, 1).reshape(-1, share_fc1.shape[-1]).contiguous()
                     share_fc2_weight = share_fc2.transpose(0, 1).reshape(share_fc2.shape[1], -1).contiguous()
-                    del share_fc1, share_fc2
                 else:
                     share_fc1_weight = None
                     share_fc2_weight = None
@@ -652,11 +634,9 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
                 if self.share_expert_num > 0:
                     fc1_weight = torch.cat((fc1, share_fc1), dim=0)
                     fc2_weight = torch.cat((fc2, share_fc2), dim=0)
-                    del fc1, fc2, share_fc1, share_fc2
                 else:
                     fc1_weight = fc1
                     fc2_weight = fc2
-                    del fc1, fc2
                 share_fc1_weight = None
                 share_fc2_weight = None
 
