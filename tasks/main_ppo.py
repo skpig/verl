@@ -436,7 +436,7 @@ class RewardManager():
                 "format_reward": format_reward,
                 "pause_tokens_index": pause_tokens_index,
                 "thinking_len": thinking_len,
-                'global_index': data_item.non_tensor_batch['index']
+                'global_index': str(data_item.non_tensor_batch['index'])
             }
 
             return return_dict

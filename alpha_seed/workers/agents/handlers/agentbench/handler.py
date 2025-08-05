@@ -63,7 +63,6 @@ class Agentless(ThreadedAgent):
                                                                          truncation=truncation)
         prompt = {
             "prompt_names": [""],
-            "raw_prompt": messages.tolist() if hasattr(messages, "tolist") else messages,
             "input_ids": input_ids[0].to(torch.int32),
             "attention_mask": attention_mask[0].to(torch.int8)
         }
@@ -126,14 +125,7 @@ class Agentless(ThreadedAgent):
             **kwargs
         }],
                                                          dtype=object)
-        item.non_tensor_batch['raw_prompt'] = np.array([[{
-            **item.non_tensor_batch['raw_prompt'][0][-1],
-            **{
-                'meta': None,
-                'name': None
-            }
-        }]],
-                                                       dtype=object)
+
         item.non_tensor_batch['agent_num_turns'] = np.array([kwargs.get('num_turns', 0)], dtype=object)
         item.non_tensor_batch['agent_num_tool_calls'] = np.array([kwargs.get('num_tool_calls', 0)], dtype=object)
         return item
