@@ -25,7 +25,7 @@ def test_logits_cross_entropy_fusion():
     model_v2.load_state_dict(model.state_dict())
 
     # apply monkey patch
-    from alpha_seed.models.transformers.modeling_p6 import p6_model_forward
+    from mono_rl.models.seed_models.modeling_p6 import p6_model_forward
     P6ForCausalLM.forward = p6_model_forward
 
     input_ids_rmpad, input_ids_rmpad_rolled, full_response_mask_rmpad, position_ids_rmpad = prepare_data()

@@ -18,8 +18,8 @@ except ImportError:
     NDTIMELINE_SEQ_ID_KEY = "seq_id"
     NDTIMELINE_PG_ID_KEY = "pg_id"
 
-from alpha_seed.models.transformers.parallel import timed_collectives
-from alpha_seed.models.transformers.parallel import collectives
+from mono_rl.models.seed_models.parallel import timed_collectives
+from mono_rl.models.seed_models.parallel import collectives
 
 
 def timed_all_reduce_impl(tensor, op=dist.ReduceOp.SUM, group=None, async_op=False, name: Optional[str] = None):

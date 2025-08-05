@@ -72,7 +72,7 @@ if rank == 0:
     print(f'Model config after override: {actor_model_config}')
 
 # optimize the model via rmpad
-from alpha_seed.models.transformers.monkey_patch import apply_monkey_patch
+from mono_rl.models.seed_models.monkey_patch import apply_monkey_patch
 assert apply_monkey_patch(config=actor_model_config,
                           verbose=rank == 0), f'Cannot find rmpad version of {actor_model_config.model_type}'
 

@@ -1,6 +1,7 @@
 import torch
 from mono_rl import DataProto
 from verl.utils.seqlen_balancing import rearrange_micro_batches
+from typing import Dict
 
 
 def clip_by_value_preserve_gradient(t, min=None, max=None):
@@ -58,3 +59,13 @@ def print_dataproto_size(data: DataProto, head):
     size_of_numpy_array /= 1024**3
     size_of_tensordict /= 1024**3
     print(f'{head}, Size of tensordict: {size_of_tensordict} GB, size of non_tensor_batch: {size_of_numpy_array} GB')
+
+
+def append_dict_items_to_dict(data: Dict, new_data: Dict):
+    for key, val in new_data.items():
+        if key not in data:
+            data[key] = []
+        if isinstance(val, list):
+            data[key].extend(val)
+        else:
+            data[key].append(val)

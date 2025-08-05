@@ -19,7 +19,7 @@ try:
 except ImportError:
     print('Cannot find pad_dataproto_to_divisor. Please use latest verl master')
     raise
-from alpha_seed.models.transformers.modeling_vlm import get_image_keys
+from mono_rl.models.seed_models.modeling_vlm import get_image_keys
 from alpha_seed.utils.dataset.dist_data_util import release_object, get_image_manager
 
 

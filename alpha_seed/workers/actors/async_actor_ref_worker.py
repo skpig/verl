@@ -15,52 +15,39 @@
 The main entry point to run the PPO algorithm
 """
 
-import copy
 import time
 from typing import Union, List
-import json
-from contextlib import nullcontext
 import warnings
 import os
 import logging
 import ray
 import torch
 import torch.distributed
-from omegaconf import DictConfig, open_dict
+from omegaconf import DictConfig
 import gc
 
 from mono_rl.single_controller import Worker
 from mono_rl.single_controller import register, Dispatch, Execute
 from mono_rl import DataProto
-from alpha_seed.utils.functional import update_model_config, get_text_config
-from verl.utils.model import print_model_size
 from alpha_seed.workers.fsdp.offload import (offload_fsdp_optimizer, load_fsdp_optimizer, offload_fsdp_model_to_cpu,
                                              load_fsdp_model_to_gpu)
 
-from alpha_seed.workers.megatron.offload import (offload_megatron_model_to_cpu, load_megatron_model_to_gpu,
-                                                 offload_megatron_optimizer, load_megatron_optimizer)
-from alpha_seed.models.transformers.monkey_patch import apply_monkey_patch, get_parallel_plan, get_ignore_modules_in_mixed_precision
-from verl.utils.import_utils import import_external_libs
+from alpha_seed.workers.megatron.offload import (offload_megatron_model_to_cpu, load_megatron_model_to_gpu)
 from verl.utils.debug import log_gpu_memory_usage
-from verl.utils.torch_functional import get_constant_schedule_with_warmup
-from alpha_seed.trainer.optim import get_optimizer_from_config
 from alpha_seed.workers.xperf_rollout.component.query import Query
 from alpha_seed.workers.xperf_rollout.utils.layout_convert_helper import offload_to_device
 
 from alpha_seed.utils import ndtimeline
 from alpha_seed.workers.hybrid_engine.fsdp_gather import DataGatherManager
-from alpha_seed.workers.fsdp.initialize import (meta_device_init, cleanup_local_tmp_folder_safetensors_files)
+from alpha_seed.workers.fsdp.initialize import cleanup_local_tmp_folder_safetensors_files
 from alpha_seed.workers.ppo_actor import DataParallelPPOActor
 from alpha_seed.workers.xperf_rollout.profiler.visualizer import visualize_metrics
 from alpha_seed.utils.kernels.persist_gemm import deploy_persist_gemm
-from alpha_seed.models.transformers.parallel.collectives import get_memory
-from alpha_seed.models.transformers.modeling_vlm import add_pixel_values_to_inflight_query
+from mono_rl.models.seed_models.parallel.collectives import get_memory
+from mono_rl.models.seed_models.modeling_vlm import add_pixel_values_to_inflight_query
 from alpha_seed.utils.dataset.vlm_rl_dataset import load_and_transform_save_image
-from alpha_seed.utils.observility.training_stats import MetricsTorchDispatchMode
 from alpha_seed.utils.observility import get_profiler_context_wrapped
-from alpha_seed.utils.ckpt import download_minimal_required_files
-from alpha_seed.utils.dataset.dist_data_util import get_image_manager
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig, AutoModelForVision2Seq
+from transformers import AutoTokenizer, AutoConfig
 from transformers import AutoProcessor
 
 from seed_models.utils.count_flops import FlopsCounter
@@ -79,6 +66,10 @@ try:
     from alpha_seed.workers.ppo_actor_megatron import MegatronPPOActor
 except:
     pass
+
+from alpha_seed.utils.mono_rl.config import actor_config_to_mono_config, ref_config_to_mono_config
+from mono_rl.worker import Role
+from mono_rl.worker.engine.fsdp.models.model import FSDPModel
 
 logger = logging.getLogger(__file__)
 
@@ -129,80 +120,48 @@ class AsyncActorRolloutRefWorker(Worker):
             if self.rank >= actor_world_size:
                 self._is_valid_actor = False
 
-        # actor model
         if self.actor_strategy in ('fsdp', 'vescale-fsdp2'):
-            actor_fsdp_size = config.actor.fsdp_size
-            actor_sp_size = config.actor.ulysses_sequence_parallel_size
-            actor_oe_size = config.actor.oe_size
-            actor_tp_size = config.actor.tp_size
-            # Monkey patch DeviceMesh._init_process_groups to inject timeout for NCCL
-            from alpha_seed.workers.fsdp import monkey_patch
-            if self.actor_strategy == 'vescale-fsdp2':
-                from alpha_seed.workers.vescale.initialize import create_mesh
-            else:
-                from alpha_seed.workers.fsdp.initialize import create_mesh
-            actor_meshes = create_mesh(fsdp_size=actor_fsdp_size,
-                                       tp_size=actor_tp_size,
-                                       oe_size=actor_oe_size,
-                                       sp_size=actor_sp_size,
-                                       tp_outside=config.actor.tp_outside,
-                                       enable_actor_critic_spatial_mux=self.enable_actor_critic_spatial_mux,
-                                       role=self.role)
-            self.actor_fsdp_mesh = actor_meshes[0]
-            self.actor_tp_mesh = actor_meshes[1]  # shared for both train and inference
-            self.actor_oe_mesh = actor_meshes[2]
-            self.actor_sp_mesh = actor_meshes[3]
-            self.actor_gather_mesh = actor_meshes[4]
-            self.actor_train_mesh = actor_meshes[5]
+            actor_mono_config = self._get_actor_mono_config()
+            self.actor_engine = FSDPModel(actor_mono_config.engine)
+            self.actor_fsdp_mesh = self.actor_engine.fsdp_mesh
+            self.actor_tp_mesh = self.actor_engine.tp_mesh
+            self.actor_oe_mesh = self.actor_engine.oe_mesh
+            self.actor_sp_mesh = self.actor_engine.sp_mesh
+            self.actor_gather_mesh = self.actor_engine.gather_mesh
+            self.actor_train_mesh = self.actor_engine.train_mesh
             if self._is_valid_actor:
                 self.actor_gather_manager = DataGatherManager(self.actor_gather_mesh, self.actor_sp_mesh)
-            if torch.distributed.get_rank() == 0:
-                print(
-                    f"Created actor with fsdp_size={self.actor_fsdp_mesh.shape}, tp_size={self.actor_tp_mesh.size()}, "
-                    f"actor sp_size={self.actor_sp_mesh.size()}")
         elif self.actor_strategy == 'megatron':
             # implement 3D parallel self.actor_gather_manager. We still assume that data is chunked in data parallel.
             # We first need to perform allgather in model parallel group so that data in each tp/pp/cp group is identical.
             # Then, we chunk data according to context parallel rank
             # In this way, the API of FSDP and Megatron can be identical
+            # FIXME: the MegatronPPoActor API is not aligned yet, need fix in both alpha_seed and mono_rl
             from alpha_seed.workers.hybrid_engine.megatron_gather import MegatronDataGatherManager
+            from mono_rl.worker.engine.megatron.model import MegatronModel
+            actor_mono_config = actor_config_to_mono_config(self.config.actor, self.config.model)
+            self.actor_engine = MegatronModel(actor_mono_config.engine)
             self.actor_gather_manager = MegatronDataGatherManager()
 
-        # reference model
         if self._is_ref:
             if self.ref_strategy in ('fsdp', 'vescale-fsdp2'):
-                ref_fsdp_size = config.ref.fsdp_size
-                ref_sp_size = config.ref.ulysses_sequence_parallel_size
-                ref_oe_size = config.ref.oe_size
-                ref_tp_size = config.ref.tp_size
-                # Monkey patch DeviceMesh._init_process_groups to inject timeout for NCCL
-                from alpha_seed.workers.fsdp import monkey_patch
-                if self.ref_strategy == 'vescale-fsdp2':
-                    from alpha_seed.workers.vescale.initialize import create_mesh
-                else:
-                    from alpha_seed.workers.fsdp.initialize import create_mesh
-                ref_meshes = create_mesh(fsdp_size=ref_fsdp_size,
-                                         tp_size=ref_tp_size,
-                                         oe_size=ref_oe_size,
-                                         sp_size=ref_sp_size,
-                                         tp_outside=config.ref.tp_outside)
-                self.ref_fsdp_mesh = ref_meshes[0]
-                self.ref_tp_mesh = ref_meshes[1]
-                self.ref_oe_mesh = ref_meshes[2]
-                self.ref_sp_mesh = ref_meshes[3]
-                self.ref_gather_mesh = ref_meshes[4]
-                self.ref_train_mesh = ref_meshes[5]
+                ref_mono_config = self._get_ref_mono_config()
+                self.ref_engine = FSDPModel(ref_mono_config.engine)
+                self.ref_fsdp_mesh = self.ref_engine.fsdp_mesh
+                self.ref_tp_mesh = self.ref_engine.tp_mesh
+                self.ref_oe_mesh = self.ref_engine.oe_mesh
+                self.ref_sp_mesh = self.ref_engine.sp_mesh
+                self.ref_gather_mesh = self.ref_engine.gather_mesh
+                self.ref_train_mesh = self.ref_engine.train_mesh
                 self.ref_gather_manager = DataGatherManager(self.ref_gather_mesh, self.ref_sp_mesh)
-                if torch.distributed.get_rank():
-                    print(
-                        f"Created reference with fsdp_size={self.ref_fsdp_mesh.shape}, tp_size={self.ref_tp_mesh.size()}, "
-                        f"infer sp_size={self.ref_sp_mesh.size()}")
             elif self.ref_strategy == 'megatron':
+                from mono_rl.worker.engine.megatron.model import MegatronModel
+                ref_mono_config = ref_config_to_mono_config(self.config.ref, self.config.model)
+                self.ref_engine = MegatronModel(ref_mono_config.engine)
                 # we assume that ref shares the same device mesh
                 self.ref_gather_manager = self.actor_gather_manager
 
         profile_fname = f"trace_{self.role}_rank{self.rank}.json"
-
         self.profiler_context = get_profiler_context_wrapped(filename=profile_fname,
                                                              profile_on_ranks=[0],
                                                              upload_to_mlx=True,
@@ -217,6 +176,28 @@ class AsyncActorRolloutRefWorker(Worker):
 
         self.binding_timer = Timer(logger=None)
 
+    def _get_actor_mono_config(self):
+        actor_mono_config = actor_config_to_mono_config(self.config.actor, self.config.model)
+        if not self._is_actor:
+            actor_mono_config.engine.fsdp.param_offload = True  # Set param offload to True for rollout in mono config
+            actor_mono_config.engine.fsdp.model_type = "bf16"
+        else:
+            actor_mono_config.engine.fsdp.optim_offload = True
+        if self.enable_actor_critic_spatial_mux:
+            actor_mono_config.engine.fsdp.spatial_mux_type = "first_half"
+        # set use_rmpad and use_ce_loss_fusion
+        actor_mono_config.engine.model.use_rmpad = self.config.model.get('use_rmpad', True)
+        actor_mono_config.engine.model.use_ce_loss_fusion = self.config.model.get('use_ce_loss_fusion', False)
+        return actor_mono_config
+
+    def _get_ref_mono_config(self):
+        ref_mono_config = actor_config_to_mono_config(self.config.ref, self.config.model)
+        ref_mono_config.engine.fsdp.param_offload = True  # Set param offload to True for ref in mono config
+        ref_mono_config.engine.fsdp.model_type = "bf16"
+        ref_mono_config.engine.model.use_rmpad = self.config.model.get('use_rmpad', True)
+        ref_mono_config.engine.model.use_ce_loss_fusion = self.config.model.get('use_ce_loss_fusion', False)
+        return ref_mono_config
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def set_rollout_callback_function(self, eos_callback_fn):
         self.rollout.set_rollout_callback_function(eos_callback_fn=eos_callback_fn)
@@ -227,355 +208,12 @@ class AsyncActorRolloutRefWorker(Worker):
         out = DataProto.from_dict(tensors={'mock': torch.tensor([[0]])}, meta_info={key: self.master_address})
         return out
 
-    def _build_model_optimizer(self,
-                               model_path,
-                               fsdp_config,
-                               optim_config,
-                               override_model_config,
-                               use_rmpad=False,
-                               enable_gradient_checkpointing=False,
-                               trust_remote_code=False,
-                               role='actor',
-                               from_scratch=True):
-        if self.rank == 0:
-            print(f'Build model and optimizer for {role}')
-
-        log_gpu_memory_usage('Before init from HF AutoModel', logger=logger)
-        # TODO: ignore pulling model file if resuming ckpt
-        self.local_path = download_minimal_required_files(model_path, from_scratch, torch.distributed.get_rank(),
-                                                          torch.distributed.get_world_size())
-
-        # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect
-        # TODO(zhangchi.usc1992): 1. (support create from random initialized model. 2. Support init with FSDP directly
-        tokenizer_path = os.path.join(self.local_path, 'tokenizer')
-        if not os.path.exists(tokenizer_path):
-            tokenizer_path = self.local_path
-
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=trust_remote_code)
-        self.processor = AutoProcessor.from_pretrained(self.local_path, trust_remote_code=trust_remote_code)
-        torch_dtype = torch.float32 if self._is_actor else torch.bfloat16
-
-        # override model kwargs
-        actor_model_config = AutoConfig.from_pretrained(self.local_path, trust_remote_code=trust_remote_code)
-
-        override_config_kwargs = {
-            'bos_token_id': self.tokenizer.bos_token_id,
-            'eos_token_id': self.tokenizer.eos_token_id,
-            'pad_token_id': self.tokenizer.pad_token_id,
-        }
-        override_config_kwargs.update(override_model_config)
-        update_model_config(actor_model_config, override_config_kwargs=override_config_kwargs)
-        setattr(actor_model_config, '_moe_implementation', 'fused')
-        if self.rank == 0:
-            print(f'Model config after override: {actor_model_config}')
-
-        actor_module_fsdp = None
-        actor_optimizer = None
-        actor_lr_scheduler = None
-        metrics_context = None
-
-        # we only need actor_model_config in rollout
-        if role == "actor" and not self._is_valid_actor or self._is_standalone_rollout or self._is_standalone_validator:
-            return actor_module_fsdp, actor_optimizer, actor_lr_scheduler, actor_model_config, metrics_context
-
-        strategy = self.ref_strategy if role == "ref" else self.actor_strategy
-
-        if use_rmpad:
-            # optimize the model via rmpad
-            assert apply_monkey_patch(
-                config=actor_model_config, verbose=self.rank == 0,
-                strategy=strategy), f'Cannot find rmpad version of {actor_model_config.model_type}'
-
-        with meta_device_init(), warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            AutoModel = AutoModelForVision2Seq if actor_model_config.model_type == 'seed_vl' else AutoModelForCausalLM
-            actor_module = AutoModel.from_config(actor_model_config,
-                                                 torch_dtype=torch_dtype,
-                                                 attn_implementation='flash_attention_2',
-                                                 trust_remote_code=trust_remote_code)
-            if hasattr(actor_model_config, "vision_config") and actor_model_config.vision_config.freeze_vit:
-                actor_module.vision_encoder.requires_grad_(False)
-            # some parameters may not in torch_dtype. TODO(zhangchi.usc1992) remove this after we switch to fsdp2
-            actor_module.to(torch_dtype)
-
-            if self.config.remove_o_bias:
-                from seed_models import P6DenseForCausalLM
-                if isinstance(actor_module, P6DenseForCausalLM):
-                    for layer in actor_module.model.layers:
-                        if layer.self_attn.o_proj.bias is not None:
-                            layer.self_attn.o_proj.bias.requires_grad = False
-
-            if self.config.freeze_gate:
-                from seed_models import M8ForCausalLM
-                if isinstance(actor_module, M8ForCausalLM):
-                    for layer in actor_module.transformer.h:
-                        if layer.mlp.moe.gate is not None:
-                            layer.mlp.moe.gate.requires_grad = False
-
-            enable_training_stats = self.config.actor.enable_training_stats
-            metrics_context = MetricsTorchDispatchMode() if enable_training_stats else nullcontext()
-
-        log_gpu_memory_usage('After init from HF AutoModel', logger=logger)
-        if self.rank == 0:
-            print(actor_module)
-            print_model_size(actor_module)
-
-        fsdp_mesh = self.ref_fsdp_mesh if role == 'ref' else self.actor_fsdp_mesh
-        train_mesh = self.ref_train_mesh if role == 'ref' else self.actor_train_mesh
-        tp_mesh = self.ref_tp_mesh if role == 'ref' else self.actor_tp_mesh
-        oe_mesh = self.ref_oe_mesh if role == 'ref' else self.actor_oe_mesh
-        tp_outside = self.config.ref.tp_outside if role == "ref" else self.config.actor.tp_outside
-
-        if strategy == 'fsdp':
-            from alpha_seed.workers.fsdp.fully_shard import fully_shard
-        elif strategy == 'vescale-fsdp2':
-            from alpha_seed.workers.vescale.fully_shard import fully_shard
-        else:
-            raise RuntimeError(f"[{role}]: Unknown strategy for fsdp: {strategy}")
-
-        # set up parameter cpu offload
-        if role == 'actor':
-            if strategy == 'fsdp' and self.config.actor.fsdp_config.param_offload:
-                # NOTE: CPUOffload needs to cooperate with FSDP.no_sync() in gradient accumulation,
-                # which will lead to more memory consumption as gradients keep unshard in between micro-batches.
-                # temporarily disbale this for more investigation
-                raise NotImplementedError("CPUOffload for trainable model is not supported in torch FSDP, "
-                                          "please use strategy=vescale-fsdp2 instead.")
-            param_offload = self.config.actor.fsdp_config.param_offload
-        elif role == 'ref':
-            param_offload = self.config.ref.fsdp_config.param_offload
-        elif role == 'rollout':
-            param_offload = True
-
-        # get ignored modules
-        ignored_modules = None
-        if self.config.update_gate_ema:
-            ignored_modules = get_ignore_modules_in_mixed_precision(actor_model_config.model_type)
-
-        if not from_scratch:
-            warnings.filterwarnings("ignore", "state not found in", category=UserWarning)
-
-        act_offload_kwargs = dict(
-            offload_threshold=self.config.get('act_offload_threshold', 1024 * 1024),
-            offload_upbound=self.config.get('act_offload_upbound', None),
-            buffer_size=self.config.get('act_offload_buff_size', 64),
-            pin_memory=self.config.get('act_offload_pin_memory', False),
-        )
-        if hasattr(actor_module, "vision_encoder"):
-            block_cls = actor_module.language_model._no_split_modules + actor_module.vision_encoder._no_split_modules
-        else:
-            block_cls = actor_module._no_split_modules
-
-            # TODO(fix me)
-            # also wrap MLP for M10
-            # if actor_model_config.model_type == 'seed_m10':
-            #     block_cls = ['M10MLP'] + block_cls
-
-        if self.rank == 0:
-            print(f'FSDP wrap module cls: {block_cls}')
-
-        actor_module_fsdp, metrics_context = fully_shard(
-            model=actor_module,
-            block_cls=block_cls,
-            fsdp_mesh=fsdp_mesh,
-            tp_plan=get_parallel_plan(actor_model_config, tp_mesh, strategy),
-            tp_mesh=tp_mesh,
-            oe_mesh=oe_mesh,
-            tp_outside=tp_outside,
-            recompute=enable_gradient_checkpointing,
-            act_offload=self.config.actor.act_offload if role == 'actor' else False,
-            param_offload=param_offload,
-            weights=self.local_path if from_scratch else None,
-            ignored_modules=ignored_modules,
-            enable_training_stats=enable_training_stats,
-            act_offload_kwargs=act_offload_kwargs,
-            train_mesh=train_mesh)
-        log_gpu_memory_usage(f'After {role} FSDP init')
-
-        # create optimizer for actor
-        actor_optimizer = None
-        actor_lr_scheduler = None
-        if role == 'actor':
-            actor_optimizer = get_optimizer_from_config(
-                [param for param in actor_module_fsdp.parameters() if param.requires_grad], optim_config)
-
-            # enable optimizer offload
-            if strategy == 'fsdp' and not param_offload:
-                actor_optimizer.register_step_pre_hook(
-                    lambda optim, args, kwargs: load_fsdp_optimizer(optim, torch.cuda.current_device()))
-                actor_optimizer.register_step_post_hook(lambda optim, args, kwargs: offload_fsdp_optimizer(optim))
-            elif strategy == 'vescale-fsdp2':
-                from alpha_seed.workers.vescale.fully_shard import register_dtensor_hook
-                from vescale.parallel.fsdp2.extension.optimizer_offload import apply_optimizer_offload, OptimizerOffloadPolicy
-                register_dtensor_hook(actor_module_fsdp, actor_optimizer)
-                if not param_offload:
-                    policy = OptimizerOffloadPolicy(gpu_reserved_size=0, overlap_with_forward=False)
-                    apply_optimizer_offload(
-                        actor_module_fsdp,
-                        actor_optimizer,
-                        get_seqlen_fn=lambda args,
-                        kwargs: kwargs["input_ids"].numel(),
-                        offload_policy=policy,
-                    )
-
-            total_steps = optim_config.get('total_training_steps', 0)
-            num_warmup_steps = int(optim_config.get('lr_warmup_steps', -1))
-            if num_warmup_steps < 0:
-                num_warmup_steps_ratio = optim_config.get('lr_warmup_steps_ratio', 0.)
-                num_warmup_steps = int(num_warmup_steps_ratio * total_steps)
-
-            if self.rank == 0:
-                print(f'Total steps: {total_steps}, num_warmup_steps: {num_warmup_steps}')
-
-            actor_lr_scheduler = get_constant_schedule_with_warmup(optimizer=actor_optimizer,
-                                                                   num_warmup_steps=num_warmup_steps)
-
-        assert get_text_config(actor_model_config).num_attention_heads % self.config.actor.ulysses_sequence_parallel_size == 0, \
-            f'invalid ulysses sequence parallel size: {get_text_config(actor_model_config).num_attention_heads=} % {self.config.actor.ulysses_sequence_parallel_size=} != 0'
-
-        log_gpu_memory_usage('After actor optimizer init')
-        self.image_manager = get_image_manager()
-        return actor_module_fsdp, actor_optimizer, actor_lr_scheduler, actor_model_config, metrics_context
-
-    def _build_model_optimizer_mariana(self, model_path, role='actor'):
-        assert role in ['actor', 'ref']
-
-        from alpha_seed.models.mariana.checkpoint_utils import load_partial_pretrain
-        from alpha_seed.models.mariana.config_utils import convert_hf_config_to_mariana, update_megatron_config
-        from alpha_seed.models.mariana.modeling_mariana import convert_gate_to_fp32
-        from alpha_seed.models.mariana.optimizer_utils import configure_optimizers
-
-        from mariana.utils.megatron import initialize_megatron_args
+    def _get_actor_model_config_mariana(self, model_path):
         from verl.utils.fs import copy_local_path_from_hdfs
-
-        from mariana.models.text.config import TrainConfig, MegatronConfig
-
-        log_gpu_memory_usage('Before init from HF AutoModel', logger=logger)
-        # TODO: ignore pulling model file if resuming ckpt
+        # TODO: add local_path, tokenizer, processer into monorl mariana
         local_path = copy_local_path_from_hdfs(model_path)
-        self.local_path = local_path
-
-        # TODO(zhangchi.usc1992): this logic is VERY VERY hacky as the upstream mariana
-        # lacks huggingface folder checkpoint format
-        ckpt_meta_info_json_path = os.path.join(local_path, 'meta_info.json')
-
-        if os.path.exists(ckpt_meta_info_json_path):
-            # we read from huggingface
-            with open(ckpt_meta_info_json_path, 'r') as f:
-                ckpt_meta_info = json.load(f)
-            assert 'omnistore_ckpt_path' in ckpt_meta_info
-            ckpt_path = ckpt_meta_info['omnistore_ckpt_path']
-            config_path = local_path
-        else:
-            config_path = local_path
-            # Note(zhangchi.usc1992) make sure the config_path does not end with '/', which is guaranteed by copy_local_path_from_hdfs
-            ckpt_path = os.path.dirname(model_path)
-            # config_path = os.path.join(local_path, 'huggingface')
-            assert os.path.exists(config_path), \
-                'Please make sure the huggingface checkpoint stores the upstream path. If not, please re-convert it using 0306 seed-models'
-
-        # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect
-        # TODO(zhangchi.usc1992): 1. support create from random initialized model. 2. Support init with FSDP directly
-
-        tokenizer_path = os.path.join(config_path, 'tokenizer')
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-        actor_model_config = AutoConfig.from_pretrained(config_path)
-
-        if self._is_standalone_rollout or self._is_standalone_validator:
-            return None, None, None, actor_model_config
-
-        megatron_config = MegatronConfig(**self.config.mariana.megatron)
-
-        model_config = convert_hf_config_to_mariana(hf_config=actor_model_config,
-                                                    model_implementation=self.config.mariana.model_implementation)
-
-        # vpp size
-        update_megatron_config(model_config,
-                               megatron_config,
-                               vpp_size=self.config.mariana.megatron.virtual_pipeline_parallel_size)
-
-        if role == 'actor':
-            #Note(zhangchi.usc1992): very important! We only build megatron world once
-            initialize_megatron_args(model_config, megatron_config)
-
-        # step 3: build model and optimizer
-        def megatron_model_provider(pre_process=True, post_process=True):
-            """Build the policy model."""
-            from alpha_seed.models.mariana.modeling_mariana import MarianaForCausalLM
-            model = MarianaForCausalLM(model_config,
-                                       megatron_config,
-                                       pre_process=pre_process,
-                                       post_process=post_process)
-            return model
-
-        from megatron.training import get_model
-        from megatron.model import ModelType
-
-        # model_kwargs
-        model_kwargs = {}
-        # this returns model chunk for each pp stage
-        # note that for reference policy, we actually don't need wrap_with_ddp. We do so that offload API can be unified.
-        models = get_model(megatron_model_provider, ModelType.encoder_or_decoder, wrap_with_ddp=True, **model_kwargs)
-        convert_gate_to_fp32(models)
-
-        # load checkpoint. Note that we should load ckpt before optimizer. Otherwise, the fp32 params will be wrong.
-        # we assume the megatron_merge_state.pt in the same folder as hf
-        # ckpt_path = 'hdfs://haruna/home/byte_data_seed/ssd_hldy/user/tiantianfan1/sft/M8_680m_SFT/checkpoints/global_epoch_2/megatron_merge_states.pt'
-        # ckpt_local_path = copy_local_path_from_hdfs(ckpt_path)
-        # load_partial_pretrain(models,
-        #                       partial_pretrain=ckpt_local_path,
-        #                       model_config=model_config,
-        #                       download_in_shards=True)
-
-        # switch to use omnistore
-        # the original ckpt is under local_path/meta_info.json
-
-        import omnistore
-        ckpt_state = {"model": models}
-        # load model and optimizer
-        omnistore.MegatronCheckpointer.load(
-            path=ckpt_path,
-            enable_shm_download_ckpt_tmp=False,
-            checkpoint_state=ckpt_state,
-            loader_in_split_mode=False,
-        )
-
-        if role == 'actor':
-            # build optimizer
-            optim_config = self.config.actor.optim
-
-            total_steps = optim_config.get('total_training_steps', 0)
-            total_steps = 100000
-            assert total_steps > 0
-
-            num_warmup_steps = int(optim_config.get('lr_warmup_steps', -1))
-            if num_warmup_steps < 0:
-                num_warmup_steps_ratio = optim_config.get('lr_warmup_steps_ratio', 0.)
-                num_warmup_steps = int(num_warmup_steps_ratio * total_steps)
-
-            optimizers, lr_schedulers = configure_optimizers(
-                models=models,
-                train_iters=total_steps,
-                lr_warmup_iters=num_warmup_steps,
-                lr=optim_config.lr,
-                adam_betas=optim_config.betas,
-                adam_eps=optim_config.eps,
-                weight_decay=optim_config.weight_decay,
-            )
-
-            # If resume_optimizer is false, copy bf16 weights in model to optimizer
-            # to avoid loss error issues.
-            optimizers[0].reload_model_params()
-
-        else:
-            optimizers = None
-            lr_schedulers = None
-
-        offload_megatron_model_to_cpu(models=models)  # everything is on CPU
-
-        log_gpu_memory_usage(head='After offload_megatron_model_to_cpu in init')
-
-        return models, optimizers, lr_schedulers, actor_model_config
+        actor_model_config = AutoConfig.from_pretrained(local_path)
+        return actor_model_config, local_path
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def delete_local_tmp_folder_safetensors_files(self):
@@ -768,95 +406,59 @@ class AsyncActorRolloutRefWorker(Worker):
 
     def _init_model(self, from_scratch):
         # This is used to import external_lib into the huggingface systems
-        import_external_libs(self.config.model.get('external_lib', None))
+        log_gpu_memory_usage("Before actor initialized")
 
         from omegaconf import OmegaConf
         override_model_config = OmegaConf.to_container(self.config.model.get('override_config', OmegaConf.create()))
+        self.actor_module_fsdp, self.actor_module_mariana, self.actor_optimizer, self.actor_lr_scheduler = None, None, None, None
+        self.ref_module_fsdp, self.ref_module_mariana = None, None
 
-        use_rmpad = self.config.model.get('use_rmpad', False)
-        use_ce_loss_fusion = self.config.model.get('use_ce_loss_fusion', False)
+        # Setup attrs that every role needs, including actor_model_config, local_path, tokenizer, processor
+        # For actor, rolllout, and ref_policy, some of the four attributes might be overridden later in this function
+        if self.actor_strategy in ('fsdp', 'vescale-fsdp2'):
+            from mono_rl.worker.engine.fsdp.utils import get_hf_model_config
+            self.actor_model_config, self.local_path = get_hf_model_config(self.config.model.path,
+                                                                           override_model_config,
+                                                                           from_scratch=from_scratch)
+        elif self.actor_strategy == 'megatron':
+            self.actor_model_config, self.local_path = self._get_actor_model_config_mariana(self.config.model.path)
 
-        if self._is_actor or self._is_rollout or self._is_standalone_rollout or self._is_standalone_validator:
+        trust_remote_code = self.config.model.get('trust_remote_code', False)
+
+        tokenizer_path = os.path.join(self.local_path, 'tokenizer')
+        if not os.path.exists(tokenizer_path):
+            tokenizer_path = self.local_path
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=trust_remote_code)
+        self.processor = AutoProcessor.from_pretrained(self.local_path, trust_remote_code=trust_remote_code)
+
+        # NOTE: the following for role specific attributes over-writing
+        if self._is_actor and not self._is_valid_actor or self._is_standalone_rollout or self._is_standalone_validator:
+            pass  # NOTE: no need to set extra fields for standalone rollout and validators.
+        elif self._is_valid_actor or self._is_rollout:
             # we need the model for actor and rollout
+            if self.actor_strategy in ('fsdp', 'vescale-fsdp2'):
+                self.actor_engine.init_model(from_scratch=from_scratch, build_optimizer=self._is_actor)
+                self.actor = DataParallelPPOActor(as_config=self.config.actor, model_engine=self.actor_engine)
+                self.actor_module_fsdp, self.actor_model_config = self.actor_engine.model_module, self.actor_engine.model_config
+            elif self.actor_strategy == 'megatron':
+                self.actor_engine.init_model(from_scratch=from_scratch)
+                self.actor = MegatronPPOActor(as_config=self.config.actor, model_engine=self.actor_engine)
+                self.actor_module_mariana, self.actor_model_config = self.actor_engine.model_module, self.actor_engine.actor_model_config
             if self._is_actor:
-                optim_config = self.config.actor.optim
-                fsdp_config = self.config.actor.fsdp_config
-            else:
-                optim_config = None
-                fsdp_config = OmegaConf.create()
-
-            if self.actor_strategy in ('fsdp', 'vescale-fsdp2'):
-                self.actor_module_fsdp, self.actor_optimizer, self.actor_lr_scheduler, self.actor_model_config, self.metrics_context = self._build_model_optimizer(
-                    model_path=self.config.model.path,
-                    fsdp_config=fsdp_config,
-                    optim_config=optim_config,
-                    override_model_config=override_model_config,
-                    enable_gradient_checkpointing=self.config.model.get('enable_gradient_checkpointing', False),
-                    use_rmpad=use_rmpad,
-                    trust_remote_code=self.config.model.get('trust_remote_code', False),
-                    role='actor' if self._is_actor else 'rollout',
-                    from_scratch=from_scratch)
-
-                assert get_text_config(self.actor_model_config).num_attention_heads % self.config.actor.ulysses_sequence_parallel_size == 0, \
-                    f'invalid ulysses sequence parallel size: {get_text_config(self.actor_model_config).num_attention_heads=} % {self.config.actor.ulysses_sequence_parallel_size=} != 0'
-
-            elif self.actor_strategy == 'megatron':
-                # TODO: build megatron model
-                self.actor_module_mariana, self.actor_optimizer, self.actor_lr_scheduler, self.actor_model_config = self._build_model_optimizer_mariana(
-                    model_path=self.config.model.path, role='actor')
-
-        # load from checkpoint
-        if self._is_valid_actor:
-            OmegaConf.set_struct(self.config.actor, True)
-            if self.actor_strategy in ('fsdp', 'vescale-fsdp2'):
-                with open_dict(self.config.actor):
-                    self.config.actor.use_rmpad = use_rmpad
-                    self.config.actor.use_ce_loss_fusion = use_ce_loss_fusion
-                enable_non_reentrant_recompute = self.config.model.get('enable_gradient_checkpointing',
-                                                                       False) and not self.config.actor.act_offload
-                self.actor = DataParallelPPOActor(config=self.config.actor,
-                                                  actor_module=self.actor_module_fsdp,
-                                                  actor_optimizer=self.actor_optimizer,
-                                                  actor_model_config=self.actor_model_config,
-                                                  enable_non_reentrant_recompute=enable_non_reentrant_recompute,
-                                                  metrics_context=self.metrics_context,
-                                                  actor_train_mesh=self.actor_train_mesh)
-            elif self.actor_strategy == 'megatron':
-                # TODO: build megatron actor
-                self.actor = MegatronPPOActor(config=self.config.actor,
-                                              actor_module=self.actor_module_mariana,
-                                              actor_optimizer=self.actor_optimizer)
+                self.actor_optimizer, self.actor_lr_scheduler = self.actor_engine.optimizer, self.actor_engine.lr_scheduler
+            self.image_manager = self.actor_engine.image_manager
 
         if self._is_ref:
             from_scratch_ref = True if self.config.ref.ema == 1 else from_scratch
             if self.ref_strategy in ('fsdp', 'vescale-fsdp2'):
-                self.ref_module_fsdp = self._build_model_optimizer(
-                    model_path=self.config.model.path,
-                    fsdp_config=self.config.ref.fsdp_config,
-                    optim_config=None,
-                    use_rmpad=use_rmpad,
-                    override_model_config=override_model_config,
-                    enable_gradient_checkpointing=self.config.model.get('enable_gradient_checkpointing', False),
-                    trust_remote_code=self.config.model.get('trust_remote_code', False),
-                    role='ref',
-                    from_scratch=from_scratch_ref)[0]
-                self.ref_module_fsdp.eval()
-
-                OmegaConf.set_struct(self.config.ref, True)
-                with open_dict(self.config.ref):
-                    self.config.ref.use_rmpad = use_rmpad
-                    self.config.ref.use_ce_loss_fusion = use_ce_loss_fusion
-                self.ref_policy = DataParallelPPOActor(config=self.config.ref,
-                                                       actor_module=self.ref_module_fsdp,
-                                                       actor_model_config=self.actor_model_config,
-                                                       actor_train_mesh=self.ref_train_mesh)
+                self.ref_engine.init_model(from_scratch=from_scratch_ref, build_optimizer=False)
+                self.ref_policy = DataParallelPPOActor(as_config=self.config.ref, model_engine=self.ref_engine)
+                self.ref_module_fsdp = self.ref_engine.model_module
             elif self.ref_strategy == 'megatron':
-                # TODO: build megatron actor
-                self.ref_module_mariana = self._build_model_optimizer_mariana(model_path=self.config.model.path,
-                                                                              role='ref')[0]
-                # TODO: make it eval
-                # for each model chunk
-                self.ref_policy = MegatronPPOActor(config=self.config.ref, actor_module=self.ref_module_mariana)
+                self.ref_engine.init_model(from_scratch=from_scratch_ref)
+                self.ref_policy = MegatronPPOActor(as_config=self.config.ref, model_engine=self.ref_engine)
+                self.ref_module_mariana = self.ref_engine.model_module
+                self.ref_gather_manager = self.actor_gather_manager
 
         if self.config.actor.train_memory_offload:
             self.to("cpu")
@@ -868,9 +470,10 @@ class AsyncActorRolloutRefWorker(Worker):
 
         if self._is_valid_actor:
             self.flops_counter = FlopsCounter(self.actor_model_config)
+            actor_model_to_save = self.actor_module_fsdp if self.actor_strategy != 'megatron' else self.actor_module_mariana
             self.checkpoint_manager = CheckpointManagerWrapper(strategy=self.actor_strategy,
-                                                               model=self.actor.actor_module,
-                                                               optimizer=self.actor.actor_optimizer,
+                                                               model=actor_model_to_save,
+                                                               optimizer=self.actor_optimizer,
                                                                lr_scheduler=self.actor_lr_scheduler,
                                                                hf_config=self.actor_model_config,
                                                                tokenizer=self.tokenizer,
@@ -878,9 +481,10 @@ class AsyncActorRolloutRefWorker(Worker):
                                                                processor=self.processor)
 
         if self._is_ref:
+            ref_model_to_save = self.ref_module_fsdp if self.ref_strategy != 'megatron' else self.ref_module_mariana
             self.checkpoint_manager_ref = CheckpointManagerWrapper(
                 strategy=self.ref_strategy,
-                model=self.ref_policy.actor_module,
+                model=ref_model_to_save,
                 optimizer=None,
                 lr_scheduler=None,
                 hf_config=self.actor_model_config,  # same for actor and ref
@@ -955,6 +559,11 @@ class AsyncActorRolloutRefWorker(Worker):
         if self.config.actor.train_memory_offload:
             self.to("cuda", model=True, optimizer=False if self.actor_strategy == 'fsdp' else True)
 
+        # add necessary meta_info keys to the data proto
+        data.meta_info['role'] = Role.Actor
+        data.meta_info["response_length"] = data.batch["responses"].shape[1]
+        data.meta_info['compute_entropy'] = (self.config.actor.entropy_coeff > 0)
+
         with self.actor_gather_manager:
             data = self.actor_gather_manager.preprocess_data(data)
 
@@ -1010,6 +619,11 @@ class AsyncActorRolloutRefWorker(Worker):
         # note optimizer offload will be managed inside `update_policy`
         if self.config.actor.train_memory_offload:
             self.to("cuda", model=True, optimizer=False)
+
+        # add necessary meta_info keys to the data proto
+        data.meta_info['role'] = Role.Actor
+        data.meta_info["response_length"] = data.batch["responses"].shape[1]
+        data.meta_info['compute_entropy'] = (self.config.actor.entropy_coeff > 0)
 
         with self.actor_gather_manager:
             data = self.actor_gather_manager.preprocess_data(data)
@@ -1082,9 +696,13 @@ class AsyncActorRolloutRefWorker(Worker):
             # align with the training config
             output.meta_info['use_dynamic_bsz'] = self.config.actor.use_dynamic_bsz
             if self.config.actor.use_dynamic_bsz:
-                output.meta_info['max_token_len'] = self.config.actor.ppo_max_token_len
+                output.meta_info['micro_batch_tokens'] = self.config.actor.ppo_max_token_len
             else:
                 output.meta_info['micro_batch_size'] = self.config.actor.ppo_micro_batch_size
+            output.meta_info['response_length'] = output.batch["responses"].shape[1]
+            output.meta_info['compute_entropy'] = True
+            output.meta_info['role'] = Role.Actor
+
             with self.actor_gather_manager:
                 output = self.actor_gather_manager.preprocess_data(output)
                 old_entropy, old_log_probs, acceptance_matrix = self.actor.compute_log_prob(data=output)
@@ -1183,15 +801,18 @@ class AsyncActorRolloutRefWorker(Worker):
         torch.cuda.reset_peak_memory_stats()
         assert self._is_ref
 
-        # data = data.to('cuda')
+        data = data.to('cuda')
 
         micro_batch_size = self.config.ref.log_prob_micro_batch_size
         data.meta_info['use_dynamic_bsz'] = self.config.ref.use_dynamic_bsz
         if self.config.ref.use_dynamic_bsz:
-            data.meta_info['max_token_len'] = self.config.ref.max_token_len
+            data.meta_info['micro_batch_tokens'] = self.config.ref.max_token_len
         else:
             data.meta_info['micro_batch_size'] = micro_batch_size
         data.meta_info['temperature'] = self.config.rollout.train_generate_kwargs.temperature
+        data.meta_info['response_length'] = data.batch["responses"].shape[1]
+        data.meta_info['compute_entropy'] = True
+        data.meta_info['role'] = Role.Ref
 
         log_gpu_memory_usage('Before reference recompute log prob', logger=logger)
 
@@ -1203,8 +824,8 @@ class AsyncActorRolloutRefWorker(Worker):
 
         # reset FSDP buffer after forward
         from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-        if isinstance(self.ref_policy.actor_module, FSDP):
-            self.ref_policy.actor_module._handle.reshard(True)
+        if isinstance(self.ref_policy.engine.model_module, FSDP):
+            self.ref_policy.engine.model_module._handle.reshard(True)
         log_gpu_memory_usage('After reference recompute log prob')
 
         max_memory_allocated, max_memory_reserved = get_memory()

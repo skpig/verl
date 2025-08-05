@@ -37,10 +37,10 @@ from megatron.core import parallel_state as mpu
 
 from mono_rl import DataProto
 
-from alpha_seed.models.mariana.checkpoint_utils import load_partial_pretrain
-from alpha_seed.models.mariana.config_utils import convert_hf_config_to_mariana, update_megatron_config
-from alpha_seed.models.mariana.modeling_mariana import convert_gate_to_fp32
-from alpha_seed.models.mariana.optimizer_utils import configure_optimizers
+from mono_rl.models.mariana.checkpoint_utils import load_partial_pretrain
+from mono_rl.models.mariana.config_utils import convert_hf_config_to_mariana, update_megatron_config
+from mono_rl.models.mariana.modeling_mariana import convert_gate_to_fp32
+from mono_rl.models.mariana.optimizer_utils import configure_optimizers
 from alpha_seed.workers.ppo_actor_megatron import MegatronPPOActor
 
 from mariana.utils.megatron import initialize_megatron_args
@@ -75,7 +75,7 @@ def main(config: DictConfig):
     # step 3: build model and optimizer
     def megatron_model_provider(pre_process=True, post_process=True):
         """Build the policy model."""
-        from alpha_seed.models.mariana.modeling_mariana import MarianaForCausalLM
+        from mono_rl.models.mariana.modeling_mariana import MarianaForCausalLM
         model = MarianaForCausalLM(model_config, megatron_config, pre_process=pre_process, post_process=post_process)
         return model
 

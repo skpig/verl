@@ -14,278 +14,40 @@
 """
 Single Process Actor
 """
-from typing import Iterable, ContextManager
-import itertools
+from typing import Dict
 import math
 
-import gc
 import torch
 from tensordict import TensorDict
-from transformers import PretrainedConfig
-
-from torch import nn
-import torch.distributed as dist
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.device_mesh import DeviceMesh
-
-from flash_attn.bert_padding import unpad_input, pad_input
-from flash_attn.ops.triton.cross_entropy import cross_entropy_loss
 
 from mono_rl import DataProto
 from verl.workers.actor import BasePPOActor
-from verl.utils.py_functional import append_to_dict
-from verl.utils.torch_functional import logprobs_from_logits, log_probs_from_logits_response_rmpad, get_unpad_data
 import verl.utils.torch_functional as verl_F
+from alpha_seed.utils.functional import append_dict_items_to_dict
 
-from verl.utils.model import compute_position_id_with_mask
-
-from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
-from dist_attn.ulysses.ops import gather_outputs
-
-from alpha_seed.utils.functional import rearrange_micro_data_proto
-from alpha_seed.workers.hybrid_engine.fsdp_gather import ulysses_pad_and_slice_inputs, ulysses_pad
-from alpha_seed.models.transformers.modeling_vlm import get_image_inputs, get_image_keys
-from alpha_seed.utils.observility.training_stats import sync_training_stats
-from alpha_seed.utils.observility import get_profiler_context_wrapped, profile_step
-from alpha_seed.utils.dataset.dist_data_util import get_image_manager
+from mono_rl.models.seed_models.modeling_vlm import get_image_keys
 from alpha_seed import core_algos
-from alpha_seed.models.transformers.monkey_patch import update_gate_ema
-from verl.utils.seqlen_balancing import rearrange_micro_batches, get_reverse_idx
-
-from alpha_seed.workers.fsdp.offload import offload_fsdp_optimizer, load_fsdp_optimizer
-
-from contextlib import nullcontext
-import ray
+from mono_rl.worker.engine.fsdp.models.model import FSDPModel
+from omegaconf import DictConfig, OmegaConf
 
 __all__ = ['DataParallelPPOActor']
-
-try:
-    from mono_rl.utils.debug import MemoryProfiler
-except:
-    print('Cannot find profile utilities. Please use latest verl master')
-    raise
 
 
 class DataParallelPPOActor(BasePPOActor):
 
-    def __init__(
-            self,
-            config,
-            actor_module: nn.Module,
-            actor_optimizer: torch.optim.Optimizer = None,
-            actor_model_config: PretrainedConfig = None,
-            enable_non_reentrant_recompute: bool = False,
-            metrics_context: ContextManager = nullcontext(),
-            actor_train_mesh: DeviceMesh = None,
-    ):
-        """When optimizer is None, it is Reference Policy.
-
-        Note that the class is instantiated more than once in PPO training, whose config is
-        created with a dedicated struct instead of using users' config directly.
+    def __init__(self, as_config: DictConfig, model_engine: FSDPModel):
+        """When optimizer is None, it is Reference Policy. This is implemented based on monorl FSDPModel.
         """
-        super().__init__(config)
-        self.actor_module: FSDP = actor_module
-        self.actor_optimizer = actor_optimizer
-        self.actor_model_config = actor_model_config
-        self.metrics_context = metrics_context
-        self.actor_train_mesh = actor_train_mesh
-        self.enable_non_reentrant_recompute = enable_non_reentrant_recompute
-        self.use_rmpad = self.config.get('use_rmpad', False)
-        if torch.distributed.get_rank() == 0:
-            print(f'Actor use_rmpad={self.use_rmpad}')
-        self.use_ce_loss_fusion = config.get('use_ce_loss_fusion', False)
+        super().__init__(as_config)
+        self.engine = model_engine
 
-        if hasattr(self.config, 'profile'):
-            # refernce doesn't need debug
-            self.profiler_context = get_profiler_context_wrapped(filename=self.config.profile.filename,
-                                                                 profile_on_ranks=self.config.profile.profile_on_ranks,
-                                                                 upload_to_mlx=self.config.profile.upload_to_mlx,
-                                                                 enable=self.config.profile.enable,
-                                                                 warmup=self.config.profile.warmup,
-                                                                 wait=self.config.profile.wait,
-                                                                 active=self.config.profile.active)
-
-            self.memory_profiler = MemoryProfiler(filename=self.config.profile.filename + 'memory',
-                                                  enable=torch.distributed.get_rank() == 0 and
-                                                  self.config.profile.mem_enable,
-                                                  upload_to_mlx=self.config.profile.upload_to_mlx,
-                                                  wait=10)
-
-        self.compute_entropy_loss = core_algos.compute_entropy_loss
-        self.entropy_from_logits = verl_F.entropy_from_logits
-        self.loss_fn = default_loss_fn
-        self.image_manager = get_image_manager()
-
-    def _forward_micro_batch(self, micro_batch: TensorDict, temperature, compute_entropy, non_tensor_batch):
-        from flash_attn.bert_padding import index_first_axis, rearrange
-
-        response_length = micro_batch['responses'].size(-1)
-        image_kwargs = get_image_inputs(non_tensor_batch, image_manager=self.image_manager)
-        with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-            if not self.use_rmpad:
-                raise NotImplementedError('only support rmpad mode')
-
-            # TODO(zhangchi.usc1992): we can actually remove padding for the whole batch and perform balancing to reduce peak memory
-            input_ids = micro_batch['input_ids'].to(torch.int64)
-            attention_mask = micro_batch['attention_mask'].to(torch.int64)
-            position_ids = compute_position_id_with_mask(attention_mask)
-            input_ids_rmpad, indices, cu_seqlens, max_seqlen_in_batch = unpad_input(
-                input_ids.unsqueeze(-1), attention_mask=attention_mask)  # (totol_nnz, 1)
-            input_ids_rmpad = input_ids_rmpad.transpose(0, 1)  # (1, total_nnz)
-            input_ids_rmpad_rolled = torch.roll(input_ids_rmpad, shifts=-1, dims=1)
-            position_ids_rmpad = index_first_axis(rearrange(position_ids.unsqueeze(-1), "b s ... -> (b s) ..."),
-                                                  indices).transpose(0, 1)
-
-            # add mtp labels
-            mtp_labels = []
-            if hasattr(self.actor_model_config, 'mtp_mode'):
-                mtp_n_heads = self.actor_model_config.mtp_n_heads
-                for i in range(1, mtp_n_heads):
-                    input_ids_rmpad_rolled_mtp = torch.roll(input_ids_rmpad, shifts=-i - 1, dims=1)
-                    mtp_labels.append(input_ids_rmpad_rolled_mtp)
-
-            # handle ulysses sequence parallelism
-            sp_size = get_ulysses_sequence_parallel_world_size()
-            total_nnz = input_ids_rmpad.size(1)
-            if 'vision_config' in self.actor_model_config:
-                input_ids_rmpad, position_ids_rmpad, pad_size = ulysses_pad(input_ids_rmpad, position_ids_rmpad,
-                                                                            sp_size)
-            else:
-                input_ids_rmpad, position_ids_rmpad, pad_size = ulysses_pad_and_slice_inputs(
-                    input_ids_rmpad, position_ids_rmpad, sp_size)
-
-            # slice labels
-            input_ids_rmpad_rolled, _, _ = ulysses_pad_and_slice_inputs(input_ids_rmpad_rolled, None, sp_size)
-            input_ids_rmpad_rolled = input_ids_rmpad_rolled.squeeze(0)
-
-            # slice mtp labels
-            for i, mtp_label in enumerate(mtp_labels):
-                mtp_labels[i] = ulysses_pad_and_slice_inputs(mtp_label, None, sp_size)[0].squeeze(0)
-
-            batch_size, seqlen = input_ids.shape
-            seqlen_rmpad = input_ids_rmpad.size(1)
-            acceptance_matrix = None
-
-            # forward
-            if self.use_ce_loss_fusion and not compute_entropy:
-                # forward with lm_head CE fusion
-                kwargs = {
-                    'input_ids': input_ids_rmpad,
-                    'position_ids': position_ids_rmpad,
-                    'labels': input_ids_rmpad_rolled,
-                    'temperature': temperature,
-                    'fuse_lm_head_ce_loss': True,
-                    'mtp_labels': mtp_labels
-                }
-
-                # merge two dict
-                kwargs.update(image_kwargs)
-                output = self.actor_module(
-                    **kwargs,
-                    use_cache=False,
-                    output_hidden_states=False,
-                )
-                full_log_probs_rmpad = output.loss * (-1.0)
-                acceptance_matrix = output.acceptance_matrix  # list of tensor. [total_nnz // sp,]
-            else:
-                output = self.actor_module(input_ids=input_ids_rmpad,
-                                           position_ids=position_ids_rmpad,
-                                           labels=input_ids_rmpad_rolled,
-                                           use_cache=False,
-                                           compute_entropy=compute_entropy,
-                                           temperature=temperature,
-                                           mtp_labels=mtp_labels,
-                                           **image_kwargs)
-                full_entropy_rmpad, full_log_probs_rmpad = output.entropy, output.log_probs
-                acceptance_matrix = output.acceptance_matrix  # list of tensor. [total_nnz // sp,]
-
-            if sp_size > 1:
-                full_log_probs_rmpad = gather_outputs(full_log_probs_rmpad,
-                                                      gather_dim=0,
-                                                      padding_dim=0,
-                                                      unpad_dim_size=total_nnz)
-            full_log_probs = pad_input(hidden_states=full_log_probs_rmpad.unsqueeze(-1),
-                                       indices=indices,
-                                       batch=batch_size,
-                                       seqlen=seqlen)
-            log_probs = full_log_probs.squeeze(-1)[:, -response_length - 1:-1]  # [batch_size, response_length]
-            if compute_entropy:
-                if sp_size > 1:
-                    full_entropy_rmpad = gather_outputs(full_entropy_rmpad,
-                                                        gather_dim=0,
-                                                        padding_dim=0,
-                                                        unpad_dim_size=total_nnz)  # (total_nnz,)
-                # pad it back
-                entropy = pad_input(hidden_states=full_entropy_rmpad.unsqueeze(-1),
-                                    indices=indices,
-                                    batch=batch_size,
-                                    seqlen=seqlen).squeeze(-1)[:,
-                                                               -response_length - 1:-1]  # (batch_size, response_length)
-            else:
-                entropy = None
-
-            if acceptance_matrix is not None:
-                acceptance_matrix_lst = []
-                for i, matrix in enumerate(acceptance_matrix):
-
-                    if sp_size > 1:
-                        matrix = gather_outputs(matrix, gather_dim=0, padding_dim=0, unpad_dim_size=total_nnz)
-                    matrix = pad_input(hidden_states=matrix.unsqueeze(-1),
-                                       indices=indices,
-                                       batch=batch_size,
-                                       seqlen=seqlen).squeeze(-1)[:, -response_length - 1:-1]
-                    acceptance_matrix_lst.append(matrix)
-                acceptance_matrix = tuple(acceptance_matrix_lst)
-
-            return entropy, log_probs, seqlen_rmpad, acceptance_matrix
-
-    def _make_minibatch_iterator(self, data: DataProto) -> Iterable[DataProto]:
-        select_keys = ['responses', 'input_ids', 'attention_mask', 'old_log_probs', 'advantages', 'upgo_advantages']
-        for opt_key in ['ref_log_prob', 'model_output_mask']:
-            if opt_key in data.batch.keys():
-                select_keys.append(opt_key)
-        data = data.select(batch_keys=select_keys)
-        return data.make_iterator(mini_batch_size=self.config.ppo_mini_batch_size,
-                                  epochs=self.config.ppo_epochs,
-                                  dataloader_kwargs={'shuffle': self.config.shuffle})
-
-    def _optimizer_step(self):
-
-        # release kv mirror memory for m8
-        if hasattr(self.actor_module, 'release_act_memory'):
-            self.actor_module.release_act_memory()
-        assert self.config.grad_clip is not None
-        grad_norm = self.actor_module.clip_grad_norm_(max_norm=self.config.grad_clip)
-        self.actor_optimizer.step()
-        return grad_norm
-
-    def _optimizer_zero_grad(self):
-        # NOTE(zhiqi.0): when use_orig_params=True, parameters in optimizer are nn.Parameter instead of
-        # FlatParam. The param.grad is a view of FlatParam.grad. Therefore, optimizer.zero_grad()
-        # only removes tensor views of gradients, but cannot remove the FlatParam.grad.
-        self.actor_optimizer.zero_grad()
-        if isinstance(self.actor_module, FSDP):
-            for module in FSDP.fsdp_modules(self.actor_module):
-                module._flat_param.grad = None
-        else:
-            self.actor_module.zero_grad()
-
-    def compute_log_prob(self, data: DataProto) -> DataProto:
-        # set to eval
-        self.actor_module.eval()
-
-        use_dynamic_bsz = data.meta_info['use_dynamic_bsz']
-        if use_dynamic_bsz:
-            max_token_len = data.meta_info['max_token_len']
-        else:
-            micro_batch_size = data.meta_info['micro_batch_size']
-        temperature = data.meta_info['temperature']  # temperature must be in the data.meta_info to avoid slient error
-
+    def compute_log_prob(self, data: DataProto):
         select_keys = ['responses', 'input_ids', 'attention_mask']
         image_keys = get_image_keys(data.non_tensor_batch)
         selected_data = data.select(batch_keys=select_keys, non_tensor_batch_keys=image_keys)
 
-        mtp_n_heads = getattr(self.actor_model_config, 'mtp_n_heads', 1)
+        mtp_n_heads = getattr(self.engine.model_config, 'mtp_n_heads', 1)
 
         entropy_lst = []
         log_prob_lst = []
@@ -294,144 +56,34 @@ class DataParallelPPOActor(BasePPOActor):
         # mismatched log probs. In order to match them, we need to split
         # batch into mini batches (same with training).
         chunk_size = math.ceil(selected_data.batch.batch_size[0] / self.config.ppo_mini_batch_size)
-        for batch_idx, mini_batch in enumerate(selected_data.chunk(chunk_size)):
-            if use_dynamic_bsz:
-                indices, micro_batches, non_tensor_batches = rearrange_micro_data_proto(
-                    max_token_len, mini_batch, self.actor_train_mesh.get_group())
-            else:
-                micro_batches = mini_batch.chunk(math.ceil(mini_batch.batch.batch_size[0] / micro_batch_size))
-                num_micro_batches = len(micro_batches)
-
-            mini_batch_entropy = []
-            mini_batch_log_prob = []
-            mini_batch_acceptance_matrix = [[] for _ in range(mtp_n_heads - 1)]
-
-            with torch.no_grad():
-                for i, micro_batch_proto in enumerate(micro_batches):
-                    if use_dynamic_bsz:
-                        non_tensor_batch = non_tensor_batches[i]
-                        assert micro_batch_proto.device == torch.device('cpu')
-                        micro_batch = micro_batch_proto.cuda()
-                    else:
-                        non_tensor_batch = micro_batch_proto.non_tensor_batch
-                        assert micro_batch_proto.batch.device == torch.device('cpu')
-                        micro_batch = micro_batch_proto.batch.cuda()
-                    entropy, log_probs, _, acceptance_matrix = self._forward_micro_batch(
-                        micro_batch=micro_batch,
-                        temperature=temperature,
-                        compute_entropy=True,
-                        non_tensor_batch=non_tensor_batch)
-                    mini_batch_log_prob.append(log_probs)
-                    mini_batch_entropy.append(entropy)
-                    for j in range(mtp_n_heads - 1):
-                        mini_batch_acceptance_matrix[j].append(acceptance_matrix[j])
-
-            # release root module unshard memory
-            if isinstance(self.actor_module, FSDP):
-                self.actor_module._handle.reshard(True)
-
-            mini_log_prob = torch.cat(mini_batch_log_prob, dim=0)
-            mini_entropy = torch.cat(mini_batch_entropy, dim=0)
+        for _, mini_batch in enumerate(selected_data.chunk(chunk_size)):
+            output_proto = self.engine.forward_backward_step(data=mini_batch, forward_only=True)
+            if isinstance(self.engine.model_module, FSDP):
+                self.engine.model_module._handle.reshard(True)  # release memory
+            log_prob_lst.append(output_proto.batch['logprobs'])
+            entropy_lst.append(output_proto.batch['entropy'])
             for j in range(mtp_n_heads - 1):
-                mini_batch_acceptance_matrix[j] = torch.cat(mini_batch_acceptance_matrix[j], dim=0)
-
-            if use_dynamic_bsz:
-                indices = list(itertools.chain.from_iterable(indices))
-                assert len(indices) == mini_entropy.size(
-                    0), f"{len(indices)} vs. {mini_entropy.size()} vs. {mini_log_prob.size()}"
-                revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
-                mini_log_prob = mini_log_prob[revert_indices]
-                mini_entropy = mini_entropy[revert_indices]
-                for j in range(mtp_n_heads - 1):
-                    mini_batch_acceptance_matrix[j] = mini_batch_acceptance_matrix[j][revert_indices]
-
-            log_prob_lst.append(mini_log_prob)
-            entropy_lst.append(mini_entropy)
-            for j in range(mtp_n_heads - 1):
-                acceptance_matrix_lst[j].append(mini_batch_acceptance_matrix[j])
-
+                acceptance_matrix_lst[j].append(output_proto.batch[f'acceptance_matrix_{j}'])
         log_probs = torch.concat(log_prob_lst, dim=0)
         entropy = torch.concat(entropy_lst, dim=0)
-        acceptance_matrix = []
-        for j in range(mtp_n_heads - 1):
-            acceptance_matrix.append(torch.concat(acceptance_matrix_lst[j], dim=0))
+        acceptance_matrix = [torch.concat(acceptance_matrix_lst[j], dim=0) for j in range(mtp_n_heads - 1)]
         return entropy, log_probs, tuple(acceptance_matrix)
 
-    def set_loss_fn(self, loss_fn):
-        self.loss_fn = loss_fn
-
     def train_one_step(self, data: DataProto):
-        # make sure we are in training mode
-        self.actor_module.train()
-        temperature = data.meta_info['temperature']  # temperature must be in the data.meta_info to avoid slient error
-        global_step = data.meta_info.get('global_step')
-        batch = data.batch
+        self.engine.set_loss(pg_loss_fn, OmegaConf.to_container(self.config, resolve=True))
+        output_proto = self.engine.forward_backward_step(data=data, forward_only=False)
+        metrics_opt = self.engine.optimizer_step()
+        self.engine.optimizer_zero_grad()
 
-        # todo: put it into batch.meta_info
-        entropy_coeff = self.config.entropy_coeff
-        if entropy_coeff <= 0.:
-            compute_entropy = False
-        else:
-            compute_entropy = True
-
-        # only use nullcontext for non-reentrant gradient checkpointing
-        metrics_exec_context = nullcontext() if self.enable_non_reentrant_recompute else self.metrics_context
-        metrics = {}
-
-        with self.profiler_context as p, metrics_exec_context:
-            if self.config.use_dynamic_bsz:
-                micro_batches, _ = rearrange_micro_batches(batch=batch, max_token_len=self.config.ppo_max_token_len)
-            else:
-                # split batch into micro_batches
-                micro_batches = batch.split(self.config.ppo_micro_batch_size)
-            self._optimizer_zero_grad()
-
-            for i, micro_data in enumerate(micro_batches):
-                assert micro_data.device == torch.device('cpu')
-                micro_data = micro_data.cuda()  # actor device is cpu when using offload
-                full_entropy, log_prob, seqlen, _ = self._forward_micro_batch(micro_batch=micro_data,
-                                                                              temperature=temperature,
-                                                                              compute_entropy=compute_entropy)
-                loss, micro_data_metric = self.loss_fn(self.config, micro_data, full_entropy, log_prob)
-
-                if self.config.use_dynamic_bsz:
-                    loss = loss * (len(micro_data) / self.config.ppo_mini_batch_size)
-                else:
-                    loss = loss / self.gradient_accumulation
-                loss.backward()
-
-                micro_data_metric['actor/seqlen'] = seqlen
-                append_to_dict(metrics, micro_data_metric)
-
-            grad_norm = self._optimizer_step()
-
-            if self.config.get('update_gate_ema', False):
-                # update gate_ema
-                update_gate_ema(self.actor_module)
-
-            data_metric = {
-                'actor/grad_norm': grad_norm.detach().item(),
-                'actor/#micro_batch_update': len(micro_batches),
-            }
-            append_to_dict(metrics, data_metric)
-
-            profile_step(p, global_step)
-            self.memory_profiler.step()
+        metrics = {
+            'actor/grad_norm': metrics_opt['grad_norm'],  # NOTE: grad_norm is a float from monorl
+            'actor/#micro_batch_update': output_proto.meta_info["metrics"].pop('#micro_batch_update'),
+            **output_proto.meta_info["metrics"],
+        }
         return metrics
 
     def update_policy(self, data: DataProto):
-        # make sure we are in training mode
-        self.actor_module.train()
-
-        if not self.config.use_dynamic_bsz:
-            assert self.config.ppo_mini_batch_size % self.config.ppo_micro_batch_size == 0
-            self.gradient_accumulation = self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size
-            if self.gradient_accumulation > 2 and not isinstance(self.profiler_context, nullcontext):
-                raise ValueError(
-                    f'Number of {self.gradient_accumulation=} is too large when turn on profile. Try to turn off profile or reduce ppo_mini_batch_size.'
-                )
-        temperature = data.meta_info['temperature']  # temperature must be in the data.meta_info to avoid slient error
-        global_step = data.meta_info.get('global_step')
+        config_dict = OmegaConf.to_container(self.config, resolve=True)
 
         # compute batch full token count
         response_length = data.batch['responses'].size(1)
@@ -439,119 +91,86 @@ class DataParallelPPOActor(BasePPOActor):
         if 'overlong_mask' in data.batch.keys():
             batch_full_token_count_mask *= data.batch['overlong_mask'].unsqueeze(-1)
         batch_full_token_count = max(1, batch_full_token_count_mask.sum().item())
+        config_dict["response_length"] = response_length
+        config_dict["batch_full_token_count"] = batch_full_token_count
 
         dataloader = make_mini_step_dataloader(data, self.config.ppo_mini_batch_size, return_dataproto=True)
+        config_dict["dataloader_length"] = len(dataloader)
         metrics = {}
 
-        first_mini_ppo_kl_sum = 0
-        # only use nullcontext for non-reentrant gradient checkpointing
-        metrics_exec_context = nullcontext() if self.enable_non_reentrant_recompute else self.metrics_context
-
         for batch_idx, mini_batch in enumerate(dataloader):
-            with self.profiler_context as p, metrics_exec_context:
-                if self.config.use_dynamic_bsz:
-                    indices, micro_batches, non_tensor_batches = rearrange_micro_data_proto(
-                        self.config.ppo_max_token_len, mini_batch, self.actor_train_mesh.get_group())
-                else:
-                    # split batch into micro_batches
-                    micro_chunk_size = math.ceil(mini_batch.batch.batch_size[0] / self.config.ppo_micro_batch_size)
-                    micro_batches = mini_batch.chunk(micro_chunk_size)
-                self._optimizer_zero_grad()
+            self.engine.optimizer_zero_grad()
 
-                minibatch_early_stop = False
+            # compute minibatch full token count
+            mini_batch_full_token_count_mask = mini_batch.batch['attention_mask'][:, -response_length:]
+            if 'overlong_mask' in mini_batch.batch.keys():
+                mini_batch_full_token_count_mask *= mini_batch.batch['overlong_mask'].unsqueeze(-1)
+            mini_batch_full_token_count = max(1, mini_batch_full_token_count_mask.sum().item())
+            config_dict["mini_batch_full_token_count"] = mini_batch_full_token_count
 
-                # compute minibatch full token count
-                mini_batch_full_token_count_mask = mini_batch.batch['attention_mask'][:, -response_length:]
-                if 'overlong_mask' in mini_batch.batch.keys():
-                    mini_batch_full_token_count_mask *= mini_batch.batch['overlong_mask'].unsqueeze(-1)
-                mini_batch_full_token_count = max(1, mini_batch_full_token_count_mask.sum().item())
+            # Set the loss function of update actor function for every mini batch
+            self.engine.set_loss(pg_loss_fn, config_dict)
+            output_proto = self.engine.forward_backward_step(data=mini_batch, forward_only=False)
 
-                for i, micro_batch in enumerate(micro_batches):
-                    if self.config.use_dynamic_bsz:
-                        micro_data = micro_batch
-                        non_tensor_batch = non_tensor_batches[i]
-                    else:
-                        micro_data = micro_batch.batch
-                        non_tensor_batch = micro_batch.non_tensor_batch
-                    assert micro_data.device == torch.device('cpu')
-                    micro_data = micro_data.cuda()  # actor device is cpu when using offload
-                    entropy_coeff = self.config.entropy_coeff
-                    if entropy_coeff <= 0.:
-                        compute_entropy = False
-                    else:
-                        compute_entropy = True
+            # TODO: support early stop by kl in monorl
 
-                    full_entropy, log_prob, seqlen, _ = self._forward_micro_batch(micro_batch=micro_data,
-                                                                                  temperature=temperature,
-                                                                                  compute_entropy=compute_entropy,
-                                                                                  non_tensor_batch=non_tensor_batch)
-                    policy_loss, micro_data_metric = self.loss_fn(self.config, micro_data, full_entropy, log_prob)
+            metrics_opt = self.engine.optimizer_step()
+            self.engine.optimizer_zero_grad()
 
-                    if self.config.early_stop_by_kl != 0 and micro_data_metric[
-                            'actor/ppo_kl'] > self.config.early_stop_by_kl and batch_idx > 0:
-                        minibatch_early_stop = True
-                        break
+            print(f"[debug][actor] {metrics_opt['grad_norm']=}")
 
-                    if self.config.loss_average_method in ['token', 'sample', 'constant']:
-                        if self.config.use_dynamic_bsz:
-                            loss = policy_loss * (len(micro_data) / self.config.ppo_mini_batch_size)
-                        else:
-                            loss = policy_loss / self.gradient_accumulation
-                    elif self.config.loss_average_method == 'minibatch':
-                        loss = policy_loss / mini_batch_full_token_count
-                    elif self.config.loss_average_method == 'batch':
-                        loss = policy_loss / batch_full_token_count * len(dataloader)
-                    else:
-                        raise NotImplementedError(f'loss_average_method {loss_average_method} not implemented.')
-                    loss.backward()
+            data_metric = {
+                'actor/grad_norm': metrics_opt['grad_norm'],  # NOTE: grad_norm is a float from monorl
+                'actor/#micro_batch_update': output_proto.meta_info["metrics"].pop('#micro_batch_update'),
+                **output_proto.meta_info["metrics"],
+            }
+            append_dict_items_to_dict(metrics, data_metric)
 
-                    micro_data_metric['actor/seqlen'] = seqlen
+        # TODO: support first_mini_ppo_kl_sum in monorl
+        # append_to_dict(metrics, {'first_mini_ppo_kl_sum': first_mini_ppo_kl_sum})
 
-                    if batch_idx == 0:
-                        first_mini_ppo_kl_sum += micro_data_metric['actor/ppo_kl_sum']
-
-                    append_to_dict(metrics, micro_data_metric)
-                    if self.config.gc_freq == "micro":
-                        gc.collect()
-
-                if minibatch_early_stop:
-                    print(f'early stop at {batch_idx}!!!')
-                    break
-
-                if not isinstance(self.metrics_context, nullcontext):
-                    training_stats = sync_training_stats(self.metrics_context, self.actor_model_config,
-                                                         self.actor_module, self.config.fsdp_size)
-                    append_to_dict(metrics, training_stats)
-
-                grad_norm = self._optimizer_step()
-
-                if self.config.gc_freq == "mini":
-                    gc.collect()
-
-                if self.config.get('update_gate_ema', False):
-                    # update gate_ema
-                    update_gate_ema(self.actor_module)
-
-                data_metric = {
-                    'actor/grad_norm': grad_norm.detach().item(),
-                    'actor/#micro_batch_update': len(micro_batches),
-                }
-                append_to_dict(metrics, data_metric)
-
-                profile_step(p, global_step)
-                self.memory_profiler.step()
-
-        append_to_dict(metrics, {'first_mini_ppo_kl_sum': first_mini_ppo_kl_sum})
-
-        self._optimizer_zero_grad()
+        self.engine.optimizer_zero_grad()
         return metrics
 
 
-def default_loss_fn(config, micro_data, full_entropy, log_prob):
-    responses = micro_data['responses']
-    response_length = responses.size(1)
-    attention_mask = micro_data['attention_mask']
-    if config.use_model_output_mask:
+def pg_loss_fn(config: Dict, output: TensorDict, micro_data: TensorDict):
+    loss_average_method = config.get("loss_average_method", "sample")
+    use_dynamic_bsz = config.get("use_dynamic_bsz", True)
+    ppo_mini_batch_size = config.get("ppo_mini_batch_size", -1)
+    ppo_micro_batch_size = config.get("ppo_micro_batch_size", -1)
+    mini_batch_full_token_count = config.get("mini_batch_full_token_count", -1)
+    batch_full_token_count = config.get("mini_batch_full_token_count", -1)
+    dataloader_length = config.get("dataloader_length", -1)
+    full_entropy = output['entropy']
+    log_prob = output['logprobs']
+
+    policy_loss, micro_data_metric = default_pg_loss_fn(config, micro_data, full_entropy, log_prob)
+    gradient_accumulation = ppo_mini_batch_size // ppo_micro_batch_size
+
+    if loss_average_method in ['token', 'sample', 'constant']:
+        if use_dynamic_bsz:
+            loss = policy_loss * (len(micro_data) / ppo_mini_batch_size)
+        else:
+            loss = policy_loss / gradient_accumulation
+    elif loss_average_method == 'minibatch':
+        loss = policy_loss / mini_batch_full_token_count
+    elif loss_average_method == 'batch':
+        loss = policy_loss / batch_full_token_count * dataloader_length
+    else:
+        raise NotImplementedError(f'loss_average_method {loss_average_method} not implemented.')
+
+    return loss, micro_data_metric
+
+
+def default_pg_loss_fn(config, micro_data, full_entropy, log_prob):
+    """
+    Note that the loss function used by monorl should return a tuple as below:
+    1. policy_loss: a single float tensor that will be used for backward function.
+    2. metrics: a dict in the format of {key: val (float/int/list/tensor)} that records key metrics.
+    """
+    response_length = config.get("response_length", 2048)
+    attention_mask = micro_data["attention_mask"]
+    if config.get("use_model_output_mask", False):
         loss_mask = micro_data['model_output_mask']
         response_mask = loss_mask[:, -response_length:]
     else:
@@ -564,51 +183,52 @@ def default_loss_fn(config, micro_data, full_entropy, log_prob):
         old_log_prob = micro_data['rollout_behavior_log_probs']
         ref_log_prob = micro_data['old_log_probs']
     else:
-        use_ewma_loss = config.use_ewma_loss
-        old_log_prob = micro_data['old_log_probs']
-        ref_log_prob = micro_data.get('ref_log_prob', None)
+        use_ewma_loss = config.get("use_ewma_loss", False)
+        old_log_prob = micro_data["old_log_probs"]
+        ref_log_prob = micro_data.get("ref_log_prob", None)
 
-    advantages = micro_data['advantages']
-    upgo_advantages = micro_data['upgo_advantages']
-    overlong_mask = micro_data.get('overlong_mask', None)
+    advantages = micro_data["advantages"]
+    upgo_advantages = micro_data["upgo_advantages"]
+    overlong_mask = micro_data.get("overlong_mask", None)
 
-    clip_ratio = config.clip_ratio
+    clip_ratio = config.get("clip_ratio", 0.2)
     clip_ratio_low = clip_ratio
     clip_ratio_high = clip_ratio
-    if config.clip_ratio_low:
-        clip_ratio_low = config.clip_ratio_low
-    if config.clip_ratio_high:
-        clip_ratio_high = config.clip_ratio_high
-    clip_ratio2 = config.clip_ratio2
-    scale_pg_by_kl = config.scale_pg_by_kl
-    scale_pg_by_local_kl = config.scale_pg_by_local_kl
-    entropy_coeff = config.entropy_coeff
-    upgo_loss_weight = config.upgo_loss_weight
-    kl_loss_weight = config.kl_loss_weight
-    offpolicy_kl_loss_weight = config.offpolicy_kl_loss_weight
-    lm_loss_weight = config.lm_loss_weight
-    kl_penalty_type = config.kl_penalty
-    loss_average_method = config.loss_average_method
-    loss_average_constant = config.loss_average_constant
-
-    total_loss, pg_loss, upgo_loss, pg_clipfrac, pg_clipfrac_hi, pg_clipfrac_lo, pg_clipfrac2, ppo_kl, ppo_kl_sum = core_algos.compute_policy_loss(
-        old_log_prob=old_log_prob,
-        ref_log_prob=ref_log_prob,
-        log_prob=log_prob,
-        advantages=advantages,
-        upgo_advantages=upgo_advantages,
-        eos_mask=response_mask,
-        cliprange_low=clip_ratio_low,
-        cliprange_high=clip_ratio_high,
-        cliprange2=clip_ratio2,
-        scale_pg_by_kl=scale_pg_by_kl,
-        scale_pg_by_local_kl=scale_pg_by_local_kl,
-        upgo_loss_weight=upgo_loss_weight,
-        use_ewma_loss=use_ewma_loss,
-        kl_penalty_type=kl_penalty_type,
-        overlong_mask=overlong_mask,
-        loss_average_method=loss_average_method,
-        loss_average_constant=loss_average_constant)
+    if config.get("clip_ratio_low", None):
+        clip_ratio_low = config.get("clip_ratio_low", None)
+    if config.get("clip_ratio_high", None):
+        clip_ratio_high = config.get("clip_ratio_high", None)
+    clip_ratio2 = config.get("clip_ratio2", 10.0)
+    scale_pg_by_kl = config.get("scale_pg_by_kl", False)
+    scale_pg_by_local_kl = config.get("scale_pg_by_local_kl", False)
+    entropy_coeff = config.get("entropy_coeff", 0.001)
+    upgo_loss_weight = config.get("upgo_loss_weight", 0.0)
+    kl_loss_weight = config.get("kl_loss_weight", 0.0)
+    offpolicy_kl_loss_weight = config.get("offpolicy_kl_loss_weight", 0.0)
+    lm_loss_weight = config.get("lm_loss_weight", 0.0)
+    kl_penalty_type = config.get("kl_penalty", "low_var_kl")
+    loss_average_method = config.get("loss_average_method", "sample")
+    loss_average_constant = config.get("loss_average_constant", 0)
+    total_loss, pg_loss, upgo_loss, pg_clipfrac, pg_clipfrac_hi, pg_clipfrac_lo, pg_clipfrac2, ppo_kl, ppo_kl_sum = (
+        core_algos.compute_policy_loss(
+            old_log_prob=old_log_prob,
+            ref_log_prob=ref_log_prob,
+            log_prob=log_prob,
+            advantages=advantages,
+            upgo_advantages=upgo_advantages,
+            eos_mask=response_mask,
+            cliprange_low=clip_ratio_low,
+            cliprange_high=clip_ratio_high,
+            cliprange2=clip_ratio2,
+            scale_pg_by_kl=scale_pg_by_kl,
+            scale_pg_by_local_kl=scale_pg_by_local_kl,
+            upgo_loss_weight=upgo_loss_weight,
+            use_ewma_loss=use_ewma_loss,
+            kl_penalty_type=kl_penalty_type,
+            overlong_mask=overlong_mask,
+            loss_average_method=loss_average_method,
+            loss_average_constant=loss_average_constant,
+        ))
 
     if kl_loss_weight > 0.0:
         kl_loss = core_algos.compute_kl_loss(log_prob,
@@ -629,13 +249,13 @@ def default_loss_fn(config, micro_data, full_entropy, log_prob):
         offpolicy_kl_loss = torch.zeros((), device=pg_loss.device)
 
     if lm_loss_weight > 0.0:
-        eos_ids = micro_data['eos_ids']
-        raw_scores = micro_data['token_level_scores']
+        eos_ids = micro_data["eos_ids"]
+        raw_scores = micro_data["token_level_scores"]
         lm_loss = core_algos.compute_lm_loss(log_prob, raw_scores, eos_ids, loss_average_method=loss_average_method)
     else:
         lm_loss = torch.zeros((), device=pg_loss.device)
 
-    if entropy_coeff <= 0.:
+    if entropy_coeff <= 0.0:
         compute_entropy = False
     else:
         compute_entropy = True
@@ -651,26 +271,23 @@ def default_loss_fn(config, micro_data, full_entropy, log_prob):
 
     metrics = {
         # 'actor/entropy': entropy_loss.detach().item(),
-        'actor/pg_loss': pg_loss.detach().item(),
-        'actor/upgo_loss': upgo_loss.detach().item(),
-        'actor/kl_loss': kl_loss.detach().item(),
-        'actor/offpolicy_kl_loss': offpolicy_kl_loss.detach().item(),
-        'actor/pg_clipfrac': pg_clipfrac.detach().item(),
-        'actor/pg_clipfrac_hi': pg_clipfrac_hi.detach().item(),
-        'actor/pg_clipfrac_lo': pg_clipfrac_lo.detach().item(),
-        'actor/pg_clipfrac2': pg_clipfrac2.detach().item(),
-        'actor/ppo_kl': ppo_kl.detach().item(),
-        'actor/ppo_kl_sum': ppo_kl_sum.detach().item(),
-        'actor/tokens_per_micro_batch_update': attention_mask.sum().detach().item(),
-        'actor/lm_loss': lm_loss.detach().item(),
-        'actor/logprob_eq_zero': logprob_eq_zero.detach().item(),
+        "actor/pg_loss": pg_loss.detach().item(),
+        "actor/upgo_loss": upgo_loss.detach().item(),
+        "actor/kl_loss": kl_loss.detach().item(),
+        "actor/pg_clipfrac": pg_clipfrac.detach().item(),
+        "actor/pg_clipfrac_hi": pg_clipfrac_hi.detach().item(),
+        "actor/pg_clipfrac_lo": pg_clipfrac_lo.detach().item(),
+        "actor/pg_clipfrac2": pg_clipfrac2.detach().item(),
+        "actor/ppo_kl": ppo_kl.detach().item(),
+        "actor/ppo_kl_sum": ppo_kl_sum.detach().item(),
+        "actor/tokens_per_micro_batch_update": attention_mask.sum().detach().item(),
+        "actor/lm_loss": lm_loss.detach().item(),
+        "actor/logprob_eq_zero": logprob_eq_zero.detach().item(),
     }
     return policy_loss, metrics
 
 
 def make_mini_step_dataloader(data, ppo_mini_batch_size, return_dataproto=False):
-    # make minibatch iterator
-    # dataloader = self._make_minibatch_iterator(data=data)
     select_keys = [
         'responses', 'input_ids', 'attention_mask', 'old_log_probs', 'advantages', 'upgo_advantages', 'off_policy_steps'
     ]

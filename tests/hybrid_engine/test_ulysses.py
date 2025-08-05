@@ -130,13 +130,13 @@ def test_ulysses(model: str):
 
     # run with ulysses
     if model == "p6":
-        from alpha_seed.models.transformers.monkey_patch import apply_monkey_patch_to_p6
+        from mono_rl.models.seed_models.monkey_patch import apply_monkey_patch_to_p6
         apply_monkey_patch_to_p6()
     elif model == "p6dense":
-        from alpha_seed.models.transformers.monkey_patch import apply_monkey_patch_to_p6_dense
+        from mono_rl.models.seed_models.monkey_patch import apply_monkey_patch_to_p6_dense
         apply_monkey_patch_to_p6_dense()
     elif model == "p7":
-        from alpha_seed.models.transformers.monkey_patch import apply_monkey_patch_to_p7
+        from mono_rl.models.seed_models.monkey_patch import apply_monkey_patch_to_p7
         apply_monkey_patch_to_p7()
     else:
         raise NotImplementedError(f"Unknown model type:{model}")

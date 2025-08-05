@@ -103,10 +103,10 @@ def main(global_config):
         from torch.distributed.fsdp import StateDictType
         FSDP.set_state_dict_type(actor_module_fsdp, StateDictType.SHARDED_STATE_DICT)
     elif backend == 'megatron':
-        from alpha_seed.models.mariana.checkpoint_utils import load_partial_pretrain
-        from alpha_seed.models.mariana.config_utils import convert_hf_config_to_mariana, update_megatron_config
-        from alpha_seed.models.mariana.modeling_mariana import convert_gate_to_fp32
-        from alpha_seed.models.mariana.optimizer_utils import configure_optimizers
+        from mono_rl.models.mariana.checkpoint_utils import load_partial_pretrain
+        from mono_rl.models.mariana.config_utils import convert_hf_config_to_mariana, update_megatron_config
+        from mono_rl.models.mariana.modeling_mariana import convert_gate_to_fp32
+        from mono_rl.models.mariana.optimizer_utils import configure_optimizers
 
         from mariana.utils.megatron import initialize_megatron_args
 
@@ -131,7 +131,7 @@ def main(global_config):
         # step 3: build model and optimizer
         def megatron_model_provider(pre_process=True, post_process=True):
             """Build the policy model."""
-            from alpha_seed.models.mariana.modeling_mariana import MarianaForCausalLM
+            from mono_rl.models.mariana.modeling_mariana import MarianaForCausalLM
             model = MarianaForCausalLM(model_config,
                                        megatron_config,
                                        pre_process=pre_process,

@@ -9,7 +9,7 @@ os.environ['TRITON_REMOTE_CACHE_BACKEND'] = 'alpha_seed.utils.redis.triton_redis
 os.environ['BPEX_NO_WARN_ON_UNTUNED_CASE'] = '1'
 os.environ['NCCL_DEBUG'] = '0'
 
-from alpha_seed.models.transformers.ops.group_gemm_ep import FusedMoeExpertFunctionEP
+from mono_rl.models.seed_models.ops.group_gemm_ep import FusedMoeExpertFunctionEP
 from seed_models.utils.modeling_fused_moe import FusedMoeExpertFunction
 
 import torch

@@ -122,6 +122,7 @@ python3 tasks/main_ppo.py \
     +critic.model.override_config.attention_dropout=0. \
     +critic.model.override_config.embd_pdrop=0. \
     +critic.model.override_config.resid_pdrop=0. \
+    +critic.model.override_config.architectures=['P6DenseForTokenClassification'] \
     +critic.use_rmpad=True \
     critic.model.external_lib=seed_models \
     reward_model.enable=False \

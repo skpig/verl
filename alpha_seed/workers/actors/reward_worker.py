@@ -34,15 +34,20 @@ from verl.utils.fsdp_utils import get_fsdp_wrap_policy
 from verl.utils.import_utils import import_external_libs
 from verl.utils.model import compute_position_id_with_mask
 
+from transformers import AutoTokenizer
 from alpha_seed.workers.hybrid_engine.fsdp_gather import DataGatherManager, ulysses_pad_and_slice_inputs
-from alpha_seed.models.transformers.monkey_patch import apply_monkey_patch, get_parallel_plan
+from mono_rl.models.seed_models.monkey_patch import apply_monkey_patch, get_parallel_plan
 from verl.utils.seqlen_balancing import rearrange_micro_batches
 from alpha_seed.utils import ndtimeline
-from alpha_seed.models.transformers.parallel.collectives import get_memory
+from mono_rl.models.seed_models.parallel.collectives import get_memory
 from alpha_seed.workers.fsdp.initialize import create_mesh, parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init, cleanup_local_tmp_folder_safetensors_files
 from alpha_seed.workers.fsdp.extensions import register_dtensor_save_hook, parallelize_module
 from dist_attn.ulysses.ops import gather_outputs
 from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
+
+from alpha_seed.utils.mono_rl.config import reward_config_to_mono_config
+from mono_rl.worker.engine.fsdp.models.model import FSDPModel
+from mono_rl.worker import Role
 
 from seed_models.utils.count_flops import FlopsCounter
 
@@ -68,165 +73,73 @@ class RewardModelWorker(Worker):
         self.config = config
         self.role = "rm"
 
-        fsdp_size = config.fsdp_size
         sp_size = config.ulysses_sequence_parallel_size
         tp_size = config.tp_size
         world_size = torch.distributed.get_world_size()
-        meshes = create_mesh(fsdp_size=fsdp_size, tp_size=tp_size, sp_size=sp_size)
-
-        self.fsdp_mesh = meshes[0]
-        self.tp_mesh = meshes[1]
-        self.sp_mesh = meshes[2]
-        self.gather_mesh = meshes[3]
-        self.gather_manager = DataGatherManager(self.gather_mesh, self.sp_mesh)
 
         self.config.micro_batch_size //= (world_size // sp_size // tp_size)
 
         self._model_initialized = True
 
-    def _build_model(self, config):
-        # the following line is necessary
-        from transformers import AutoModelForTokenClassification, AutoTokenizer, AutoConfig
-        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, ShardingStrategy, CPUOffload
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def init_model(self, remove_safetensors_after_init=False):
 
-        # download the checkpoint from hdfs
-        local_path = copy_local_path_from_hdfs(config.model.path)
+        if self._model_initialized:
+            return
 
+        # The critic config of the alpha_seed DictConfig format
+        from omegaconf import DictConfig
+        as_config: DictConfig = self.config
+
+        trust_remote_code = as_config.model.get('trust_remote_code', False)
+
+        # Setup input_tokenizer which is not covered by the monorl engine
         input_tokenizer_local_path = None
-        if self.config.model.input_tokenizer is None:
+        if as_config.model.input_tokenizer is None:
             self._do_switch_chat_template = False
         else:
             self._do_switch_chat_template = True
-            input_tokenizer_local_path = copy_local_path_from_hdfs(config.model.input_tokenizer)
+            input_tokenizer_local_path = copy_local_path_from_hdfs(as_config.model.input_tokenizer)
             self.input_tokenizer = AutoTokenizer.from_pretrained(input_tokenizer_local_path,
-                                                                 trust_remote_code=config.model.get(
-                                                                     'trust_remote_code', False))
-        self.tokenizer = AutoTokenizer.from_pretrained(local_path,
-                                                       trust_remote_code=config.model.get('trust_remote_code', False))
+                                                                 trust_remote_code=trust_remote_code)
 
         if self.rank == 0:
             print(f'Switch chat_template: {self._do_switch_chat_template}')
 
-        trust_remote_code = config.model.get('trust_remote_code', False)
-        model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code)
+        mono_config = reward_config_to_mono_config(as_config)
+        mono_config.engine.fsdp.param_offload = True
 
-        use_rmpad = self.config.get('use_rmpad', False)
-        if use_rmpad:
-            # optimize the model via rmpad
-            assert apply_monkey_patch(config=model_config,
-                                      verbose=self.rank == 0), f'Cannot find rmpad version of {model_config.model_type}'
+        self.engine = FSDPModel(mono_config.engine)
+        self.engine.init_model(build_optimizer=False)
+        self.tokenizer = self.reward_engine.tokenizer
 
-        model_config.pad_token_id = self.tokenizer.pad_token_id
+        # get the device meshes from monorl fsdp model engine and construct the data gather manager
+        self.fsdp_mesh, self.tp_mesh, self.oe_mesh, self.sp_mesh, self.gather_mesh = self.engine.fsdp_mesh, self.engine.tp_mesh, self.engine.oe_mesh, self.engine.sp_mesh, self.engine.gather_mesh
+        self.gather_manager = DataGatherManager(self.gather_mesh, self.sp_mesh)
 
-        with meta_device_init(), warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            # model_config.moe_implementation = 'group_gemm'  # Note that this is deprecated. Use seed-models stable
-            setattr(model_config, '_moe_implementation', 'fused')
-            setattr(model_config, 'classifier_dropout', 0.)
-            reward_module = AutoModelForTokenClassification.from_config(model_config,
-                                                                        torch_dtype=torch.bfloat16,
-                                                                        attn_implementation='flash_attention_2',
-                                                                        trust_remote_code=trust_remote_code)
-            reward_module.to(torch.bfloat16)
-            if self.rank == 0:
-                print(reward_module)
-
-        shard_plan = get_parallel_plan(model_config, self.tp_mesh)
-        shard_plan = parallelize_module(reward_module, shard_plan, self.tp_mesh)
-
-        auto_wrap_policy = get_fsdp_wrap_policy(module=reward_module, config=self.config.model.fsdp_config)
-
-        cpu_offload = None
-        if self.config.model.fsdp_config.param_offload:
-            cpu_offload = CPUOffload(offload_params=True)
-
-        # we only support ZeRO3 of hybrid DP+FSDP or full FSDP
-        if self.fsdp_mesh.ndim == 1:
-            sharding_strategy = ShardingStrategy.FULL_SHARD
-        elif self.fsdp_mesh.ndim == 2:
-            sharding_strategy = ShardingStrategy.HYBRID_SHARD
-        else:
-            raise NotImplementedError(f"get device mesh ndim={self.fsdp_mesh.ndim}, but only support 1 or 2")
-
-        reward_module = FSDP(
-            reward_module,
-            param_init_fn=parallel_init_fsdp_fn(reward_module, parallel_load_safetensors(local_path)),
-            use_orig_params=True,
-            auto_wrap_policy=auto_wrap_policy,
-            device_id=torch.cuda.current_device(),
-            sharding_strategy=sharding_strategy,  # zero3
-            device_mesh=self.fsdp_mesh,
-            sync_module_states=False,
-            forward_prefetch=True,
-            cpu_offload=cpu_offload)
-
-        register_dtensor_save_hook(reward_module, shard_plan)
-
-        if self.rank == 0:
-            print(model_config)
-
-        return reward_module, model_config
-
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def init_model(self, remove_safetensors_after_init=False):
-        if self._model_initialized:
-            return
-        # This is used to import external_lib into the huggingface systems
-        import_external_libs(self.config.model.get('external_lib', None))
-        self.reward_module = self._build_model(config=self.config)
-        self.reward_module.eval()
         torch.cuda.empty_cache()
         ndtimeline.init_with_ray(self)
         self._model_initialized = True
         if remove_safetensors_after_init:
-            cleanup_local_tmp_folder_safetensors_files(self.reward_model_config._name_or_path)
+            cleanup_local_tmp_folder_safetensors_files(self.engine.model_config._name_or_path)
 
-    def _forward_micro_batch(self, micro_batch):
-        from flash_attn.bert_padding import pad_input, unpad_input, index_first_axis, rearrange
+    def forward_micro_batch(self, micro_batch, response_length):
+        max_prompt_length = self.config['max_prompt_length']
+        response_ids = micro_batch['input_ids'][:, max_prompt_length:].to(torch.int64)
+        response_mask = micro_batch['attention_mask'][:, max_prompt_length:].to(torch.int64)
+        reflection_nums = torch.zeros((response_mask.shape[0],))
+        if self.config.get('use_last_response', False):
+            response_ids, response_mask, reflection_nums = self.get_last_response(response_ids, response_mask)
 
-        with torch.inference_mode(), torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-            if self.config.get('use_rmpad', False):
-                # 重新组合input_ids和attention_mask
-                max_prompt_length = self.config['max_prompt_length']
-                response_ids = micro_batch['input_ids'][:, max_prompt_length:].to(torch.int64)
-                response_mask = micro_batch['attention_mask'][:, max_prompt_length:].to(torch.int64)
-                reflection_nums = torch.zeros((response_mask.shape[0],))
-                if self.config.get('use_last_response', False):
-                    response_ids, response_mask, reflection_nums = self.get_last_response(response_ids, response_mask)
+        prompt_ids = micro_batch['answer_input_ids'].to(torch.int64)
+        micro_batch["input_ids"] = torch.cat([prompt_ids, response_ids], dim=-1)
+        prompt_mask = data.batch["answer_attention_mask"].to(torch.int64)
+        micro_batch["attention_mask"] = torch.cat([prompt_mask, response_mask], dim=-1)
 
-                prompt_ids = micro_batch['answer_input_ids'].to(torch.int64)
-                input_ids = torch.cat([prompt_ids, response_ids], dim=-1)
-                prompt_mask = micro_batch['answer_attention_mask'].to(torch.int64)
-                attention_mask = torch.cat([prompt_mask, response_mask], dim=-1)
-
-                batch, seqlen = input_ids.shape
-                input_ids_rmpad, indices, cu_seqlens, _ = unpad_input(input_ids.unsqueeze(-1),
-                                                                      attention_mask=attention_mask)  # (totol_nnz, 1)
-                input_ids_rmpad = input_ids_rmpad.transpose(0, 1)  # (1, total_nnz)
-
-                position_ids = compute_position_id_with_mask(attention_mask)
-                position_ids_rmpad = index_first_axis(rearrange(position_ids.unsqueeze(-1), "b s ... -> (b s) ..."),
-                                                      indices).transpose(0, 1)
-
-                # handle ulysses sequence parallelism
-                sp_size = get_ulysses_sequence_parallel_world_size()
-                total_s = input_ids_rmpad.size(1)
-                input_ids_rmpad, position_ids_rmpad, pad_size = ulysses_pad_and_slice_inputs(
-                    input_ids_rmpad, position_ids_rmpad, sp_size)
-
-                output = self.reward_module(input_ids=input_ids_rmpad, position_ids=position_ids_rmpad, use_cache=False)
-
-                # handle ulysses sequence parallelism
-                if sp_size > 1:
-                    output.logits = gather_outputs(output.logits, gather_dim=1, padding_dim=1, unpad_dim_size=total_s)
-
-                rm_score = output.logits.squeeze(0).squeeze(-1)  # (total_nnz,)
-                last_pos = cu_seqlens[1:] - 1
-                rm_score = rm_score[last_pos]  # (bsz,)
-                assert rm_score.shape == (batch,)
-            else:
-                raise NotImplementedError
-            return rm_score, reflection_nums
+        output_td, _ = self.engine._forward_micro_batch(micro_batch, response_length, role=Role.Reward)
+        rm_score = output_td["rm_scores"]  # (total_nnz,)
+        assert rm_score.shape == (micro_batch["input_ids"].shape[0],)
+        return rm_score, reflection_nums
 
     def get_last_response(self, response_ids, response_mask):
         bs = response_ids.shape[0]
@@ -400,6 +313,8 @@ class RewardModelWorker(Worker):
             rm_data = data
 
         rm_data.batch = rm_data.batch.cuda()
+        response_length = data.batch['responses'].shape[-1]
+
         with self.gather_manager:
             rm_data = self.gather_manager.preprocess_data(rm_data)
 
@@ -412,7 +327,7 @@ class RewardModelWorker(Worker):
             output = []
             total_reflection_nums = []
             for i, micro_batch in enumerate(micro_batches):
-                rm_score, reflection_nums = self._forward_micro_batch(micro_batch)
+                rm_score, reflection_nums = self.forward_micro_batch(micro_batch, response_length=response_length)
                 output.append(rm_score)
                 total_reflection_nums.append(reflection_nums)
             scores = torch.cat(output, dim=0)  # (batch_size)
@@ -424,9 +339,6 @@ class RewardModelWorker(Worker):
             output = self.gather_manager.postprocess_data(output)
 
         output = output.to('cpu')
-
-        # reset FSDP buffer after forward
-        self.reward_module._handle.reshard(True)
         torch.cuda.empty_cache()
         max_memory_allocated, max_memory_reserved = get_memory()
         output.meta_info.update({
@@ -443,7 +355,7 @@ class RewardModelWorker(Worker):
     def reinit(self, config):
         import gc
         if self._model_initialized:
-            del self.reward_module
+            del self.engine
         gc.collect()
         torch.cuda.empty_cache()
         self.__init__(config)

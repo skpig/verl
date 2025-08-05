@@ -50,7 +50,7 @@ from alpha_seed.workers.fsdp.initialize import meta_device_init
 from alpha_seed.workers.hybrid_engine.fsdp_gather import ulysses_pad_and_slice_inputs
 from dist_attn.ulysses.parallel_states import set_ulysses_sequence_parallel_group
 from dist_attn.ulysses.ops import gather_outputs
-from alpha_seed.models.transformers.monkey_patch import apply_monkey_patch, get_parallel_plan
+from mono_rl.models.seed_models.monkey_patch import apply_monkey_patch, get_parallel_plan
 from alpha_seed.workers.fsdp.offload import offload_fsdp_optimizer, load_fsdp_optimizer
 from alpha_seed.trainer.optim import get_optimizer_from_config
 

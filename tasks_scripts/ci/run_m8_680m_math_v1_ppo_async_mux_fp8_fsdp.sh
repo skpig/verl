@@ -90,6 +90,7 @@ python3 tasks/main_ppo.py \
     +actor_rollout_ref.model.override_config.attention_dropout=0. \
     +actor_rollout_ref.model.override_config.embd_pdrop=0. \
     +actor_rollout_ref.model.override_config.resid_pdrop=0. \
+    +critic.model.override_config.architectures=['M8ForTokenClassification'] \
     actor_rollout_ref.actor.optim.lr=${actor_lr} \
     actor_rollout_ref.actor.optim.lr_warmup_steps=${lr_warmup_steps} \
     actor_rollout_ref.actor.ppo_mini_batch_size=${ppo_mini_batch_size} \
@@ -109,6 +110,7 @@ python3 tasks/main_ppo.py \
     +critic.model.override_config.attention_dropout=0. \
     +critic.model.override_config.embd_pdrop=0. \
     +critic.model.override_config.resid_pdrop=0. \
+    +critic.model.override_config.architectures=['M8ForTokenClassification'] \
     +critic.use_rmpad=True \
     critic.model.external_lib=seed_models \
     reward_model.enable=False \

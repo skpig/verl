@@ -2,9 +2,13 @@ set -x
 
 ray stop --force
 
+
+NUM_STEPS="${NUM_STEPS:-100}"
+echo $NUM_STEPS
+
 export MARIANA_DISABLE_ROPE_REGISTER_INV_FREQ=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-export NCCL_DEBUG=WARN
+export NCCL_DEBUG=ERROR
 
 # tracking实验名
 project_name='alphaseed_megatron'
@@ -102,6 +106,7 @@ python3 tasks/main_ppo.py \
     +critic.model.override_config.attention_dropout=0. \
     +critic.model.override_config.embd_pdrop=0. \
     +critic.model.override_config.resid_pdrop=0. \
+    +critic.model.override_config.architectures=['M8ForTokenClassification'] \
     +critic.use_rmpad=True \
     critic.model.external_lib=seed_models \
     critic.ppo_mini_batch_size=${critic_ppo_mini_batch_size} \
@@ -122,7 +127,7 @@ python3 tasks/main_ppo.py \
     algorithm.lam=${gae_lam} \
     algorithm.force_append_eos=${force_append_eos} \
     algorithm.kl_penalty=${kl_penalty} \
-    trainer.critic_warmup=10 \
+    # trainer.critic_warmup=10 \
     trainer.logger=['console','tracking'] \
     trainer.project_name=${project_name} \
     trainer.experiment_name=${experiment_name} \
@@ -145,7 +150,7 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.rollout.bon_strategy=${bon_strategy} \
     actor_rollout_ref.actor.shuffle=False \
     +actor_rollout_ref.rollout.use_vllm=True \
-    +actor_rollout_ref.rollout.enable_paged_attention=True \
+    ++actor_rollout_ref.rollout.enable_paged_attention=True \
     +actor_rollout_ref.rollout.dump_nan=${default_hdfs_dir}/dump_nan \
     +actor_rollout_ref.rollout.complete_ratio=0.5 \
     streaming_rollout.nnodes=1 \
@@ -158,4 +163,5 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.rollout.quant_mode=WFP8 \
     +actor_rollout_ref.rollout.model_type=m8_14b \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.9 \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=2
+    actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
+    trainer.total_steps=${NUM_STEPS}

@@ -28,7 +28,7 @@ def test_logits_cross_entropy_fusion():
     model_v2.load_state_dict(model.state_dict())
 
     # apply monkey patch
-    from alpha_seed.models.transformers.modeling_p7 import p7_model_forward
+    from mono_rl.models.seed_models.modeling_p7 import p7_model_forward
     from seed_models.integrations import apply_liger_kernel_to_p7
     P7ForCausalLM.forward = p7_model_forward
     apply_liger_kernel_to_p7()

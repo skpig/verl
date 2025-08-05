@@ -45,7 +45,7 @@ from verl.utils.seqlen_balancing import rearrange_micro_batches
 from verl.utils.model import compute_position_id_with_mask
 from verl.utils.fsdp_utils import get_fsdp_wrap_policy
 
-from alpha_seed.models.transformers.monkey_patch import apply_monkey_patch, get_parallel_plan
+from mono_rl.models.seed_models.monkey_patch import apply_monkey_patch, get_parallel_plan
 from alpha_seed.workers.fsdp.initialize import create_mesh, parallel_load_safetensors, parallel_init_fsdp_fn, meta_device_init
 from alpha_seed.workers.fsdp.extensions import parallelize_module, register_dtensor_save_hook
 from alpha_seed.workers.fsdp.offload import activation_offload

@@ -60,7 +60,7 @@ from alpha_seed.workers.xperf_rollout.utils.nccl_weights_communicator import NCC
 from alpha_seed.workers.streaming_service.xperf_model_prophet import XperfModelProphet
 from alpha_seed.workers.xperf_rollout.utils.logits_manipulate import logits_manipulate_fn_core, logits_manipulate_fn_eta, logits_manipulate_fn_minp, logits_manipulate_fn_clip
 from alpha_seed.utils.observility import get_profiler_context_wrapped, profile_step
-from alpha_seed.models.transformers.modeling_vlm import add_pixel_values_to_inflight_query
+from mono_rl.models.seed_models.modeling_vlm import add_pixel_values_to_inflight_query
 from alpha_seed.workers.xperf_rollout.profiler.visualizer import visualize_metrics
 from alpha_seed.utils.dataset.dist_data_util import get_image_manager, get_local_inputs
 from functools import partial
