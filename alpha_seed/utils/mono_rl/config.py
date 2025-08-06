@@ -125,7 +125,7 @@ def reward_config_to_mono_config(reward_config: DictConfig) -> RewardWorkerConfi
     # set strategy according to the config
     _set_config_field(mono_config, config, "strategy")
 
-    if mono_config.strategy == "fsdp":
+    if mono_config.strategy in ["fsdp", "vescale-fsdp2"]:
         _set_config_fsdp_engine(mono_config.engine, config)
     elif mono_config.strategy == "megatron":
         _set_config_megatron_engine(mono_config.engine, config)
@@ -144,7 +144,7 @@ def actor_config_to_mono_config(actor_config: DictConfig, model_config: DictConf
     # set strategy according to the config
     _set_config_field(mono_config, config, "strategy")
 
-    if mono_config.strategy == "fsdp":
+    if mono_config.strategy in ["fsdp", "vescale-fsdp2"]:
         _set_config_fsdp_engine(mono_config.engine, config, model_config)
     elif mono_config.strategy == "megatron":
         _set_config_megatron_engine(mono_config.engine, config, model_config)
@@ -163,7 +163,7 @@ def ref_config_to_mono_config(ref_config: DictConfig, model_config: DictConfig) 
     # set strategy according to the config
     _set_config_field(mono_config, config, "strategy")
 
-    if mono_config.strategy == "fsdp":
+    if mono_config.strategy in ["fsdp", "vescale-fsdp2"]:
         _set_config_fsdp_engine(mono_config.engine, config, model_config)
     elif mono_config.strategy == "megatron":
         _set_config_megatron_engine(mono_config.engine, config, model_config)
