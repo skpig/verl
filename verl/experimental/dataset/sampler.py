@@ -74,6 +74,8 @@ class MoPPSSampler(AbstractCurriculumBatchSampler):
         # 后验参数
         self.alpha = torch.ones(len(data_source))
         self.beta  = torch.ones(len(data_source))
+        print("[Sampler] Initializing MoPPSampler with batch size:", self.bsz, 
+                "dataset length:", len(data_source))
 
         # 这里 queue 还是存“单条索引”，方便 fill_queue 逻辑复用
         self.queue: Deque[int] = deque(maxlen=self.bsz)
@@ -85,6 +87,7 @@ class MoPPSSampler(AbstractCurriculumBatchSampler):
         """batch 内必须带 'item' (索引) 和 'score' (0/1 or 回归分数)"""
         indices = torch.tensor(batch.non_tensor_batch["item"].astype(np.int32))
         scores  = torch.tensor(batch.non_tensor_batch["score"])
+        print("[Sampler] Update with indices:", indices.tolist())
 
         unique_idx, inverse = torch.unique(indices, return_inverse=True)
         counts = torch.bincount(inverse, minlength=len(unique_idx))
@@ -115,6 +118,7 @@ class MoPPSSampler(AbstractCurriculumBatchSampler):
     # ---------- 采样核心 ----------
     def fill_queue(self):
         k = self.bsz - len(self.queue)
+        print(f"[Sampler] fill queue from {len(self.queue)} to {self.bsz} items")
         if k <= 0:
             return
 
@@ -127,10 +131,15 @@ class MoPPSSampler(AbstractCurriculumBatchSampler):
         # 2) 选最小权重的 k 个样本补入队列
         #    注意：可能出现重复，为避免刷屏可随机打乱或加去重
         new_indices = torch.topk(weights, k=k, largest=False).indices
-        print("[Sampler] rates:")
-        pprint.pprint(rates[new_indices].tolist())
-        print("[Sampler] acc:")
-        pprint.pprint([self.index2acc.get(idx, -1) for idx in new_indices])
+        # print("[Sampler] rates:")
+        # pprint.pprint(rates[new_indices].tolist())
+        # print("[Sampler] acc:")
+        # pprint.pprint([self.index2acc.get(idx, -1) for idx in new_indices.tolist()])
+        print("[Sampler] rates/acc")
+        print([
+            (f'{r:.2f}', f'{self.index2acc.get(idx, -1):.2f}')
+            for r, idx in zip(rates[new_indices].tolist(),new_indices.tolist())
+        ])
         self.queue.extend(new_indices.tolist())
 
     # ---------- 迭代 ----------
@@ -138,7 +147,8 @@ class MoPPSSampler(AbstractCurriculumBatchSampler):
         while True:
             # # 若不够一个 batch 就补货
             if len(self.queue) < self.bsz:
-                print("[Sampler] Not enough items in queue, filling...")
+                print("[Sampler] Current queue size: ", len(self.queue))
+                print("[Sampler] Not enough items in queue, filling queue...")
                 # print current runtime stack
                 traceback.print_stack()
                 self.fill_queue()
@@ -147,6 +157,7 @@ class MoPPSSampler(AbstractCurriculumBatchSampler):
             # 组装一个 batch
             print("[Sampler] Pop queue")
             batch = [self.queue.popleft() for _ in range(self.bsz)]
+            print("[Sampler] Current Train Batch: ", batch)
             yield batch
 
     # ---------- 状态保存 / 恢复 ----------
