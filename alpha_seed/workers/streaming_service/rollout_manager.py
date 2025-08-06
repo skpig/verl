@@ -1053,8 +1053,9 @@ class RolloutManager:
             #Here some CI tasks need initial files to upload to sandbox
             for i in range(len(gen_batch)):
                 agent_env_initial_files = gen_batch.non_tensor_batch['initial_files'][i]
-                gen_batch.non_tensor_batch['extra_data'][i].update(
-                    {'agent_env_initial_files': json.loads(agent_env_initial_files)['initial_files']})
+                if not pd.isna(agent_env_initial_files):
+                    gen_batch.non_tensor_batch['extra_data'][i].update(
+                        {'agent_env_initial_files': json.loads(agent_env_initial_files)['initial_files']})
         for i in range(len(gen_batch)):
             gen_batch.non_tensor_batch['extra_data'][i].update({'config': self.config_dict})
         # More efficient for server-client interaction
