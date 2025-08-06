@@ -1701,7 +1701,7 @@ class RayPPOTrainer:
                 # this is experimental and may be changed/removed in the future in favor of a general-purpose one
                 if isinstance(self.train_dataloader.sampler, AbstractCurriculumSampler):
                     self.train_dataloader.sampler.update(batch=batch)
-                elif isinstance(self.train_dataloader.sampler, AbstractCurriculumBatchSampler):
+                elif isinstance(self.train_dataloader.batch_sampler, AbstractCurriculumBatchSampler):
                     self.train_dataloader.batch_sampler.update(batch=batch)
 
                 # TODO: make a canonical logger that supports various backend
