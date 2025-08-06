@@ -1693,6 +1693,7 @@ class RayPPOTrainer(object):
         if self.config.trainer.val_only:
             if self.config.trainer.save_train_batch_dir is not None and self.config.trainer.need_log:
                 hput(self.config.trainer.log_file, self.config.trainer.save_train_batch_dir)
+            wandb.finish()
             return
 
         # Note that we start from step 1. After resume, we increment step by 1 to start next step
