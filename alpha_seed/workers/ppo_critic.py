@@ -34,8 +34,6 @@ __all__ = ['DataParallelPPOCritic']
 class DataParallelPPOCritic(BasePPOCritic):
 
     def __init__(self, as_config: DictConfig, model_engine: FSDPModel):
-        """When optimizer is None, it is Reference Policy. This is implemented based on monorl FSDPModel.
-        """
         super().__init__(as_config)
         self.engine = model_engine
 

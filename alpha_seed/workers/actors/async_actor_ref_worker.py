@@ -192,7 +192,6 @@ class AsyncActorRolloutRefWorker(Worker):
 
     def _get_ref_mono_config(self):
         ref_mono_config = actor_config_to_mono_config(self.config.ref, self.config.model)
-        ref_mono_config.engine.fsdp.param_offload = True  # Set param offload to True for ref in mono config
         ref_mono_config.engine.fsdp.model_type = "bf16"
         ref_mono_config.engine.model.use_rmpad = self.config.model.get('use_rmpad', True)
         ref_mono_config.engine.model.use_ce_loss_fusion = self.config.model.get('use_ce_loss_fusion', False)

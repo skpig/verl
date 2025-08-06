@@ -32,6 +32,8 @@ def _set_config_fsdp_engine(mono_config, source_config: DictConfig, model_config
     _set_config_field(mono_config.model, config, "use_ce_loss_fusion")
     _set_config_field(mono_config.model, config, "logits_clamp")
     _set_config_field(mono_config.model, config, "update_gate_ema")
+    _set_config_field(mono_config.model, config, "remove_o_bias")
+    _set_config_field(mono_config.model, config, "freeze_gate")
 
     # set the hf_model_config field of the fsdp_engine from model_config
     source_model_config = model_config
@@ -64,14 +66,15 @@ def _set_config_fsdp_engine(mono_config, source_config: DictConfig, model_config
 
     # set the fsdp field of the fsdp_engine
     _set_config_field(mono_config.fsdp, config, "strategy")
-    if hasattr(mono_config, "fsdp") and mono_config.fsdp.strategy == "vescale-fsdp2":
+    if mono_config.fsdp.strategy == "vescale-fsdp2":
         mono_config.fsdp.strategy = "vescale"
+    if hasattr(config, "fsdp_config"):  # Note that param_offload is a sub-field of role.fsdp_config.param_offload
+        mono_config.fsdp.param_offload = config.fsdp_config.param_offload
     _set_config_field(mono_config.fsdp, config, "fsdp_size")
     _set_config_field(mono_config.fsdp, config, "act_offload")
     _set_config_field(mono_config.fsdp, config, "act_offload_upbound")
     _set_config_field(mono_config.fsdp, config, "act_offload_buff_size")
     _set_config_field(mono_config.fsdp, config, "act_offload_threshold")
-    _set_config_field(mono_config.fsdp, config, "param_offload")
     _set_config_field(mono_config.fsdp, config, "ulysses_sequence_parallel_size")
     _set_config_field(mono_config.fsdp, config, "oe_size")
     _set_config_field(mono_config.fsdp, config, "tp_size")
@@ -103,7 +106,7 @@ def critic_config_to_mono_config(critic_config: DictConfig) -> CriticWorkerConfi
     # set strategy according to the config
     _set_config_field(mono_config, config, "strategy")
 
-    if mono_config.strategy == "fsdp":
+    if mono_config.strategy in ["fsdp", "vescale-fsdp2"]:
         _set_config_fsdp_engine(mono_config.engine, config)
     elif mono_config.strategy == "megatron":
         _set_config_megatron_engine(mono_config.engine, config)

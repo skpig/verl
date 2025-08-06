@@ -37,8 +37,6 @@ __all__ = ['DataParallelPPOActor']
 class DataParallelPPOActor(BasePPOActor):
 
     def __init__(self, as_config: DictConfig, model_engine: FSDPModel):
-        """When optimizer is None, it is Reference Policy. This is implemented based on monorl FSDPModel.
-        """
         super().__init__(as_config)
         self.engine = model_engine
 
@@ -145,12 +143,12 @@ def pg_loss_fn(config: Dict, output: TensorDict, micro_data: TensorDict):
     log_prob = output['logprobs']
 
     policy_loss, micro_data_metric = default_pg_loss_fn(config, micro_data, full_entropy, log_prob)
-    gradient_accumulation = ppo_mini_batch_size // ppo_micro_batch_size
 
     if loss_average_method in ['token', 'sample', 'constant']:
         if use_dynamic_bsz:
             loss = policy_loss * (len(micro_data) / ppo_mini_batch_size)
         else:
+            gradient_accumulation = ppo_mini_batch_size // ppo_micro_batch_size
             loss = policy_loss / gradient_accumulation
     elif loss_average_method == 'minibatch':
         loss = policy_loss / mini_batch_full_token_count
