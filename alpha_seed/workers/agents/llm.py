@@ -28,8 +28,9 @@ def make_reqeust_data_and_metadata(item: DataProto, prompt: str, host, port):
     else:
         data = {"prompt": prompt}
     if 'image_data_ref' in item.non_tensor_batch:
-        image_data_ref = item.non_tensor_batch['image_data_ref'][0]
-        if image_data_ref is not None:
+        image_data_ref = item.non_tensor_batch['image_data_ref']
+        if image_data_ref is not None and len(image_data_ref) > 0:
+            assert isinstance(image_data_ref, list)
             data['image_data_ref'] = image_data_ref
     meta_info = copy.copy(item.meta_info)
     # required for eos callback
@@ -111,11 +112,7 @@ class OpenAIAsyncClient(AsyncLLMInterface):
             generation_kwargs = meta_info['generation_kwargs']
 
             # 构建ChatCompletionRolloutMessageParam格式的messages
-            messages = {"prompt": content["prompt"]}
-
-            # 如果有图像数据，添加图像相关字段
-            if 'image_data_ref' in content:
-                messages['image_data_ref'] = content['image_data_ref']
+            messages = {"prompt": content["prompt"], 'image_data_ref': content.get('image_data_ref')}
 
             request_data = {
                 "model": "rollout",  # 使用server期望的模型名
@@ -279,11 +276,7 @@ class OpenAIClient(SyncLLMInterface):
             generation_kwargs = meta_info['generation_kwargs']
 
             # 构建ChatCompletionRolloutMessageParam格式的messages
-            messages = {"prompt": content["prompt"]}
-
-            # 如果有图像数据，添加图像相关字段
-            if 'image_data_ref' in content:
-                messages['image_data_ref'] = content['image_data_ref']
+            messages = {"prompt": content["prompt"], 'image_data_ref': content.get('image_data_ref')}
 
             request_data = {
                 "model": "rollout",  # 使用server期望的模型名

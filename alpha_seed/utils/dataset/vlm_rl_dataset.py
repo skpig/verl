@@ -18,6 +18,7 @@ VLM dataset
 from typing import Dict, List, Optional, Union
 import io
 import re
+import json
 
 import ray
 import copy
@@ -36,6 +37,7 @@ from transformers.image_utils import ImageInput
 from transformers.utils import TensorType
 
 from alpha_seed.utils.server_client import is_local_ray_instance
+import pyarrow as pa
 
 
 def convert_prompts_into_input_ids(prompts,
@@ -195,6 +197,46 @@ def process_images(images, image_processor):
         return image_inputs
 
 
+def get_reward_model(row_dict: dict) -> dict:
+    # Use AlphaSeed LLM's reward system if `reward_model` is specified:
+    if row_dict.get('reward_model'):
+        reward_model = {
+            'style': row_dict['reward_model']['style'],
+            'ground_truth': row_dict['reward_model']['ground_truth'],
+        }
+        return reward_model
+
+    # Use VLM's reward system, i.e., row_dict['verifier_feature'], if row_dict['reward_model'] does not exist:
+    verifier_feature = json.loads(row_dict['verifier_feature'])
+    verifier_name = verifier_feature.get('verifier_name', '')
+
+    # These if-else statements are for backward compatibility. To be deprecated in the future.
+    if not verifier_name:
+        if row_dict['ability'] == 'verifier_math':
+            verifier_name = 'math'
+        elif row_dict['ability'] == 'verifier_boxed_str':
+            verifier_name = 'boxed_str'
+        elif row_dict['ability'] == 'verifier_service':
+            verifier_name = 'math_verifier_service'
+        elif row_dict['ability'] == 'verifier_visual_functionCall_answer':
+            verifier_name = 'visual_cot_verifier'
+        elif row_dict['ability'] == 'verifier_vstar':
+            verifier_name = 'verifier_vstar'
+        elif row_dict['ability'] == 'verifier_zerobench':
+            verifier_name = 'verifier_zerobench'
+        else:
+            data_source = row_dict['data_source']
+            raise ValueError(f'Please specify verifier_name in verifier_feature! {data_source} {verifier_feature}')
+        verifier_feature['verifier_name'] = verifier_name
+
+    # Use the VLM verifier router to route to the corresponding VLM specialized verifier.
+    reward_model = {
+        'style': 'vlm_verifier_router',
+        'ground_truth': json.dumps(verifier_feature),
+    }
+    return reward_model
+
+
 class RLHFDatasetVL(RLHFDataset):
     """
     We assume the dataset contains a column that contains prompts and other information
@@ -211,62 +253,8 @@ class RLHFDatasetVL(RLHFDataset):
         self.image_manager = init_or_get_image_manager(stable_pool_name)
         super().__init__(*args, **kwargs)
 
-    def process(self,
-                image_inputs: ImageInput = None,
-                conversation: List[Dict] = None,
-                padding=False,
-                truncation=None,
-                max_length: int = None,
-                return_tensors=TensorType.PYTORCH,
-                return_prompt: bool = False,
-                return_num_image_tokens: bool = False) -> BatchFeature:
-        if image_inputs is None or len(image_inputs) == 0:
-            image_inputs = {}
-            num_image_tokens = None
-        else:
-            num_image_tokens = image_inputs['num_image_tokens']
-
-        prompt = ""
-        for turn in conversation:
-            turn_prompt = ""
-            for content in turn["content"]:
-                if content["type"] == "image":
-                    turn_prompt += "[SOI]<ImageHere>[EOI]"
-                elif content["type"] == "text":
-                    turn_prompt += content["text"]
-                else:
-                    raise NotImplementedError
-            # turn_prompt = f"{self.tokenizer.bos_token} {turn_prompt}"
-            prompt += turn_prompt
-
-        chunks = prompt.split("<ImageHere>")
-
-        input_ids = []
-        attention_mask = []
-        img_idx = 0
-        for chunk in chunks:
-            if chunk == "":
-                continue
-            text_inputs = self.tokenizer(chunk, padding=padding, truncation=truncation, max_length=max_length)
-            input_ids += text_inputs["input_ids"]
-            attention_mask += text_inputs["attention_mask"]
-            if num_image_tokens is not None and img_idx < len(num_image_tokens):
-                if self.processor.image_processor.use_navit:
-                    num_img_token = num_image_tokens[img_idx]
-                else:
-                    num_img_token = self.processor.image_processor.num_img_token
-                input_ids += [self.processor.image_token_id] * num_img_token
-                attention_mask += [1] * num_img_token
-            img_idx += 1
-
-        input_ids = torch.tensor(input_ids).unsqueeze(0)
-        attention_mask = torch.tensor(attention_mask).unsqueeze(0)
-        if return_prompt:
-            image_inputs["prompt"] = prompt
-
-        return BatchFeature(data={"input_ids": input_ids, "attention_mask": attention_mask, **image_inputs})
-
     def _read_files_and_tokenize_dist(self):
+        pa.set_memory_pool(pa.system_memory_pool())
         is_local_ray = is_local_ray_instance()
 
         def satisfied(node):
@@ -324,6 +312,9 @@ class RLHFDatasetVL(RLHFDataset):
 
         print(f'original dataset len: {len(self.dataframe)}')
 
+        pool = pa.default_memory_pool()
+        pool.release_unused()
+
         # Apply epoch replication if needed
         if hasattr(self, 'data_auto_repeat') and self.data_auto_repeat:
             assert not self.dist_image
@@ -359,7 +350,7 @@ class RLHFDatasetVL(RLHFDataset):
         if isinstance(chat[0], dict):
             chat = [c["content"] for c in chat]
 
-        user_contents = [{"type": "text", "text": f"{self.tokenizer.bos_token}user\n "}]
+        user_contents = [{"type": "text", "text": f"{self.tokenizer.bos_token}user\n"}]
         prompt_chunks = re.split(r"(<image>)", chat[0])
         for chunk in prompt_chunks:
             if not chunk:
@@ -398,12 +389,10 @@ class RLHFDatasetVL(RLHFDataset):
         prompt = convert_conversation_to_prompt(conversation)
 
         # reward_model is required
-        if 'reward_model' in row_dict:
-            row_dict_ret['reward_model'] = row_dict['reward_model']
-        else:
-            row_dict_ret['reward_model'] = {}
-            row_dict_ret['reward_model']['style'] = row_dict['ability']
-            row_dict_ret['reward_model']['ground_truth'] = row_dict['verifier_feature']
+        row_dict_ret['reward_model'] = get_reward_model(row_dict)
+
+        if 'prompt_id' in row_dict:
+            row_dict_ret['prompt_id'] = row_dict['prompt_id']
 
         # 添加answer
         if self.use_ref_answer:
@@ -525,8 +514,12 @@ def transform_image(prompt, images_bytes, tokenizer, processor, truncation, max_
     return row_dict_ret
 
 
-def load_and_transform_image(prompts, tokenizer, processor, image_manager, max_prompt_length=None):
-    batch_size = prompts.batch.batch_size[0]
+def load_and_transform_save_image(prompts,
+                                  tokenizer,
+                                  processor,
+                                  image_manager,
+                                  max_prompt_length=None,
+                                  truncation="left"):
     if 'input_ids' not in prompts.batch:
         image_bytes = get_local_inputs(prompts.non_tensor_batch, 'images_bytes_ref', image_manager)
         processed_list = []
@@ -536,38 +529,7 @@ def load_and_transform_image(prompts, tokenizer, processor, image_manager, max_p
                                         image_bytes[i],
                                         tokenizer,
                                         processor,
-                                        truncation="error",
-                                        max_prompt_length=max_prompt_length)
-            # processed['images_bytes'] = image_bytes[i]
-            processed_list.append(processed)
-        processed_dict = collate_fn(processed_list)
-        prompt_ids = processed_dict.pop('input_ids')  # (bs, prompt_length)
-        prompts.batch['input_ids'] = prompt_ids
-        prompts.batch['attention_mask'] = processed_dict.pop('attention_mask')
-
-        # TODO(caisonghua) we may not need all the keys in non_tensor_batch
-        for key in prompts.non_tensor_batch:
-            if key not in processed_dict:
-                processed_dict[key] = prompts.non_tensor_batch[key]
-    else:
-        processed_dict = prompts.non_tensor_batch
-        if 'image_data_ref' in processed_dict:
-            image_data = get_local_inputs(processed_dict, 'image_data_ref', image_manager)
-            processed_dict['image_data'] = image_data
-    return processed_dict
-
-
-def load_and_transform_save_image(prompts, tokenizer, processor, image_manager, max_prompt_length=None):
-    if 'input_ids' not in prompts.batch:
-        image_bytes = get_local_inputs(prompts.non_tensor_batch, 'images_bytes_ref', image_manager)
-        processed_list = []
-        from alpha_seed.utils.dataset.vlm_rl_dataset import collate_fn
-        for i in range(len(image_bytes)):
-            processed = transform_image(prompts.non_tensor_batch['prompt'][i],
-                                        image_bytes[i],
-                                        tokenizer,
-                                        processor,
-                                        truncation="left",
+                                        truncation=truncation,
                                         max_prompt_length=max_prompt_length)
             processed_list.append(processed)
         processed_dict = collate_fn(processed_list)

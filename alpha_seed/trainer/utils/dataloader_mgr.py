@@ -4,6 +4,7 @@ from omegaconf import OmegaConf, open_dict, ListConfig
 from alpha_seed.utils.dataset.rl_dataset import RLHFDataset
 from verl.utils.fs import copy_local_path_from_hdfs
 from omnistore.utilities.io.bfile import is_local_path
+from alpha_seed.utils.functional import log_cpu_memory_usage
 
 
 class DataLoaderMgr:
@@ -59,6 +60,8 @@ class DataLoaderMgr:
         } if self.is_vlm else {}
         data_auto_repeat = self.config.data.get('data_auto_repeat', False)
 
+        log_cpu_memory_usage('before create train_dataset')
+
         self.train_dataset = self.RLHFDataset(parquet_files=self.config.data.train_files,
                                               tokenizer=self.tokenizer,
                                               prompt_key=self.config.data.prompt_key,
@@ -77,6 +80,8 @@ class DataLoaderMgr:
                                               max_response_length=self.config.data.max_response_length,
                                               **kwargs)
 
+        log_cpu_memory_usage('after create train_dataset')
+
         self.val_dataset = self.RLHFDataset(parquet_files=self.config.data.val_files,
                                             tokenizer=self.tokenizer,
                                             prompt_key=self.config.data.prompt_key,
@@ -92,6 +97,7 @@ class DataLoaderMgr:
                                             use_grm=self.config.trainer.use_grm,
                                             max_response_length=self.config.data.max_response_length,
                                             **kwargs)
+        log_cpu_memory_usage('after create val_dataset')
 
     def _create_dataloaders(self):
         from torch.utils.data import DataLoader

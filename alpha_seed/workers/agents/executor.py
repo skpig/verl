@@ -7,7 +7,7 @@ from typing import Type, List
 
 import ray
 from omegaconf import DictConfig
-from transformers import PreTrainedTokenizer
+from transformers import PreTrainedTokenizer, AutoProcessor
 
 from alpha_seed.utils.server_client import is_local_ray_instance
 from alpha_seed.utils.tokenizer.async_tokenizer import AsyncTokenizer
@@ -19,8 +19,8 @@ from mono_rl import DataProto
 
 class AgentWorker:
 
-    def __init__(self, config: DictConfig, tokenizer: PreTrainedTokenizer, host, port, request_manager_name,
-                 worker_id: int):
+    def __init__(self, config: DictConfig, tokenizer: PreTrainedTokenizer, processor: AutoProcessor, host, port,
+                 request_manager_name, worker_id: int):
         """
         config: root config
         host: llm server host
@@ -35,7 +35,7 @@ class AgentWorker:
                                                    thread_name_prefix=f"agent-worker-{worker_id}")
         self.tokenizer = tokenizer
         self.async_tokenizer = AsyncTokenizer(tokenizer)
-
+        self.processor = processor
         # 根据配置选择使用Direct/OpenAI client
         if config.rollout_server.agent.direct_submit_query:
             self.llm = DirectAsyncClient(request_manager_name)
@@ -73,6 +73,7 @@ class AgentWorker:
             'config': self.config,
             'executor': self._thread_executor,
             'global_state': self.global_state,
+            'processor': self.processor
         }
 
 
@@ -94,7 +95,7 @@ class ExecutorBase:
 
 class RayActorExecutor(ExecutorBase):
 
-    def __init__(self, name, config, tokenizer, host, port, request_manager_name):
+    def __init__(self, name, config, tokenizer, processor, host, port, request_manager_name):
         self.name = name
         self.max_workers = config.rollout_server.agent.max_workers
         self.worker_max_concurrency = config.rollout_server.agent.worker_max_concurrency
@@ -109,8 +110,8 @@ class RayActorExecutor(ExecutorBase):
             RemoteAgentWorker.options(scheduling_strategy="SPREAD",
                                       max_concurrency=self.worker_max_concurrency + worker_oob_concurrency,
                                       resources=resources,
-                                      name=f"{name}-agent_worker_{idx}").remote(config, tokenizer, host, port,
-                                                                                request_manager_name, idx)
+                                      name=f"{name}-agent_worker_{idx}").remote(config, tokenizer, processor, host,
+                                                                                port, request_manager_name, idx)
             for idx in range(self.max_workers)
         ]
         self.worker_in_band_concurrency_limits = [
@@ -139,12 +140,13 @@ class RayActorExecutor(ExecutorBase):
 
 class LocalExecutor(ExecutorBase):
 
-    def __init__(self, name, config, tokenizer, host, port, request_manager_name):
+    def __init__(self, name, config, tokenizer, processor, host, port, request_manager_name):
         self.name = name
         self.max_workers = config.rollout_server.agent.max_workers
         self.worker_max_concurrency = config.rollout_server.agent.worker_max_concurrency
         self.workers = [
-            AgentWorker(config, tokenizer, host, port, request_manager_name, idx) for idx in range(self.max_workers)
+            AgentWorker(config, tokenizer, processor, host, port, request_manager_name, idx)
+            for idx in range(self.max_workers)
         ]
         self.worker_pointer = cycle(range(self.max_workers))
 

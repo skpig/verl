@@ -63,4 +63,5 @@ jobs:
           - bash tasks_scripts/ci/run_vlm_680m.sh
           - bash tasks_scripts/ci/run_vlm_680m_rollout_server.sh
           - bash tasks_scripts/ci/run_vlm_680m_async.sh
+          - bash tasks_scripts/ci/run_vlm_680m_visual_cot.sh
           - ray stop --force

@@ -247,6 +247,9 @@ actor_rollout_ref:
       enable_prefix_sampling: False
       show_error_case_prob: 0.7
       max_new_tokens_per_turn: ${data.max_response_length}
+    vlm:
+      return_raw_output: False
+      truncation: ${data.truncation}
   streaming_rollout_args: ${streaming_rollout}
   streaming_validator_args: ${streaming_validator}
   use_cuda_timer: False # doesn't take effect; only for backward-compatibility
@@ -464,6 +467,8 @@ trainer:
   verifier_service_psm: ""
   gaokao_verifier_service_psm: ""
   aider_service_psm: ""
+  volc_ark_key: ""
+  volc_model_name: ""
   use_remote_aider_sandbox: False
   use_remote_swe_sandbox: False
   use_remote_sandbox: False

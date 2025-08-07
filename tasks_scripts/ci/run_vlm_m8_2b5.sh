@@ -9,6 +9,12 @@ SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/ssd_lq/user/caisonghua_new/chec
 
 TRAIN_FILE=hdfs://haruna/home/byte_data_seed/hl_lq/iccv/user/xiaoboqin/data/rlhf/math/mmathcot_v4_hard_w_sys_for_rl.parquet
 TEST_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/caisonghua/eval_mathvision_mini.parquet
+
+SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/ssd_hldy/iccv/user/zhangxiaoying.xy/checkpoints/M8_2b5/hf/m8_vlm_m8_2b5_visualcot_ct_v393_s400_v4data_gt100_hf
+SFT_MODEL_PATH=hdfs://harunawl/home/byte_data_seed_wl/vlm/iccv/user/mark/models/visual_cot/m8_vlm_2b5_cp2_sft_noncot_7.0.4_beta_cotv8_visual_cot_2b5_v2_hf
+TRAIN_FILE=hdfs://harunawl/home/byte_data_seed_wl/user/caisonghua/v3.5.1-20B-PPO-PEv2_mini.parquet
+TEST_FILE=hdfs://harunawl/home/byte_data_seed_wl/user/caisonghua/vstar_zerobench_chunk_8_repeat8.parquet
+
 default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/caisonghua/test/vlm_grpo
 
 

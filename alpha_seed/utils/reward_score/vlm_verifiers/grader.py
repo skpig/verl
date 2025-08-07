@@ -6,16 +6,16 @@ This logic is largely copied from the Hendrycks' MATH release (math_equivalence)
 - https://github.com/deepseek-ai/DeepSeek-Math/blob/main/evaluation/eval/eval_utils.py
 """
 
-import re
-import regex
 import multiprocessing
+import re
 from math import isclose
 from typing import Union
-from collections import defaultdict
 
-from sympy import simplify, N
-from sympy.parsing.sympy_parser import parse_expr
+import regex
+from sympy import N
 from sympy.parsing.latex import parse_latex
+from sympy.parsing.sympy_parser import parse_expr
+
 try:
     from .latex2sympy2.latex2sympy2 import latex2sympy
 except Exception:
@@ -254,7 +254,7 @@ def symbolic_equal(a, b):
     # simplify equal
     try:
         ## simplify has high risks for hanging, add back when fix timeout
-        #if a.equals(b) or simplify(a - b) == 0:
+        # if a.equals(b) or simplify(a - b) == 0:
         if a.equals(b):
             return True
     except:

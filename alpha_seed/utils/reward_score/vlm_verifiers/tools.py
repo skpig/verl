@@ -1,4 +1,5 @@
 import re
+
 from word2number import w2n
 
 
@@ -77,3 +78,79 @@ def extract_and_convert_number(input_string):
 
     # 如果没有匹配到数字，则返回0
     return number_of_points, True
+
+
+def remove_bold(text):
+    # 去除加粗 **text** 或 __text__
+    text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
+    text = re.sub(r'__(.*?)__', r'\1', text)
+    return text
+
+
+def get_valid_options(options):
+    valid_options = []
+    if options is not None:
+        for i in range(len(options)):
+            valid_options.append(chr(ord('A') + i))
+        return valid_options
+    else:
+        return ['A', 'B', 'C', 'D', 'E', 'F']
+
+
+def extract_option(text, options=['A', 'B', 'C', 'D', 'E', 'F']):
+    text = remove_bold(text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    if text in options:
+        return text
+    options_str = "|".join(options)
+
+    # start with option, e.g. '(A) xxxx' or '(A)'
+    pattern = re.compile(f"^\(?({options_str})\)?\.?(\ |$)")
+    answer = re.findall(pattern, text)
+    if len(answer):
+        return answer[0][0]
+
+    # have option in \boxed{}. e.g. '\boxed{A. dasdasd}'
+    if '\\boxed' in text:
+        content = re.findall(r'\\boxed\{(.+?)\}', text)
+        if content:
+            pattern = re.compile(f"^\(?({options_str})\)?\.?(\ |$)")
+            answer = re.findall(pattern, content[0].strip())
+            if len(answer):
+                return answer[0][0]
+
+    # have option with valid English prefix, e.g. 'the best answer is A xxxx'
+    pattern = re.compile(f"([Aa]nswer|[Oo]ption|[Cc]hoice)(\ is|:|\ is:)\ ?\(?({options_str})\)?")
+    answer = re.findall(pattern, text)
+    if len(answer):
+        return answer[0][-1]
+
+    # have option with valid Chinese prefix, e.g. '最佳选项是：(A)'
+    pattern = re.compile(f"(回答|选择|选项|答案)(是|：|是：)\ ?\(?({options_str})\)?")
+    answer = re.findall(pattern, text)
+    if len(answer):
+        return answer[0][-1]
+    return ""
+
+
+def extract_boxed_number(input_string):
+    """
+    从字符串中提取 \boxed{} 中的数字
+
+    参数:
+        input_string (str): 输入字符串
+
+    返回:
+        str: 花括号中提取的数字，如果没有匹配项，则返回 None
+    """
+    # 定义匹配 \boxed{} 中数字的正则表达式模式
+    pattern = r'\\boxed\{(\d+)\}'
+
+    # 搜索匹配项
+    match = re.search(pattern, input_string)
+
+    # 如果找到匹配项，返回匹配的数字
+    if match:
+        return match.group(1)
+    else:
+        return None

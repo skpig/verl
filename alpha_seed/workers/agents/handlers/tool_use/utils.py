@@ -254,7 +254,6 @@ class LLMInterface:
         if num_assistant_messages != len(completion_messages):
             print("[DEBUG] num_assistant_messages!= len(completion_messages)")
             print_conversation(state.history)
-            breakpoint()
         assert num_assistant_messages == len(
             completion_messages
         ), f"num_assistant_messages={num_assistant_messages}, len(data_packs)={len(completion_messages)}"

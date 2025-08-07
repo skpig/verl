@@ -55,7 +55,7 @@ from alpha_seed.workers.actors.rollout_pool import RolloutPool
 from alpha_seed.workers.ppo_actor import make_mini_step_dataloader
 from alpha_seed.utils.observility.pretty_print import pprint
 from alpha_seed.utils import ndtimeline
-from alpha_seed.utils.functional import print_dataproto_size
+from alpha_seed.utils.functional import print_dataproto_size, log_cpu_memory_usage
 from alpha_seed.utils.tracking_utils import async_process_batch_samples_to_wandb
 from alpha_seed.utils.multithreads import ThreadPoolManager
 from alpha_seed.utils.dataset.dist_data_util import load_image_data_dist, get_image_manager, init_or_get_image_manager
@@ -1680,7 +1680,9 @@ class RayPPOTrainer(object):
         with metric_collection_context:
             if self.global_step != 0:
                 # load checkpoint before doing anything
+                log_cpu_memory_usage('before load checkpoint')
                 self.load_checkpoint()
+                log_cpu_memory_usage('after load checkpoint')
 
         # perform validation before training
         if self.val_reward_fn is not None and (self.config.trainer.eval_before_training or
@@ -1693,6 +1695,9 @@ class RayPPOTrainer(object):
         if self.config.trainer.val_only:
             if self.config.trainer.save_train_batch_dir is not None and self.config.trainer.need_log:
                 hput(self.config.trainer.log_file, self.config.trainer.save_train_batch_dir)
+                print(
+                    f'Saving validation log_file from {self.config.trainer.log_file} to {self.config.trainer.save_train_batch_dir}',
+                    flush=True)
             wandb.finish()
             return
 

@@ -538,7 +538,8 @@ class AsyncActorRolloutRefWorker(Worker):
                                                 self.tokenizer,
                                                 self.processor,
                                                 self.image_manager,
-                                                max_prompt_length=self.config.rollout.prompt_length)
+                                                max_prompt_length=self.config.rollout.prompt_length,
+                                                truncation=self.config.rollout.vlm.truncation)
         return prompts
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO, blocking=False)

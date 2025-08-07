@@ -19,8 +19,7 @@ try:
 except ImportError:
     print('Cannot find pad_dataproto_to_divisor. Please use latest verl master')
     raise
-from mono_rl.models.seed_models.modeling_vlm import get_image_keys
-from alpha_seed.utils.dataset.dist_data_util import release_object, get_image_manager
+from alpha_seed.utils.dataset.dist_data_util import release_object, get_image_manager, get_local_inputs
 
 
 class ValidateManager(object):
@@ -47,6 +46,47 @@ class ValidateManager(object):
         assert len(self.val_dataloader) == 1, "for bon metrics computation"
         self.rollout_manager = rollout_manager
         self.image_manager = image_manager
+
+    def _save_val_data(self, reward_tensor_before_select, prompts, responses, f):
+        for reward, prompt, response in zip(reward_tensor_before_select, prompts, responses):
+            data = {"reward": reward.item(), "prompt": prompt, "response": response}
+            f.write(json.dumps(data, ensure_ascii=False) + "\n")
+            f.flush()
+
+    def _save_val_data_vlm(self, test_batch, prompt_ids, reward_tensor_before_select, prompts, responses, val_epoch_idx,
+                           val_idx, f):
+        rollout_ids = test_batch.non_tensor_batch['rollout_id']
+        if "prompt_id" in test_batch.non_tensor_batch:
+            ori_prompt_indexs = test_batch.non_tensor_batch['prompt_id']
+        elif "index" in test_batch.non_tensor_batch:
+            ori_prompt_indexs = test_batch.non_tensor_batch['index']
+        else:
+            ori_prompt_indexs = [None] * prompt_ids.shape[0]
+        if self.config.actor_rollout_ref.rollout.vlm.return_raw_output:
+            raw_outputs = get_local_inputs(test_batch.non_tensor_batch, 'raw_output_ref', self.image_manager)
+        else:
+            raw_outputs = [''] * prompt_ids.shape[0]
+        if "index" in test_batch.non_tensor_batch:
+            dataset_indexs = test_batch.non_tensor_batch['index']
+        else:
+            dataset_indexs = [None] * prompt_ids.shape[0]
+        for reward, prompt, response, rollout_id, ori_prompt_index, raw_output, dataset_index in zip(
+                reward_tensor_before_select, prompts, responses, rollout_ids, ori_prompt_indexs, raw_outputs,
+                dataset_indexs):
+            data = {
+                "val_epoch_idx": val_epoch_idx,
+                "val_idx": val_idx,
+                "prompt_id": ori_prompt_index,
+                "index_id": dataset_index,
+                "ori_prompt_id": dataset_index,
+                "rollout_id": rollout_id,
+                "reward": reward.item(),
+                "prompt": prompt,
+                "response": response.replace("[SOI][EOI]", "[SOI]<ImageHere>[EOI]"),
+                "raw_output": raw_output
+            }
+            f.write(json.dumps(data, ensure_ascii=False) + "\n")
+            f.flush()
 
     def validate(self,
                  val_epoch=1,
@@ -99,12 +139,6 @@ class ValidateManager(object):
                     self.logger.log(data=val_log, step=global_step, backend="tracking")
         return
 
-    def temp_unpad_dataproto(self, data: DataProto, pad_size):
-        if pad_size != 0:
-            # data = data[:-pad_size]
-            data = data.select_idxs(list(range(len(data) - pad_size)))
-        return data
-
     def _validate(self, val_epoch, need_log, log_file, is_async, global_step):
         print(f'{time.time()} start validate with fast_result={self.fast_result}')
         metric_dict = {}
@@ -135,6 +169,8 @@ class ValidateManager(object):
                         num_prompts_per_data, split_keys=['input_ids', 'attention_mask', 'prompt_names'])
 
                 eval_bon = self.config.actor_rollout_ref.rollout.get("eval_bon", 1)
+                test_batch.non_tensor_batch['rollout_id'] = np.array(
+                    [str(uuid.uuid4()) for _ in range(len(test_batch))], dtype=object)
                 if eval_bon != 1:
                     test_batch = test_batch.repeat(eval_bon)
 
@@ -209,10 +245,12 @@ class ValidateManager(object):
                     prompts = self.tokenizer.batch_decode(decode_batch_prompt, skip_special_tokens=True)
                     responses = self.tokenizer.batch_decode(decode_batch_response, skip_special_tokens=False)
                     reward_tensor_before_select = reward_tensor_before_select.sum(-1).cpu()
-                    for reward, prompt, response in zip(reward_tensor_before_select, prompts, responses):
-                        data = {"reward": reward.item(), "prompt": prompt, "response": response}
-                        f.write(json.dumps(data, ensure_ascii=False) + "\n")
-                        f.flush()
+                    if 'image_bytes_ref' in test_batch.non_tensor_batch or \
+                            'image_data_ref' in test_batch.non_tensor_batch:
+                        self._save_val_data_vlm(test_batch, prompt_ids, reward_tensor_before_select, prompts, responses,
+                                                val_epoch_idx, val_idx, f)
+                    else:
+                        self._save_val_data(reward_tensor_before_select, prompts, responses, f)
                 release_object(self.image_manager, test_batch.non_tensor_batch, ['image_data_ref', 'images_bytes_ref'])
 
         reward_tensor = torch.cat(reward_tensor_lst, dim=0).cpu()  # (valsize*num_prompt_per_data, eval_bon)

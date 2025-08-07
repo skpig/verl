@@ -1,7 +1,12 @@
+import psutil
+import datetime
+import logging
 import torch
 from mono_rl import DataProto
 from verl.utils.seqlen_balancing import rearrange_micro_batches
 from typing import Dict
+
+logger = logging.getLogger(__name__)
 
 
 def clip_by_value_preserve_gradient(t, min=None, max=None):
@@ -38,13 +43,13 @@ def rearrange_micro_data_proto(max_token_len, mini_batch, dp_group=None):
 
 
 def update_model_config(module_config, override_config_kwargs):
-    print('!!!!!!!!!!! module_config', module_config, '###### override_config_kwargs ', override_config_kwargs)
+    logger.info(f'!!!!!!!!!!! module_config: {module_config}, ###### override_config_kwargs: {override_config_kwargs}')
     for key, val in override_config_kwargs.items():
         if isinstance(val, dict):
             update_model_config(getattr(module_config, key), val)
         else:
             if not hasattr(module_config, key):
-                print(f"WARN: {key} not exists in {module_config}", flush=True)
+                logger.warning(f"WARN: {key} not exists in {module_config}")
             setattr(module_config, key, val)
 
 
@@ -58,7 +63,17 @@ def print_dataproto_size(data: DataProto, head):
 
     size_of_numpy_array /= 1024**3
     size_of_tensordict /= 1024**3
-    print(f'{head}, Size of tensordict: {size_of_tensordict} GB, size of non_tensor_batch: {size_of_numpy_array} GB')
+    logger.info(
+        f'{head}, Size of tensordict: {size_of_tensordict} GB, size of non_tensor_batch: {size_of_numpy_array} GB')
+    log_cpu_memory_usage(head)
+
+
+def log_cpu_memory_usage(key):
+    process = psutil.Process()
+    mem = psutil.virtual_memory()
+    logger.info(
+        f"{key} {datetime.datetime.now()} cpu memory usage: process rss{process.memory_info().rss / 1024**3}GB, sys memory used: {mem.used / 1024**3}GB"
+    )
 
 
 def append_dict_items_to_dict(data: Dict, new_data: Dict):

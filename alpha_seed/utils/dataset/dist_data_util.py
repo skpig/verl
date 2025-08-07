@@ -16,6 +16,12 @@ from .utils import convert_tensor_to_numpy
 from verl.utils.fs import copy_local_path_from_hdfs
 from ..server_client import is_local_ray_instance
 
+import pyarrow as pa
+
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 def write_objects_to_bin(objects_list, filename="data.bin"):
     """
@@ -136,6 +142,7 @@ class DistImageLoader:
         self.tokenizer_file = tokenizer_file
         self.node_rank = node_rank
         self.n_partition = n_partition
+        pa.set_memory_pool(pa.system_memory_pool())
         if tokenizer_file.startswith('hdfs'):
             self.tokenizer_file = download_config_and_tokenizer(tokenizer_file)
         self.processor = AutoImageProcessor.from_pretrained(self.tokenizer_file)
@@ -162,6 +169,8 @@ class DistImageLoader:
         self.offset = 0
         for i in range(node_rank):
             self.offset += self.partition_counts[i]
+        pool = pa.default_memory_pool()
+        pool.release_unused()
         self.image_manager = get_image_manager()
 
     def load_data_from_file(self, bin_file, fn_dict):
@@ -234,16 +243,19 @@ class ImageManager:
             assert len(uids) == len(indices)
             assert key is not None
         for idx, uid in enumerate(uids):
-            index = indices[idx] if indices is not None else None
-            ref = None
-            if uid is not None:
-                if uid in self.uid2refs:
-                    ref = self.uid2refs[uid]
-                elif index is not None and index in self.index2refs and key in self.index2refs[index]:
-                    ref = self.index2refs[index][key]
-                else:
-                    in_history = uid in self.history_refs
-                    raise RuntimeError(f"{uid} not found in current pool, in_history: {in_history}")
+            if isinstance(uid, list):
+                ref = self.get_refs(uid, indices, key)
+            else:
+                index = indices[idx] if indices is not None else None
+                ref = None
+                if uid is not None:
+                    if uid in self.uid2refs:
+                        ref = self.uid2refs[uid]
+                    elif index is not None and index in self.index2refs and key in self.index2refs[index]:
+                        ref = self.index2refs[index][key]
+                    else:
+                        in_history = uid in self.history_refs
+                        raise RuntimeError(f"{uid} not found in current pool, in_history: {in_history}")
             refs.append(ref)
         return refs
 
@@ -279,6 +291,12 @@ class ImageManager:
                     self.ref_counts[r] -= 1
 
     def release_refs(self, refs=None):
+        if len(refs) == 0:
+            return
+        if isinstance(refs[0], list):
+            for ref in refs:
+                self.release_refs(ref)
+            return
         for ref, count in self.ref_counts.items():
             if count <= 0 and ref not in self.persistent_refs and ref in self.uid2refs:
                 res = self.uid2refs.pop(ref)

@@ -1,0 +1,397 @@
+import ast
+import re
+
+from alpha_seed.utils.reward_score.vlm_verifiers.base_verifier import BaseVerifier, VerifyResult
+
+
+class GUIVerifier(BaseVerifier):
+
+    def verify(self, response: str, verifier_feature_dict: dict) -> VerifyResult:
+        gt_content = verifier_feature_dict['answer']
+        item_value_correct = rule_for_action(gt_content, response)
+
+        if item_value_correct:
+            return VerifyResult(score=1.0, extracted_answer=response)
+        else:
+            return VerifyResult(score=0.0, extracted_answer=response)
+
+
+def get_pure_text(text):
+    # 去除加粗 **text** 或 __text__
+    text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
+    text = re.sub(r'__(.*?)__', r'\1', text)
+    return text
+
+
+def get_truth_action_type_value(content):
+    content = get_pure_text(content)
+    pattern = r"Action: (\w+)\((.*)\)"
+    match = re.search(pattern, content, re.DOTALL)
+    if match:
+        action_type = match.group(1)  # 提取 action type (click)
+        action_value = match.group(2)
+        if action_type == 'type':
+            # 抽取文本答案
+            content_pattern = r"content='(.*?)'"
+            content_match = re.search(content_pattern, action_value, re.DOTALL)
+            line_content = content_match.group(1) if content_match else None
+            # 抽取bbox
+            bbox = []
+            value_pattern = r"point='<point>(.*?)</point>'"
+            value_match = re.search(value_pattern, action_value)
+            if value_match:
+                numbers = re.findall("\d+", value_match.group(1))
+                if len(numbers) == 2:
+                    bbox = [
+                        float(numbers[0]) / 1000,
+                        float(numbers[1]) / 1000,
+                        float(numbers[0]) / 1000,
+                        float(numbers[1]) / 1000
+                    ]
+                elif len(numbers) == 4:
+                    bbox = [
+                        float(numbers[0]) / 1000,
+                        float(numbers[1]) / 1000,
+                        float(numbers[2]) / 1000,
+                        float(numbers[3]) / 1000
+                    ]
+            return action_type, (line_content, bbox)
+
+        elif action_type == 'drag':
+            # 抽取start_bbox
+            start_bbox = []
+            value_pattern = r"start[_ ]point='<point>(.*?)</point>'"
+            value_match = re.search(value_pattern, action_value)
+            if value_match:
+                numbers = re.findall("\d+", value_match.group(1))
+                if len(numbers) == 2:
+                    start_bbox = [
+                        float(numbers[0]) / 1000,
+                        float(numbers[1]) / 1000,
+                        float(numbers[0]) / 1000,
+                        float(numbers[1]) / 1000
+                    ]
+                elif len(numbers) == 4:
+                    start_bbox = [
+                        float(numbers[0]) / 1000,
+                        float(numbers[1]) / 1000,
+                        float(numbers[2]) / 1000,
+                        float(numbers[3]) / 1000
+                    ]
+            # 抽取end_bbox
+            end_bbox = []
+            value_pattern = r"end[_ ]point='<point>(.*?)</point>'"
+            value_match = re.search(value_pattern, action_value)
+            if value_match:
+                numbers = re.findall("\d+", value_match.group(1))
+                if len(numbers) == 2:
+                    end_bbox = [
+                        float(numbers[0]) / 1000,
+                        float(numbers[1]) / 1000,
+                        float(numbers[0]) / 1000,
+                        float(numbers[1]) / 1000
+                    ]
+                elif len(numbers) == 4:
+                    end_bbox = [
+                        float(numbers[0]) / 1000,
+                        float(numbers[1]) / 1000,
+                        float(numbers[2]) / 1000,
+                        float(numbers[3]) / 1000
+                    ]
+            return action_type, (start_bbox, end_bbox)
+
+        elif action_type == 'scroll':
+            # 确定GUI的方向
+            direction_pattern = r"direction='(.*?)'"
+            direction_match = re.search(direction_pattern, action_value, re.DOTALL)
+            direction = direction_match.group(1) if direction_match else None
+            # 确定bbox
+            bbox = []
+            value_pattern = r"point='<point>(.*?)</point>'"
+            value_match = re.search(value_pattern, action_value)
+            if value_match:
+                numbers = re.findall("\d+", value_match.group(1))
+                if len(numbers) == 2:
+                    bbox = [
+                        float(numbers[0]) / 1000,
+                        float(numbers[1]) / 1000,
+                        float(numbers[0]) / 1000,
+                        float(numbers[1]) / 1000
+                    ]
+                elif len(numbers) == 4:
+                    bbox = [
+                        float(numbers[0]) / 1000,
+                        float(numbers[1]) / 1000,
+                        float(numbers[2]) / 1000,
+                        float(numbers[3]) / 1000
+                    ]
+            return action_type, (direction, bbox)
+        else:
+            value_pattern = r"point='<point>(.*?)</point>'"
+            value_match = re.search(value_pattern, action_value)
+            if value_match:
+                numbers = re.findall("\d+", value_match.group(1))
+                if len(numbers) == 2:
+                    bbox = [
+                        float(numbers[0]) / 1000,
+                        float(numbers[1]) / 1000,
+                        float(numbers[0]) / 1000,
+                        float(numbers[1]) / 1000
+                    ]
+                    return action_type, bbox
+                elif len(numbers) == 4:
+                    bbox = [
+                        float(numbers[0]) / 1000,
+                        float(numbers[1]) / 1000,
+                        float(numbers[2]) / 1000,
+                        float(numbers[3]) / 1000
+                    ]
+                    return action_type, bbox
+
+            value_pattern = r"'<point>(.*?)</point>'"
+            value_match = re.search(value_pattern, action_value)
+            if value_match:
+                quoted_value = value_match.group(1)  # 提取引号中的内容
+                return action_type, quoted_value
+            else:
+                # print(f"truth doesn't found match value:{content}")  #finished wait
+                return action_type, action_value
+    else:
+        try:
+            final_value = ast.literal_eval(content)
+            final_value = [final_value[0], final_value[1], final_value[0], final_value[1]]
+            return "click", final_value
+        except Exception as e:
+            print("[ERROR]", content)
+
+
+def get_pred_action_type_value(content):
+    content = get_pure_text(content)
+    pattern = r"^\s*Thought:.*\s*\nAction:\s*(\w+)\((.*)\)\s*$"
+    match = re.search(pattern, content, re.DOTALL)
+    if match:
+        action_type = match.group(1)  # 提取 action type (click)
+        action_value = match.group(2)
+        if action_type == 'type':
+            # 抽取文本答案
+            content_pattern = r"content='(.*?)'"
+            content_match = re.search(content_pattern, action_value, re.DOTALL)
+            line_content = content_match.group(1) if content_match else None
+            # 抽取bbox
+            bbox = []
+            value_pattern = r"point='<point>(.*?)</point>'"
+            value_match = re.search(value_pattern, action_value)
+            if value_match:
+                numbers = re.findall("\d+", value_match.group(1))
+                if len(numbers) >= 2:
+                    bbox = [
+                        float(numbers[0]) / 1000,
+                        float(numbers[1]) / 1000,
+                        float(numbers[0]) / 1000,
+                        float(numbers[1]) / 1000
+                    ]
+            return action_type, (line_content, bbox)
+        elif action_type == 'drag':
+            # 抽取start_bbox
+            start_bbox = []
+            value_pattern = r"start[_ ]point='<point>(.*?)</point>'"
+            value_match = re.search(value_pattern, action_value)
+            if value_match:
+                numbers = re.findall("\d+", value_match.group(1))
+                if len(numbers) >= 2:
+                    start_bbox = [
+                        float(numbers[0]) / 1000,
+                        float(numbers[1]) / 1000,
+                        float(numbers[0]) / 1000,
+                        float(numbers[1]) / 1000
+                    ]
+            # 抽取end_bbox
+            end_bbox = []
+            value_pattern = r"end[_ ]point='<point>(.*?)</point>'"
+            value_match = re.search(value_pattern, action_value)
+            if value_match:
+                numbers = re.findall("\d+", value_match.group(1))
+                if len(numbers) >= 2:
+                    end_bbox = [
+                        float(numbers[0]) / 1000,
+                        float(numbers[1]) / 1000,
+                        float(numbers[0]) / 1000,
+                        float(numbers[1]) / 1000
+                    ]
+            return action_type, (start_bbox, end_bbox)
+        elif action_type == 'scroll':
+            # 确定滑动的方向
+            direction_pattern = r"direction='(.*?)'"
+            direction_match = re.search(direction_pattern, action_value, re.DOTALL)
+            direction = direction_match.group(1) if direction_match else None
+            # 确定bbox
+            bbox = []
+            value_pattern = r"point='<point>(.*?)</point>'"
+            value_match = re.search(value_pattern, action_value)
+            if value_match:
+                numbers = re.findall("\d+", value_match.group(1))
+                if len(numbers) >= 2:
+                    bbox = [
+                        float(numbers[0]) / 1000,
+                        float(numbers[1]) / 1000,
+                        float(numbers[0]) / 1000,
+                        float(numbers[1]) / 1000
+                    ]
+            return action_type, (direction, bbox)
+        else:
+            value_pattern = r"point='<point>(.*?)</point>'"
+            value_match = re.search(value_pattern, action_value)
+            if value_match:
+                numbers = re.findall("\d+", value_match.group(1))
+                if len(numbers) >= 2:
+                    bbox = [
+                        float(numbers[0]) / 1000,
+                        float(numbers[1]) / 1000,
+                        float(numbers[0]) / 1000,
+                        float(numbers[1]) / 1000
+                    ]
+                    return action_type, bbox
+
+            value_pattern = r"'<point>(.*?)</point>'"
+            value_match = re.search(value_pattern, action_value)
+            if value_match:
+                quoted_value = value_match.group(1)  # 提取引号中的内容
+                return action_type, quoted_value
+            else:
+                # print(f"truth doesn't found match value:{content}")  #finished wait
+                return action_type, action_value
+    else:
+        # print(f"pred doesn't have match action:{content}")
+        return None, None
+
+
+def cal_distance(golden_cord, pred_cord):
+    golden_point = [(golden_cord[0] + golden_cord[2]) / 2, (golden_cord[1] + golden_cord[3]) / 2]
+    pred_point = [(pred_cord[0] + pred_cord[2]) / 2, (pred_cord[1] + pred_cord[3]) / 2]
+    distance = ((golden_point[0] - pred_point[0])**2 + (golden_point[1] - pred_point[1])**2)**0.5
+    return distance
+
+
+def metric_distance(gt_bbox, pred_bbox):
+    try:
+        dis = cal_distance(gt_bbox, pred_bbox)
+        dis_value_error = False
+    except Exception as e:
+        # print(f"cal dis error:{e}, gt_value:{gt_bbox}, pred_value:{pred_bbox}, pred_ori:{pred_line}")
+        dis_value_error = True
+        dis = 100
+    return dis, dis_value_error
+
+
+def rule_for_action(gt_content, pred_content):
+    from rouge_chinese import Rouge
+    scorer = Rouge()
+    dis_threshold = 0.05
+    item_rouge_score = None
+    item_dis = None
+    item_type_correct = False
+    item_value_correct = False
+
+    gt_result = get_truth_action_type_value(gt_content)
+    if gt_result is not None:
+        gt_type, gt_value = gt_result
+    else:
+        return False
+
+    pred_type, pred_value = get_pred_action_type_value(pred_content)
+    # print(gt_type, gt_value, pred_type, pred_value)
+    if pred_type == "left_single":
+        pred_type = "click"
+    if gt_type == pred_type and gt_type is not None:
+        item_type_correct = True
+        if gt_type.lower() in ['click', 'select', 'hover', 'right_single', 'left_double', 'left_single']:
+            gt_bbox = gt_value
+            pred_bbox = pred_value
+            item_dis, dis_value_error = metric_distance(gt_bbox, pred_bbox)
+            if item_dis < dis_threshold:
+                item_value_correct = True
+        elif gt_type.lower() == 'scroll':
+            gt_direction = gt_value[0]
+            pred_direction = pred_value[0]
+            gt_bbox = gt_value[1]
+            pred_bbox = pred_value[1]
+            if gt_bbox != []:
+                item_dis, dis_value_error = metric_distance(gt_bbox, pred_bbox)
+                if item_dis < dis_threshold and gt_direction == pred_direction:
+                    item_value_correct = True
+            else:
+                if gt_direction == pred_direction:
+                    item_value_correct = True
+
+        elif gt_type.lower() == 'drag':
+            gt_start_bbox = gt_value[0]
+            pred_start_bbox = pred_value[0]
+            gt_end_bbox = gt_value[1]
+            pred_end_bbox = pred_value[1]
+            gt_bbox = [gt_start_bbox, gt_end_bbox]
+            pred_bbox = [pred_start_bbox, pred_end_bbox]
+            dis_start, dis_start_value_error = metric_distance(gt_start_bbox, pred_start_bbox)
+            dis_end, dis_end_value_error = metric_distance(gt_end_bbox, pred_end_bbox)
+            item_dis = (dis_start + dis_end) / 2
+            dis_value_error = dis_start_value_error or dis_end_value_error
+            if dis_start < dis_threshold and dis_end < dis_threshold:
+                item_value_correct = True
+        elif gt_type.lower() in ['navigate_back', 'navigate_home', 'enter', 'wait', 'finished']:
+            item_value_correct = True
+        elif gt_type.lower() == 'type':
+            import jieba
+            gt_content = gt_value[0]
+            gt_bbox = gt_value[1]
+            pred_content = pred_value[0]
+            pred_bbox = pred_value[1]
+            gt_content_seg = ' '.join(jieba.cut(str(gt_content)))
+            pred_content_seg = ' '.join(jieba.cut(str(pred_content)))
+            if gt_content_seg == '\n':
+                gt_content_seg = '\\n'
+            if pred_content_seg == '\n':
+                pred_content_seg = '\\n'
+            try:
+                scores = scorer.get_scores(gt_content_seg, pred_content_seg)
+                item_rouge_score = scores[0]['rouge-l']['f']
+            except:
+                item_rouge_score = 0
+            if item_rouge_score >= 0.5:
+                item_value_correct = True
+            else:
+                item_value_correct = False
+        else:
+            if gt_value == pred_value:
+                item_value_correct = True
+    return item_value_correct
+
+
+if __name__ == "__main__":
+    import pandas as pd
+    import json
+
+    input_file = "hdfs://haruna/home/byte_data_seed/hl_lq/iccv/user/wangjiawei.424/datasets/gui_o1/data/gui_rl_small_image_upsample4_shuff/copy_3.parquet"
+    data = pd.read_parquet(input_file).to_dict("records")
+
+    gui_verifier = GUIVerifier()
+    for i, d in enumerate(data):
+        verifier_feature = json.loads(d['session']['verifier_feature'])
+        gt = verifier_feature['answer']
+        # 用老数据时的过渡使用
+        gt = gt.replace("<bbox>", "<point>").replace("</bbox>", "</point>")
+        if "drag" in gt:
+            gt = gt.replace("start_box", "start_point").replace("end_box", "end_point")
+        else:
+            gt = gt.replace("start_box", "point")
+        pred = gt
+        verifier_feature['answer'] = gt
+        res = gui_verifier.verify(pred, verifier_feature_dict=verifier_feature)
+        status = json.dumps({
+            'tag': 'verified',
+            'pred': res.extracted_answer,
+            'answer': gt,
+            'score': res.score
+        },
+                            ensure_ascii=False)
+        if res.score == 0:
+            print(f"----{i}----")
+            print(f'[VERIFIER INFO] {status}', flush=True)

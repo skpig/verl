@@ -124,5 +124,8 @@ def _select_rm_score_fn(reward_style, external_lib: str = None):
     elif reward_style == 'DSUT_verifier':
         from . import dsut_verifier
         return dsut_verifier.compute_score
+    elif reward_style == "vlm_verifier_router":
+        from alpha_seed.utils.reward_score.vlm_verifiers import vlm_verifier_router
+        return vlm_verifier_router.compute_score_client
     else:
         raise NotImplementedError(f"{reward_style=} not implemented")

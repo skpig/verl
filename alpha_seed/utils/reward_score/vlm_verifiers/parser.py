@@ -1,12 +1,17 @@
-import regex
 import re
-from typing import TypeVar, Iterable, List, Union, Any, Dict
+
+import regex
+
 try:
     from word2number import w2n
+
     use_w2n = True
 except Exception:
     use_w2n = False
-from .latex2sympy2.latex2sympy2 import latex2sympy
+try:
+    from .latex2sympy2.latex2sympy2 import latex2sympy
+except Exception:
+    from latex2sympy2.latex2sympy2 import latex2sympy
 
 
 def _fix_fracs(string):

@@ -216,6 +216,8 @@ class DataPack:
     is_finished: list
     metrics: dict
     extra_data: Optional[list] = None
+    image_data_ref: Optional[list] = None
+    raw_output_ref: Optional[list] = None
 
     @classmethod
     def create_from_completion(cls, message):
@@ -225,7 +227,9 @@ class DataPack:
                              this_turn_off_policy_steps=[[-1 for _ in range(len(message.raw_output_ids))]],
                              is_finished=[message.is_finished],
                              extra_data=[message.extra_data],
-                             metrics=message.metrics)
+                             metrics=message.metrics,
+                             image_data_ref=[message.get('image_data_ref')],
+                             raw_output_ref=[message.get('raw_output_ref')])
         return data_pack
 
     @classmethod
@@ -236,7 +240,9 @@ class DataPack:
                              this_turn_off_policy_steps=[[-1 for _ in range(len(message['raw_output_ids']))]],
                              is_finished=[message['is_finished']],
                              extra_data=[message['extra_data']],
-                             metrics=message['metrics'])
+                             metrics=message['metrics'],
+                             image_data_ref=[message.get('image_data_ref')],
+                             raw_output_ref=[message.get('raw_output_ref')])
         return data_pack
 
 
@@ -308,6 +314,11 @@ def pack_to_dataproto(prompts, tokenizer, data_pack: DataPack, config) -> DataPr
     out.non_tensor_batch = copy.deepcopy(prompts.non_tensor_batch)
     if data_pack.extra_data is not None:
         out.non_tensor_batch['extra_data'] = np.array(data_pack.extra_data, dtype=object)
+    if data_pack.image_data_ref is not None and any(i is not None for i in data_pack.image_data_ref):
+        out.non_tensor_batch['image_data_ref'] = np.fromiter(data_pack.image_data_ref, dtype=object)
+    if data_pack.raw_output_ref is not None:
+        out.non_tensor_batch['raw_output_ref'] = np.fromiter(data_pack.raw_output_ref, dtype=object)
+
     return out
 
 

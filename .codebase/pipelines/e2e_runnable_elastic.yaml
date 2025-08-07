@@ -23,7 +23,7 @@ jobs:
         commands:
           - cd /opt/tiger
           - rm -rf seed_models mono_rl
-          - git clone -b 20250103 git@code.byted.org:seed/seed_models.git
+          - git clone git@code.byted.org:seed/seed_models.git
           - git clone git@code.byted.org:seed/mono_rl.git
           - sudo pip3 install --upgrade byted-wandb
           - sudo pip3 install --upgrade bytedance.ndtimeline

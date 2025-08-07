@@ -57,6 +57,7 @@ from alpha_seed.utils.server_client import is_local_ray_instance, validate_clien
 # rule-based reward score
 from alpha_seed.utils.reward_score.extra_reward import add_length_reward, punish_format_return_positions
 from alpha_seed.utils.reward_score import verifier_service, gaokao_verifier_service, aider_utils, swe_repair_verifier, oj_utils, deep_research_verifier, response_post_proc, _select_rm_score_fn
+from alpha_seed.utils.reward_score.vlm_verifiers import vlm_verifier_router
 from alpha_seed.utils.duplicate import para_dup
 from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRefWorker
 from alpha_seed.workers.actors.critic_worker import CriticWorker
@@ -68,6 +69,27 @@ from alpha_seed.utils.chat_template import CHATML, CHATML_TOOL, CHATML_TOOL_V2, 
 from alpha_seed.workers.streaming_service.rollout_request_manager import RequestManager, RequestManagerRegisterCenter
 from databus import collect_array
 
+
+def patch_print():
+    """全局替换内置的 print 函数, 为其添加时间戳"""
+    import builtins
+    from datetime import datetime
+
+    if hasattr(builtins, 'print_patched'):
+        return
+
+    _original_print = builtins.print
+
+    def tprint(*args, **kwargs):
+        """一个会添加时间戳的自定义 print 函数"""
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+        _original_print(f"[{timestamp}]", *args, **kwargs)
+
+    builtins.print = tprint
+    builtins.print_patched = True
+
+
+patch_print()
 user_email = os.getenv('ARNOLD_LARK_RECEIVER', '')
 task_url = os.getenv('ARNOLD_ORIGIN_PLATFORM_URL', '')
 ARNOLD_TRIAL_ID = os.environ.get("ARNOLD_TRIAL_ID", "0")
@@ -125,6 +147,7 @@ class RemoteClient:
         self.verifier_service = ray.remote(num_cpus=1)(verifier_service.compute_score)
         self.deep_research_verifier = ray.remote(num_cpus=1)(deep_research_verifier.compute_score)
         self.gaokao_verifier_service = ray.remote(num_cpus=1)(gaokao_verifier_service.compute_score)
+        self.vlm_verifier_router = ray.remote(num_cpus=1)(vlm_verifier_router.compute_score)
         self.call_swe = ray.remote(num_cpus=1)(swe_repair_verifier.compute_score)
 
     def clear(self):
@@ -307,6 +330,7 @@ class RewardManager():
             response_length = response_ids.shape[-1]
             valid_response_length = data_item.batch['attention_mask'][prompt_length:].sum().item()
             valid_response_ids = response_ids[:valid_response_length]
+            valid_response_ids = valid_response_ids[valid_response_ids >= 0]
 
             # decode
             # the image placeholder in input_ids is negative
@@ -353,13 +377,16 @@ class RewardManager():
                 'rm_name': self.rm_name,
                 'pause_tokens_index': pause_tokens_index
             }
-            if reward_style == "code-sandbox":
+            if reward_style in ("code-sandbox", "vlm_verifier_router"):
                 score_fn_inputs["code_sandbox_psm"] = self.config.trainer.code_sandbox_psm
             if reward_style == "aider":
                 score_fn_inputs['solution_str'] = solution_str.rsplit(self.tokenizer.eos_token, 1)[0]
                 score_fn_inputs["aider_service_psm"] = self.config.trainer.code_sandbox_psm
             if reward_style == "verifier_service":
                 score_fn_inputs["verifier_service_psm"] = self.config.trainer.verifier_service_psm
+            if reward_style in ("verifier_service_volc", "vlm_verifier_router"):
+                score_fn_inputs["volc_ark_key"] = self.config.trainer.volc_ark_key
+                score_fn_inputs["volc_model_name"] = self.config.trainer.volc_model_name
             if reward_style == "gaokao_verifier_service":
                 score_fn_inputs["gaokao_verifier_service_psm"] = self.config.trainer.gaokao_verifier_service_psm
 
@@ -941,6 +968,7 @@ def init_ray(config: DictConfig):
             'TRITON_REMOTE_CACHE_BACKEND': 'alpha_seed.utils.redis.triton_redis:BytedRedisRemoteCacheBackend'
         }
         runtime_env = {
+            'worker_process_setup_hook': patch_print,
             'env_vars': {
                 'TOKENIZERS_PARALLELISM': 'true',
                 'BPEX_NO_WARN_ON_UNTUNED_CASE': '1',

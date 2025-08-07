@@ -227,6 +227,7 @@ class RolloutManager:
         if self.config.trainer.use_remote_verifier:
             remote_reward_style.append('verifier_service')
             remote_reward_style.append('gaokao_verifier_service')
+            remote_reward_style.append('vlm_verifier_router')
         if self.config.trainer.use_remote_swe_sandbox:
             remote_reward_style.append('swe_repair_verifier')
         # add more reward style here that are going to be pipelined inside generation
@@ -290,10 +291,12 @@ class RolloutManager:
             ExecutorCls = RayActorExecutor
         else:
             raise ValueError(f"Unsupported executor class: {executor_cls}")
-        self.train_client_executor = ExecutorCls("train", self.config, self.tokenizer, self.train_rollout_server.host,
-                                                 self.train_rollout_server.port, "train_rollout")
-        self.val_client_executor = ExecutorCls("val", self.config, self.tokenizer, self.val_rollout_server.host,
-                                               self.val_rollout_server.port, "val_rollout")
+        self.train_client_executor = ExecutorCls("train", self.config, self.tokenizer, self.processor,
+                                                 self.train_rollout_server.host, self.train_rollout_server.port,
+                                                 "train_rollout")
+        self.val_client_executor = ExecutorCls("val", self.config, self.tokenizer, self.processor,
+                                               self.val_rollout_server.host, self.val_rollout_server.port,
+                                               "val_rollout")
 
     def initialize(self, hybrid_wg, rollout_pool=None, train_standalone_wg=None, val_standalone_wg=None):
         assert not self._initialized

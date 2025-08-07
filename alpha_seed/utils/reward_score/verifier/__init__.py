@@ -1,1 +1,0 @@
-# verifier code is copied from https://code.byted.org/seed/seed_rl/compare/cb54272bfece9e30e9495835f3db144737df80af...qxb%2Fvlm_rule_rm_p6/changes
