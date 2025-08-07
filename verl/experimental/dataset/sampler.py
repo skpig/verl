@@ -189,10 +189,12 @@ class PrioritySampler(AbstractBatchSampler):
         self.bsz = data_config.train_batch_size
         print("Initializing Priority BatchSampler with batch size:", self.bsz)
 
-        self.index2acc = {}
         # we always assert drop last
         self.data_item_num = len(data_source)
         self.temporal_decay = data_config.sampler.temporal_decay
+        
+        # Initialize accuracy tensor with -1 (indicating uninitialized)
+        self.index2acc = torch.full((self.data_item_num,), -1.0, dtype=torch.float32)
 
         # initialize priority queue
         self.queue = deque()
@@ -212,12 +214,21 @@ class PrioritySampler(AbstractBatchSampler):
         score_sums = torch.bincount(inverse_indices, weights=scores, minlength=len(unique_indices))
         score_complements = counts.to(torch.float32) - score_sums
 
-        # update the accuracy tracking with the new indices and scores
-        for index, score_sum, count in zip(unique_indices.tolist(), score_sums.tolist(), counts.tolist()):
-            if index not in self.index2acc:
-                self.index2acc[index] = score_sum / count
-            else:
-                self.index2acc[index] = self.temporal_decay * (score_sum / count) + (1 - self.temporal_decay) * self.index2acc[index] # EMA update
+        # update the accuracy tracking with the new indices and scores using tensor operations
+        new_acc = score_sums.float() / counts.float()  # compute new accuracy for each unique index
+        
+        # Create masks for first-time and existing indices
+        first_time_mask = self.index2acc[unique_indices] == -1.0
+        existing_mask = ~first_time_mask
+        
+        # Update first-time indices
+        self.index2acc[unique_indices[first_time_mask]] = new_acc[first_time_mask]
+        
+        # Update existing indices with EMA
+        self.index2acc[unique_indices[existing_mask]] = (
+            self.temporal_decay * new_acc[existing_mask] + 
+            (1 - self.temporal_decay) * self.index2acc[unique_indices[existing_mask]]
+        )
         
         self.fill_queue()
         
@@ -227,26 +238,19 @@ class PrioritySampler(AbstractBatchSampler):
         if k <= 0:
             return
 
-        assert len(self.index2acc) == self.data_item_num, "Should not fill queue before calculate acc for all indices"
+        # Check that all indices have been initialized (no -1 values)
+        assert torch.all(self.index2acc != -1.0), "Should not fill queue before calculate acc for all indices"
 
-        id_tensor = np.array(list(self.index2acc.keys()))
-        acc_tensor = np.array(list(self.index2acc.values()))
-        reverse_acc_tensor = 1.0 - acc_tensor
+        # Use tensor operations directly
+        reverse_acc_tensor = 1.0 - self.index2acc
         prob_dist = reverse_acc_tensor / (reverse_acc_tensor.sum() + 1e-8)
 
         # Sample k indices proportional to their reverse accuracy
-        sampled_indices = np.random.choice(
-            len(reverse_acc_tensor),  # total number of indices
-            size=k,              # number of samples to draw
-            replace=False,            # no replacement
-            p=prob_dist               # sampling probability
-        )
+        sampled_indices = torch.multinomial(prob_dist, num_samples=k, replacement=False)
 
-        # Get the actual indices from the sampled indices
-        sampled_items = id_tensor[sampled_indices]
-
-        for item in sampled_items:
-            self.queue.append(item.item())
+        # Add sampled indices to queue
+        for idx in sampled_indices:
+            self.queue.append(idx.item())
 
     def __iter__(self):
         """Iterate over the sampler, yielding batches of indices."""
