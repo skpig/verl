@@ -1,6 +1,5 @@
 import os
 import time
-import json
 import logging
 import copy
 import uuid
@@ -8,15 +7,12 @@ import asyncio
 import torch
 
 import numpy as np
-import pandas as pd
 import verl.utils.torch_functional as verl_F
 
 from enum import Enum
 from dataclasses import dataclass, fields
-from typing import Union, List, Dict
-from functools import partial
-from concurrent.futures import ThreadPoolExecutor
-from transformers.utils import PaddingStrategy
+from typing import List, Dict
+from transformers import PreTrainedTokenizer
 from omegaconf import DictConfig
 from mono_rl import DataProto
 from alpha_seed.utils.dataset.rl_dataset import collate_fn
@@ -24,16 +20,15 @@ from alpha_seed.workers.agents.handlers import register_handler, TaskContext
 from alpha_seed.workers.agents.handlers.base import ThreadedAgent
 from alpha_seed.workers.agents.handlers.agentbench.proxy import get_metrics_client, get_proxy_client
 from alpha_seed.workers.agents.handlers.agentbench.trajectory_manager import build_training_samples
-from alpha_seed.workers.streaming_service.streaming_utils import internal_call
 from alpha_seed.workers.streaming_service.streaming_utils import DataPack, pack_to_dataproto
-from bytedance import metrics
 
 
-@register_handler("agent/agentbench/agentless")
-class AgentBench(ThreadedAgent):
+class AgentHandler(ThreadedAgent):
 
     def __init__(self, tokenizer, llm, **kwargs):
         super().__init__(tokenizer, llm)
+        self._pad_token_id = self.tokenizer.pad_token_id
+        self._eos_token_id = self.tokenizer.eos_token_id
 
     def _extract_prompt_meta(self, item: DataProto) -> Dict:
         framework, dataset, index = item.non_tensor_batch['raw_prompt'][0][0].get('meta').split(":")
@@ -50,17 +45,64 @@ class AgentBench(ThreadedAgent):
             }
         }
 
-    def _preprocess(self, messages: List[Dict], prompt_meta: Dict, row_dict: Dict, meta_info: Dict,
-                    max_prompt_length: int, truncation: str, sub_index: int) -> DataProto:
-        prompt_with_chat_template = self.tokenizer.apply_chat_template(messages,
+    def _preprocess(self, task_id, turn_task, prompt_meta: Dict, row_dict: Dict, meta_info: Dict, max_length: int,
+                    pad_to_max_length: bool, truncation: str, sub_index: int) -> DataProto:
+
+        # just a copy from verl with minor change
+        def _tokenize_and_postprocess_data(prompt: str,
+                                           tokenizer: PreTrainedTokenizer,
+                                           max_length: int,
+                                           pad_token_id: int,
+                                           left_pad=True,
+                                           truncation='error'):
+            """
+            input_data is the output from tokenizer.
+            """
+            assert truncation in ['left', 'right', 'error']
+
+            input_data = tokenizer(prompt, return_tensors='pt', add_special_tokens=False)
+
+            input_ids = input_data['input_ids']
+            attention_mask = input_data['attention_mask']
+
+            assert input_ids.ndim == 2
+
+            sequence_length = input_ids.shape[-1]
+            truncated = False
+            if pad_to_max_length and sequence_length < max_length:
+                input_ids = verl_F.pad_sequence_to_length(input_ids,
+                                                          max_seq_len=max_length,
+                                                          pad_token_id=pad_token_id,
+                                                          left_pad=left_pad)
+                attention_mask = verl_F.pad_sequence_to_length(attention_mask,
+                                                               max_seq_len=max_length,
+                                                               pad_token_id=0,
+                                                               left_pad=left_pad)
+            elif sequence_length > max_length:
+                if truncation == 'left':
+                    # actually, left truncation may not be reasonable
+                    input_ids = input_ids[:, -max_length:]
+                    attention_mask = attention_mask[:, -max_length:]
+                elif truncation == 'right':
+                    input_ids = input_ids[:, :max_length]
+                    attention_mask = attention_mask[:, :max_length]
+                elif truncation == 'error':
+                    raise NotImplementedError(f'{sequence_length=} is larger than {max_length=}')
+                else:
+                    raise NotImplementedError(f'Unknown truncation method {truncation}')
+                truncated = True
+
+            return input_ids, attention_mask, truncated
+
+        prompt_with_chat_template = self.tokenizer.apply_chat_template(turn_task.request.messages,
                                                                        add_generation_prompt=True,
                                                                        tokenize=False)
-        input_ids, attention_mask = verl_F.tokenize_and_postprocess_data(prompt=prompt_with_chat_template,
-                                                                         tokenizer=self.tokenizer,
-                                                                         max_length=max_prompt_length,
-                                                                         pad_token_id=self.tokenizer.pad_token_id,
-                                                                         left_pad=True,
-                                                                         truncation=truncation)
+        input_ids, attention_mask, truncated = _tokenize_and_postprocess_data(prompt=prompt_with_chat_template,
+                                                                              tokenizer=self.tokenizer,
+                                                                              max_length=max_length,
+                                                                              pad_token_id=self._pad_token_id,
+                                                                              left_pad=True,
+                                                                              truncation=truncation)
         prompt = {"input_ids": input_ids[0].to(torch.int32), "attention_mask": attention_mask[0].to(torch.int8)}
 
         _row_dict = {
@@ -83,10 +125,18 @@ class AgentBench(ThreadedAgent):
                                                                                            )) else y)))(str(
                              row_dict.get('index')).strip(), prompt_meta.get('index', 0))
             },
+            **{
+                '__AGENTBENCH_task_id':
+                    task_id,
+                '__AGENTBENCH_turn_task_id':
+                    turn_task.task_id,
+                '__AGENTBENCH_traj_id':
+                    turn_task.request.extra_info.traj_id if turn_task.request.extra_info is not None else task_id,
+            },
         }
         _item = DataProto.from_single_dict(collate_fn([_row_dict]))
         _item.meta_info = copy.copy(meta_info)
-        return _item
+        return {'item': _item, 'truncated': truncated}
 
     def _postprocess(self, completion, item: DataProto, origin_prompt, rollout_config: DictConfig,
                      tagkv: Dict) -> DataProto:
@@ -95,12 +145,15 @@ class AgentBench(ThreadedAgent):
         out.non_tensor_batch['prompt_names'] = copy.deepcopy(origin_prompt.get('prompt_names'))
         out.non_tensor_batch['raw_prompt'] = copy.deepcopy(origin_prompt.get('raw_prompt'))
 
+        def extra_fill_input_ids():
+            out.non_tensor_batch['__AGENTBENCH_input_ids'] = np.array([item.batch['input_ids'][0]], dtype=object)
+
         def extra_fill_datapack():
-            out.non_tensor_batch['data_pack'] = np.array([data_pack], dtype=object)
+            out.non_tensor_batch['__AGENTBENCH_data_pack'] = np.array([data_pack], dtype=object)
 
         def extra_fill_raw_response():
             raw_output_ids = completion['choices'][0]['message']['raw_output_ids']
-            if self.tokenizer.eos_token_id == raw_output_ids[-1]:
+            if self._eos_token_id == raw_output_ids[-1]:
                 raw_output_ids = raw_output_ids[:-1]
             raw_response = ''.join(self.tokenizer.decode(raw_output_ids, skip_special_tokens=False))
             get_metrics_client().emit_timer("agentbench.handler.task_raw_response_len", len(raw_response), tags=tagkv)
@@ -110,12 +163,16 @@ class AgentBench(ThreadedAgent):
             get_metrics_client().emit_timer("agentbench.handler.task_response_len", len(raw_response), tags=tagkv)
             out.non_tensor_batch['raw_response'] = np.array([raw_response], dtype=object)
 
+        extra_fill_input_ids()
         extra_fill_datapack()
         extra_fill_raw_response()
-        return out
+        return {'item': out}
 
     def _build_records(self, item: DataProto, agentbench_score, **kwargs):
-        item.pop(non_tensor_batch_keys=['data_pack', 'raw_response'])
+        item.pop(non_tensor_batch_keys=[
+            'raw_response', '__AGENTBENCH_task_id', '__AGENTBENCH_turn_task_id', '__AGENTBENCH_traj_id',
+            '__AGENTBENCH_input_ids', '__AGENTBENCH_data_pack'
+        ])
         item.non_tensor_batch['reward_model'] = np.array([{
             **(item.non_tensor_batch.get('reward_model', [{}])[0]),
             **{
@@ -152,6 +209,10 @@ class AgentBench(ThreadedAgent):
             'trial_id': os.getenv('ARNOLD_TRIAL_ID', 'unk'),
             'framework': prompt_meta.get('framework', 'unk'),
         }
+        max_length = (config.data.max_prompt_length + config.data.max_response_length) if prompt_meta.get(
+            'framework', 'unk') != 'agentless' else config.data.max_prompt_length
+        pad_to_max_length = prompt_meta.get('framework', 'unk') == 'agentless'
+        truncation = config.data.truncation
 
         class Status(Enum):
             NON_EXIST = 1
@@ -326,24 +387,31 @@ class AgentBench(ThreadedAgent):
                     get_proxy_client().trigger_turn(turn_task_meta_info.task_id)
 
                     turn_task = get_proxy_client().get_turn(turn_task_meta_info.task_id)
-                    turn_item = self._preprocess(turn_task.request.messages, prompt_meta, row_dict, meta_info,
-                                                 config.data.max_prompt_length, config.data.truncation, len(trajectory))
-
-                    try:
-                        completion = self.llm.complete(turn_item, rollout_config)
-                    except asyncio.CancelledError:
-                        logging.exception(
-                            f"agentbench_handler: task[{task_details}] rollout was cancelled, turn_task_id[{turn_task_meta_info.task_id}]"
-                        )
-                        break
-                    except Exception as e:
-                        logging.exception(
-                            f"agentbench_handler: task[{task_details}] rollout caught exception[{e}], turn_task_id[{turn_task_meta_info.task_id}]"
-                        )
-                        break
-
-                    out = self._postprocess(completion, turn_item, origin_prompt, rollout_config, _tagkv)
-                    get_proxy_client().respond_turn(turn_task_meta_info.task_id, out)
+                    preprocess_output = self._preprocess(task_id, turn_task, prompt_meta, row_dict, meta_info,
+                                                         max_length, pad_to_max_length, truncation, len(trajectory))
+                    if preprocess_output.get('truncated') and prompt_meta.get('framework', 'unk') != 'agentless':
+                        _item = DataProto.from_dict(non_tensors={
+                            'raw_response':
+                                np.array([f'The task {turn_task_meta_info.task_id} is truncated'], dtype=str)
+                        })
+                    else:
+                        turn_item = preprocess_output.get('item')
+                        try:
+                            completion = self.llm.complete(turn_item, rollout_config)
+                        except asyncio.CancelledError:
+                            logging.exception(
+                                f"agentbench_handler: task[{task_details}] rollout was cancelled, turn_task_id[{turn_task_meta_info.task_id}]"
+                            )
+                            break
+                        except Exception as e:
+                            logging.exception(
+                                f"agentbench_handler: task[{task_details}] rollout caught exception[{e}], turn_task_id[{turn_task_meta_info.task_id}]"
+                            )
+                            break
+                        postprocess_output = self._postprocess(completion, turn_item, origin_prompt, rollout_config,
+                                                               _tagkv)
+                        _item = postprocess_output.get('item')
+                    get_proxy_client().respond_turn(turn_task_meta_info.task_id, _item)
                 elif status == Status.RUN_ROLLOUT:
                     get_metrics_client().emit_counter("agentbench.handler.rollout_fail", 1, tags=_tagkv)
                     rollout_trial += 1
@@ -436,13 +504,61 @@ class AgentBench(ThreadedAgent):
                                             }
                                         })
         if score is not None:
-            train_samples = build_training_samples(self._build_records, task, score, trajectory, rollout_config,
-                                                   context)
-            logging.info(f"agentbench_handler: task[{prompt_meta=}] score is {score}, {len(train_samples)=}")
+            train_samples = build_training_samples(self._build_records,
+                                                   task,
+                                                   score,
+                                                   trajectory,
+                                                   rollout_config,
+                                                   tokenizer=tokenizer,
+                                                   max_prompt_length=config.data.max_prompt_length,
+                                                   max_response_length=config.data.max_response_length)
         else:
             logging.info(f"agentbench_handler: task[{prompt_meta=}] score is None")
             train_samples = []
+
+        for _ in train_samples:
+
+            def off_policy_steps(start_step):
+                return self.global_state.get_global_step() - start_step
+
+            get_metrics_client().emit_timer("agentbench.handler.off_policy_steps",
+                                            off_policy_steps(context.global_step),
+                                            tags={
+                                                **tagkv_common,
+                                                **{
+                                                    'trial': str(trial + 1),
+                                                }
+                                            })
+
+            def response_status(score):
+                if score == -1:
+                    return 'infer_fail'
+                elif score == -100000:
+                    return 'eval_fail'
+                else:
+                    return 'normal'
+
+            status = response_status(score)
+            get_metrics_client().emit_counter("agentbench.handler.response",
+                                              1,
+                                              tags={
+                                                  **tagkv_common,
+                                                  **{
+                                                      'trial': str(trial + 1),
+                                                      'status': status
+                                                  }
+                                              })
         return train_samples
+
+
+@register_handler("agent/agentbench")
+class Agentbench(AgentHandler):
+    pass
+
+
+@register_handler("agent/agentbench/agentless")
+class Agentless(AgentHandler):
+    pass
 
 
 if __name__ == '__main__':
@@ -500,6 +616,7 @@ if __name__ == '__main__':
         f'{os.path.dirname(os.path.abspath(__file__))}/../../../../../tasks/config/ppo_trainer.yaml')
     config.data.truncation = 'left'
     config.rollout_server.agent.direct_submit_query = False
+    config.elastic.resource_pools.stable_pool_names = ''
 
     tokenizer_path = copy_local_path_from_hdfs(
         "hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/models/p6dense-0.5B-Instruct")
@@ -554,7 +671,8 @@ if __name__ == '__main__':
             }]
         }
 
-    client_executor = LocalExecutor('train', config, tokenizer, None, None, "train_rollout")
+    loop = asyncio.new_event_loop()
+    client_executor = LocalExecutor('train', config, tokenizer, None, None, None, "train_rollout", loop)
     for worker in client_executor.workers:
         worker.sync_llm.chat_completions = chat_completions
 
@@ -566,7 +684,7 @@ if __name__ == '__main__':
         server_port=None,
         is_train=True,
     )
-    handler = select_handler_fn("agent/agentbench/agentless")
+    handler = select_handler_fn("agent/agentbench")
 
     for item in gen_batch.chunk(len(gen_batch)):
-        print(len(asyncio.run(client_executor.submit(handler, item, context))))
+        print(len(loop.run_until_complete(client_executor.submit(handler, item, context))))

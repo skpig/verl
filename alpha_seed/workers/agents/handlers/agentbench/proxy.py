@@ -52,6 +52,7 @@ class ChatCompletionRequest(BaseModel):
 @dataclass
 class ChatCompletionResponse:
     model: str  # turn_task_id
+    aborted: bool
     response: str
     payload: Any
 
@@ -479,7 +480,9 @@ class ProxyClient(Storage):
         assert len(data_proto) == 1, f"respond_turn with len(data_proto) = {len(data_proto)}"
         assert 'raw_response' in data_proto.non_tensor_batch, f"raw_response should be in data_proto"
         response = data_proto.non_tensor_batch['raw_response'][0]
-        super().respond_turn(turn_task_id, ChatCompletionResponse(model=None, response=response, payload=data_proto))
+        super().respond_turn(
+            turn_task_id,
+            ChatCompletionResponse(model=None, aborted=data_proto.batch is None, response=response, payload=data_proto))
 
 
 class ProxyServer(Storage):
@@ -640,7 +643,7 @@ class ProxyServer(Storage):
         def _completions(request: ChatCompletionRequest):
             task_id = request.model
             if not self.task_exist(task_id):
-                logging.info(f"agentbench_proxy completion results: {task_id=} not found, raise 422 HTTPException")
+                logging.info(f"agentbench_proxy completions: {task_id=} not found, raise 422 HTTPException")
                 raise HTTPException(status_code=422, detail=f"{task_id=} not found")
             turn_task_id = self.request_turn(task_id, request)
             get_metrics_client().emit_counter("agentbench.proxy.completion_request",
@@ -665,7 +668,7 @@ class ProxyServer(Storage):
             task_id = self.extract_task_id_func(turn_task_id)
             if not self.task_exist(task_id):
                 logging.info(
-                    f"agentbench_proxy completion results: {task_id=}/{turn_task_id=} not found, raise 422 HTTPException"
+                    f"agentbench_proxy completions results: {task_id=}/{turn_task_id=} not found, raise 422 HTTPException"
                 )
                 raise HTTPException(status_code=422, detail=f"{task_id=}/{turn_task_id=} not found")
             result = self.get_turn_result(turn_task_id)
@@ -676,7 +679,12 @@ class ProxyServer(Storage):
                                                   'status': 'success' if result is not None else 'fail'
                                               })
             if result is not None:
-                logging.info(f"agentbench_proxy completion results: {turn_task_id=}")
+                logging.info(f"agentbench_proxy completions results: {turn_task_id=}")
+                if result.response.aborted:
+                    logging.warning(
+                        f"agentbench_proxy completion results: {task_id=}/{turn_task_id=} is aborted, raise 432 HTTPException"
+                    )
+                    raise HTTPException(status_code=432, detail=f"{result.response.response}")
                 message = {
                     'task_id': task_id,
                     'turn_task_id': turn_task_id,
