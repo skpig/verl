@@ -191,10 +191,12 @@ def draw_dec_tps_and_dec_bsz(metrics):
 
 
 def visualize_metrics(metrics):
-    gather_metrics = [None for _ in range(dist.get_world_size())]
-    dist.all_gather_object(gather_metrics, metrics)
-    metrics["visualize/replica_latency_and_step"], long_tail_replica_id = draw_replica_latency_and_step(gather_metrics)
-    long_tail_replica_metrics = gather_metrics[long_tail_replica_id]
+    # DANGER: inbalanced dp worker can cause nccl timeout
+    # gather_metrics = [None for _ in range(dist.get_world_size())]
+    # dist.all_gather_object(gather_metrics, metrics)
+    # metrics["visualize/replica_latency_and_step"], long_tail_replica_id = draw_replica_latency_and_step(gather_metrics)
+    # long_tail_replica_metrics = gather_metrics[long_tail_replica_id]
+    long_tail_replica_metrics = metrics
     metrics["visualize/per_step_latency_and_dec_bsz"] = draw_per_step_latency_and_bsz(long_tail_replica_metrics,
                                                                                       bs_key="dec_bs")
     metrics["visualize/per_step_latency_and_tokens_num"] = draw_per_step_latency_and_bsz(long_tail_replica_metrics,
