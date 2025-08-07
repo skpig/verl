@@ -654,7 +654,7 @@ class InferenceSession:
         self.cache_manager.empty_cache()
         self.infer_scheduler.empty_cache()
         self.stop_signal_tensor = torch.tensor([0.0]).float().cuda()
-        self.pending = InflightQueue()
+        # self.pending = InflightQueue()
         self.waiting = []
         self.running = []
         self.all_accepted_queries = {}
