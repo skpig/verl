@@ -64,6 +64,7 @@ actor_rollout_ref:
     clip_ratio2: 10.0
     loss_average_method: "sample"  # "token", "minibatch", "batch", "constant"
     loss_average_constant: 0
+    reuse_old_experts: False
     scale_pg_by_kl: False
     scale_pg_by_local_kl: False
     upgo_loss_weight: 0.0
@@ -433,6 +434,7 @@ algorithm:
     kl_coef: 0.001
   bon_filter_high_acc_data: False
   group_mode: "normal"
+  fix_bad_positive_adv: False
   priority_sample: False
   TD_priority_ratio: 0.0
   use_model_output_mask: ${actor_rollout_ref.rollout.train_generate_kwargs.plugin_config.enable}

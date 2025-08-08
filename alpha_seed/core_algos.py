@@ -154,16 +154,19 @@ def compute_upgo_advantage(token_level_rewards: torch.Tensor, values: torch.Tens
     return upgo_advantages
 
 
-def compute_grpo_advantage_return(token_level_scores: torch.Tensor,
-                                  num_bon: torch.Tensor,
-                                  eos_mask: torch.Tensor,
-                                  index: torch.Tensor,
-                                  epsilon: float = 1e-6,
-                                  use_async_gen: bool = False,
-                                  group_mode: str = "normal",
-                                  token_level_scores_mean: Optional[torch.Tensor] = None,
-                                  token_level_scores_std: Optional[torch.Tensor] = None,
-                                  use_pre_computed_stats: List[bool] = []):  # normal, no_std, clamp, trinary
+def compute_grpo_advantage_return(
+        token_level_scores: torch.Tensor,
+        num_bon: torch.Tensor,
+        eos_mask: torch.Tensor,
+        index: torch.Tensor,
+        epsilon: float = 1e-6,
+        use_async_gen: bool = False,
+        group_mode: str = "normal",
+        token_level_scores_mean: Optional[torch.Tensor] = None,
+        token_level_scores_std: Optional[torch.Tensor] = None,
+        use_pre_computed_stats: List[bool] = [],  # normal, no_std, clamp, trinary
+        fix_bad_positive_adv: bool = False,
+        raw_token_level_scores: torch.Tensor = None):
     """Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py
 
     Args:
@@ -187,6 +190,11 @@ def compute_grpo_advantage_return(token_level_scores: torch.Tensor,
     id2score = defaultdict(list)
     id2mean = {}
     id2std = {}
+
+    raw_scores = None if raw_token_level_scores is None else raw_token_level_scores.sum(-1)
+    if fix_bad_positive_adv:
+        assert raw_scores is not None, "raw_scores should not be None when fix_bad_positive_adv"
+
     with torch.no_grad():
         bsz = scores.shape[0]
         for i in range(bsz):
@@ -214,6 +222,8 @@ def compute_grpo_advantage_return(token_level_scores: torch.Tensor,
                     scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
                 else:
                     scores[i] = scores[i] - id2mean[index[i]]
+            if fix_bad_positive_adv and scores[i] > 0 and raw_scores[i] < 0:
+                scores[i] = 0.0 * scores[i]
         scores = scores.unsqueeze(dim=1).tile([1, response_length]) * eos_mask
 
     if use_async_gen and len(lens):

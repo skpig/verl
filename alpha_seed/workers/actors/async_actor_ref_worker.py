@@ -704,12 +704,16 @@ class AsyncActorRolloutRefWorker(Worker):
             output.meta_info['role'] = Role.Actor
 
             with self.actor_gather_manager:
+                reuse_old_experts = self.config.actor.reuse_old_experts
                 output = self.actor_gather_manager.preprocess_data(output)
-                old_entropy, old_log_probs, acceptance_matrix = self.actor.compute_log_prob(data=output)
+                old_entropy, old_log_probs, acceptance_matrix, old_experts = self.actor.compute_log_prob(
+                    data=output, reuse_old_experts=reuse_old_experts)
                 output.batch['old_log_probs'] = old_log_probs
                 output.batch['old_entropy'] = old_entropy
                 for j in range(len(acceptance_matrix)):
                     output.batch[f'acceptance_matrix_{j}'] = acceptance_matrix[j]
+                if reuse_old_experts:
+                    output.batch['old_experts'] = old_experts
                 output = self.actor_gather_manager.postprocess_data(output)
 
             if self.config.actor.train_memory_offload:
@@ -818,7 +822,7 @@ class AsyncActorRolloutRefWorker(Worker):
 
         with self.ref_gather_manager:
             data = self.ref_gather_manager.preprocess_data(data)
-            _, output, _ = self.ref_policy.compute_log_prob(data=data)
+            _, output, _, _ = self.ref_policy.compute_log_prob(data=data)
             output = DataProto.from_dict(tensors={'ref_log_prob': output})
             output = self.ref_gather_manager.postprocess_data(output)
 

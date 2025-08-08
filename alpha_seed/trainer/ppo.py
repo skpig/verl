@@ -231,11 +231,24 @@ def apply_kl_penalty(data: DataProto,
     return data, metrics
 
 
-def compute_advantage(data: DataProto, gamma, lam, use_variable_lambda, variable_lambda_scalar, adv_estimator,
-                      upgo_loss_version, num_bon, adv_whiten, use_async_gen, use_separate_critic_lam, critic_lam,
-                      group_mode, use_model_output_mask):
+def compute_advantage(data: DataProto,
+                      gamma,
+                      lam,
+                      use_variable_lambda,
+                      variable_lambda_scalar,
+                      adv_estimator,
+                      upgo_loss_version,
+                      num_bon,
+                      adv_whiten,
+                      use_async_gen,
+                      use_separate_critic_lam,
+                      critic_lam,
+                      group_mode,
+                      use_model_output_mask,
+                      fix_bad_positive_adv=False):
     # TODO: add other ways to estimate advantages
     token_level_rewards = data.batch['token_level_rewards']
+    raw_scores = data.batch['raw_scores']
     responses = data.batch['responses']
     response_length = responses.size(1)
 
@@ -288,7 +301,9 @@ def compute_advantage(data: DataProto, gamma, lam, use_variable_lambda, variable
             group_mode=group_mode,
             token_level_scores_mean=token_level_scores_mean,
             token_level_scores_std=token_level_scores_std,
-            use_pre_computed_stats=use_pre_computed_stats)
+            use_pre_computed_stats=use_pre_computed_stats,
+            fix_bad_positive_adv=fix_bad_positive_adv,
+            raw_token_level_scores=raw_scores if fix_bad_positive_adv else None)
         data.batch['advantages'] = advantages
         data.batch['origin_advantages'] = advantages
         data.batch['returns'] = returns
@@ -2039,6 +2054,7 @@ class RayPPOTrainer(object):
                             use_separate_critic_lam=self.config.algorithm.use_separate_critic_lam,
                             critic_lam=self.config.algorithm.critic_lam,
                             use_model_output_mask=self.config.algorithm.use_model_output_mask,
+                            fix_bad_positive_adv=self.config.algorithm.fix_bad_positive_adv,
                         )
                         metrics.update(adv_metrics)
                     metrics['timing/adv'] = timer.last
@@ -2056,6 +2072,10 @@ class RayPPOTrainer(object):
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_step and self.global_step % self.config.trainer.actor_update_freq == 0:
                         actor_future = self.actor_rollout_wg.update_actor(input_batch)
+
+                    # remove old_experts after policy update
+                    if "old_experts" in batch.batch:
+                        batch.batch.pop("old_experts")
 
                     # update critic
                     if self.use_critic:

@@ -40,7 +40,7 @@ class DataParallelPPOActor(BasePPOActor):
         super().__init__(as_config)
         self.engine = model_engine
 
-    def compute_log_prob(self, data: DataProto):
+    def compute_log_prob(self, data: DataProto, reuse_old_experts=False):
         select_keys = ['responses', 'input_ids', 'attention_mask']
         image_keys = get_image_keys(data.non_tensor_batch)
         selected_data = data.select(batch_keys=select_keys, non_tensor_batch_keys=image_keys)
@@ -50,22 +50,31 @@ class DataParallelPPOActor(BasePPOActor):
         entropy_lst = []
         log_prob_lst = []
         acceptance_matrix_lst = [[] for _ in range(mtp_n_heads - 1)]
+        selected_experts_lst = []
         # Note: mismatched data order (here vs. upldate policy) can lead to
         # mismatched log probs. In order to match them, we need to split
         # batch into mini batches (same with training).
         chunk_size = math.ceil(selected_data.batch.batch_size[0] / self.config.ppo_mini_batch_size)
         for _, mini_batch in enumerate(selected_data.chunk(chunk_size)):
-            output_proto = self.engine.forward_backward_step(data=mini_batch, forward_only=True)
+            output_proto = self.engine.forward_backward_step(data=mini_batch,
+                                                             forward_only=True,
+                                                             reuse_old_experts=reuse_old_experts)
             if isinstance(self.engine.model_module, FSDP):
                 self.engine.model_module._handle.reshard(True)  # release memory
             log_prob_lst.append(output_proto.batch['logprobs'])
             entropy_lst.append(output_proto.batch['entropy'])
+            if reuse_old_experts:
+                selected_experts_lst.append(output_proto.batch['old_experts'])
             for j in range(mtp_n_heads - 1):
                 acceptance_matrix_lst[j].append(output_proto.batch[f'acceptance_matrix_{j}'])
         log_probs = torch.concat(log_prob_lst, dim=0)
         entropy = torch.concat(entropy_lst, dim=0)
+        if reuse_old_experts:
+            selected_experts = torch.concat(selected_experts_lst, dim=0)
+        else:
+            selected_experts = None
         acceptance_matrix = [torch.concat(acceptance_matrix_lst[j], dim=0) for j in range(mtp_n_heads - 1)]
-        return entropy, log_probs, tuple(acceptance_matrix)
+        return entropy, log_probs, tuple(acceptance_matrix), selected_experts
 
     def train_one_step(self, data: DataProto):
         self.engine.set_loss(pg_loss_fn, OmegaConf.to_container(self.config, resolve=True))
@@ -291,7 +300,7 @@ def make_mini_step_dataloader(data, ppo_mini_batch_size, return_dataproto=False)
     ]
     for opt_key in [
             'ref_log_prob', 'rollout_behavior_log_probs', 'overlong_mask', 'eos_ids', 'token_level_scores',
-            'model_output_mask'
+            'model_output_mask', 'old_experts'
     ]:
         if opt_key in data.batch.keys():
             select_keys.append(opt_key)
