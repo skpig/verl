@@ -27,6 +27,7 @@ from typing import Any, List, Optional, Tuple
 from uuid import uuid4
 
 import numpy as np
+import ray
 import sglang.srt.entrypoints.engine
 import torch
 import torch.distributed as dist
@@ -44,7 +45,7 @@ from sglang.srt.utils import (
     get_ip,
     get_open_port,
     is_cuda,
-    maybe_set_triton_cache_manager,
+    # maybe_set_triton_cache_manager,
     set_prometheus_multiproc_dir,
     set_ulimit,
 )
@@ -56,6 +57,7 @@ from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast, Processor
 from verl import DataProto
 from verl.interactions.base import BaseInteraction
 from verl.interactions.utils.interaction_registry import initialize_interactions_from_config
+from verl.single_controller.ray.base import PortManager
 from verl.third_party.sglang import parallel_state as sglang_ps
 from verl.tools.base_tool import BaseTool
 from verl.tools.schemas import OpenAIFunctionCallSchema, OpenAIFunctionParsedSchema, OpenAIFunctionToolCall
@@ -105,9 +107,9 @@ def _set_envs_and_config(server_args: ServerArgs):
     set_ulimit()
 
     # Fix triton bugs
-    if server_args.tp_size * server_args.dp_size > 1:
-        # FIXME: remove this after https://github.com/triton-lang/triton/pull/4295 is used as a dependency.
-        maybe_set_triton_cache_manager()
+    # if server_args.tp_size * server_args.dp_size > 1:
+    #     # FIXME: remove this after https://github.com/triton-lang/triton/pull/4295 is used as a dependency.
+    #     maybe_set_triton_cache_manager()
 
     # Check flashinfer version
     if server_args.attention_backend == "flashinfer":
@@ -273,6 +275,7 @@ class SGLangRollout(BaseRollout):
         processing_class: PreTrainedTokenizer | PreTrainedTokenizerFast | ProcessorMixin,
         model_hf_config,
         port=None,
+        port_manager=None,
         trust_remote_code: bool = False,
         device_mesh: DeviceMesh | None = None,
         **kwargs,
@@ -302,6 +305,7 @@ class SGLangRollout(BaseRollout):
         super().__init__()
         self.config = config
         self._device_mesh_cpu = device_mesh
+        self.port_manager: PortManager = port_manager
         os.environ.setdefault("SGL_DISABLE_TP_MEMORY_INBALANCE_CHECK", "true")
 
         (
@@ -456,7 +460,7 @@ class SGLangRollout(BaseRollout):
         if first_rank_in_node:
             rank = dist.get_rank()
             os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
-            all_open_ports = get_open_ports(16)
+            all_open_ports = ray.get(self.port_manager.get_ports.remote(self.cuda_visible_device_ids[0]))
             self._engine = AsyncEngine(
                 model_path=actor_module,
                 dtype=self.config.dtype,
@@ -472,7 +476,8 @@ class SGLangRollout(BaseRollout):
                 trust_remote_code=trust_remote_code,
                 # NOTE(linjunrong): add rank to prevent SGLang generate same port inside PortArgs.init_new
                 # when random.seed is being set during training
-                port=all_open_ports[self.cuda_visible_device_ids[0]],
+                port=all_open_ports[0],
+                nccl_port=all_open_ports[1],
                 # NOTE(Chenyang): if you want to debug the SGLang engine output
                 # please set the following parameters
                 # Otherwise, it will make the engine run too slow

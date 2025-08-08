@@ -23,6 +23,7 @@ from dataclasses import asdict
 from typing import Any
 
 import psutil
+import ray
 import torch
 import torch.distributed
 import torch.distributed as dist
@@ -114,6 +115,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.config = config
         self.profile_option = kwargs.get("profile_option", None)
         import torch.distributed
+
+        self.port_manager = kwargs.get("port_manager", None)
+        assert self.port_manager is not None
 
         if not torch.distributed.is_initialized():
             rank = int(os.environ.get("RANK", 0))
@@ -535,6 +539,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 actor_module=local_path,
                 config=self.config.rollout,
                 processing_class=self.processor if self.processor is not None else self.tokenizer,
+                port_manager=self.port_manager,
                 model_hf_config=self.actor_model_config,
                 trust_remote_code=trust_remote_code,
             )
@@ -942,12 +947,15 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
 
 class CriticWorker(Worker, DistProfilerExtension):
-    def __init__(self, config):
+    def __init__(self, config, **kwargs):
         Worker.__init__(self)
         DistProfilerExtension.__init__(
             self, DistProfiler(rank=self.rank, config=omega_conf_to_dataclass(config.get("profiler")))
         )
         import torch.distributed
+
+        self.port_manager = kwargs.get("port_manager", None)
+        assert self.port_manager is not None
 
         if not torch.distributed.is_initialized():
             torch.distributed.init_process_group(
@@ -1330,13 +1338,16 @@ class RewardModelWorker(Worker, DistProfilerExtension):
     Note that we only implement the reward model that is subclass of AutoModelForTokenClassification.
     """
 
-    def __init__(self, config):
+    def __init__(self, config, **kwargs):
         Worker.__init__(self)
         DistProfilerExtension.__init__(
             self, DistProfiler(rank=self.rank, config=omega_conf_to_dataclass(config.get("profiler")))
         )
 
         import torch.distributed
+
+        self.port_manager = kwargs.get("port_manager", None)
+        assert self.port_manager is not None
 
         if not torch.distributed.is_initialized():
             torch.distributed.init_process_group(

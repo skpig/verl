@@ -171,6 +171,34 @@ def merge_resource_pool(rp1: RayResourcePool, rp2: RayResourcePool) -> RayResour
 
     return merged
 
+@ray.remote
+class PortManager:
+    def __init__(self, node_id, world_size=32):
+        self.world_size = world_size
+        import socket
+        self.sockets, self.ports = [], []
+        for _ in range(2 * world_size):
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.bind(("", 0))
+            s.listen(1)
+            self.sockets.append(s)
+            self.ports.append(s.getsockname()[1])
+        # 记录当前节点
+        import ray
+        self.node_id = ray.get_runtime_context().get_node_id()
+        assert node_id == self.node_id
+
+    def get_ports(self, rank: int):
+        assert rank <= self.world_size
+        s = self.sockets[2 * rank]
+        s.close()
+        s = self.sockets[2 * rank + 1]
+        s.close()
+        return self.ports[2 * rank], self.ports[2 * rank + 1]
+
+    def get_node_id(self):
+        return self.node_id
+
 
 class RayClassWithInitArgs(ClassWithInitArgs):
     """A wrapper class for Ray actors with initialization arguments.
@@ -208,6 +236,7 @@ class RayClassWithInitArgs(ClassWithInitArgs):
         placement_group_bundle_idx,
         use_gpu: bool = True,
         num_gpus=1,
+        port_manager=None,
         sharing_with=None,
         device_name="cuda",
     ) -> Any:
@@ -249,7 +278,7 @@ class RayClassWithInitArgs(ClassWithInitArgs):
         # print("cls:", self.cls)
         # print("args: ", self.args)
         # print("kwargs: ", self.kwargs)
-        return self.cls.options(**options).remote(*self.args, **self.kwargs)
+        return self.cls.options(**options).remote(port_manager=port_manager, *self.args, **self.kwargs)
 # 
 
 class RayWorkerGroup(WorkerGroup):
@@ -364,6 +393,19 @@ class RayWorkerGroup(WorkerGroup):
         # 遍历每一个placement_group，也即me每一个node
         for pg_idx, pg in enumerate(sort_placement_group_by_node_ip(pgs)):
             assert local_world_size <= pg.bundle_count, f"when generating for {self.name_prefix}, for the "
+
+            # get node_id for current pg
+            specs = ray._private.state.state.placement_group_table(pg.id)
+            node_id = specs["bundles_to_node_id"][0]
+            # Create a port_manager for each pg
+            port_manager = PortManager.options(
+                scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=node_id, soft=False),
+                num_cpus=0.1,
+                num_gpus=0
+            ).remote(node_id, local_world_size)
+            # open_ports = ray.get(port_manager.get_ports.remote())
+            # print(f"Node id {node_id} has open ports: {open_ports}")
+
             # 遍历每一个gpu
             for local_rank in range(local_world_size):
                 rank += 1
@@ -411,6 +453,7 @@ class RayWorkerGroup(WorkerGroup):
                     use_gpu=use_gpu,
                     num_gpus=num_gpus,
                     device_name=self.device_name,
+                    port_manager=port_manager
                 )
                 self._workers.append(worker)
                 self._worker_names.append(name)
@@ -776,7 +819,7 @@ def create_colocated_worker_cls(class_dict: dict[str, RayClassWithInitArgs]):
 
     # TODO: create a class with customizable name
     class WorkerDict(worker_cls):
-        def __init__(self):
+        def __init__(self, port_manager):
             super().__init__()
             self.worker_dict = {}
             for key, user_defined_cls in cls_dict.items():
@@ -786,6 +829,7 @@ def create_colocated_worker_cls(class_dict: dict[str, RayClassWithInitArgs]):
                 # when DISABLE_WORKER_INIT == 1 it will return immediately
                 with temp_env_var("DISABLE_WORKER_INIT", "1"):
                     self.worker_dict[key] = user_defined_cls(
+                        port_manager=port_manager,
                         *init_args_dict[key].get("args", ()), **init_args_dict[key].get("kwargs", {})
                     )
 
