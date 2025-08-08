@@ -11,7 +11,7 @@ from alpha_seed.workers.agents.handlers import register_handler, TaskContext
 from alpha_seed.workers.agents.handlers.base import AsyncAgent, AsyncLLMInterface
 from alpha_seed.workers.agents.envs.textbrowser import create_from_env_str as create_textbrowser_env_from_env_str
 from alpha_seed.workers.agents.envs.search import create_from_env_str as create_search_env_from_env_str
-from alpha_seed.workers.agents.handlers.tool.parser import FunctionCall, ToolParser
+from alpha_seed.workers.agents.handlers.tool.parser import FunctionCall, ToolParser, ToolParser
 from mono_rl import DataProto
 from typing import List, Dict
 import json
@@ -20,17 +20,29 @@ import regex as re
 from uuid import uuid4
 import numpy as np
 import ray
+from alpha_seed.workers.agents.handlers.ci.tool import JupyterCI, JupyterCI_stateful
+
+CODING_SNIPET_REGEX = (r'<escapeShell\s+type=["\']code["\']\s*,?\s*id=["\'](?P<id>\d+)["\']\s*,?\s*'
+                       r'(name=["\'](?P<name>[^"\']+)["\']\s*)?>'
+                       r'(?P<code>[\s\S]*?)</escapeShell>')
+
+RAW_CODE_REGEX = r"```(?P<language>.*?)\s*\n(?P<code>[\s\S]*?)```"
 
 
-@register_handler("agent/tool/search_and_text_browser")
-class ToolAgent(AsyncAgent):
+@register_handler("agent/search_ci")
+class SearchCIAgent(AsyncAgent):
 
     def __init__(self, tokenizer: AsyncTokenizer | PreTrainedTokenizer, llm: AsyncLLMInterface, **kwargs):
         super().__init__(tokenizer, llm, **kwargs)
         self.search = create_search_env_from_env_str("deep_research/search@{}", tokenizer=tokenizer)
         self.textbrowser = create_textbrowser_env_from_env_str("deep_research/textbrowser@{}", tokenizer=tokenizer)
+        self.ci = JupyterCI()
+        self.ci_stateful = JupyterCI_stateful()
         self.tool_parser = ToolParser(tokenizer, self.config)
         self.tools = {
+            "jupyter_ci": self.ci,
+            "JupyterCI_new": self.ci,
+            "JupyterCI_stateful": self.ci_stateful,
             "Search": self.search,
             "GlobalSearch": self.search,
             "TextBrowser": self.textbrowser,
@@ -40,9 +52,13 @@ class ToolAgent(AsyncAgent):
         # Get tool schema for the calculator
         self.tool_schemas = [
             self.search.get_openai_tool_schema().model_dump(exclude_unset=True, exclude_none=True),
-            self.textbrowser.get_openai_tool_schema().model_dump(exclude_unset=True, exclude_none=True)
+            self.textbrowser.get_openai_tool_schema().model_dump(exclude_unset=True, exclude_none=True),
+            self.ci.get_openai_tool_schema().model_dump(exclude_unset=True, exclude_none=True)
         ]
         self.tool_schemas = [tool['function'] for tool in self.tool_schemas]
+
+        self.ci_mode = None
+
         assert hasattr(tokenizer, 'pad_token'), 'we need `pad_token` to substitute the rollout ids'
 
     async def __call__(self, item: DataProto, context: TaskContext, **kwargs):
@@ -52,6 +68,8 @@ class ToolAgent(AsyncAgent):
         max_length = max_prompt_length + max_response_length
         max_turns = context.config.actor_rollout_ref.rollout.agent.max_turns
         max_new_tokens_per_turn = context.config.actor_rollout_ref.rollout.agent.max_new_tokens_per_turn
+        ci_sandbox_psm = context.config.trainer.ci_sandbox_psm
+        self.ci_mode = context.config.rollout_server.agent.ci_mode
         item.meta_info = copy.deepcopy(item.meta_info)
         global_step = context.global_step
 
@@ -74,7 +92,31 @@ class ToolAgent(AsyncAgent):
         response_texts = []
         all_input_ids = []
         all_prompts = []
+
         response_info = []
+
+        def _parse_code_blocks(model_output: str):
+            all_added_code_files = []
+
+            code_matches = list(re.finditer(CODING_SNIPET_REGEX, model_output))
+
+            for code_match in code_matches:
+                raw_insert_item = code_match.group('code')
+                idx = int(code_match.group('id'))
+                name = str(code_match.group('name'))
+                raw_code_match = re.search(RAW_CODE_REGEX, raw_insert_item)
+
+                if raw_code_match:
+                    language = raw_code_match.group('language')
+
+                    code = raw_code_match.group('code')
+                    if not (code.strip() == ''):
+                        if name != '' and name is not None:
+                            name = name.replace('"', '').replace("'", '')
+                        all_added_code_files.append({'idx': idx, 'file_name': name, 'language': language, 'code': code})
+            return all_added_code_files
+
+        self.file_properties = {}
 
         while num_turns <= max_turns:
             # Generate response using LLM
@@ -116,7 +158,29 @@ class ToolAgent(AsyncAgent):
 
             # 算这一轮新增给llm的长度（可能是上一轮的tool call的结果等）
             incremental_input_length = prompt_length - last_turn_prompt_model_output_length
-            assert incremental_input_length >= 0, f"incremental_input_length should be > 0, {prompt_length=} {last_turn_prompt_model_output_length=}, {prompt_lengths=}, {response_lengths=}, {num_turns=}"
+            try:
+                assert incremental_input_length >= 0, f"incremental_input_length should be > 0, {prompt_length=} {last_turn_prompt_model_output_length=}, {prompt_lengths=}, {response_lengths=}, {num_turns=}"
+            # input_length=1495 last_turn_prompt_model_output_length=2304, temp=[268, 1495], num_turns=2
+            except:
+                save_info = {
+                    "all_input_ids": all_input_ids,
+                    "prompt_len": prompt_length,
+                    "last_turn_prompt_model_output_length": last_turn_prompt_model_output_length,
+                    "prompt_lengths": prompt_lengths,
+                    "response_lengths": response_lengths,
+                    "response_texts": response_texts,
+                    "num_turns": num_turns,
+                    "messages": messages,
+                    "raw_output_ids": raw_output_ids
+                }
+                with open("special_calculator_error.json", "w") as f:
+                    json.dump(save_info, f)
+                from hdfs_io.hdfs_io import hcopy, hmkdir
+                hcopy(
+                    f"special_calculator_error.json",
+                    "hdfs://haruna/home/byte_data_seed/lf_lq/user/qiying.01/projects/alphaseed/experiments/tool_use_demo2"
+                )
+                raise
 
             model_out_mask_list.append((False, incremental_input_length))
             model_out_mask_list.append((True, response_length))
@@ -129,10 +193,11 @@ class ToolAgent(AsyncAgent):
             if last_turn_prompt_model_output_length - len(initial_input_ids) >= max_response_length:
                 break
 
-            messages.append({
-                "role": "assistant",
-                "content": self.tokenizer.pad_token * len(response_message['raw_output_ids'])
-            })
+            # 添加assistant的对话, 不能使用response_message['prompt']，这个会截断，可能是rebalance导致的，还在查
+            # response_text = self.tokenizer.decode(response_message['raw_output_ids'])
+            # response_text = """<escapeShell type="code" id="0">```python\nprint("hello world")\n```</escapeShell><|FunctionCallBegin|>[{"name": "DoubaoCodeInterpreter", "parameters": {"id": "0"}}]<|FunctionCallEnd|>"""
+            # response_text = "<|FunctionCallBegin|>" + json.dumps([{"name": "JupyterCI", "parameters": {"code": "print('hello world')"}}], ensure_ascii=False) + "<|FunctionCallEnd|>"
+            # breakpoint()
 
             #Chen: Here is the implementation of exculding all function call within thinking cot
             #FIXME: need to fix the hard code od thinking token
@@ -149,6 +214,25 @@ class ToolAgent(AsyncAgent):
                 return text
 
             response_text_excluded_thinking_cot = remove_think_block(response_text)
+            all_added_code_files = _parse_code_blocks(response_text_excluded_thinking_cot)
+
+            for i in range(len(all_added_code_files)):
+                code_block_id = all_added_code_files[i]['idx']
+                file_name = all_added_code_files[i]['file_name']
+                code = all_added_code_files[i]['code']
+
+                self.file_properties['id_' + str(code_block_id)] = {
+                    'content': code,
+                    'language': all_added_code_files[i]['language'],
+                    'called': False
+                }
+
+            messages.append({
+                "role": "assistant",
+                "content": self.tokenizer.pad_token * len(response_message['raw_output_ids'])
+                # "content": response_text,
+            })
+
             # Parse tool calls from response
             tool_calls = await self.tool_parser.extract_tool_calls(response_text_excluded_thinking_cot)
             num_tool_calls += len(tool_calls)
@@ -160,7 +244,11 @@ class ToolAgent(AsyncAgent):
             # Execute tool calls
             tool_responses = []
             for tool_call in tool_calls:
-                tool_response = await self._call_tool(tool_call, global_step)
+                tool_response = await self._call_tool(
+                    tool_call,
+                    global_step,
+                    ci_sandbox_psm,
+                    initial_files=item.non_tensor_batch['extra_data'][0]['agent_env_initial_files'])
                 if isinstance(tool_response, Exception):
                     break
                 tool_responses.append(tool_response)
@@ -208,11 +296,14 @@ class ToolAgent(AsyncAgent):
             'raw_output_ids': total_output_ids,
             'response_log_probs': log_probs,
         })
-        if context.config.trainer.use_remote_search:
+        reward_model = item.non_tensor_batch['reward_model'][0]
+        reward_style = reward_model['style']
+        if context.config.trainer.use_remote_search and reward_style in [
+                'code-sandbox', 'aider', 'verifier_service', 'deep_research_verifier', 'gaokao_verifier_service',
+                'swe_repair_verifier'
+        ]:
             input_ids = entire_seq_list[:max_length]
             req_id = item.non_tensor_batch['uid'][0]
-            reward_model = item.non_tensor_batch['reward_model'][0]
-            reward_style = reward_model['style']
             ground_truth = reward_model['ground_truth']
 
             # note that the uid of padding dataproto should be None
@@ -252,7 +343,14 @@ class ToolAgent(AsyncAgent):
         if remain_length == 0:
             prompt = ""
         else:
-            initial_prompt = item.non_tensor_batch['raw_prompt'][0][0]['content']
+            # Here combine all user prompts and system prompts if there exists more than one in dataset
+            if len(item.non_tensor_batch['raw_prompt'][0]) > 1:
+                full_prompt = ''
+                for prompt in item.non_tensor_batch['raw_prompt'][0]:
+                    full_prompt += prompt['content']
+                initial_prompt = full_prompt
+            else:
+                initial_prompt = item.non_tensor_batch['raw_prompt'][0][0]['content']
             prompt_data = await self.tokenizer.batch_encode_plus_async([initial_prompt], add_special_tokens=False)
             prompt_data = prompt_data.input_ids[0][-remain_length:]
             prompt = self.tokenizer.decode(prompt_data)
@@ -275,7 +373,11 @@ class ToolAgent(AsyncAgent):
             max_tokenize_length = max_prompt_length
         else:
             max_tokenize_length = max_length
-        prompt_data = await self.tokenizer.batch_encode_plus_async([prompt_with_tools], add_special_tokens=False)
+
+        prompt_data = await self.tokenizer.batch_encode_plus_async([prompt_with_tools],
+                                                                   add_special_tokens=False,
+                                                                   max_length=max_tokenize_length,
+                                                                   truncation=True)
 
         # set input and attn mask
         item.batch['input_ids'] = torch.tensor(prompt_data.input_ids, dtype=torch.int32)[:, -max_tokenize_length:]
@@ -303,11 +405,39 @@ class ToolAgent(AsyncAgent):
 
         return completion, prompt_with_tools
 
-    async def _call_tool(self, tool_call: FunctionCall, global_step: int) -> Dict[str, str]:
+    async def _call_tool(self,
+                         tool_call: FunctionCall,
+                         global_step,
+                         ci_sandbox_psm,
+                         initial_files=None) -> Dict[str, str]:
         """Execute a tool call and return the response"""
         try:
             tool_name = tool_call.name
             tool_args = json.loads(tool_call.arguments)
+
+            if "id" in tool_args:
+                idx = tool_args['id']
+                if not ('id_' + str(idx) in self.file_properties):
+                    return {
+                        "role": "tool",
+                        "content": "plugin_error (code block not found): Code block {str(idx)} not found"
+                    }
+
+                elif self.file_properties[f'id_{idx}']['called']:
+                    return {
+                        "role":
+                            "tool",
+                        "content":
+                            f"plugin_error (repeat call): Code block {str(idx)} has been called before and no change is detected. Please do not repeat running the same code block"
+                    }
+                else:
+                    code_block = self.file_properties[f'id_{idx}']['content']
+                    self.file_properties[f'id_{idx}']['called'] = True
+                    if self.ci_mode == 'stateful':
+                        tool_name = "JupyterCI_stateful"
+                    else:
+                        tool_name = "JupyterCI_new"
+                    tool_args = {"code": [code_block]}
 
             if tool_name not in self.tools:
                 return {"role": "tool", "content": f"Error: Unknown tool {tool_name}", "name": tool_name}
@@ -316,7 +446,12 @@ class ToolAgent(AsyncAgent):
             instance_id = str(uuid4())
 
             # Execute the tool
-            tool_response = await tool.step(instance_id, tool_name, tool_args, global_step)
+            tool_response, tool_reward_score, tool_metrics = await tool.execute(instance_id,
+                                                                                tool_args=tool_args,
+                                                                                tool_name=tool_name,
+                                                                                global_step=global_step,
+                                                                                ci_sandbox_psm=ci_sandbox_psm,
+                                                                                initial_files=initial_files)
 
             return {"role": "tool", "content": tool_response, "name": tool_name}
 

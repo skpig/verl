@@ -3,6 +3,8 @@ from typing import List
 
 import regex as re
 
+import ast
+
 
 class FunctionCall:
 
@@ -11,7 +13,7 @@ class FunctionCall:
         self.arguments = arguments
 
 
-class HermesToolParser:
+class ToolParser:
     """Tool parser for Hermes format, adapted from verl"""
 
     def __init__(self, tokenizer, config):
@@ -30,16 +32,39 @@ class HermesToolParser:
         function_calls = []
         for match in matches:
             try:
-                function_call = json.loads(match)
-                if isinstance(function_call, list):
-                    for f in function_call:
-                        name, arguments = f["name"], f["arguments"] if "arguments" in f else f["parameters"]
-                        function_calls.append(
-                            FunctionCall(name=name, arguments=json.dumps(arguments, ensure_ascii=False)))
-                else:
-                    name, arguments = function_call["name"], function_call[
-                        "arguments"] if "arguments" in function_call else function_call["parameters"]
+                tree = ast.parse(match)
+                expr = tree.body[0].value
+                assert isinstance(expr, ast.Call), "expr is not a ast.Call"
+                func_name = expr.func.id
+                kwargs_dict = {}
+                for kw in expr.keywords:
+                    key = kw.arg
+                    if isinstance(kw.value, ast.Constant):
+                        value = kw.value.value
+                    elif isinstance(kw.value, ast.List):
+                        value = [ast.literal_eval(item) for item in kw.value.elts]
+                    elif isinstance(kw.value, ast.Dict):
+                        keys = [ast.literal_eval(k) for k in kw.value.keys]
+                        values = [ast.literal_eval(v) for v in kw.value.values]
+                        value = dict(zip(keys, values))
+                    else:
+                        value = ast.literal_eval(ast.dump(kw.value))
+                    kwargs_dict[key] = value
+                function_calls.append(
+                    FunctionCall(name=func_name, arguments=json.dumps(kwargs_dict, ensure_ascii=False)))
+            except:
+                try:
+                    function_call = json.loads(match)
+                    if isinstance(function_call, list):
+                        function_call = function_call[0]
+                    if 'arguments' in function_call:
+                        name, arguments = function_call["name"], function_call["arguments"]
+                    elif 'parameters' in function_call:
+                        name, arguments = function_call["name"], function_call["parameters"]
+                    else:
+                        raise ValueError(f"Invalid function call format: {match}")
                     function_calls.append(FunctionCall(name=name, arguments=json.dumps(arguments, ensure_ascii=False)))
-            except Exception as e:
-                pass  # Skip invalid tool calls
+                except Exception as e:
+                    print(f"Error parsing function call: {match}. Error: {e}")
+                    pass
         return function_calls

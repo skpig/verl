@@ -144,7 +144,7 @@ class SearchEnv(BaseEnv):
         func_name, _ = parse_func_call_kwargs(action)
         return func_name in ["Search", "GlobalSearch"]
 
-    async def step(self, instance_id, tool_name, tool_args: dict, global_step: int) -> str:
+    async def step(self, instance_id, tool_name, tool_args: dict, global_step: int, **kwargs) -> str:
         assert tool_name in ["Search", "GlobalSearch"]
         action = tool_args["query"]
         self._call_count += 1

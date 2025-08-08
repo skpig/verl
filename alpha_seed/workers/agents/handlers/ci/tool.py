@@ -59,9 +59,9 @@ class JupyterCI(BaseTool):
         tool_schema = OpenAIFunctionToolSchema.model_validate(schema)
         return tool_schema
 
-    async def execute(self, instance_id: str, parameters: dict[str, Any], **kwargs) -> Tuple[str, float, dict]:
+    async def execute(self, instance_id: str, tool_args: dict[str, Any], **kwargs) -> Tuple[str, float, dict]:
         # try:
-        response = await self.submit_python_jupyter(parameters['code'], kwargs['ci_sandbox_psm'])
+        response = await self.submit_python_jupyter(tool_args['code'], kwargs['ci_sandbox_psm'])
         if os.getenv('PRINT_JUPYTER_RESPONSE', '0') == '1':
             print('[doubao_code_interpreter] jupyter_response:', response)
         return response, 0, {}
@@ -217,13 +217,13 @@ class JupyterCI_stateful(BaseTool):
         tool_schema = OpenAIFunctionToolSchema.model_validate(schema)
         return tool_schema
 
-    async def execute(self, instance_id: str, parameters: dict[str, Any], initial_files,
+    async def execute(self, instance_id: str, tool_args: dict[str, Any], initial_files,
                       **kwargs) -> Tuple[str, float, dict]:
         _start_time = time.time()
         # try:
         if self.jupyter_env_id is None:
             await self.start_up_jupyter_w_state(initial_files)
-        response = await self.submit_python_jupyter_w_state({'code_blocks': parameters['code']},
+        response = await self.submit_python_jupyter_w_state({'code_blocks': tool_args['code']},
                                                             env_id=self.jupyter_env_id)
         if "⚠️ Jupyter Sandbox Restarted" in response:
             self.jupyter_env_id = None

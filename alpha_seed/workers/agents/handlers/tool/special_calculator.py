@@ -10,7 +10,7 @@ from alpha_seed.utils.tokenizer.async_tokenizer import AsyncTokenizer
 from alpha_seed.workers.agents.handlers import register_handler, TaskContext
 from alpha_seed.workers.agents.handlers.base import AsyncAgent
 from alpha_seed.workers.agents.llm import AsyncLLMInterface
-from alpha_seed.workers.agents.handlers.tool.parser import FunctionCall, HermesToolParser
+from alpha_seed.workers.agents.handlers.tool.parser import FunctionCall, ToolParser
 from mono_rl import DataProto
 from verl.tools.base_tool import BaseTool
 from verl.tools.schemas import OpenAIFunctionToolSchema
@@ -78,7 +78,7 @@ class ToolAgent(AsyncAgent):
     def __init__(self, tokenizer: AsyncTokenizer | PreTrainedTokenizer, llm: AsyncLLMInterface, **kwargs):
         super().__init__(tokenizer, llm, **kwargs)
         self.calculator = Calculator()
-        self.tool_parser = HermesToolParser(tokenizer, self.config)
+        self.tool_parser = ToolParser(tokenizer, self.config)
         self.tools = {"calculate": self.calculator}
         # Get tool schema for the calculator
         self.tool_schemas = [self.calculator.get_openai_tool_schema().model_dump(exclude_unset=True, exclude_none=True)]
