@@ -69,27 +69,6 @@ from alpha_seed.utils.chat_template import CHATML, CHATML_TOOL, CHATML_TOOL_V2, 
 from alpha_seed.workers.streaming_service.rollout_request_manager import RequestManager, RequestManagerRegisterCenter
 from databus import collect_array
 
-
-def patch_print():
-    """全局替换内置的 print 函数, 为其添加时间戳"""
-    import builtins
-    from datetime import datetime
-
-    if hasattr(builtins, 'print_patched'):
-        return
-
-    _original_print = builtins.print
-
-    def tprint(*args, **kwargs):
-        """一个会添加时间戳的自定义 print 函数"""
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-        _original_print(f"[{timestamp}]", *args, **kwargs)
-
-    builtins.print = tprint
-    builtins.print_patched = True
-
-
-patch_print()
 user_email = os.getenv('ARNOLD_LARK_RECEIVER', '')
 task_url = os.getenv('ARNOLD_ORIGIN_PLATFORM_URL', '')
 ARNOLD_TRIAL_ID = os.environ.get("ARNOLD_TRIAL_ID", "0")
@@ -968,7 +947,6 @@ def init_ray(config: DictConfig):
             'TRITON_REMOTE_CACHE_BACKEND': 'alpha_seed.utils.redis.triton_redis:BytedRedisRemoteCacheBackend'
         }
         runtime_env = {
-            'worker_process_setup_hook': patch_print,
             'env_vars': {
                 'TOKENIZERS_PARALLELISM': 'true',
                 'BPEX_NO_WARN_ON_UNTUNED_CASE': '1',
