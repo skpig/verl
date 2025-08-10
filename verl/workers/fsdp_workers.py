@@ -1018,6 +1018,7 @@ class CriticWorker(Worker, DistProfilerExtension):
 
         use_shm = config.model.get("use_shm", False)
         local_path = copy_to_local(config.model.path, use_shm=use_shm)
+        print("[Critic] Init model from path:", config.model.path)
         # note that the tokenizer between actor and critic may be different. So override tokenizer info with actor info
         # using random initialized model from any architecture. May not be the same as Actor.
 
