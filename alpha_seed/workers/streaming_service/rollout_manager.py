@@ -498,7 +498,7 @@ class RolloutManager:
         return batch
 
     def train_generate_queued(self, train_batch_iter, step: int, metrics: Dict = None) -> DataProto:
-        """Train generation in queued style 
+        """Train generation in queued style
         :param train_batch_iter: generator to get gen input batch
         :param step: current training step
         :param metrics: metrics dict

@@ -79,7 +79,9 @@ CHANNEL = "llm_channel"
 
 
 def post_process_solution_str(config, solution_str, reward_style, eos_token):
-    solution_str = solution_str.rsplit(eos_token, 1)[0]
+    if solution_str.endswith(eos_token):
+        solution_str = solution_str[:-len(eos_token)]
+    solution_str = solution_str.split(eos_token, 1)[-1]
     if reward_style == "code-sandbox" and config.reward_model.use_last_response == 'lastcodeblock':
         solution_str_post_proc = response_post_proc.last_codeblock_postprocess(
             solution_str,

@@ -25,6 +25,7 @@ import copy
 import numpy as np
 import pandas as pd
 import torch
+import json
 import verl.utils.torch_functional as verl_F
 from PIL import Image
 
@@ -337,6 +338,7 @@ class RLHFDatasetVL(RLHFDataset):
 
         row_dict_ret = {}
         row_dict_ret["agent_handler"] = row_dict.get("agent_handler", "")
+        row_dict_ret["initial_files"] = row_dict.get("initial_files", json.dumps({'initial_files': {}}))
 
         chat = row_dict[self.prompt_key]
         # encode prompts without chat template

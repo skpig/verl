@@ -61,11 +61,7 @@ class Agentless(ThreadedAgent):
                                                                          pad_token_id=self.tokenizer.pad_token_id,
                                                                          left_pad=True,
                                                                          truncation=truncation)
-        prompt = {
-            "prompt_names": [""],
-            "input_ids": input_ids[0].to(torch.int32),
-            "attention_mask": attention_mask[0].to(torch.int8)
-        }
+        prompt = {"input_ids": input_ids[0].to(torch.int32), "attention_mask": attention_mask[0].to(torch.int8)}
 
         _row_dict = {
             **row_dict,
@@ -92,9 +88,12 @@ class Agentless(ThreadedAgent):
         _item.meta_info = copy.copy(meta_info)
         return _item
 
-    def _postprocess(self, completion, item: DataProto, rollout_config: DictConfig, tagkv: Dict) -> DataProto:
+    def _postprocess(self, completion, item: DataProto, origin_prompt, rollout_config: DictConfig,
+                     tagkv: Dict) -> DataProto:
         data_pack = DataPack.create_from_completion_dict(completion['choices'][0]['message'])
         out = pack_to_dataproto(item, self.tokenizer, data_pack, rollout_config)  # dataproto
+        out.non_tensor_batch['prompt_names'] = copy.deepcopy(origin_prompt.get('prompt_names'))
+        out.non_tensor_batch['raw_prompt'] = copy.deepcopy(origin_prompt.get('raw_prompt'))
 
         def extra_fill_datapack():
             out.non_tensor_batch['data_pack'] = np.array([data_pack], dtype=object)
@@ -125,7 +124,6 @@ class Agentless(ThreadedAgent):
             **kwargs
         }],
                                                          dtype=object)
-
         item.non_tensor_batch['agent_num_turns'] = np.array([kwargs.get('num_turns', 0)], dtype=object)
         item.non_tensor_batch['agent_num_tool_calls'] = np.array([kwargs.get('num_tool_calls', 0)], dtype=object)
         return item
@@ -142,6 +140,10 @@ class Agentless(ThreadedAgent):
         wait_for_task_timeout = float(config.rollout_server.get('wait_for_request_timeout', 600))
         wait_for_request_timeout = float(config.rollout_server.get('wait_for_request_timeout', 3600))
 
+        origin_prompt = {
+            'prompt_names': copy.deepcopy(item.non_tensor_batch['raw_prompt']),
+            'raw_prompt': copy.deepcopy(item.non_tensor_batch['raw_prompt'])
+        }
         prompt_meta = self._extract_prompt_meta(item)
         row_dict = self._extract_row_dict(item)
         meta_info = copy.copy(item.meta_info)
@@ -340,7 +342,7 @@ class Agentless(ThreadedAgent):
                         )
                         break
 
-                    out = self._postprocess(completion, turn_item, rollout_config, _tagkv)
+                    out = self._postprocess(completion, turn_item, origin_prompt, rollout_config, _tagkv)
                     get_proxy_client().respond_turn(turn_task_meta_info.task_id, out)
                 elif status == Status.RUN_ROLLOUT:
                     get_metrics_client().emit_counter("agentbench.handler.rollout_fail", 1, tags=_tagkv)
@@ -436,6 +438,7 @@ class Agentless(ThreadedAgent):
         if score is not None:
             train_samples = build_training_samples(self._build_records, task, score, trajectory, rollout_config,
                                                    context)
+            logging.info(f"agentbench_handler: task[{prompt_meta=}] score is {score}, {len(train_samples)=}")
         else:
             logging.info(f"agentbench_handler: task[{prompt_meta=}] score is None")
             train_samples = []

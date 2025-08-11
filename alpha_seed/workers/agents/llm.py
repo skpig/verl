@@ -13,6 +13,7 @@ from alpha_seed.workers.xperf_rollout.component.query import Query
 from alpha_seed.workers.streaming_service.protocol import ChatCompletionRollout, ChoiceRollout, ChatCompletionMessageRollout, CompletionUsage
 import uuid
 import time
+import numpy as np
 from mono_rl import DataProto
 from mono_rl.utils.network import is_ipv6
 
@@ -30,7 +31,10 @@ def make_reqeust_data_and_metadata(item: DataProto, prompt: str, host, port):
     if 'image_data_ref' in item.non_tensor_batch:
         image_data_ref = item.non_tensor_batch['image_data_ref']
         if image_data_ref is not None and len(image_data_ref) > 0:
-            assert isinstance(image_data_ref, list)
+            assert isinstance(image_data_ref, list) or isinstance(
+                image_data_ref, np.ndarray), f"type of image_data_ref error: {type(image_data_ref)}"
+            if isinstance(image_data_ref, np.ndarray):
+                image_data_ref = image_data_ref.tolist()
             data['image_data_ref'] = image_data_ref
     meta_info = copy.copy(item.meta_info)
     # required for eos callback
