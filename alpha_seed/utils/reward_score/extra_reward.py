@@ -227,8 +227,10 @@ def filter_thinking_part_v2(response, eos_token=None):
     return response, success
 
 
-def filter_thinking_part(response, eos_token=None):
-    think_template = os.getenv("THINK_TEMPLATE", "v2")
+def filter_thinking_part(response, config=None, think_template=None):
+    if think_template is None:
+        assert config is not None
+        think_template = config.data.think_template if hasattr(config.data, 'think_template') else 'v2'
     print("[debug think_template 1 ]", think_template)
     if think_template == 'v1':
         return filter_thinking_part_v1(response)
@@ -239,7 +241,7 @@ def filter_thinking_part(response, eos_token=None):
 
 
 def punish_format_return_positions_vlm(text, config):
-    think_template = os.getenv("THINK_TEMPLATE", "v2")
+    think_template = config.data.think_template if hasattr(config.data, 'think_template') else "v2"
     print(f"[debug think_template] {think_template}")
     if think_template == 'v1':
         pattern = re.compile(r'(<\|begin_of_thought\|>)|(<\|end_of_thought\|>)|'

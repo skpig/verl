@@ -11,8 +11,11 @@ logger = logging.getLogger(__file__)
 
 def compute_score(solution_str, ground_truth, **kwargs) -> float:
     tokenizer = kwargs['tokenizer']
+    config = kwargs['config']
+    think_template = config.data.think_template if hasattr(config.data, 'think_template') else 'v2'
     try:
-        score, tag = submit_verifier(solution_str, ground_truth, tokenizer.eos_token, tokenizer.bos_token)
+        score, tag = submit_verifier(solution_str, ground_truth, tokenizer.eos_token, tokenizer.bos_token,
+                                     think_template)
     except FunctionTimedOut:
         logger.info(f"timeout when compute score for {solution_str} and {ground_truth}")
         score = -2
@@ -20,7 +23,7 @@ def compute_score(solution_str, ground_truth, **kwargs) -> float:
 
 
 @func_set_timeout(30)
-def submit_verifier(decoded_text, verifier_feature, eos_token, bos_token):
+def submit_verifier(decoded_text, verifier_feature, eos_token, bos_token, think_template):
     tag = 'none'
     if not decoded_text:
         return -0.1, tag
@@ -29,7 +32,7 @@ def submit_verifier(decoded_text, verifier_feature, eos_token, bos_token):
         raise ValueError(f"must provide verifier feature")
 
     ## check format if invalid, return 0
-    extracted_response, success = filter_thinking_part(decoded_text)
+    extracted_response, success = filter_thinking_part(decoded_text, think_template=think_template)
     if not success:
         return 0, tag
     response = extracted_response

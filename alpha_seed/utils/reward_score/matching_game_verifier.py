@@ -112,7 +112,7 @@ def calculate_matching_score(label_segments, predicted_segments):
 
 
 def compute_score(solution_str, ground_truth, **kwargs):
-    solution_str, success = filter_thinking_part(solution_str)
+    solution_str, success = filter_thinking_part(solution_str, kwargs['config'])
     if solution_str == "":
         # ExtractAnswerFailed
         return extract_answer_failed_reward()

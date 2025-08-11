@@ -1,4 +1,3 @@
-from alpha_seed.utils.reward_score.extra_reward import filter_thinking_part, extract_answer_failed_reward
 from alpha_seed.utils.reward_score.verifier.tools import extract_and_convert_number
 from alpha_seed.utils.reward_score import point_verifier
 from alpha_seed.utils.reward_score import bbox_verifier
@@ -19,7 +18,7 @@ def compute_score(solution_str, ground_truth, delta, **kwargs):
 
     if "<point>" in solution_str:
         ground_truth['answer'] = point_answer
-        point_score = point_verifier.compute_score(solution_str, ground_truth)
+        point_score = point_verifier.compute_score(solution_str, ground_truth, **kwargs)
     elif "<bbox>" in solution_str:
         bbox_answer = []
         for point in point_answer:
@@ -27,7 +26,7 @@ def compute_score(solution_str, ground_truth, delta, **kwargs):
             x2, y2 = point[3][0], point[3][1]
             bbox_answer.append([x1, y1, x2, y2])
         ground_truth['answer'] = bbox_answer
-        point_score = bbox_verifier.compute_score(solution_str, ground_truth)
+        point_score = bbox_verifier.compute_score(solution_str, ground_truth, **kwargs)
     else:
         point_score = 0 if count_answer != 0 else 1
 

@@ -208,8 +208,6 @@ class VisualCotAgent(AsyncAgent):
         image_data_ref = [None] * max_turns
         real_image_data_ref = last_data['image_data_ref']
         image_data_ref[:len(real_image_data_ref)] = real_image_data_ref
-        if sum(img_token_num_list[1:]) // 4 != len([i for i in total_output_ids if i == -100]):
-            breakpoint()
         assert sum(img_token_num_list[1:]) // 4 == len([i for i in total_output_ids if i == -100
                                                        ]), 'img token num not match'
 

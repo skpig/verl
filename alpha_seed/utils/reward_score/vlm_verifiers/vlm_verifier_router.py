@@ -12,9 +12,10 @@ logger = logging.getLogger(__file__)
 
 # Note: AlphaSeed uses [-1, +1] for reward scores and -2 for error handling, which is different from SeedRL's [0, 1].
 def compute_score(solution_str, ground_truth, code_sandbox_psm: str, volc_ark_key: str, volc_model_name: str,
-                  **kwargs) -> float:
+                  think_template: str, **kwargs) -> float:
     try:
-        ref = submit_verifier.remote(solution_str, ground_truth, code_sandbox_psm, volc_ark_key, volc_model_name)
+        ref = submit_verifier.remote(solution_str, ground_truth, code_sandbox_psm, volc_ark_key, volc_model_name,
+                                     think_template)
         try:
             score = ray.get(ref, timeout=1500)
         except ray.exceptions.GetTimeoutError:
@@ -39,16 +40,18 @@ def compute_score_client(solution_str, ground_truth, code_sandbox_psm: str, volc
         handler = ray.get_actor('remote_client')
         # retrieve the score directly
         score = ray.get(handler.get_results.remote(data_uid))
+    think_template = config.data.think_template if hasattr(config.data, 'think_template') else 'v2'
 
     if score is None:
-        score = compute_score(solution_str, ground_truth, code_sandbox_psm, volc_ark_key, volc_model_name)
+        score = compute_score(solution_str, ground_truth, code_sandbox_psm, volc_ark_key, volc_model_name,
+                              think_template)
 
     return score
 
 
 @ray.remote(num_cpus=1)
 def submit_verifier(response: str, verifier_feature: str, code_sandbox_psm: str, volc_ark_key: str,
-                    volc_model_name: str):
+                    volc_model_name: str, think_template: str):
     full_rollout = response
 
     if not response:
@@ -84,7 +87,7 @@ def submit_verifier(response: str, verifier_feature: str, code_sandbox_psm: str,
         k = response.rfind(bos_token)
 
     # Verify if it follows the VisualCoT format. Allow the last turn to be FC to support LLM FC data.
-    if verifier_name not in ('verifier_vstar', 'verifier_zerobench') and os.getenv("THINK_TEMPLATE", "v2") != "v1":
+    if verifier_name not in ('verifier_vstar', 'verifier_zerobench') and think_template != "v1":
         # Skip these two for now. May delete this `if` in the future.
         if not match_visual_cot_format(response, verifier_feature=feature, allow_last_turn_fc=True):
             response = ''  # Let it fail.
@@ -97,7 +100,7 @@ def submit_verifier(response: str, verifier_feature: str, code_sandbox_psm: str,
         if k >= 0:
             response = response[k + len(bos_assistant_nl):]
         # Discard the CoT part:
-        response, _ = filter_thinking_part(response)
+        response, _ = filter_thinking_part(response, think_template=think_template)
 
     try:
         if response == '':

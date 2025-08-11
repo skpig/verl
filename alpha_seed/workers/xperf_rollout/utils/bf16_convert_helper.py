@@ -444,7 +444,6 @@ def _reshard_fsdp_state_dict_to_xperf_deepseek_v3(tp_model, state_dict, device_m
             q_b_proj_weight_src = q_b_proj_weight_src.redistribute(device_mesh=device_mesh,
                                                                    placements=[Replicate(), Shard(0)])._local_tensor
 
-        # breakpoint()
         assert q_a_proj_weight.data.shape == q_a_proj_weight_src.shape
         q_a_proj_weight.data = q_a_proj_weight_src.cpu().contiguous()
 

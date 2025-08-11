@@ -113,7 +113,7 @@ def get_bbox_metrics(predict_bboxes, gt_ans, iou_rwei=1.0, PN=20):
 
 
 def compute_score(solution_str, ground_truth, **kwargs):
-    solution_str, success = filter_thinking_part(solution_str)
+    solution_str, success = filter_thinking_part(solution_str, kwargs['config'])
     if solution_str == "":
         # ExtractAnswerFailed
         return extract_answer_failed_reward()

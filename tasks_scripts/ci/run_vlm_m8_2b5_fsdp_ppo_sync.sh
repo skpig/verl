@@ -3,7 +3,6 @@ set -x
 NUM_STEPS="${NUM_STEPS:-1}"
 echo $NUM_STEPS
 
-export THINK_TEMPLATE=v1
 
 # ckpt和路径
 SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/hl_lq/iccv/user/lingyue/checkpoints/xperf/m8_2b5_32k_seedvit_400m_baseline_openthought_8k_simplified_sys_fix_dropout_rope50
@@ -25,9 +24,9 @@ echo "default_hdfs_dir ${default_hdfs_dir}"
 max_prompt_length=8192
 max_response_length=4096
 # batch size && 训练epoch
-train_batch_size=4096
+train_batch_size=16
 val_batch_size=3039
-ppo_mini_batch_size=256
+ppo_mini_batch_size=8
 critic_warmup=0
 
 total_epochs=100
@@ -184,4 +183,5 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.ref.max_token_len=${actor_ref_max_token_len} \
     critic.ppo_max_token_len=${critic_ppo_max_token_len} \
     trainer.offload_train_memory=True \
-    actor_rollout_ref.model.use_ce_loss_fusion=True
+    actor_rollout_ref.model.use_ce_loss_fusion=True \
+    +data.think_template=v1
