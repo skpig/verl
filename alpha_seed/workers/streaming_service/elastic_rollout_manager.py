@@ -9,6 +9,7 @@ from alpha_seed.utils.server_client import is_local_ray_instance
 from alpha_seed.workers.streaming_service.auto_scaling import ScalePolicyConfig, HorizontalAutoScaling
 from alpha_seed.workers.streaming_service.rollout_proxy import BalancedRolloutWorkerGroupProxy, CombinedRayWorkerGroupAdapter, StandaloneRolloutWGAdapter
 from alpha_seed.workers.streaming_service.streaming_rollout import ElasticAsyncXPerfGPTRollout
+from alpha_seed.workers.xperf_rollout.utils.base_weights_communicator import WeightsRankInfo
 from mono_rl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, RayResourcePool
 from mono_rl.single_controller.ray.replicated_worker_group import ReplicatedRayWorkerGroup, ScalingRayWorkerGroup
 
@@ -18,11 +19,11 @@ class ElasticRolloutManager:
     def __init__(self, config):
         self.config = config
         self.standalone_rollout_ha: Optional[HorizontalAutoScaling] = None
-        self._hybrid_rollout_addresses_fut = None
-        self._rollout_relay_addresses: List[List[str]] = []  # [[tp0, tp1], [tp0, tp1], ...]
+        self._hybrid_rollout_source_info: List[WeightsRankInfo] = []
+        self._rollout_relay_addresses: List[List[WeightsRankInfo]] = []  # [[tp0, tp1], [tp0, tp1], ...]
 
-    def set_hybrid_rollout_address(self, hybrid_rollout_address):
-        self._hybrid_rollout_addresses_fut = hybrid_rollout_address
+    def set_hybrid_rollout_source_info(self, hybrid_rollout_address):
+        self._hybrid_rollout_source_info = hybrid_rollout_address
 
     def init_elastic_rollout(self, hybrid_replica: ReplicatedRayWorkerGroup):
         rollout_config = self.config.streaming_rollout
@@ -31,18 +32,16 @@ class ElasticRolloutManager:
         tp_size = sum(res_shape)
 
         # 依赖actor的address作为ucx endpoint
-        hybrid_rollout_addrs = ray.get(self._hybrid_rollout_addresses_fut)
-        print(f"all ucx source addresses: {hybrid_rollout_addrs}")
+        hybrid_rollout_rank_info: List[WeightsRankInfo] = self._hybrid_rollout_source_info
+        print(f"all ucx source addresses: {hybrid_rollout_rank_info}")
 
         # 按照rollout的dp world进行切分，一定是正好切够的
-        assert len(hybrid_rollout_addrs) % tp_size == 0, \
-            f"hybrid rollout world size({len(hybrid_rollout_addrs)}) should be divisible by dp_world_size({tp_size})"
-        # 按TP维度切片，将相同tp rank的放一起
-        # shape: (tp_size, dp_size)
-        # [[TP0, ...] [TP1, ...] [TP2, ...] [TP3, ...]]
-        hybrid_dp_size = len(hybrid_rollout_addrs) // tp_size
-        hybrid_rollout_addresses_tp_groups = [
-            [hybrid_rollout_addrs[i * tp_size + j] for i in range(hybrid_dp_size)] for j in range(tp_size)
+        assert len(hybrid_rollout_rank_info) % tp_size == 0, \
+            f"hybrid rollout world size({len(hybrid_rollout_rank_info)}) should be divisible by dp_world_size({tp_size})"
+        # shape: (dp_size, tp_size)
+        # [[TP0, TP1, ...] [TP0, TP1, ...] ...]
+        hybrid_rollout_info_tp_groups = [
+            hybrid_rollout_rank_info[i:i + tp_size] for i in range(0, len(hybrid_rollout_rank_info), tp_size)
         ]
 
         # streaming+elastic的standalone rollout初始化
@@ -50,16 +49,13 @@ class ElasticRolloutManager:
         rollout_cls = RayClassWithInitArgs(cls=ElasticAsyncXPerfGPTRollout,
                                            config=self.config.actor_rollout_ref,
                                            role="rollout_server",
-                                           hybrid_rollout_addrs=hybrid_rollout_addrs)
+                                           hybrid_rollout_info=hybrid_rollout_rank_info)
 
         def initial_stable_model_setup_comm(wg: Union[RayWorkerGroup, ElasticAsyncXPerfGPTRollout]) -> List[ObjectRef]:
             # 需要确保actor初始化好才能setup rollout作为client去获取参数
             # 连上hybrid rollout 或者 stable standalone rollout获取参数
-            # 从dp group里随机选一组地址以负载平衡，更大规模的负载平衡再换别的分配的方式
-            random_dp_rank = random.randint(0, len(hybrid_rollout_addresses_tp_groups[0]) - 1)
-            hybrid_tp_group = [group[random_dp_rank] for group in hybrid_rollout_addresses_tp_groups]
             # 返回relay address，即此rollout自己as server的address
-            return wg.init_and_setup(hybrid_tp_group, setup_relay=True)
+            return wg.init_and_setup(hybrid_rollout_info_tp_groups, setup_relay=True)
 
         # 每个rollout_worker用1个gpu
         res_shape = [self.config.streaming_rollout.n_gpus_per_node] * self.config.streaming_rollout.nnodes
@@ -90,16 +86,16 @@ class ElasticRolloutManager:
 
         # 等待stable standalone rollout启动完成
         # [tp0, tp1, tp0, tp1, ...]
-        relay_addrs: List[str] = ray.get(min_replicas_init_fut)
+        relay_addrs: List[WeightsRankInfo] = ray.get(min_replicas_init_fut)
         # [[tp0, tp1], [tp0, tp1], ...]
         self._rollout_relay_addresses = [relay_addrs[i:i + tp_size] for i in range(0, len(relay_addrs), tp_size)]
         print(f'relay ready, address tp groups: {self._rollout_relay_addresses}')
 
         def elastic_model_setup_comm(wg: Union[RayWorkerGroup, ElasticAsyncXPerfGPTRollout]) -> List[ObjectRef]:
-            relay_tp_group = random.choice(self._rollout_relay_addresses)
-
             # 直接拉参数，拉完立刻ready可接受请求
-            return wg.init_and_setup(relay_tp_group, setup_relay=False, intermediately_update_weights=True)
+            return wg.init_and_setup(self._rollout_relay_addresses,
+                                     setup_relay=False,
+                                     intermediately_update_weights=True)
 
         # 弹性池跑伸缩副本
         elastic_res_pool = RayResourcePool(
@@ -117,7 +113,8 @@ class ElasticRolloutManager:
             persistent={'elastic': elastic_replicas},
         )
         # 封装给worker group的接口代理
-        rollout_proxy = BalancedRolloutWorkerGroupProxy(replicas, hybrid_rollout_addrs, 'train_rollout', rollout_config)
+        rollout_proxy = BalancedRolloutWorkerGroupProxy(replicas, hybrid_rollout_rank_info, 'train_rollout',
+                                                        rollout_config)
 
         # initialize rollout horizontal auto scaling control handle
         elastic_pool_name = self.config.streaming_rollout.elastic.elastic_pool_name

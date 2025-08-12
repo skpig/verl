@@ -1,12 +1,29 @@
-from typing import List
+from dataclasses import dataclass
+from typing import List, Tuple
+
+
+@dataclass
+class WeightsRankInfo:
+    rank: int
+    dp_rank: int
+    tp_rank: int
+    ip: str  # oob address (eth0 or bond0 or so on)
+    worker_name: str
+    ucx_address: str  # ip:port 格式的ucx server的地址
+    oob_address: str  # ip:port 格式的oob控制地址(http或tcp)
+    pid: int  # rank process id
 
 
 class WeightsCommunicator:
 
-    def setup_as_client(self, role, source_address: str):
+    def setup_as_client(self, role, source_endpoint_info: List[WeightsRankInfo]):
         pass
 
-    def setup_as_server(self, ifname=None) -> str:
+    def setup_as_server(self, ifname=None) -> Tuple[str, str]:
+        """
+        setup the server client/server mode
+        return the main traffic address and oob control traffic address in format ip:port
+        """
         pass
 
     def setup_standalone_worker_comm(self, hybrid_master_address, standalone_master_address, port, role):
@@ -28,7 +45,7 @@ class WeightsCommunicator:
         """
         return
 
-    def update_standalone_worker_end(self, addresses: List[str]):
+    def update_standalone_worker_end(self, addresses: List[WeightsRankInfo]):
         """
         broadcast finishing signal to all hybrid rollout instance to tell them to exit weights serving mode.
         (due to be unable to interrupt the hybrid rollout rpc when serving is up, introduce this function)

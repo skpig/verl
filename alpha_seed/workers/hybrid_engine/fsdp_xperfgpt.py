@@ -59,6 +59,7 @@ class ActorXPerfGPTShardingManager(BaseShardingManager):
                  only_bind_once=False,
                  backend='fsdp',
                  weights_communicator="nccl",
+                 weights_communicator_enable_aiomonitor=False,
                  enable_actor_critic_spatial_mux=False):
         super().__init__()
         self.module = module
@@ -66,6 +67,7 @@ class ActorXPerfGPTShardingManager(BaseShardingManager):
         self.device_mesh = device_mesh
         self.model_config = model_config
         self.weights_communicator = weights_communicator
+        self.weights_communicator_enable_aiomonitor = weights_communicator_enable_aiomonitor
         self.enable_actor_critic_spatial_mux = enable_actor_critic_spatial_mux
 
         # here standalone means standalone validator or standalone validator
@@ -96,7 +98,7 @@ class ActorXPerfGPTShardingManager(BaseShardingManager):
         self.weights_communicator = CommunicatorCls(inference_engine=self.inference_engine,
                                                     standalone=self.standalone,
                                                     device_mesh=self.device_mesh,
-                                                    enable_aiomonitor=False)  # 外面config不方便传集哪里，这里先默认False
+                                                    enable_aiomonitor=self.weights_communicator_enable_aiomonitor)
 
     def release_param_and_cache(self):
         """Release the GPU memory occupied by xperf parameter and cache"""

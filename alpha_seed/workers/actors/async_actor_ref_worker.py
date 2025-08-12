@@ -59,6 +59,7 @@ from datetime import timedelta
 from .checkpoint import CheckpointManagerWrapper
 from ..streaming_service.streaming_utils import get_free_port_for_nccl_primitive
 from ..xperf_rollout.session import LoadMetric
+from ..xperf_rollout.utils.base_weights_communicator import WeightsRankInfo
 
 # mariana dependency
 try:
@@ -111,7 +112,7 @@ class AsyncActorRolloutRefWorker(Worker):
         self.actor_strategy = config.actor.strategy
         self.ref_strategy = config.ref.strategy
         self.local_path = None
-        self.hybrid_rollout_addresses = None
+        self.hybrid_rollout_info = None
         self.enable_actor_critic_spatial_mux = enable_actor_critic_spatial_mux
 
         self._is_valid_actor = self._is_actor
@@ -253,6 +254,7 @@ class AsyncActorRolloutRefWorker(Worker):
 
         # Note that in standalone case, model is None.
         weights_communicator = self.config.rollout.weights_communicator
+        enable_aiomonitor = self.config.rollout.weights_communicator_enable_aiomonitor
         if self.actor_strategy in ('fsdp', 'vescale-fsdp2'):
             sharding_manager = FSDPXPerfGPTShardingManager(
                 module=self.actor_module_fsdp,
@@ -263,6 +265,7 @@ class AsyncActorRolloutRefWorker(Worker):
                 only_bind_once=self.role == "rollout",
                 backend='fsdp',
                 weights_communicator=weights_communicator,
+                weights_communicator_enable_aiomonitor=enable_aiomonitor,
                 enable_actor_critic_spatial_mux=self.enable_actor_critic_spatial_mux)
         elif self.actor_strategy == 'megatron':
             sharding_manager = MegatronXPerfGPTShardingManager(module=self.actor_module_mariana,
@@ -355,21 +358,46 @@ class AsyncActorRolloutRefWorker(Worker):
         if remove_safetensors_after_init:
             cleanup_local_tmp_folder_safetensors_files(self.actor_model_config._name_or_path)
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
     def setup_as_server(self, ifname=None):
-        return self.sharding_manager.weights_communicator.setup_as_server(ifname)
-
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    def setup_as_relay(self, ifname=None):
-        return self.sharding_manager.weights_communicator.setup_as_server(ifname)
+        ucx_address, oob_address = self.sharding_manager.weights_communicator.setup_as_server(ifname)
+        tp_size = self.config.rollout.tensor_model_parallel_size
+        return WeightsRankInfo(
+            rank=self.rank,  # 对于hybrid rollout来说，因为是一整个dp，所以这里是global rank
+            dp_rank=self.rank // tp_size,
+            tp_rank=self.rank % tp_size,
+            ip=self._get_node_ip(),
+            worker_name=self._get_actor_name(),
+            ucx_address=ucx_address,
+            oob_address=oob_address,
+            pid=os.getpid(),
+        )
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
-    def setup_as_client(self, role, source_addresses, all_rollout_addresses):
+    def setup_as_relay(self, ifname=None):
+        ucx_address, oob_address = self.sharding_manager.weights_communicator.setup_as_server(ifname)
+        return WeightsRankInfo(
+            rank=0,  # 对于standalone rollout来说，因为每个dp都是独立的，所以这里rank和dp_rank暂时为0算
+            dp_rank=0,
+            tp_rank=self.rank,  # 只有一个dp，所以就是tp rank
+            ip=self._get_node_ip(),
+            worker_name=self._get_actor_name(),
+            ucx_address=ucx_address,
+            oob_address=oob_address,
+            pid=os.getpid(),
+        )
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
+    def setup_as_client(self, role, source_addresses: List[List[WeightsRankInfo]],
+                        all_rollout_info: List[WeightsRankInfo]):
         # source_addresses: length等于自己的world size，根据自己的rank一一对应一个address即可
         # all_rollout_addresses: length等于hybrid rollout的world size
-        self.hybrid_rollout_addresses = all_rollout_addresses
-        source_address = source_addresses[self.rank]
-        self.sharding_manager.weights_communicator.setup_as_client(role, source_address)
+        self.hybrid_rollout_info = all_rollout_info
+        tp_size = self.config.rollout.tensor_model_parallel_size
+        # 按tp取整个dp group切片，% tp_size为了避免self是一个整个world包含多个dp(elastic下只会有1个dp，非elastic有多个dp)
+        tp_rank = self.rank % tp_size
+        source_info_this_tp = [dp[tp_rank] for dp in source_addresses]
+        self.sharding_manager.weights_communicator.setup_as_client(role, source_info_this_tp)
 
     def _normalize_config(self):
         config = self.config
@@ -528,7 +556,7 @@ class AsyncActorRolloutRefWorker(Worker):
         # this function should only be invoked by standalone worker
         assert self._is_rollout or self._is_standalone_rollout or self._is_standalone_validator
         # 通知所有actor server退出weights transfer
-        self.sharding_manager.weights_communicator.update_standalone_worker_end(self.hybrid_rollout_addresses)
+        self.sharding_manager.weights_communicator.update_standalone_worker_end(self.hybrid_rollout_info)
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO, blocking=True)
     def load_and_transform_save_image(self, prompts: DataProto):

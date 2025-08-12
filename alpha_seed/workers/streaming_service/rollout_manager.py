@@ -24,6 +24,7 @@ from alpha_seed.workers.streaming_service.elastic_rollout_manager import Elastic
 from alpha_seed.workers.streaming_service.rollout_proxy import FixedReplicatedRayWorkerGroupAdapter, \
     RolloutWorkerGroupProxy, BalancedRolloutWorkerGroupProxy, CombinedRayWorkerGroupAdapter
 from alpha_seed.workers.streaming_service.streaming_rollout import RemoteAsyncXPerfGPTRollout
+from alpha_seed.workers.xperf_rollout.utils.base_weights_communicator import WeightsRankInfo
 from mono_rl import DataProto
 from mono_rl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, RayResourcePool
 from mono_rl.single_controller.ray.replicated_worker_group import ReplicatedRayWorkerGroup, ScalingRayWorkerGroup
@@ -60,12 +61,13 @@ def _setup_standalone_comm(hybrid_wg, standalone_wg, role: str):
     ray.get(slave_fut)
 
 
-def _setup_standalone_comm_ucx(all_actor_addresses, standalone_wg, role: str):
-    print(f"all ucx source addresses: {all_actor_addresses}")
-    source_address_iter = itertools.cycle(all_actor_addresses)
-    addresses = [next(source_address_iter) for _ in range(standalone_wg.world_size)]
-    standalone_wg.setup_as_client(role, addresses, all_actor_addresses)
-    # 及时纯stable standalone也setup as relay是为了在weights同步过程中等传输完了再返回，如果不是relay则直接返回，在后台自动传完
+def _setup_standalone_comm_ucx(all_actor_info: List[WeightsRankInfo], standalone_wg, role: str):
+    print(f"all ucx source addresses: {all_actor_info}")
+    tp_size = all_actor_info[-1].tp_rank + 1  # 按rank排序，最后一个rank一定是最大的tp_rank
+    source_by_dp = [all_actor_info[i:i + tp_size] for i in range(0, len(all_actor_info), tp_size)]
+
+    standalone_wg.setup_as_client(role, source_by_dp, all_actor_info)
+    # 即使纯stable standalone也setup as relay是为了在weights同步过程中等传输完了再返回，如果不是relay则直接返回，在后台自动传完
     standalone_wg.setup_as_relay()
 
 
@@ -198,17 +200,15 @@ class RolloutManager:
         # 其他的既可以nccl也可以ucx
         if self.weights_communicator == 'ucx':
             # setup actor as server to serve weights update request
-            self._source_addresses_fut = self.hybrid_wg.setup_as_server()
-            self.elastic_rollout_mgr.set_hybrid_rollout_address(self._source_addresses_fut)
+            self._source_info = self.hybrid_wg.setup_as_server()
+            self.elastic_rollout_mgr.set_hybrid_rollout_source_info(self._source_info)
 
             # setup standalone worker as client
             if self.train_standalone_wg is not None and not self._rollout_elastic_enabled:
                 # elastic rollout由每个实例scale up后setup，这里跳过
-                _setup_standalone_comm_ucx(ray.get(self._source_addresses_fut), self.train_standalone_wg,
-                                           "standalone_rollout")
+                _setup_standalone_comm_ucx(self._source_info, self.train_standalone_wg, "standalone_rollout")
             if self.val_standalone_wg is not None:
-                _setup_standalone_comm_ucx(ray.get(self._source_addresses_fut), self.val_standalone_wg,
-                                           "standalone_validator")
+                _setup_standalone_comm_ucx(self._source_info, self.val_standalone_wg, "standalone_validator")
         else:
             if self.train_standalone_wg is not None:
                 _setup_standalone_comm(self.hybrid_wg,

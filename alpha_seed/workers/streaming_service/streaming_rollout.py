@@ -14,9 +14,10 @@
 """
 Create a XPerfGPT Rollout
 """
+import time
 import traceback
 
-from alpha_seed.workers.xperf_rollout.utils.base_weights_communicator import WeightsCommunicator
+from alpha_seed.workers.xperf_rollout.utils.base_weights_communicator import WeightsCommunicator, WeightsRankInfo
 from mono_rl import DataProto
 import copy
 from contextlib import contextmanager, nullcontext
@@ -27,7 +28,7 @@ import tempfile
 import json
 import queue
 import threading
-from typing import AsyncGenerator, List, Type
+from typing import AsyncGenerator, List, Type, Optional
 import asyncio
 import xperf_gpt
 from mono_rl.single_controller import Execute
@@ -117,6 +118,9 @@ class AsyncXPerfGPTRollout(object):
         self.process_thread = None
         self._process_thread_last_error = None
         self._process_thread_last_tb = None
+
+        # 初始状态下不在loop里，先set
+        self.gen_loop_exited.set()
 
     def switch_mode(self, to_async: bool):
         """
@@ -573,8 +577,10 @@ class AsyncXPerfGPTRollout(object):
         torch.cuda.set_device(int(os.getenv('LOCAL_RANK', '0')))
         while (not self.exit_event.is_set()):
             if not self.weights_loaded.wait(timeout=1):
+                time.sleep(0.05)
                 continue
             if self.stop_event.is_set():
+                time.sleep(0.05)
                 continue
             with logging_set_level(self.config.get('logging_level', 'WARN')), self.profiler_context as p:
                 try:
@@ -708,7 +714,7 @@ class RemoteAsyncXPerfGPTRollout(Worker):
         self.role = role
         self.rollout_actor = AsyncXPerfGPTRollout(config=self.config.rollout, role=role)
         self._weights_loaded = threading.Event()
-        self._hybrid_rollout_addrs = None
+        self._hybrid_rollout_info = None
         self._stable_standalone_rollout_addrs = None  # stable的实例也会作为server，给elastic rollout提供参数
         self.weights_communicator: WeightsCommunicator = None
 
@@ -771,10 +777,12 @@ class RemoteAsyncXPerfGPTRollout(Worker):
         self.rollout_actor.initialize(self.config.model.path, True)
         self.rollout_actor.setup_rollout()
         weights_communicator = self.config.rollout.weights_communicator
+        enable_aiomonitor = self.config.rollout.weights_communicator_enable_aiomonitor
         CommunicatorCls = UCXWeightsCommunicator if weights_communicator == "ucx" else NCCLWeightsCommunicator
         self.weights_communicator = CommunicatorCls(inference_engine=self.rollout_actor.inference_engine,
                                                     standalone=self.rollout_actor.is_standalone,
-                                                    device_mesh=self.rollout_actor.device_mesh)
+                                                    device_mesh=self.rollout_actor.device_mesh,
+                                                    enable_aiomonitor=enable_aiomonitor)
 
         # save nccl master addr and port
         self.master_address = os.getenv('MASTER_ADDR', 'localhost')
@@ -782,15 +790,29 @@ class RemoteAsyncXPerfGPTRollout(Worker):
         print(f'Master address: {self.master_address}, Master port: {self.master_port}')
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    def setup_as_client(self, role, source_addresses: List[str], hybrid_rollout_addrs: List[str]):
-        self._hybrid_rollout_addrs = hybrid_rollout_addrs
+    def setup_as_client(self, role, source_addresses_by_tp: List[List[WeightsRankInfo]],
+                        hybrid_rollout_info: List[WeightsRankInfo]):
+        self._hybrid_rollout_info = hybrid_rollout_info
         # connect to weight source after model initialized
-        source_address = source_addresses[self.rank]
-        self.weights_communicator.setup_as_client(role, source_address)
+        tp_size = self.config.rollout.tensor_model_parallel_size
+        # 按tp取整个dp group切片，% tp_size为了避免self是一个整个world包含多个dp(elastic下只会有1个dp，非elastic有多个dp)
+        tp_rank = self.rank % tp_size
+        source_info_this_tp = [dp[tp_rank] for dp in source_addresses_by_tp]
+        self.weights_communicator.setup_as_client(role, source_info_this_tp)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
     def setup_as_relay(self, ifname=None):
-        return self.weights_communicator.setup_as_server(ifname)
+        ucx_address, oob_address = self.weights_communicator.setup_as_server(ifname)
+        return WeightsRankInfo(
+            rank=0,  # 对于standalone rollout来说，因为每个dp都是独立的，所以这里rank和dp_rank暂时为0算
+            dp_rank=0,
+            tp_rank=self.rank,  # 只有一个dp，所以就是tp rank
+            ip=self._get_node_ip(),
+            worker_name=self._get_actor_name(),
+            ucx_address=ucx_address,
+            oob_address=oob_address,
+            pid=os.getpid(),
+        )
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def setup_standalone_worker_comm(self, hybrid_master_address, standalone_master_address, port, role):
@@ -832,7 +854,7 @@ class RemoteAsyncXPerfGPTRollout(Worker):
     # group 内任意一个rank发送结束信号即可
     @register(execute_mode=Execute.RANK_ZERO)
     def update_standalone_worker_end(self):
-        self.weights_communicator.update_standalone_worker_end(self._hybrid_rollout_addrs)
+        self.weights_communicator.update_standalone_worker_end(self._hybrid_rollout_info)
 
     # caller 自己去wait这个non-blocking
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
@@ -871,36 +893,37 @@ def _unwrap_ray_remote(cls) -> Type[RemoteAsyncXPerfGPTRollout]:
 @ray.remote
 class ElasticAsyncXPerfGPTRollout(_unwrap_ray_remote(RemoteAsyncXPerfGPTRollout)):
 
-    def __init__(self, config: DictConfig, role: str, hybrid_rollout_addrs: List[str]):
+    def __init__(self, config: DictConfig, role: str, hybrid_rollout_info: List[WeightsRankInfo]):
         super().__init__(config, role)
-        self.hybrid_rollout_addrs = hybrid_rollout_addrs
+        self.hybrid_rollout_info = hybrid_rollout_info
         self._elastic_has_setup = threading.Event()
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    def init_and_setup(self,
-                       weights_source_tp_group: List[str],
-                       setup_relay: bool,
-                       intermediately_update_weights: bool = False):
+    def init_and_setup(
+            self,
+            weights_source_by_dp_group: List[List[WeightsRankInfo]],  # [[tp0,...], [tp0,...], ...]
+            setup_relay: bool,
+            intermediately_update_weights: bool = False):
         """
         放在这里统一setup，返回一个ObjectRef，让调用方一次性等待整个初始化完成
-        :param weights_source_tp_group: 要连上的拉取weight的server address，目前是一个tp group的address
+        :param weights_source_by_dp_group: 要连上的拉取weight的server address, 按 [dp0[tp0,...], dp1[tp0,...], ...] 分组
         :param setup_relay: 是否要设置为relay提供别的worker拉参数
         :param intermediately_update_weights: 初始化完之后是否立即拉一次参数，适用于elastic的场景
         :return: relay address, worker group返回的则是整个tp group的address，如果setup_relay=False，则返回空字符串
         """
         self.init_model()
-        self.setup_as_client(self.role, weights_source_tp_group, self.hybrid_rollout_addrs)
+        self.setup_as_client(self.role, weights_source_by_dp_group, self.hybrid_rollout_info)
 
-        relay_addr = ''
+        relay_info: Optional[WeightsRankInfo] = None
         if setup_relay:
-            relay_addr = self.setup_as_relay()
+            relay_info = self.setup_as_relay()
 
         if intermediately_update_weights:
             self.update_standalone_worker(self.role)
             self.restart_server_after_weights_update()
 
         self._elastic_has_setup.set()
-        return relay_addr
+        return relay_info
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def initialized(self):

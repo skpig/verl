@@ -22,6 +22,7 @@ from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRe
 from alpha_seed.workers.streaming_service.rollout_request_manager import RequestManager, RequestManagerRegisterCenter
 from alpha_seed.workers.streaming_service.streaming_rollout import RemoteAsyncXPerfGPTRollout
 from alpha_seed.workers.xperf_rollout.component.query import Query
+from alpha_seed.workers.xperf_rollout.utils.base_weights_communicator import WeightsRankInfo
 from mono_rl.single_controller.ray import RayWorkerGroup
 from mono_rl.single_controller.ray.base import func_generator
 from mono_rl.single_controller.ray.replicated_worker_group import ReplicatedRayWorkerGroup, ScalingRayWorkerGroup
@@ -448,12 +449,12 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
     负责请求状态同步到request pool
     """
 
-    def __init__(self, replicas: Union[ReplicatedRayWorkerGroup, ScalingRayWorkerGroup], actor_addresses: List[str],
-                 request_manager_name: str, config: DictConfig):
+    def __init__(self, replicas: Union[ReplicatedRayWorkerGroup, ScalingRayWorkerGroup],
+                 actor_info: List[WeightsRankInfo], request_manager_name: str, config: DictConfig):
         self.request_manager: RequestManager = RequestManagerRegisterCenter.get(request_manager_name)  # noqa
         super().__init__(self.request_manager)
         self.replicas = replicas
-        self.actor_addresses = actor_addresses
+        self.actor_info = actor_info  # hybrid rollout actor info
         self.config = config  # .streaming_rollout.proxy
         self._tracer = Tracer.get_instance()
         self._stop_server_ts = 0
@@ -674,9 +675,9 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
 
 class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
 
-    def __init__(self, replicas: Union[ReplicatedRayWorkerGroup, ScalingRayWorkerGroup], actor_addresses: List[str],
-                 request_manager_name: str, config: DictConfig):
-        super().__init__(replicas, actor_addresses, request_manager_name, config)
+    def __init__(self, replicas: Union[ReplicatedRayWorkerGroup, ScalingRayWorkerGroup],
+                 actor_info: List[WeightsRankInfo], request_manager_name: str, config: DictConfig):
+        super().__init__(replicas, actor_info, request_manager_name, config)
         self._rebalance_threshold = self.config.proxy.rebalance_threshold
         self.abort_logger = DebounceAccumulatedLogger()
 

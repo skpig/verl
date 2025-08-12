@@ -1,3 +1,4 @@
+
 data:
   tokenizer: null
   train_files: hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/gsm8k/train_with_ans_new.parquet
@@ -159,6 +160,7 @@ actor_rollout_ref:
     schedule_strategy: default # [default,fifo]
     mode: "batch" # [batch, server]
     weights_communicator: "nccl" # [nccl, ucx], elastic模式下只能用ucx
+    weights_communicator_enable_aiomonitor: ${misc.aiomonitor.enable}
     prefix_cache_slot_num: -1
     prefix_cache_max_length: -1
     recommend_standalone_usage:
