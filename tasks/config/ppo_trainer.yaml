@@ -669,3 +669,7 @@ mariana:
     janus_use_big_op: false
     janus_big_op_version: V1
     moe_pr_expert_type: swiglu-default
+
+triton_cache:
+  type: redis
+  hdfs_remote_cache_dir: none

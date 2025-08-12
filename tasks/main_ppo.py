@@ -949,8 +949,12 @@ def init_ray(config: DictConfig):
         # this is for local ray cluster
         remote_cache_env = {
             'TRITON_CACHE_MANAGER': 'triton.runtime.cache:RemoteCacheManager',
-            'TRITON_REMOTE_CACHE_BACKEND': 'alpha_seed.utils.redis.triton_redis:BytedRedisRemoteCacheBackend'
         }
+        backend = 'alpha_seed.utils.redis.triton_redis:BytedRedisRemoteCacheBackend'
+        if config.triton_cache.type == 'hdfs':
+            backend = 'alpha_seed.utils.redis.triton_redis:HdfsRemoteCacheBackend'
+            remote_cache_env['HDFS_REMOTE_CACHE_DIR'] = config.triton_cache.hdfs_remote_cache_dir
+        remote_cache_env['TRITON_REMOTE_CACHE_BACKEND'] = backend
         runtime_env = {
             'env_vars': {
                 'TOKENIZERS_PARALLELISM': 'true',
