@@ -58,15 +58,13 @@ def compute_score(solution_str, ground_truth, verifier_service_psm, **argv) -> f
     }
     for i in range(3):
         try:
-            response = requests.post(f"{endpoint}/verify", json=data)
+            response = requests.post(f"{endpoint}/verify", json=data, timeout=30)
             if response.status_code != 200:
                 continue
-            response = response.json()
-            if response["is_correct"] == True:
-                return 1
-            else:
-                return -1
+            resp_json = response.json()
+            return 1 if resp_json.get("is_correct") else -1
         except Exception as ex:
+            print(f'[RETRY] Got exception in compute_score via verifier_service, ex: {ex}')
             continue
     print(f'Got exception in compute_score via verifier_service')
     return -2
