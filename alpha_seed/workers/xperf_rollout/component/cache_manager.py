@@ -126,12 +126,12 @@ class CacheManager:
         # See if any query from the waiting-list can be activated
         for query in waiting_queries:
             threshold = self.moving_avg_len // self.slot_block_size
-            status = self._update_query(query, thresold=threshold)
+            status = self._update_query(query, threshold=threshold)
             while (status == UpdateQueryStatus.ALLOC_INSUFFICIENT_SLOT) and (
                     self.cur_bs_this_run
                     < len(allocated_paused_queries)) and self._release_one_paused_(allocated_paused_queries):
                 # If paused queries with kv cache is more than half, allow release them for waiting queries to run
-                status = self._update_query(query, thresold=threshold)
+                status = self._update_query(query, threshold=threshold)
 
             if status == UpdateQueryStatus.SUCCESS:
                 phase0_running.append(query)
@@ -204,12 +204,12 @@ class CacheManager:
         while len(waiting) > 0:
             query = waiting[-1]
             threshold = self.moving_avg_len // self.slot_block_size
-            status = self._update_query(query, thresold=threshold)
+            status = self._update_query(query, threshold=threshold)
             while (status == UpdateQueryStatus.ALLOC_INSUFFICIENT_SLOT) and (
                     self.cur_bs_this_run
                     < len(allocated_paused_queries)) and self._release_one_paused_(allocated_paused_queries):
                 # if paused queries with kv allocated is more than 50%, allow release them for waiting queries to run
-                status = self._update_query(query, thresold=threshold)
+                status = self._update_query(query, threshold=threshold)
 
             if status == UpdateQueryStatus.SUCCESS:
                 if not query.recent_scheduled_time:
@@ -239,7 +239,7 @@ class CacheManager:
             logging_rank_only(logging.debug, 0, "kv utils {}".format(
                 (self.slot_num - len(self.available_slot_table)) / self.slot_num))
 
-    def _update_query(self, query: Query, thresold: int = 0) -> UpdateQueryStatus:
+    def _update_query(self, query: Query, threshold: int = 0) -> UpdateQueryStatus:
         if self.cur_bs_this_run == self.max_batch_size:
             return UpdateQueryStatus.REACH_MAX_BS
 
@@ -250,7 +250,7 @@ class CacheManager:
         if not query.is_kv_cache_slot_allocated():
             if self.use_vllm:
                 context_slots_num = (len(query.input_ids) + self.slot_block_size - 1) // self.slot_block_size
-                if self.get_available_slot_num() < context_slots_num + thresold:
+                if self.get_available_slot_num() < context_slots_num + threshold:
                     return UpdateQueryStatus.ALLOC_INSUFFICIENT_SLOT
                 query.kv_slot_ids.extend([self.available_slot_table.popleft() for i in range(context_slots_num)])
             else:

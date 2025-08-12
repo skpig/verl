@@ -68,9 +68,9 @@ class XPerfTritonInferenceModule:
         config_dict["max_batch_size"] = kwargs.pop("max_batch_size", 16)
         config_dict["max_length"] = kwargs.pop("max_length", 2048)
         config_dict["vanilla_checkpoint_path"] = kwargs.pop("vanilla_checkpoint_path", None)
-        config_dict["preshard_checkpoint_path"] = kwargs.pop("reshard_checkpoint_path", None)
+        config_dict["preshard_checkpoint_path"] = kwargs.pop("preshard_checkpoint_path", None)
         config_dict["use_cuda_graph"] = False  # avoid capture cuda graph in init
-        config_dict['use_paged_attention'] = kwargs.pop("use_pated_attn", False)
+        config_dict['use_paged_attention'] = kwargs.pop("use_paged_attn", False)
 
         model_config_path = kwargs.pop('model_config_path')
         with open(model_config_path, "r") as f:
@@ -107,7 +107,7 @@ class XPerfTritonInferenceModule:
         self.xperf_triton_cfg = kwargs.pop('xperf_triton_cfg')
 
     def _get_kv_cache(self, layer_idx, is_quant=False):
-        return self.model.layers[layer_idx].self_attnetion._kv_cache
+        return self.model.layers[layer_idx].self_attention._kv_cache
 
     def get_param_list(self, skip_meta=False):
         return [param.data for param in self.model.parameters() if not (param.is_meta and skip_meta)]

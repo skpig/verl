@@ -316,6 +316,7 @@ class InferenceSession:
             "vanilla_checkpoint_path": None,
             "checkpoint_path": None,
             "reshard_checkpoint_path": None,
+            "preshard_checkpoint_path": None,
             "tokenizer_path": None,
             "save_mp_checkpoint_path": None,
             "return_full_hidden_states": False,
@@ -415,6 +416,8 @@ class InferenceSession:
             init_inference_kwargs["eos_token_id"] = self.eos_token_id
             init_inference_kwargs['enable_cuda_graph'] = self.enable_cuda_graph
             init_inference_kwargs['use_paged_attn'] = xperf_triton_cfg.use_paged_attn
+            init_inference_kwargs.pop('reshard_checkpoint_path')
+            init_inference_kwargs['preshard_checkpoint_path'] = self.preshard_checkpoint_path
             self.engine = init_inference_triton(**init_inference_kwargs)
             self.enable_cuda_graph = False
         else:
@@ -818,7 +821,7 @@ class InferenceSession:
         phase1_list = []
         phase0_total_length = []
         phase1_total_length = []
-        phase1_oe_histroy = []
+        phase1_oe_history = []
         phase0_kv_index = []
         phase1_kv_index = []
         context_shift = []
@@ -861,10 +864,10 @@ class InferenceSession:
                             total_seq_length = torch.tensor((curr_input_ids.shape[1] + start),
                                                             device=curr_input_ids.device,
                                                             dtype=torch.int).unsqueeze(0)
-                            oe_histroy = input_ids[:, start - self.oe_max_stride + 1:start]
-                            pad_len = (self.oe_max_stride - 1) - oe_histroy.shape[1]
-                            oe_histroy = F.pad(oe_histroy, (pad_len, 0), value=self.pad_token_id)
-                            curr_input_ids = torch.concat([oe_histroy, curr_input_ids], dim=1)
+                            oe_history = input_ids[:, start - self.oe_max_stride + 1:start]
+                            pad_len = (self.oe_max_stride - 1) - oe_history.shape[1]
+                            oe_history = F.pad(oe_history, (pad_len, 0), value=self.pad_token_id)
+                            curr_input_ids = torch.concat([oe_history, curr_input_ids], dim=1)
                             input_embs = self.engine.get_input_oe_embeddings(curr_input_ids, step_seq_length,
                                                                              total_seq_length)
                         else:
@@ -918,11 +921,11 @@ class InferenceSession:
                 phase1_kv_index.append(query.kv_slot_ids) if self.enable_paged_attn else phase1_kv_index.extend(
                     query.kv_slot_ids)
                 if len(query.new_token_ids) >= self.oe_max_stride:
-                    oe_histroy = query.new_token_ids[-self.oe_max_stride:-1]
+                    oe_history = query.new_token_ids[-self.oe_max_stride:-1]
                 else:
-                    oe_histroy = query.input_ids[-(self.oe_max_stride - len(query.new_token_ids) + 1) +
+                    oe_history = query.input_ids[-(self.oe_max_stride - len(query.new_token_ids) + 1) +
                                                  1:] + query.new_token_ids[:-1]
-                phase1_oe_histroy.append(oe_histroy)
+                phase1_oe_history.append(oe_history)
                 if self.enable_ngrams_decoding:
                     max_code_book_len = max(max_code_book_len, len(query.code_book))
                     key = query.new_token_ids[-self.max_ngram_size:]
@@ -968,8 +971,8 @@ class InferenceSession:
 
         if len(phase1_list) > 0:
             if self.oe_max_stride > 1:
-                for i, (query, oe_histroy) in enumerate(zip(phase1_list, phase1_oe_histroy)):
-                    phase1_list[i] = [self.pad_token_id] * (self.oe_max_stride - 1 - len(oe_histroy)) + oe_histroy + [
+                for i, (query, oe_history) in enumerate(zip(phase1_list, phase1_oe_history)):
+                    phase1_list[i] = [self.pad_token_id] * (self.oe_max_stride - 1 - len(oe_history)) + oe_history + [
                         query
                     ]
                 decode_input = torch.tensor(phase1_list, dtype=torch.int64, device="cuda")

@@ -235,7 +235,7 @@ class InferScheduler():
             return next_tokens, accepted_len, target_hidden_states, log_probs
         else:
             # forward mtp spec
-            accpeted_tokens, accepted_len, target_hidden_states = self.engine.forward_spec(
+            accepted_tokens, accepted_len, target_hidden_states = self.engine.forward_spec(
                 draft_model=self.engine,
                 draft_input_ids=draft_input,
                 eagle_hidden_states=target_hidden_states,
@@ -249,4 +249,4 @@ class InferScheduler():
             target_hidden_states = [
                 hidden_states[:accepted_len[i] + 1] for i, hidden_states in enumerate(target_hidden_states)
             ]
-            return accpeted_tokens, accepted_len, target_hidden_states, None
+            return accepted_tokens, accepted_len, target_hidden_states, None

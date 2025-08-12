@@ -80,7 +80,7 @@ class NCCLWeightsCommunicator(WeightsCommunicator):
 
             # for torch vit
             if isinstance(vit_engine, TorchVitInferencer):
-                vit_engine.update_standalone_weighs(comm_fn, comm_rank)
+                vit_engine.update_standalone_weights(comm_fn, comm_rank)
                 return
 
             if hasattr(vit_engine.visual_encoder.module, "layers_weight"):

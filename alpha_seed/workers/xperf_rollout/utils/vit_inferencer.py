@@ -94,7 +94,7 @@ class TorchVitInferencer(PreTrainedModel):
         torch.cuda.empty_cache()
         print('====>> resharding VIT finished !!!')
 
-    def update_standalone_weighs(self, comm_fn, comm_rank):
+    def update_standalone_weights(self, comm_fn, comm_rank):
 
         def comm_and_assign(module, param_names=None):
             if param_names is None:
