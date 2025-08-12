@@ -384,6 +384,9 @@ class RewardManager():
             if isinstance(extra_data, dict) and (cached_score := extra_data.get('score', None)) is not None:
                 # score already calculated and is passed in extra_data
                 score = cached_score
+                if isinstance(score, dict) and all([key in score for key in ['score', 'msg']]):
+                    score_msg = score['msg']
+                    score = score['score']
             elif self.config.data.image_key is not None and format_reward != 0:
                 score = 0
             else:
