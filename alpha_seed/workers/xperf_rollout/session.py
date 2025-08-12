@@ -170,6 +170,8 @@ class InferenceSession:
             enable_paged_attn=False,
             context_split_len=4 * 1024,
             vit_use_xperf_gpt=True,
+            vit_use_dp=False,
+            dp_vit_batching_step=0,
             max_prompt_length=None,
             context_limit_bs=1,
             max_context_shift=0,
@@ -198,6 +200,7 @@ class InferenceSession:
         # Context processing
         self.context_split_len = context_split_len
         self.vit_use_xperf_gpt = vit_use_xperf_gpt
+        self.vit_use_dp = vit_use_dp
         self.context_limit_bs = context_limit_bs
 
         self.max_prompt_length = max_prompt_length
@@ -268,6 +271,9 @@ class InferenceSession:
         self.waiting: List[Query] = []
         self.running: List[Query] = []
         self.paused: List[Query] = []
+        self.paused_ready: List[Query] = []
+        self.paused_ready_step = 0
+        self.paused_batching_step = dp_vit_batching_step if vit_use_dp else 0
 
         self.all_accepted_queries: Dict[str, Query] = {}
         self.queries_to_abort: Queue = Queue()  # 要abort掉的query将query_id放进queue里
@@ -470,6 +476,8 @@ class InferenceSession:
                     vit_config.update(detail_config)
                 if vit_config.get('use_navit', False):
                     vit_config['navit_anyres'] = True
+                if self.vit_use_dp:
+                    vit_config['dp_vit'] = True
                 self.vit_engine = VITInferencer(vit_config_dict=vit_config,
                                                 tokenization_path=self.tokenizer_path).cuda().to(torch.bfloat16)
             else:
@@ -653,6 +661,8 @@ class InferenceSession:
         self.stop_signal_tensor = torch.tensor([0.0]).float().cuda()
         self.waiting = []
         self.running = []
+        self.paused_ready = []
+        self.paused_ready_step = 0
         self.all_accepted_queries = {}
 
     def get_inorder_responses(self):
@@ -752,26 +762,34 @@ class InferenceSession:
                 self.infer_scheduler.metrics['accept_len'].append(accepted_len)
 
     def _try_resume_paused_queries(self):
-        if len(self.paused) == 0:
-            return
-        batch_sync_tp_queries(self.paused, tp_group=self.tp_group)
-        new_paused = []
-        for query in self.paused:
-            query.try_resume_from_paused()
-            if query.meet_pause_condition():
-                new_paused.append(query)
-            else:
-                threshold = self.num_pred_tokens + 1 if self.enable_ngrams_decoding else 0
-                if self._exceed_length_condition(query, tokens_threshold=threshold) or not query.action:
-                    query.output_prompt = self.tokenizer.batch_decode([query.output_tokens
-                                                                      ]) if self.decode_output else ""
-                    self._finish_query(query)
+        if self.paused:
+            batch_sync_tp_queries(self.paused, tp_group=self.tp_group)
+            new_paused = []
+            for query in self.paused:
+                query.try_resume_from_paused()
+                if query.meet_pause_condition():
+                    new_paused.append(query)
                 else:
-                    if query.is_kv_cache_slot_allocated():
-                        self.running.append(query)
+                    threshold = self.num_pred_tokens + 1 if self.enable_ngrams_decoding else 0
+                    if self._exceed_length_condition(query, tokens_threshold=threshold) or not query.action:
+                        query.output_prompt = self.tokenizer.batch_decode([query.output_tokens
+                                                                          ]) if self.decode_output else ""
+                        self._finish_query(query)
                     else:
-                        self.waiting.append(query)
-        self.paused = new_paused
+                        self.paused_ready.append(query)
+            self.paused = new_paused
+        if self.paused_ready_step >= self.paused_batching_step or len(self.paused_ready) >= self.engine.module.tp_size:
+            for _ in range(self.engine.module.tp_size):
+                if len(self.paused_ready) == 0:
+                    break
+                query = self.paused_ready.pop()
+                if query.is_kv_cache_slot_allocated():
+                    self.running.append(query)
+                else:
+                    self.waiting.append(query)
+            self.paused_ready_step = 0
+        else:
+            self.paused_ready_step += 1
 
     # Preparing queries for next forward
     def _select_running_queries(self):
@@ -779,35 +797,98 @@ class InferenceSession:
             query.lazy_init_from_prompt_once(self.tokenizer)
         return self.cache_manager.update_queries(self.running, self.waiting, self.paused)
 
-    def _prepare_image_embeds(self, input_ids, image_data):
-        assert image_data is not None
-        pixel_values = image_data['pixel_values']
-        image_grid_hw = image_data['image_grid_hw']
-        if isinstance(pixel_values, np.ndarray):
-            pixel_values = convert_numpy_to_tensor(pixel_values, float)
-        pixel_values = pixel_values.to(torch.bfloat16).cuda(non_blocking=True)
-        if isinstance(image_grid_hw, np.ndarray):
-            image_grid_hw = convert_numpy_to_tensor(image_grid_hw, int)
+    def _prepare_image_embeds(self, input_ids, query):
+        # image embeddings has already been computed
+        if query.input_embedding is not None:
+            return query.input_embedding
 
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            if self.vit_use_xperf_gpt:
-                img_emb = self.vit_engine.visual_encoder(pixel_values, grid_hw=image_grid_hw)
-                if self.vit_engine.ln_vision is not None:
-                    img_emb = self.vit_engine.ln_vision(img_emb)
-                if self.vit_engine.seed_proj is not None:
-                    img_emb = self.vit_engine.seed_proj(img_emb)
+        input_ids = input_ids[:, query.context_shift:]
+        if query.image_shift < query.image_data['image_grid_hw'].shape[0]:
+            # get increasemental image embeddings
+            image_grid_hw = query.image_data['image_grid_hw'][query.image_shift:]
+            pixel_values = query.image_data['pixel_values'][-(image_grid_hw[:, 0] * image_grid_hw[:, 1]).sum():]
+            query.image_shift += image_grid_hw.shape[0]
+
+            assert pixel_values is not None
+            if isinstance(pixel_values, np.ndarray):
+                pixel_values = convert_numpy_to_tensor(pixel_values, float)
+            pixel_values = pixel_values.to(torch.bfloat16).cuda(non_blocking=True)
+            if isinstance(image_grid_hw, np.ndarray):
+                image_grid_hw = convert_numpy_to_tensor(image_grid_hw, int)
+
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                if self.vit_use_xperf_gpt:
+                    img_emb = self.vit_engine.visual_encoder(pixel_values, grid_hw=image_grid_hw)
+                    if self.vit_engine.ln_vision is not None:
+                        img_emb = self.vit_engine.ln_vision(img_emb)
+                    if self.vit_engine.seed_proj is not None:
+                        img_emb = self.vit_engine.seed_proj(img_emb)
+                else:
+                    img_emb = self.vit_engine.get_image_features(pixel_values, image_grid_hw)
+
+            image_token_id = -100
+            image_mask = input_ids == image_token_id
+            # fill image tokens to padding tokens, to avoid negative token_ids for text embedding
+            input_ids[image_mask] = 1
+            text_embeds = self.engine.get_input_embeddings(input_ids=input_ids)
+            image_mask = image_mask.unsqueeze(-1).expand_as(text_embeds).to(text_embeds.device)
+            img_emb = img_emb.to(text_embeds.device)
+            text_embeds = text_embeds.masked_scatter(image_mask, img_emb)
+        else:
+            text_embeds = self.engine.get_input_embeddings(input_ids=input_ids)
+        query.input_embedding = text_embeds
+        return query.input_embedding
+
+    def _prepare_image_embeds_dp(self, running):
+        image_queries = [
+            query for query in running if query.is_context_computing and query.image_data is not None and
+            query.input_embedding is None and query.image_shift < query.image_data['image_grid_hw'].shape[0]
+        ]
+        if image_queries:
+            tp_size = self.engine.module.tp_size
+            tp_rank = torch.distributed.get_rank(group=self.tp_group)
+            hidden_size = self.engine.config.model_config['hidden_size']
+            assert tp_size >= len(image_queries), "context_limit_bs must smaller than tp_size when use dp vit"
+            img_token_len = [0] * tp_size
+            for i, query in enumerate(image_queries):
+                input_ids = torch.tensor(query.input_ids, device="cuda")[query.context_shift:]
+                img_token_len[i] = (input_ids == -100).sum().item()
+            if tp_rank < len(image_queries):
+                query = image_queries[tp_rank]
+                image_grid_hw = query.image_data['image_grid_hw'][query.image_shift:]
+                pixel_values = query.image_data['pixel_values'][-(image_grid_hw[:, 0] * image_grid_hw[:, 1]).sum():]
+                if isinstance(image_grid_hw, np.ndarray):
+                    image_grid_hw = torch.from_numpy(image_grid_hw.astype(int))
+                if isinstance(pixel_values, np.ndarray):
+                    pixel_values = torch.from_numpy(pixel_values.astype(float))
+                pixel_values = pixel_values.to(torch.bfloat16).cuda(non_blocking=True)
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    if self.vit_use_xperf_gpt:
+                        img_emb = self.vit_engine.visual_encoder(pixel_values, grid_hw=image_grid_hw)
+                        if self.vit_engine.ln_vision is not None:
+                            img_emb = self.vit_engine.ln_vision(img_emb)
+                        if self.vit_engine.seed_proj is not None:
+                            img_emb = self.vit_engine.seed_proj(img_emb)
+                    else:
+                        img_emb = self.vit_engine.get_image_features(pixel_values, image_grid_hw)
             else:
-                img_emb = self.vit_engine.get_image_features(pixel_values, image_grid_hw)
+                img_emb = torch.empty((0, hidden_size), dtype=torch.bfloat16, device="cuda")
+            all_emb_list = [
+                torch.empty((img_token_len[i], hidden_size), dtype=torch.bfloat16, device="cuda")
+                for i in range(tp_size)
+            ]
+            torch.distributed.all_gather(all_emb_list, img_emb, group=self.tp_group)
 
-        image_token_id = -100
-        image_mask = input_ids == image_token_id
-        # fill image tokens to padding tokens, to avoid negative token_ids for text embedding
-        input_ids[image_mask] = 1
-        text_embeds = self.engine.get_input_embeddings(input_ids=input_ids)
-        image_mask = image_mask.unsqueeze(-1).expand_as(text_embeds).to(text_embeds.device)
-        img_emb = img_emb.to(text_embeds.device)
-        text_embeds = text_embeds.masked_scatter(image_mask, img_emb)
-        return text_embeds
+            for i, query in enumerate(image_queries):
+                input_ids = torch.tensor(query.input_ids, device="cuda").unsqueeze(0)[:, query.context_shift:]
+                image_token_id = -100
+                image_mask = input_ids == image_token_id
+                input_ids[image_mask] = 1
+                text_embeds = self.engine.get_input_embeddings(input_ids=input_ids)
+                image_mask = image_mask.unsqueeze(-1).expand_as(text_embeds).to(text_embeds.device)
+                text_embeds = text_embeds.masked_scatter(image_mask, all_emb_list[i].to(text_embeds.device))
+                query.input_embedding = text_embeds
+                query.image_shift = query.image_data['image_grid_hw'].shape[0]
 
     def _prepare_forward_inputs(self, running: List[Query]):
         max_context_len = -1
@@ -838,6 +919,9 @@ class InferenceSession:
         # MTP is PD separate
         prefill_only = self.enable_mtp_decoding and any([query.is_context_computing for query in running])
 
+        if self.vit_use_dp:
+            self._prepare_image_embeds_dp(running)
+
         for index, query in enumerate(running):
             assert len(query.input_ids) > 0 and len(query.input_ids) <= self.max_length, \
                 f"input_ids length {len(query.input_ids)} must be greater than 0 and less than or equal to max_length {self.max_length}"
@@ -852,8 +936,10 @@ class InferenceSession:
                     input_ids = torch.tensor(input_ids).cuda().unsqueeze(0)
                     is_oe = self.oe_max_stride > 1
                     if is_vlm:
-                        input_embs = self._prepare_image_embeds(input_ids, query.image_data)
-                        input_embs = input_embs[:, start:end, :]
+                        input_embs = self._prepare_image_embeds(input_ids, query)
+                        cur_shift = end - start
+                        input_embs = input_embs[:, query.image_context_shift:query.image_context_shift + cur_shift, :]
+                        query.image_context_shift += cur_shift
                     else:
                         if is_oe:
                             curr_input_ids = input_ids[:, start:end]
@@ -1184,6 +1270,9 @@ class InferenceSession:
                 if len(self.paused) > 0:
                     # all queries are paused, wait for a while
                     time.sleep(0.1)
+                    continue
+                elif len(self.paused_ready) > 0:
+                    self.paused_ready_step = self.paused_batching_step
                     continue
                 else:
                     break

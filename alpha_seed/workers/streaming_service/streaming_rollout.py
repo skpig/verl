@@ -267,6 +267,8 @@ class AsyncXPerfGPTRollout(object):
                                           schedule_strategy=self.config.schedule_strategy,
                                           step_profiler=step_profiler,
                                           vit_use_xperf_gpt=self.config.vit_use_xperf_gpt,
+                                          vit_use_dp=self.config.vit_use_dp,
+                                          dp_vit_batching_step=self.config.dp_vit_batching_step,
                                           prefix_cache_slot_num=self.config.prefix_cache_slot_num,
                                           prefix_cache_max_length=self.config.prefix_cache_max_length,
                                           enable_mtp_decoding=use_mtp)
@@ -647,6 +649,25 @@ class AsyncXPerfGPTRollout(object):
                     query_metrics_dict[key] += val
             metrics.update(query_metrics_dict)
             visualize_metrics(metrics)
+
+            if self.config.recommend_standalone_usage.enable:
+                dec_bs = metrics['dec_bs']
+                max_bs = max(dec_bs)
+                max_bs_idx = len(dec_bs) - dec_bs[::-1].index(max_bs)
+                cumulative_latency = np.cumsum([0] + metrics["per_token_latency"])
+                # compute max kv_util for complete ratio range for 0.00, 0.01, 0.02, ..., 0.99
+                metrics['max_kv_util_for_complete_ratio'] = {}
+                metrics['hybrid_latency_with_complete_ratio'] = {}
+                for i in range(100):
+                    complete_ratio = i / 100
+                    bs = max_bs * (1 - complete_ratio)
+                    bs_idx = next((idx + max_bs_idx for idx, val in enumerate(dec_bs[max_bs_idx:]) if val <= bs), None)
+                    if bs_idx is not None:
+                        metrics['max_kv_util_for_complete_ratio'][complete_ratio] = max(
+                            metrics['kv_cache_utils'][bs_idx:])
+                        metrics['hybrid_latency_with_complete_ratio'][
+                            complete_ratio] = cumulative_latency[bs_idx] / 1000
+
             self.inference_engine.empty_cache()
             data_pack = DataPack(response_outputs=response_outputs,
                                  response_log_probs=response_log_probs,

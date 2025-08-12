@@ -147,6 +147,11 @@ def record_xperf_metrics(batch_info, metrics, logger, global_step, prefix=''):
         metrics_key = f"rollout/{prefix}/{key}"
         metrics[metrics_key] = wandb.Image(val)
 
+    if 'max_kv_util_for_complete_ratio' in xperf_metrics:
+        metrics['rollout/max_kv_util_for_complete_ratio'] = xperf_metrics['max_kv_util_for_complete_ratio']
+    if 'hybrid_latency_with_complete_ratio' in xperf_metrics:
+        metrics['rollout/hybrid_latency_with_complete_ratio'] = xperf_metrics['hybrid_latency_with_complete_ratio']
+
     batch_info.meta_info.pop('xperf_metrics')
     return
 

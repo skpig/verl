@@ -41,6 +41,8 @@ class Query:
     is_context_computing: bool
     new_token_len: int
     context_shift: int
+    image_shift: int
+    image_context_shift: int
     output_prompt: Union[str, List[str]]
     prefix_already_computed_len: int
     system_ids_len: int
@@ -93,6 +95,8 @@ class Query:
         self.new_token_len = 0
         self.output_prompt = ""
         self.context_shift = 0
+        self.image_shift = 0
+        self.image_context_shift = 0
         self.system_ids_len = system_ids_len
         self.hidden_states = None
         self.logits = None
@@ -114,6 +118,7 @@ class Query:
         self.temperature = None
         self.max_new_tokens = None
         self.max_length = None
+        self.input_embedding = None
         self._exception = None
 
         self.plugin_query = None
@@ -153,7 +158,10 @@ class Query:
     def reset_compute(self):
         self.kv_slot_ids = []
         self.to_context_phase()
+        self.input_embedding = None
         self.context_shift = 0
+        self.image_shift = 0
+        self.image_context_shift = 0
         self.prefix_already_computed_len = 0
         self.hidden_states = None
         self.release_count += 1
@@ -177,6 +185,8 @@ class Query:
     def add_token(self, token_id, accepted_len=-1, log_prob=0.0):
         self.accepted_len.append(accepted_len)
         self.is_context_computing = False
+        self.input_embedding = None
+        self.image_context_shift = 0
         if isinstance(log_prob, List):
             self.log_probs.extend(log_prob)
         else:
@@ -263,6 +273,8 @@ class Query:
         ret.new_token_ids = ret.new_token_ids[:new_token_ids_len]
         # Note: 其他要保证事务隔离的列表对象在这里处理好再返回
 
+        ret.input_embedding = None
+        ret.image_context_shift = 0
         return ret
 
     @classmethod

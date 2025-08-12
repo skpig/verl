@@ -1,4 +1,6 @@
 import torch.distributed as dist
+from collections import defaultdict
+import wandb
 import numpy as np
 import matplotlib.ticker as ticker
 import matplotlib.pyplot as plt
@@ -10,6 +12,36 @@ def save_fig_to_numpy(fig):
     rgb_arr = np.frombuffer(rgb_str, dtype=np.uint8)
     rgb_arr = rgb_arr.reshape(fig.canvas.get_width_height()[::-1] + (3,))
     return rgb_arr
+
+
+def draw_recommend_standalone_usage(complete_ratios, off_policy_steps, rel_acc_ratios, abs_acc_ratios):
+    fig, ax1 = plt.subplots(figsize=(12, 6))
+
+    ax1.set_xlabel('complete ratio')
+    ax1.set_ylabel('off-policy steps')
+    for standalone_nnodes, ops in off_policy_steps.items():
+        cr = complete_ratios[standalone_nnodes]
+        ax1.plot(cr, ops, marker='.', linestyle='-', label=f'{standalone_nnodes} standalone nnode(s)')
+    ax1.tick_params(axis='y')
+    ax1.grid(True, alpha=0.3)
+
+    ax2 = ax1.twinx()
+    color = 'tab:red'
+    ax2.set_ylabel('rollout resource-based acceleration ratio', color=color)
+    all_complete_ratios = []
+    for cr_list in complete_ratios.values():
+        all_complete_ratios.extend(cr_list)
+    all_complete_ratios = sorted(all_complete_ratios)
+    ax2.plot(all_complete_ratios, rel_acc_ratios, marker='x', linestyle='--', label='relative acc ratio', color=color)
+    ax2.plot(all_complete_ratios, abs_acc_ratios, marker='.', linestyle='--', label='absolute acc ratio', color=color)
+
+    ax2.tick_params(axis='y', labelcolor=color)
+    plt.title('Off-policy Steps and Acceleration Ratio vs. Complete Ratio')
+    fig.legend(loc="upper left", bbox_to_anchor=(0, 1), bbox_transform=ax1.transAxes)
+
+    fig.tight_layout()
+
+    return save_fig_to_numpy(fig)
 
 
 def draw_replica_latency_and_step(gather_metrics):
@@ -204,3 +236,32 @@ def visualize_metrics(metrics):
     metrics["visualize/cumulative_latency_and_dec_bsz"] = draw_cumulative_latency_and_dec_bsz(long_tail_replica_metrics)
     metrics["visualize/kv_cache_utils_and_dec_bsz"] = draw_kv_cache_utils_and_dec_bsz(long_tail_replica_metrics)
     metrics["visualize/dec_tps_and_dec_bsz"] = draw_dec_tps_and_dec_bsz(long_tail_replica_metrics)
+
+
+def visualize_standalone_usage(config, metrics):
+    if config.actor_rollout_ref.rollout.recommend_standalone_usage.enable:
+        if config.streaming_rollout.nnodes == 0:
+            gen_time = metrics['timing/gen']
+            step_time = metrics['timing/step']
+            train_time = step_time - gen_time
+            kv_utils = metrics['rollout/max_kv_util_for_complete_ratio']
+            nnodes = config.trainer.nnodes
+            complete_ratios = defaultdict(list)
+            off_policy_steps = defaultdict(list)
+            rel_acc_ratios = []
+            abs_acc_ratios = []
+            for complete_ratio, hybrid_latency in sorted(metrics['rollout/hybrid_latency_with_complete_ratio'].items()):
+                off_policy_step = -(gen_time // -(train_time + hybrid_latency))
+                kv_util = kv_utils[complete_ratio]
+                standalone_nnodes = nnodes
+                while standalone_nnodes > 1 and kv_util * 2 + config.actor_rollout_ref.rollout.recommend_standalone_usage.kv_util_margin < 1:
+                    standalone_nnodes //= 2
+                    kv_util *= 2
+                complete_ratios[standalone_nnodes].append(complete_ratio)
+                off_policy_steps[standalone_nnodes].append(off_policy_step)
+                rel_acc_ratios.append(step_time / (train_time + hybrid_latency) / (1 + standalone_nnodes / nnodes))
+                abs_acc_ratios.append(step_time / (train_time + hybrid_latency))
+            metrics['rollout/recommend_standalone_usage'] = wandb.Image(
+                draw_recommend_standalone_usage(complete_ratios, off_policy_steps, rel_acc_ratios, abs_acc_ratios))
+        metrics.pop('rollout/max_kv_util_for_complete_ratio')
+        metrics.pop('rollout/hybrid_latency_with_complete_ratio')

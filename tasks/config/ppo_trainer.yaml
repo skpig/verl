@@ -134,6 +134,8 @@ actor_rollout_ref:
     prompt_length: ${data.max_prompt_length}  # for xperf_gpt
     response_length: ${data.max_response_length}
     vit_use_xperf_gpt: False # if false, vit will use torch vit
+    vit_use_dp: False
+    dp_vit_batching_step: 0
     # for vllm rollout
     dtype: bfloat16 # should align with FSDP
     ignore_eos: False
@@ -159,6 +161,9 @@ actor_rollout_ref:
     weights_communicator: "nccl" # [nccl, ucx], elastic模式下只能用ucx
     prefix_cache_slot_num: -1
     prefix_cache_max_length: -1
+    recommend_standalone_usage:
+      enable: False
+      kv_util_margin: 0.05
     plugin: &plugin_config
       enable: False
       plugin_external_lib: null # [null, '/opt/tiger/agents_extension/plugins']

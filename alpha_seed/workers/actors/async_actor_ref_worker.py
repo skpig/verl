@@ -314,8 +314,6 @@ class AsyncActorRolloutRefWorker(Worker):
                     if model:
                         # we never load grad for ref model
                         load_megatron_model_to_gpu(self.ref_module_mariana, load_grad=False)
-            # clean cpu memory
-            gc.collect()
 
         elif device == "cpu":
             if self._is_actor:

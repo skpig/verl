@@ -62,6 +62,7 @@ from alpha_seed.utils.dataset.dist_data_util import load_image_data_dist, get_im
 from alpha_seed.workers.actors.checkpoint.utils import find_latest_ckpt_path_
 from alpha_seed.trainer.utils.dataloader_mgr import DataLoaderMgr
 from alpha_seed.workers.actors.sample_pool import SamplePool
+from alpha_seed.workers.xperf_rollout.profiler.visualizer import visualize_standalone_usage
 
 from mono_rl.single_controller import Worker
 from mono_rl.single_controller.ray import RayResourcePool, RayWorkerGroup, RayClassWithInitArgs
@@ -2226,6 +2227,9 @@ class RayPPOTrainer(object):
                 metrics['timing/train'] = train_timer.last
 
             metrics['timing/step'] = step_timer.last + metrics['timing/dataloader']
+
+            visualize_standalone_usage(self.config, metrics)
+
             # TODO: make a canonical logger that supports various backend
             self.logger.log(data=metrics, step=self.global_step)
             release_object(self.image_manager)
