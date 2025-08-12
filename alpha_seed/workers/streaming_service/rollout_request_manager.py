@@ -23,11 +23,12 @@ class StaleHistory:
     assigned_engine_id: str
     assigned_engine_name: str
     start_step: int  # 最早开始的step
-    # 下面时间戳均为stale之前在engine侧的时间戳 (unit: ms)
+    # 下面时间戳均为stale之前在engine侧的时间戳 (默认unit: ms)
+    dispatch_time: float  # 从request pool分出去的时间 (unit: s)
     received_time: float  # 进入engine waiting队列的时间
     first_scheduled_time: float  # 开始prefill时间
     first_token_time: float  # 最早开始decode时间(prefill完成时间)
-    end_ts: float  # 发现stale的时刻 (unit: ms)
+    end_ts: float  # 发现stale的时刻
     stale_action: str  # 是什么直接导致的stale，如release/engine-died/...
     stale_reason: str  # 基于什么原因要做这个stale的操作，如内存不够/rebalance/...
     length_generated: int  # 在这一次stale之前，decode了多少(不含prefill部分)
@@ -45,6 +46,7 @@ class StaleHistory:
             assigned_engine_id=req.assigned_engine_id,  # noqa
             assigned_engine_name=req.assigned_engine_name,
             start_step=req.global_step,
+            dispatch_time=req.last_assigned_at,
             received_time=received_time,
             first_scheduled_time=first_scheduled_time,
             first_token_time=first_token_time,

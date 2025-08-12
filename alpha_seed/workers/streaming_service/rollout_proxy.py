@@ -15,7 +15,7 @@ import ray
 import torch
 from omegaconf import DictConfig
 from ray import ObjectRef
-from ray.exceptions import ActorDiedError, GetTimeoutError, RayActorError
+from ray.exceptions import ActorDiedError, GetTimeoutError, RayActorError, RayTaskError, ActorUnavailableError
 
 from alpha_seed.utils.profile.timeline import Tracer, CompleteEvent, CounterEvent
 from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRefWorker
@@ -114,9 +114,11 @@ def split_by_indices(big_worker_group: RayWorkerGroup, indices: List[List[int]],
     # indices: [[0, 1], [2, 3], ...] 外层是切的worker groups数，内层是每个worker_group取第几个index
     rollout_cls = big_worker_group.ray_cls_with_init.cls.raw_cls_dict[original_class_name]
     worker_groups = []
-    for worker_indices in indices:
-        workers = [big_worker_group._worker_names[i] for i in worker_indices]
-        new_wg = RayWorkerGroup.from_detached(worker_names=workers,
+    for dp_rank, worker_indices in enumerate(indices):
+        worker_names = [big_worker_group._worker_names[i] for i in worker_indices]
+        name_prefix = f'{big_worker_group.name_prefix}_dp{dp_rank}'
+        new_wg = RayWorkerGroup.from_detached(name_prefix=name_prefix,
+                                              worker_names=worker_names,
                                               ray_cls_with_init=big_worker_group.ray_cls_with_init)
         # 参考RayWorkerGroup.spawn，重新给detached worker bind回Worker的方法
         new_wg._bind_worker_method(rollout_cls, func_generator)
@@ -516,12 +518,8 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
                 try:
                     history_ids = wg.get_history_ids()
                     wg_history_map[engine_id] = set(history_ids) if history_ids else set()
-                except ray.exceptions.ActorDiedError as e:
-                    # ignore actor died error, underlying replicated worker group will handle
-                    # worker group and actors lifecycle
-                    pass
-                except ray.exceptions.RayTaskError as e:
-                    self._teardown(wg, e)
+                except (ActorDiedError, RayTaskError) as e:
+                    self._finalize(wg, e)
 
             # 第一轮先按照kvcache亲和性分发
             for engine_id, wg in ready_wg_items:
@@ -550,12 +548,8 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
 
                     loads[(engine_id, wg_name)] = load
 
-                except ray.exceptions.ActorDiedError as e:
-                    # ignore actor died error, underlying replicated worker group will handle
-                    # worker group and actors lifecycle
-                    pass
-                except ray.exceptions.RayTaskError as e:
-                    self._teardown(wg, e)
+                except (ActorDiedError, RayTaskError) as e:
+                    self._finalize(wg, e)
 
             # 如果engine还有空闲则再分其他的一些
             for engine_id, wg in ready_wg_items:
@@ -585,12 +579,8 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
                             f"kv={load.kv_cache_util:.2f})")
                         self._progress_logger.log(wg_name, len(queries), fmt)
 
-                except ray.exceptions.ActorDiedError as e:
-                    # ignore actor died error, underlying replicated worker group will handle
-                    # worker group and actors lifecycle
-                    pass
-                except ray.exceptions.RayTaskError as e:
-                    self._teardown(wg, e)
+                except (ActorDiedError, RayTaskError) as e:
+                    self._finalize(wg, e)
 
             total, pending_size = ray.get(self.request_manager.get_size.remote())
             throughput = ray.get(self.request_manager.get_estimated_throughput.remote())
@@ -617,14 +607,16 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
     def get_step_metrics(self):
         return {}
 
-    def _teardown(self, wg: RayWorkerGroup, e: Exception):
-        # proactively kill the actor who causes any RayTaskErrors
+    def _finalize(self, wg: RayWorkerGroup, e: Exception):
+        # proactively kill the actor who causes any RayTaskErrors, RayTaskErrors or so on..
         # let underlying replicated worker group to handle the ready/alive of worker group
         #   in elastic scenario, there won't be any impact to task runner's proxy thread
         #   in static server scenario, any actor deadness could cause the other rpc call failure from
         #   main thread
-        traceback.print_exc()
-        print(f'show stack trace of task error of remote worker group only, {wg=}, {type(e)=}')
+        if not isinstance(e, ActorDiedError):
+            # ignore the stack of ActorDiedError, no useful information
+            traceback.print_exc()
+            print(f'show stack trace of task error of remote worker group only, {wg=}, {type(e)=}')
         try:
             wg.destroy()
         except Exception:
@@ -836,12 +828,8 @@ class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
 
                     loads[(engine_id, wg_name)] = load
 
-                except ray.exceptions.ActorDiedError as e:
-                    # ignore actor died error, underlying replicated worker group will handle
-                    # worker group and actors lifecycle
-                    pass
-                except ray.exceptions.RayTaskError as e:
-                    self._teardown(wg, e)
+                except (ActorDiedError, RayTaskError) as e:
+                    self._finalize(wg, e)
 
                     # handle dead engines during the loop to avoid request from staling for too long
             ready_wg_ids1 = self.replicas.ready_worker_group_ids

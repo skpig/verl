@@ -1165,11 +1165,11 @@ class RolloutManager:
             return
         setattr(self, flag_key, True)
         replicas = self.train_replicas if is_train else self.val_replicas
-        replicas.set_replica_ready_state(name='hybrid', ready=True)
         with self._hybrid_wg_lock:
             with hybrid_enable_server_ctx(self.hybrid_wg):
+                replicas.set_replica_ready_state(name='hybrid', ready=True)
                 yield
-        replicas.set_replica_ready_state(name='hybrid', ready=False)
+                replicas.set_replica_ready_state(name='hybrid', ready=False)
         ret_xperf_metrics = self.stop_hybrid_server_and_get_metrics()
         if xperf_metrics is not None:
             xperf_metrics[:] = ret_xperf_metrics
