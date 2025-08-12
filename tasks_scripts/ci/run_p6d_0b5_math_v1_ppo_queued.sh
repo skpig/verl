@@ -89,7 +89,6 @@ python3 tasks/main_ppo.py \
     +actor_rollout_ref.rollout.complete_ratio=0.0 \
     actor_rollout_ref.ref.log_prob_micro_batch_size=512 \
     actor_rollout_ref.ref.ema=0.99 \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.2 \
     critic.optim.lr=${critic_lr} \
     critic.optim.lr_warmup_steps_ratio=${lr_warmup_steps_ratio} \
     critic.model.path=${RM_MODEL_PATH} \

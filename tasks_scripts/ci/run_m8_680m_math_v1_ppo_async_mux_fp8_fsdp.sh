@@ -90,7 +90,6 @@ python3 tasks/main_ppo.py \
     +actor_rollout_ref.model.override_config.attention_dropout=0. \
     +actor_rollout_ref.model.override_config.embd_pdrop=0. \
     +actor_rollout_ref.model.override_config.resid_pdrop=0. \
-    +critic.model.override_config.architectures=['M8ForTokenClassification'] \
     actor_rollout_ref.actor.optim.lr=${actor_lr} \
     actor_rollout_ref.actor.optim.lr_warmup_steps=${lr_warmup_steps} \
     actor_rollout_ref.actor.ppo_mini_batch_size=${ppo_mini_batch_size} \
@@ -158,7 +157,6 @@ python3 tasks/main_ppo.py \
     +actor_rollout_ref.rollout.complete_ratio=0.5 \
     streaming_rollout.nnodes=1 \
     streaming_rollout.n_gpus_per_node=2 \
-    streaming_rollout.warmup_step=0 \
     streaming_validator.nnodes=1 \
     streaming_validator.n_gpus_per_node=2 \
     streaming_rollout.warmup_step=0 \

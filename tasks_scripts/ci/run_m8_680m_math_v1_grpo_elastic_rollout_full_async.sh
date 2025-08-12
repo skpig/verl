@@ -161,7 +161,6 @@ python3 tasks/main_ppo.py \
     critic.fsdp_size=${fsdp_size} \
     reward_model.fsdp_size=${fsdp_size} \
     actor_rollout_ref.actor.fsdp_config.param_offload=${offload} \
-    actor_rollout_ref.ref.fsdp_config.param_offload=True \
     critic.model.fsdp_config.param_offload=${offload} \
     reward_model.model.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=${actor_sp_size} \

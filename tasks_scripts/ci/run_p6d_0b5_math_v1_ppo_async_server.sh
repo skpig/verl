@@ -88,7 +88,6 @@ python3 tasks/main_ppo.py \
     +actor_rollout_ref.rollout.complete_ratio=0.0 \
     actor_rollout_ref.ref.log_prob_micro_batch_size=512 \
     actor_rollout_ref.ref.ema=0.99 \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.2 \
     actor_rollout_ref.rollout.rollout_pool.warmup_step=1 \
     +actor_rollout_ref.rollout.max_off_policy_steps=1 \
     critic.optim.lr=${critic_lr} \

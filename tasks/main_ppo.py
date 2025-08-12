@@ -821,8 +821,43 @@ def insert_nested(cfg_dict, key, value):
     cfg_dict[keys[-1]] = value
 
 
+def check_duplicate_overrides():
+    """Check for duplicate command line overrides and raise an error if found."""
+    from hydra.core.hydra_config import HydraConfig
+    try:
+        overrides = HydraConfig.get().overrides.task
+    except Exception:
+        return
+
+    seen_keys = set()
+    duplicate_keys = []
+
+    for override_str in overrides:
+        # Handle different override formats: key=value, ++key=value, ~key, etc.
+        if "=" in override_str:
+            # Extract the key part
+            key_part = override_str.split("=")[0]
+            # Remove hydra prefixes (+, ~, etc.)
+            clean_key = key_part.lstrip('+~')
+
+            if clean_key in seen_keys:
+                duplicate_keys.append(clean_key)
+            seen_keys.add(clean_key)
+
+    if duplicate_keys:
+        duplicate_list = ", ".join(sorted(set(duplicate_keys)))
+        error_msg = (f"Duplicate command line arguments detected: {duplicate_list}\n"
+                     f"Please remove duplicate arguments from your command line.\n"
+                     f"Each parameter should only be specified once.")
+        raise ValueError(error_msg)
+
+
 @hydra.main(config_path='config', config_name='ppo_trainer', version_base=None)
 def main(config):
+    # Check for duplicate command line arguments first
+    # This prevents hard-to-debug issues from duplicate parameters
+    check_duplicate_overrides()
+
     metric_collection_context = MegavisionMetricsCtx().collect_init_ray_cluster_duration() \
         if MegavisionMetricsCtx else contextlib.nullcontext()
 
