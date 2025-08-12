@@ -8,7 +8,7 @@ import copy
 import torch
 
 from mono_rl import DataProto
-from alpha_seed.utils.dataset.dist_data_util import release_ref_counts, get_image_manager, init_or_get_image_manager
+from alpha_seed.utils.dataset.dist_data_util import release_ref_counts, add_ref_counts, init_or_get_image_manager
 from alpha_seed.utils.reward_score import NON_AGENT_PLACE_HOLDER_SCORE
 
 logger = logging.getLogger(__file__)
@@ -176,6 +176,7 @@ class RolloutPool:
                     self.rollout_id2uid[rollout_id].add(uid)
                     if len(self.rollout_id2uid[rollout_id]) >= num_fillin_th:
                         self.bon_ready_batch.put(rollout_id)
+            add_ref_counts(self.image_manager, batch_lst)
 
         print("[fill_rollout_pool] fill_batch:", len(batch_lst), "bon_ready_batch:",
               self.bon_ready_batch.qsize() * self.num_bon, "pool_size:", self.pool_size)

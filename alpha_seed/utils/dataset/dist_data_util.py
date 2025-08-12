@@ -93,8 +93,9 @@ def load_objects_from_bin(filename="data.bin", offsets_to_load=None):
 
 
 def release_object(image_manager, non_tensor_batch=None, keys=None):
-    refs_to_release = []
+    refs_to_release = None
     if non_tensor_batch is not None:
+        refs_to_release = []
         for key in keys:
             if key in non_tensor_batch:
                 refs_to_release.extend(list(non_tensor_batch[key]))
@@ -102,12 +103,23 @@ def release_object(image_manager, non_tensor_batch=None, keys=None):
     ray.get(image_manager.release_refs.remote(refs_to_release))
 
 
-def release_ref_counts(image_manager, data_list):
+def _get_image_refs(data_list):
     refs = []
-    for key in ['pixel_values_ref', 'images_bytes_ref']:
+    for key in ['image_data_ref', 'images_bytes_ref']:
         for data in data_list:
             if key in data.non_tensor_batch:
                 refs.extend(list(data.non_tensor_batch[key]))
+    return refs
+
+
+def add_ref_counts(image_manager, data_list):
+    refs = _get_image_refs(data_list)
+    if refs:
+        ray.get(image_manager.add_refs_counts.remote(refs))
+
+
+def release_ref_counts(image_manager, data_list):
+    refs = _get_image_refs(data_list)
     if refs:
         ray.get(image_manager.release_refs_counts.remote(refs))
 
@@ -270,41 +282,49 @@ class ImageManager:
             self.uid2refs[ref.hex()] = ref
             if persistent:
                 self.persistent_refs.add(ref.hex())
-            self.ref_counts[ref.hex()] = 1
+            self.ref_counts[ref.hex()] = 0
             self.history_refs.add(ref.hex())
             if indices is not None:
                 if indices[i] not in self.index2refs:
                     self.index2refs[indices[i]] = {}
                 self.index2refs[indices[i]][key] = ref
 
-    def add_ref_counts(self, refs):
+    def add_refs_counts(self, refs):
         for r in refs:
-            if r is not None:
-                assert isinstance(r, str)
+            if r is None:
+                continue
+            if isinstance(r, list):
+                self.add_refs_counts(r)
+            else:
+                assert isinstance(r, str), type(r)
                 self.ref_counts[r] += 1
 
     def release_refs_counts(self, refs):
         for r in refs:
-            if r is not None:
-                assert isinstance(r, str)
+            if r is None:
+                continue
+            if isinstance(r, list):
+                self.release_refs_counts(r)
+            else:
+                assert isinstance(r, str), type(r)
                 if r in self.ref_counts:
                     self.ref_counts[r] -= 1
 
     def release_refs(self, refs=None):
-        if len(refs) == 0:
-            return
-        if isinstance(refs[0], list):
+        if refs is not None and len(refs) > 0 and isinstance(refs[0], list):
             for ref in refs:
                 self.release_refs(ref)
             return
         for ref, count in self.ref_counts.items():
             if count <= 0 and ref not in self.persistent_refs and ref in self.uid2refs:
                 res = self.uid2refs.pop(ref)
+                logger.info(f"release ref {ref}")
                 del res
         if refs is not None:
             for ref in refs:
                 if ref not in self.persistent_refs and ref in self.uid2refs:
                     res = self.uid2refs.pop(ref)
+                    logger.info(f"release ref {ref}")
                     del res
 
     def set_image_loaders(self, image_loaders):
