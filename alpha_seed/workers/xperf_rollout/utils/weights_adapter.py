@@ -167,10 +167,11 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
         self.over_enc_m = getattr(config, "over_enc_m", None)
         self.over_enc_n_in = getattr(config, "over_enc_n_in", None)
         self.over_enc_n_out = getattr(config, "over_enc_n_out", None)
-        self.mtp_n_heads = getattr(config, "mtp_n_heads", 1)
         self.use_ep = getattr(xperf_model, "use_ep", False)
-        self.use_mtp = getattr(xperf_model, "use_mtp", False)
         self.vocab_tp = getattr(xperf_model, "vocab_tp", False)
+        self.use_mtp = getattr(xperf_model, "use_mtp", False)
+        self.mtp_n_heads = getattr(config, "mtp_n_heads", 1)
+        assert not self.use_mtp or self.mtp_n_heads > 1, "mtp_n_heads must be greater than 1 when use_mtp is True"
 
     def load_from_state_dict(self, state_dict: Dict[str, Union[torch.Tensor, DTensor]], prefix: str) -> None:
 
@@ -299,12 +300,29 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
                     loader(f"{layer_key}.hc2.layer_norm.weight"),
             }
 
-        for mtp_idx in range(self.mtp_n_heads):
+        for mtp_idx in range(0, self.mtp_n_heads):
             layer_idx = self.num_layers - self.mtp_n_heads + mtp_idx
+
             if mtp_idx == 0:
-                self.source_weights[layer_idx]["static_reduce"] = loader(
+                self.source_weights[mtp_idx]["static_reduce"] = loader(
                     f"transformer.model.layers.{layer_idx}.hc2.static_reduce")
                 continue
+
+            self.source_weights[mtp_idx].update({
+                'draft_e_norm': loader(f"transformer.model.mtp_embs.{mtp_idx}.mtp_pre_emb_norm.weight"),
+                'draft_h_norm': loader(f"transformer.model.mtp_embs.{mtp_idx}.mtp_pre_hidden_norm.weight"),
+                'draft_ln_f': loader(f"transformer.model.mtp_ce_norms.{mtp_idx}.head_ln.weight"),
+                'draft_token_proj_w': loader(f"transformer.model.mtp_embs.{mtp_idx}.embed_feat_proj.weight"),
+                'draft_token_proj_b': loader(f"transformer.model.mtp_embs.{mtp_idx}.embed_feat_proj.bias"),
+                'static_reduce': loader(f"transformer.model.layers.{layer_idx}.hc2.static_reduce"),
+                'draft_vwn_static_alpha': loader(f"transformer.model.mtp_embs.{mtp_idx}.hc.static_alpha"),
+                'draft_vwn_static_beta': loader(f"transformer.model.mtp_embs.{mtp_idx}.hc.static_beta"),
+                'draft_vwn_dynamic_alpha': loader(f"transformer.model.mtp_embs.{mtp_idx}.hc.dynamic_alpha_fn"),
+                'draft_vwn_dynamic_alpha_scale': loader(f"transformer.model.mtp_embs.{mtp_idx}.hc.dynamic_alpha_scale"),
+                'draft_vwn_dynamic_beta': loader(f"transformer.model.mtp_embs.{mtp_idx}.hc.dynamic_beta_fn"),
+                'draft_vwn_dynamic_beta_scale': loader(f"transformer.model.mtp_embs.{mtp_idx}.hc.dynamic_beta_scale"),
+                'draft_vwn_layernorm_weight': loader(f"transformer.model.mtp_embs.{mtp_idx}.hc.layer_norm.weight"),
+            })
 
     def process_and_assign_weights(self, xperf_model: torch.nn.Module) -> None:
 
@@ -374,13 +392,36 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
             ]
             assign_weights(binding_weights, layer_idx)
 
-        for mtp_idx in range(self.mtp_n_heads):
-            layer_idx = self.num_layers - self.mtp_n_heads + mtp_idx
+        for mtp_idx in range(0, self.mtp_n_heads):
+
             if mtp_idx == 0:
-                static_reduce = self._process_mtp_weights(layer_idx)
+                static_reduce = self._process_mtp_weights(mtp_idx)
                 binding_weights = [(xperf_weights.module_weight, static_reduce, "reduce_static_weight")]
                 assign_weights(binding_weights, mtp_idx)
                 continue
+
+            draft_enorm_weight, draft_hnorm_weight, draft_ln_f_weight, draft_token_proj_w, \
+            draft_token_proj_b, static_reduce, draft_vwn_static_alpha, draft_vwn_static_beta, \
+            draft_vwn_dynamic_alpha, draft_vwn_dynamic_alpha_scale, draft_vwn_dynamic_beta, \
+            draft_vwn_dynamic_beta_scale, draft_vwn_layernorm_weight = self._process_mtp_weights(mtp_idx)
+
+            binding_weights = [
+                (xperf_weights.module_weight, draft_enorm_weight, "draft_enorm_weight"),
+                (xperf_weights.module_weight, draft_hnorm_weight, "draft_hnorm_weight"),
+                (xperf_weights.module_weight, draft_ln_f_weight, "draft_ln_f_weight"),
+                (xperf_weights.module_weight, draft_vwn_static_alpha, "draft_vwn_static_alpha"),
+                (xperf_weights.module_weight, draft_vwn_static_beta, "draft_vwn_static_beta"),
+                (xperf_weights.module_weight, draft_vwn_dynamic_alpha, "draft_vwn_dynamic_alpha"),
+                (xperf_weights.module_weight, draft_vwn_dynamic_alpha_scale, "draft_vwn_dynamic_alpha_scale"),
+                (xperf_weights.module_weight, draft_vwn_dynamic_beta, "draft_vwn_dynamic_beta"),
+                (xperf_weights.module_weight, draft_vwn_dynamic_beta_scale, "draft_vwn_dynamic_beta_scale"),
+                (xperf_weights.module_weight, draft_vwn_layernorm_weight, "draft_vwn_layernorm_weight"),
+            ]
+            xperf_model.draft_token_proj[mtp_idx - 1].weight.data = draft_token_proj_w
+            xperf_model.draft_token_proj[mtp_idx - 1].bias.data = draft_token_proj_b
+            assign_weights(binding_weights, mtp_idx - 1)
+            binding_weights = [(xperf_weights.module_weight, static_reduce, "reduce_static_weight")]
+            assign_weights(binding_weights, mtp_idx)
 
         xperf_weights.prepare_infer_weights()
         xperf_model.layers_weight = xperf_weights.layers_weight
@@ -690,14 +731,54 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
 
         return vwn_weights
 
-    def _process_mtp_weights(self, layer_idx: int) -> Tuple[torch.Tensor, ...]:
+    def _process_mtp_weights(self, mtp_idx: int) -> Tuple[torch.Tensor, ...]:
 
-        static_reduce = None
+        draft_enorm_weight, draft_hnorm_weight, draft_ln_f_weight, draft_token_proj_w, \
+        draft_token_proj_b, static_reduce, draft_vwn_static_alpha, draft_vwn_static_beta, \
+        draft_vwn_dynamic_alpha, draft_vwn_dynamic_alpha_scale, draft_vwn_dynamic_beta, \
+        draft_vwn_dynamic_beta_scale, draft_vwn_layernorm_weight = [None] * 13
+
+        if mtp_idx == 0:
+            if self.has_over_encoding:
+                static_reduce = self._cast_to(self._get_full_tensor(self.source_weights[mtp_idx]['static_reduce']),
+                                              torch.bfloat16)
+            return static_reduce
+
+        draft_enorm_weight = self._cast_to(self._get_full_tensor(self.source_weights[mtp_idx]['draft_e_norm']),
+                                           torch.bfloat16)[None, :]
+        draft_hnorm_weight = self._cast_to(self._get_full_tensor(self.source_weights[mtp_idx]['draft_h_norm']),
+                                           torch.bfloat16)[None, :]
+        draft_ln_f_weight = self._cast_to(self._get_full_tensor(self.source_weights[mtp_idx]['draft_ln_f']),
+                                          torch.bfloat16)[None, :]
+        draft_token_proj_w = self._cast_to(self._get_full_tensor(self.source_weights[mtp_idx]['draft_token_proj_w']),
+                                           torch.bfloat16)
+        draft_token_proj_b = self._cast_to(self._get_full_tensor(self.source_weights[mtp_idx]['draft_token_proj_b']),
+                                           torch.bfloat16)
+
         if self.has_over_encoding:
-            static_reduce = self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['static_reduce']),
+            static_reduce = self._cast_to(self._get_full_tensor(self.source_weights[mtp_idx]['static_reduce']),
                                           torch.bfloat16)
+            draft_vwn_static_alpha = self._cast_to(
+                self._get_full_tensor(self.source_weights[mtp_idx]['draft_vwn_static_alpha']), torch.bfloat16)
+            draft_vwn_static_beta = self._cast_to(
+                self._get_full_tensor(self.source_weights[mtp_idx]['draft_vwn_static_beta']), torch.bfloat16)
+            draft_vwn_dynamic_alpha = self._cast_to(
+                self._get_full_tensor(self.source_weights[mtp_idx]['draft_vwn_dynamic_alpha']),
+                torch.bfloat16).transpose(0, 1).contiguous()
+            draft_vwn_dynamic_alpha_scale = self._cast_to(
+                self._get_full_tensor(self.source_weights[mtp_idx]['draft_vwn_dynamic_alpha_scale']), torch.bfloat16)
+            draft_vwn_dynamic_beta = self._cast_to(
+                self._get_full_tensor(self.source_weights[mtp_idx]['draft_vwn_dynamic_beta']),
+                torch.bfloat16).transpose(0, 1).contiguous()
+            draft_vwn_dynamic_beta_scale = self._cast_to(
+                self._get_full_tensor(self.source_weights[mtp_idx]['draft_vwn_dynamic_beta_scale']), torch.bfloat16)
+            draft_vwn_layernorm_weight = self._cast_to(
+                self._get_full_tensor(self.source_weights[mtp_idx]['draft_vwn_layernorm_weight']), torch.bfloat16)
 
-        return static_reduce
+        return draft_enorm_weight, draft_hnorm_weight, draft_ln_f_weight, draft_token_proj_w, \
+               draft_token_proj_b, static_reduce, draft_vwn_static_alpha, draft_vwn_static_beta, \
+               draft_vwn_dynamic_alpha, draft_vwn_dynamic_alpha_scale, draft_vwn_dynamic_beta, \
+               draft_vwn_dynamic_beta_scale, draft_vwn_layernorm_weight
 
     def _process_quant_wfp8(self, *args) -> Tuple[torch.Tensor, ...]:
 

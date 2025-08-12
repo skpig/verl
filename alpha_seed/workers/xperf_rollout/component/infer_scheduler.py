@@ -49,9 +49,14 @@ class InferScheduler():
 
     def switch_mode(self, mode):
         if mode == "rollout":
-            self.return_full_hidden_states = False
+            if self.enable_mtp_decoding:
+                self.return_full_hidden_states = True
+                self.last_token_only = False
+            else:
+                self.return_full_hidden_states = False
+                self.last_token_only = True
+            self.return_full_hidden_states_after_layernorm = False
             self.return_padding_tensor = False
-            self.last_token_only = True
             self.context_only = False
         elif mode == "log_probs":
             self.context_only = True
@@ -83,6 +88,7 @@ class InferScheduler():
         self.metrics['prefill_token_num'] = []
         self.metrics['prefix_cache_hit_length'] = []
         self.metrics['evict_count'] = 0
+        self.metrics['accept_len'] = []
         self.sampler.metrics = self.metrics
         self.step_time = None
 
@@ -133,27 +139,6 @@ class InferScheduler():
     def internal_inference_orca(self, context_input: torch.Tensor, decode_input: torch.Tensor,
                                 total_length: torch.Tensor, kv_index: torch.Tensor, orca_updated: bool,
                                 context_shifts: torch.Tensor):
-
-        if self.enable_metrics:
-            tokens_num = 0
-            if context_input is not None:
-                tokens_num += context_input.shape[0] * context_input.shape[1]
-                self.metrics["ctx_bs"].append(context_input.shape[0])
-                self.metrics["ctx_prompt_length"].append(context_input.shape[1])
-            else:
-                pass
-
-            if decode_input is not None:
-                tokens_num += decode_input.shape[0]
-                self.metrics["dec_bs"].append(decode_input.shape[0])
-            else:
-                self.metrics["dec_bs"].append(0)
-
-            self.metrics["kv_cache_utils"].append(self.cache_manager.get_kv_cache_utils())
-            self.metrics["tokens_num"].append(tokens_num)
-            self.metrics["page_swap_out_bs"] += self.cache_manager.page_swap_out_bs
-            self.metrics["page_swap_out_token"] += self.cache_manager.page_swap_out_token
-
         if decode_input is not None and decode_input.shape[0] in self.bs_graph_map.keys() and context_input is None:
             bs = decode_input.shape[0]
             self.graph_decode_input_ids_placeholder[bs].copy_(decode_input)
@@ -177,20 +162,22 @@ class InferScheduler():
                 decode_max_kv_len = decode_kv_len.max().item()
                 decode_total_kv_len = decode_kv_len.sum().item()
 
-            return self.engine.forward_orca(context_input_ids=None,
-                                            context_input_embeds=context_input,
-                                            decode_input_ids=decode_input,
-                                            total_length=total_length,
-                                            kv_cache_index=kv_index,
-                                            orca_updated=orca_updated,
-                                            context_shifts=context_shifts,
-                                            return_full_hidden_states=self.return_full_hidden_states,
-                                            return_padding_tensor=self.return_padding_tensor,
-                                            last_token_only=self.last_token_only,
-                                            context_max_kv_len=context_max_kv_len,
-                                            context_total_kv_len=context_total_kv_len,
-                                            decode_max_kv_len=decode_max_kv_len,
-                                            decode_total_kv_len=decode_total_kv_len)
+            return self.engine.forward_orca(
+                context_input_ids=None,
+                context_input_embeds=context_input,
+                decode_input_ids=decode_input,
+                total_length=total_length,
+                kv_cache_index=kv_index,
+                orca_updated=orca_updated,
+                context_shifts=context_shifts,
+                return_full_hidden_states=self.return_full_hidden_states,
+                return_padding_tensor=self.return_padding_tensor,
+                return_full_hidden_states_after_layernorm=self.return_full_hidden_states_after_layernorm,
+                last_token_only=self.last_token_only,
+                context_max_kv_len=context_max_kv_len,
+                context_total_kv_len=context_total_kv_len,
+                decode_max_kv_len=decode_max_kv_len,
+                decode_total_kv_len=decode_total_kv_len)
 
     def forward_and_sample(self,
                            context_input: torch.Tensor,
@@ -206,6 +193,29 @@ class InferScheduler():
                            draft_input: torch.Tensor = None,
                            draft_total_length: torch.Tensor = None,
                            target_hidden_states: torch.Tensor = None):
+        if self.enable_metrics:
+            tokens_num = 0
+            if context_input is not None:
+                tokens_num += context_input.shape[0] * context_input.shape[1]
+                self.metrics["ctx_bs"].append(context_input.shape[0])
+                self.metrics["ctx_prompt_length"].append(context_input.shape[1])
+            else:
+                pass
+
+            if decode_input is not None:
+                decode_tokens = decode_input.shape[0]
+                if self.enable_mtp_decoding:
+                    decode_tokens *= (self.num_pred_tokens + 1)
+                tokens_num += decode_tokens
+                self.metrics["dec_bs"].append(decode_tokens)
+            else:
+                self.metrics["dec_bs"].append(0)
+
+            self.metrics["kv_cache_utils"].append(self.cache_manager.get_kv_cache_utils())
+            self.metrics["tokens_num"].append(tokens_num)
+            self.metrics["page_swap_out_bs"] += self.cache_manager.page_swap_out_bs
+            self.metrics["page_swap_out_token"] += self.cache_manager.page_swap_out_token
+
         accepted_len = None
         forward_spec = keys is not None or (self.enable_mtp_decoding and context_input is None)
         if not forward_spec:
@@ -235,18 +245,30 @@ class InferScheduler():
             return next_tokens, accepted_len, target_hidden_states, log_probs
         else:
             # forward mtp spec
-            accepted_tokens, accepted_len, target_hidden_states = self.engine.forward_spec(
+            context_bs = context_input.shape[0] if context_input is not None else 0
+            decode_kv_len = total_length[context_bs:]
+            decode_max_kv_len = decode_kv_len.max().item()
+            decode_total_kv_len = decode_kv_len.sum().item()
+            draft_context_shifts = total_length - draft_total_length - 1
+            draft_kv_len = draft_total_length + draft_context_shifts
+            draft_max_kv_len = draft_kv_len.max().item()
+            draft_total_kv_len = draft_kv_len.sum().item()
+            accpeted_tokens, accepted_len, target_hidden_states = self.engine.forward_spec(
                 draft_model=self.engine,
                 draft_input_ids=draft_input,
                 eagle_hidden_states=target_hidden_states,
                 draft_total_length=draft_total_length,
-                draft_context_shifts=total_length - draft_total_length - 1,
+                draft_context_shifts=draft_context_shifts,
                 kv_cache_index=kv_index,
                 k=self.num_pred_tokens,
                 sampler=self.sampler,
+                draft_max_kv_len=draft_max_kv_len,
+                draft_total_kv_len=draft_total_kv_len,
+                decode_max_kv_len=decode_max_kv_len,
+                decode_total_kv_len=decode_total_kv_len,
             )
             target_hidden_states = target_hidden_states.split(self.num_pred_tokens + 1)
             target_hidden_states = [
                 hidden_states[:accepted_len[i] + 1] for i, hidden_states in enumerate(target_hidden_states)
             ]
-            return accepted_tokens, accepted_len, target_hidden_states, None
+            return accpeted_tokens.contiguous(), accepted_len, target_hidden_states, None

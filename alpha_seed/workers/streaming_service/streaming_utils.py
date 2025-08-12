@@ -125,6 +125,8 @@ def record_xperf_metrics(batch_info, metrics, logger, global_step, prefix=''):
         len(prefix_cache_hit_length) / len(prefill_token_num)
     metrics[f'rollout/{prefix}/prefix_cache_hit_count'] = len(prefix_cache_hit_length)
     metrics[f'rollout/{prefix}/prefix_cache_evict_count'] = xperf_metrics.get('evict_count', 0)
+    accept_len = xperf_metrics.get('accept_len', [])
+    metrics[f'rollout/{prefix}/accept_len'] = 0 if len(accept_len) == 0 else (sum(accept_len) / len(accept_len))
 
     # plugin metrics
     for key, val in xperf_metrics.items():

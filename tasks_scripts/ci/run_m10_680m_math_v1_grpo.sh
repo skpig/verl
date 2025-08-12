@@ -194,4 +194,7 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.actor.profile.upload_to_mlx=True \
     actor_rollout_ref.actor.profile.filename=actor.tp${xperf_tp_size}.fsdp${fsdp_size} \
     trainer.total_steps=${NUM_STEPS} \
+    +actor_rollout_ref.rollout.use_ep=True \
+    +actor_rollout_ref.rollout.vocab_tp=True \
+    +actor_rollout_ref.rollout.use_mtp=True \
     2>&1 | tee log.txt

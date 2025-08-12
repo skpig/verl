@@ -206,6 +206,7 @@ class AsyncXPerfGPTRollout(object):
         tp_size = self.config.get('tensor_model_parallel_size', 1)
         use_ep = self.config.get('use_ep', False)
         use_vocab_tp = self.config.get('vocab_tp', False)
+        use_mtp = self.config.get('use_mtp', False)
         use_custom_allreduce = tp_size <= 8 and get_gpu_support_nvlink()
         multi_host_tp = is_multihost_model(tp_size)
 
@@ -267,7 +268,8 @@ class AsyncXPerfGPTRollout(object):
                                           step_profiler=step_profiler,
                                           vit_use_xperf_gpt=self.config.vit_use_xperf_gpt,
                                           prefix_cache_slot_num=self.config.prefix_cache_slot_num,
-                                          prefix_cache_max_length=self.config.prefix_cache_max_length)
+                                          prefix_cache_max_length=self.config.prefix_cache_max_length,
+                                          enable_mtp_decoding=use_mtp)
         inference_sess.max_off_policy_steps = self.config.get('max_off_policy_steps', 5)
         with tempfile.NamedTemporaryFile(mode='w', suffix=".json") as f:
             print(f"load xperf config ... {text_cfg}")

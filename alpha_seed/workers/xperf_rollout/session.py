@@ -329,12 +329,6 @@ class InferenceSession:
             "decode_output": True,
         }
 
-        if self.enable_mtp_decoding:
-            kwargs.update({
-                "return_full_hidden_states": True,
-                "last_token_only": False,
-            })
-
         for param, default in params_with_defaults.items():
             if param in kwargs:
                 value = kwargs.pop(param)
@@ -751,6 +745,11 @@ class InferenceSession:
         if 'image_data' in query.meta_info and query.meta_info.get('validate', False):
             image_data = query.meta_info.pop('image_data')
             del image_data
+        if self.enable_metrics and self.num_pred_tokens > 0:
+            accepted_steps = len(query.accepted_len)
+            if accepted_steps > 0:
+                accepted_len = sum(query.accepted_len) / (accepted_steps * self.num_pred_tokens)
+                self.infer_scheduler.metrics['accept_len'].append(accepted_len)
 
     def _try_resume_paused_queries(self):
         if len(self.paused) == 0:
@@ -833,6 +832,7 @@ class InferenceSession:
         # for MTP
         max_draft_len = -1
         draft_list = []
+        draft_oe_histroy = []
         draft_total_length = []
         target_hidden_states = []
         # MTP is PD separate
@@ -934,9 +934,19 @@ class InferenceSession:
                     code_books_list.append(query.code_book)
                 if self.enable_mtp_decoding:
                     if len(query.new_token_ids) <= 1:
+                        # prepare mtp layer kv cache
                         draft_list.append(query.input_ids[1:] + query.new_token_ids)
+                        draft_oe_histroy.append(query.input_ids[:1])
                     else:
                         draft_list.append(query.new_token_ids[-query.accepted_len[-1] - 1:])
+                        if len(query.new_token_ids) - query.accepted_len[-1] >= self.oe_max_stride:
+                            draft_oe_histroy.append(
+                                query.new_token_ids[-self.oe_max_stride -
+                                                    query.accepted_len[-1]:-query.accepted_len[-1] - 1])
+                        else:
+                            draft_oe_histroy.append(query.input_ids[-(self.oe_max_stride - len(query.new_token_ids) +
+                                                                      query.accepted_len[-1]):] +
+                                                    query.new_token_ids[:-query.accepted_len[-1] - 1])
                     max_draft_len = max(len(draft_list[-1]), max_draft_len)
                     draft_total_length.append(len(draft_list[-1]))
                     target_hidden_states.append(query.hidden_states)
@@ -984,8 +994,12 @@ class InferenceSession:
             results['decode_input'] = None
 
         if len(draft_list) > 0:
-            for i, query in enumerate(draft_list):
-                draft_list[i] = [self.pad_token_id] * (max_draft_len - len(query)) + query
+            for i, (query, oe_histroy) in enumerate(zip(draft_list, draft_oe_histroy)):
+                if self.oe_max_stride > 1:
+                    draft_list[i] = [self.pad_token_id] * (max_draft_len + self.oe_max_stride - 1 - len(query) -
+                                                           len(oe_histroy)) + oe_histroy + query
+                else:
+                    draft_list[i] = [self.pad_token_id] * (max_draft_len - len(query)) + query
             results['draft_input'] = torch.tensor(draft_list, dtype=torch.int64, device="cuda")
             results['draft_total_length'] = torch.tensor(draft_total_length, dtype=torch.int, device="cuda")
             results['target_hidden_states'] = torch.cat(target_hidden_states, dim=0)

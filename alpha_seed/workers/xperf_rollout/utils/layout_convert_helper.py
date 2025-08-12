@@ -51,20 +51,33 @@ def offload_param_to_device(tp_model, device):
     if isinstance(tp_model, (XCustomInferenceModuleAdapter, XPerfTritonInferenceModule)):
         param_list = tp_model.get_param_list(skip_meta=True)
     else:
-        param_list = [tp_model.layernorm_weight, tp_model.wte_weight, tp_model.lm_head_weight] + \
-                        [p for layer in tp_model.layers_weight for p in layer if isinstance(p, torch.Tensor)]
+        param_list = [p for layer in tp_model.layers_weight for p in layer if isinstance(p, torch.Tensor)]
+        for weight_name, type in vars(tp_model.weights.module_weight).items():
+            if "over_enc_emb_weight" in weight_name:
+                continue
+            weight = getattr(tp_model.weights.module_weight, weight_name)
+            if isinstance(weight, torch.Tensor):
+                param_list.append(weight)
+            elif isinstance(weight, list):
+                param_list.extend(weight)
         if hasattr(tp_model, 'wpe'):
             param_list.append(tp_model.wpe.weight)
-        if tp_model.config.has_over_encoding and device != "meta":
+        if hasattr(tp_model, 'draft_token_proj'):
+            for proj in tp_model.draft_token_proj:
+                if proj.weight.data.is_meta and device != "meta":
+                    proj.weight = torch.nn.Parameter(torch.empty_like(proj.weight, device=device), requires_grad=False)
+                    proj.bias = torch.nn.Parameter(torch.empty_like(proj.bias, device=device), requires_grad=False)
+                else:
+                    proj.weight = torch.nn.Parameter(proj.weight.to(device), requires_grad=False)
+                    proj.bias = torch.nn.Parameter(proj.bias.to(device), requires_grad=False)
+        if tp_model.config.has_over_encoding:
             param = tp_model.weights.module_weight.over_enc_emb_weight
-            if param.is_meta:
+            if param.is_meta and device != "meta":
                 tp_model.weights.module_weight.over_enc_emb_weight = torch.empty_like(param, device="cpu").pin_memory()
+            elif device == "meta":
+                tp_model.weights.module_weight.over_enc_emb_weight = param.to(device)
             else:
                 tp_model.weights.module_weight.over_enc_emb_weight = param.cpu().pin_memory()
-            # FIXME
-            tp_model.weights.module_weight.reduce_static_weight[0] = torch.empty_like(
-                tp_model.weights.module_weight.reduce_static_weight[0], device=device)
-            param_list.append(tp_model.weights.module_weight.over_enc_proj_weight)
     for param in param_list:
         if param.is_meta:
             out = torch.empty_like(param, device=device)

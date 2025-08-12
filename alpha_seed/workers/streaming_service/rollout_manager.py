@@ -49,10 +49,11 @@ def _setup_standalone_comm(hybrid_wg, standalone_wg, role: str):
     hybrid_master_address = hybrid_wg.get_master_addr()
     hybrid_master_port = hybrid_wg.get_master_free_port()
     standalone_master_address = standalone_wg.get_master_addr()
-
-    master_fut = hybrid_wg.setup_standalone_worker_comm(hybrid_master_address, standalone_master_address,
+    hybrid_master_address_ref = ray.put(hybrid_master_address)
+    standalone_master_address_ref = ray.put(standalone_master_address)
+    master_fut = hybrid_wg.setup_standalone_worker_comm(hybrid_master_address_ref, standalone_master_address_ref,
                                                         str(hybrid_master_port), role)
-    slave_fut = standalone_wg.setup_standalone_worker_comm(hybrid_master_address, standalone_master_address,
+    slave_fut = standalone_wg.setup_standalone_worker_comm(hybrid_master_address_ref, standalone_master_address_ref,
                                                            str(hybrid_master_port), role)
     # 这里同步，避免刚找出来的可用端口还没来得及建联就被占用了
     ray.get(master_fut)
