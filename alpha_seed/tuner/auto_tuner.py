@@ -602,8 +602,7 @@ def auto_tune_task(config, ngpus_per_node: int, nnodes: int, save_dir: str = Non
     tuner = RayWorkerGroup(resource_pool, class_with_args, name_prefix="autotuner")
     filepath = tuner.search(constraints, export_path, save_dir)
     # release resources
-    for pg in resource_pool.get_placement_groups():
-        ray.util.remove_placement_group(pg)
+    tuner.destroy()
     return filepath
 
 
