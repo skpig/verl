@@ -4,21 +4,18 @@ Implement custom functions for math expression task
 import copy
 from functools import reduce
 
-from transformers import PreTrainedTokenizer
-
-from alpha_seed.utils.tokenizer.async_tokenizer import AsyncTokenizer
 from alpha_seed.workers.agents.handlers import register_handler, TaskContext
 from alpha_seed.workers.agents.handlers.base import AsyncAgent
 from alpha_seed.workers.agents.handlers.tool.special_calculator import FunctionCall
 from mono_rl import DataProto
-from typing import List, Dict, Tuple
+from typing import List, Dict
 import json
 import torch
 import regex as re
 from uuid import uuid4
 import numpy as np
 from alpha_seed.workers.agents.handlers.ci.tool import JupyterCI, JupyterCI_stateful
-from alpha_seed.workers.agents.handlers.tool.parser import ToolParser, FunctionCall
+from alpha_seed.workers.agents.handlers.tool.parser import ToolParser, FunctionCall, _extract_messages_from_dataproto
 
 CODING_SNIPET_REGEX = (r'<escapeShell\s+type=["\']code["\']\s*,?\s*id=["\'](?P<id>\d+)["\']\s*,?\s*'
                        r'(name=["\'](?P<name>[^"\']+)["\']\s*)?>'
@@ -56,7 +53,7 @@ class ToolAsyncAgent(AsyncAgent):
         item.meta_info = copy.deepcopy(item.meta_info)
 
         # Extract initial messages from DataProto
-        messages = await self._extract_messages_from_dataproto(item, max_prompt_length)
+        messages = await _extract_messages_from_dataproto(item, max_prompt_length, self.tokenizer, self.tool_schemas)
         initial_input_ids = None
         initial_attn_mask = None
         model_out_mask_list = []  # 记录每次llm输出的token长度和input长度， (True or False, length)
@@ -303,37 +300,6 @@ class ToolAsyncAgent(AsyncAgent):
         # self.tokenizer.decode(training_part[:out.batch['attention_mask'][0, -max_response_length:].sum()])
 
         return out
-
-    async def _extract_messages_from_dataproto(self, item, max_prompt_length) -> List[Dict]:
-        """Extract messages from DataProto for chat template"""
-        # For simplicity, assume it's a user message
-        # In practice, you might need more sophisticated parsing
-        empty_prompt = self.tokenizer.apply_chat_template([{
-            "role": "user",
-            "content": ""
-        }],
-                                                          tools=self.tool_schemas,
-                                                          add_generation_prompt=True,
-                                                          tokenize=False)
-        empty_prompt_data = await self.tokenizer.batch_encode_plus_async([empty_prompt], add_special_tokens=False)
-        remain_length = max(0, max_prompt_length - len(empty_prompt_data.input_ids[0]))
-        if remain_length == 0:
-            prompt = ""
-        else:
-            # Here combine all user prompts and system prompts if there exists more than one in dataset
-            if len(item.non_tensor_batch['raw_prompt'][0]) > 1:
-                full_prompt = ''
-                for prompt in item.non_tensor_batch['raw_prompt'][0]:
-                    full_prompt += prompt['content']
-                initial_prompt = full_prompt
-            else:
-                initial_prompt = item.non_tensor_batch['raw_prompt'][0][0]['content']
-            prompt_data = await self.tokenizer.batch_encode_plus_async([initial_prompt], add_special_tokens=False)
-            prompt_data = prompt_data.input_ids[0][-remain_length:]
-            prompt = self.tokenizer.decode(prompt_data)
-        messages = [{"role": "user", "content": prompt}]
-
-        return messages
 
     async def _generate_with_tools(self, messages: List[Dict], item: DataProto, context, max_length, max_prompt_length,
                                    max_response_length, max_new_tokens_per_turn, num_turns, response_info):

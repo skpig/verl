@@ -14,7 +14,7 @@ from uuid import uuid4
 from functools import reduce
 from transformers import PreTrainedTokenizer
 from mono_rl import DataProto
-from typing import Any, Tuple, List, Dict
+from typing import List, Dict
 import torch.nn.functional as F
 
 from alpha_seed.utils.tokenizer.async_tokenizer import AsyncTokenizer
@@ -23,6 +23,7 @@ from alpha_seed.workers.agents.handlers.base import AsyncAgent, AsyncLLMInterfac
 from alpha_seed.utils.reward_score.response_post_proc import last_codeblock_postprocess
 from alpha_seed.utils.reward_score.oj_utils import compute_score_client, compute_score
 from alpha_seed.workers.streaming_service.streaming_utils import DataPack, pack_to_dataproto, rmpad
+from alpha_seed.workers.agents.handlers.tool.parser import _extract_messages_from_dataproto
 
 
 class CodeParser:
@@ -74,29 +75,6 @@ class CodeAgent(AsyncAgent):
         self.sandbox_feedback = SandboxFeedback(self.tokenizer)
         self.pad_token_id = self.tokenizer.pad_token_id
         self.eos_token_id = self.tokenizer.eos_token_id
-
-    async def _extract_messages_from_dataproto(self, item, max_prompt_length) -> List[Dict]:
-        """Extract messages from DataProto for chat template"""
-        # For simplicity, assume it's a user message
-        # In practice, you might need more sophisticated parsing
-        empty_prompt = self.tokenizer.apply_chat_template([{
-            "role": "user",
-            "content": ""
-        }],
-                                                          add_generation_prompt=True,
-                                                          tokenize=False)
-        empty_prompt_data = await self.tokenizer.batch_encode_plus_async([empty_prompt], add_special_tokens=False)
-        remain_length = max(0, max_prompt_length - len(empty_prompt_data.input_ids[0]))
-        if remain_length == 0:
-            prompt = ""
-        else:
-            initial_prompt = item.non_tensor_batch['raw_prompt'][0][0]['content']
-            prompt_data = await self.tokenizer.batch_encode_plus_async([initial_prompt], add_special_tokens=False)
-            prompt_data = prompt_data.input_ids[0][-remain_length:]
-            prompt = self.tokenizer.decode(prompt_data)
-        messages = [{"role": "user", "content": prompt}]
-
-        return messages
 
     async def _call_sandbox(self, code, ground_truth, data_uid, config):
         result = await self.sandbox_feedback(code, ground_truth, data_uid, config)
@@ -224,7 +202,7 @@ class CodeAgent(AsyncAgent):
         uid_list = []
 
         # Extract initial messages from DataProto
-        messages = await self._extract_messages_from_dataproto(item, max_prompt_length)
+        messages = await _extract_messages_from_dataproto(item, max_prompt_length, self.tokenizer, self.tool_schemas)
         completion = None
         num_turns = 1
         assert num_turns <= max_turns, "max_turns should be >= 1"

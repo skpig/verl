@@ -65,7 +65,7 @@ from alpha_seed.utils.alarm.lark_util import send_message_to_employee
 from alpha_seed.utils.reward_score.grm_service import GRMService, GRM_INVALID_SCORE
 from alpha_seed.utils.server_client import validate_client_config, KVStore, ServerHealthCheck, TaskRunner, ClientTaskRunner, check_all_workers_alive, recreate_actor
 from alpha_seed.utils.ckpt import download_minimal_required_files
-from alpha_seed.utils.chat_template import CHATML, CHATML_TOOL, CHATML_TOOL_V2, CHATML_TOOL_V3, CHATML_TOOL_V4
+from alpha_seed.utils.chat_template import CHATML, CHATML_TOOL, CHATML_TOOL_V2, CHATML_TOOL_V3, CHATML_TOOL_V4, CHATML_TOOL_V5
 from alpha_seed.workers.streaming_service.rollout_request_manager import RequestManager, RequestManagerRegisterCenter
 from databus import collect_array
 
@@ -1156,6 +1156,8 @@ def config_to_trainer_kwargs(config):
         tokenizer.chat_template = CHATML_TOOL_V3
     if config.data.get('chat_template', None) == 'chatml_tool_v4':
         tokenizer.chat_template = CHATML_TOOL_V4
+    if config.data.get('chat_template', None) == 'chatml_tool_v5':
+        tokenizer.chat_template = CHATML_TOOL_V5
 
     if config.data.image_key:
         processor = AutoProcessor.from_pretrained(local_path)
