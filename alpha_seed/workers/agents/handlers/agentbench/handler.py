@@ -30,7 +30,7 @@ from bytedance import metrics
 
 
 @register_handler("agent/agentbench/agentless")
-class Agentless(ThreadedAgent):
+class AgentBench(ThreadedAgent):
 
     def __init__(self, tokenizer, llm, **kwargs):
         super().__init__(tokenizer, llm)

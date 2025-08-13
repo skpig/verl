@@ -25,7 +25,7 @@ RAW_CODE_REGEX = r"```(?P<language>.*?)\s*\n(?P<code>[\s\S]*?)```"
 
 
 @register_handler("agent/ci")
-class ToolAsyncAgent(AsyncAgent):
+class CIAgent(AsyncAgent):
 
     def __init__(self, tokenizer, llm, **kwargs):
         super().__init__(tokenizer, llm, **kwargs)

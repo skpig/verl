@@ -19,6 +19,7 @@ class FinishedEventStats:
 @dataclass
 class RequestDigest:
     query_id: str
+    pool_name: str  # 属于哪个request manager
     assigned_engine_id: str
     assigned_engine_name: str
     assigned_at: float

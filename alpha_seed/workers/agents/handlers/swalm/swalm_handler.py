@@ -218,7 +218,7 @@ swalm_agent_score:
 
 
 @register_handler("agent/swalm_agent")
-class CodeAgent(AsyncAgent):
+class SwalmAgent(AsyncAgent):
 
     def __init__(self, tokenizer: AsyncTokenizer | PreTrainedTokenizer, llm: AsyncLLMInterface, **kwargs):
         super().__init__(tokenizer, llm, **kwargs)

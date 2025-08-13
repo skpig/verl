@@ -9,10 +9,10 @@ from transformers import PreTrainedTokenizer
 from alpha_seed.utils.tokenizer.async_tokenizer import AsyncTokenizer
 from alpha_seed.workers.agents.handlers import register_handler, TaskContext
 from alpha_seed.workers.agents.handlers.base import AsyncAgent
+from alpha_seed.workers.agents.handlers.base_tool import BaseTool
 from alpha_seed.workers.agents.llm import AsyncLLMInterface
 from alpha_seed.workers.agents.handlers.tool.parser import FunctionCall, ToolParser, _extract_messages_from_dataproto
 from mono_rl import DataProto
-from verl.tools.base_tool import BaseTool
 from verl.tools.schemas import OpenAIFunctionToolSchema
 from typing import Any, Tuple, List, Dict
 import json
@@ -73,7 +73,7 @@ class Calculator(BaseTool):
 
 
 @register_handler("agent/tool/special_calculator")
-class ToolAgent(AsyncAgent):
+class SpecialCalculator(AsyncAgent):
 
     def __init__(self, tokenizer: AsyncTokenizer | PreTrainedTokenizer, llm: AsyncLLMInterface, **kwargs):
         super().__init__(tokenizer, llm, **kwargs)

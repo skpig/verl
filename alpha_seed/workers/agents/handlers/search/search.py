@@ -22,7 +22,7 @@ import ray
 
 
 @register_handler("agent/tool/search_and_text_browser")
-class ToolAgent(AsyncAgent):
+class SearchAgent(AsyncAgent):
 
     def __init__(self, tokenizer: AsyncTokenizer | PreTrainedTokenizer, llm: AsyncLLMInterface, **kwargs):
         super().__init__(tokenizer, llm, **kwargs)

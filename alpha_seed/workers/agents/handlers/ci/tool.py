@@ -1,6 +1,7 @@
 import functools
+
 import async_timeout
-from verl.tools.base_tool import BaseTool
+from alpha_seed.workers.agents.handlers.base_tool import BaseTool
 from verl.tools.schemas import OpenAIFunctionToolSchema
 import re
 import os

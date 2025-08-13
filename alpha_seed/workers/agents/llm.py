@@ -8,6 +8,8 @@ import ray
 import torch
 from omegaconf import DictConfig
 
+from alpha_seed.workers.agents.monitor_ctx import current_agent_tracker, get_current_agent_tracker
+from alpha_seed.workers.agents.monitoring import AgentTaskTracker
 from alpha_seed.workers.streaming_service.rollout_request_manager import RequestManager, RequestManagerRegisterCenter
 from alpha_seed.workers.xperf_rollout.component.query import Query
 from alpha_seed.workers.streaming_service.protocol import ChatCompletionRollout, ChoiceRollout, ChatCompletionMessageRollout, CompletionUsage
@@ -68,6 +70,12 @@ class AsyncLLMInterface(ABC):
         raise NotImplementedError()
 
     async def complete(self, item: DataProto, config: DictConfig, prompt: str = ''):
+        try:
+            tracker: AgentTaskTracker = current_agent_tracker.get()
+            tracker.incr_llm_call()
+        except LookupError:
+            pass
+
         completion = None
         data, meta_info = make_reqeust_data_and_metadata(item, prompt, self.host, self.port)
         try:
@@ -250,6 +258,13 @@ class SyncLLMInterface(ABC):
         raise NotImplementedError()
 
     def complete(self, item: DataProto, config: DictConfig, prompt: str = ''):
+        try:
+            tracker: AgentTaskTracker = get_current_agent_tracker()
+            tracker.incr_llm_call()
+        except AttributeError:
+            # ignore if context var not set
+            pass
+
         completion = None
         try:
             data, meta_info = make_reqeust_data_and_metadata(item, prompt, self.host, self.port)

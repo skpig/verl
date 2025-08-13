@@ -100,6 +100,7 @@ class Request:
 
 @dataclass
 class ProgressStat:
+    pool_name: str
     step: int
     total: int
     finished: int
@@ -735,6 +736,7 @@ class RequestManager:
             req = self.req_pool.requests.get(query_id)
             reg_digest = RequestDigest(
                 query_id=query_id,
+                pool_name=self._rm_name,
                 assigned_engine_id=req.assigned_engine_id,
                 assigned_engine_name=req.assigned_engine_name,
                 assigned_at=req.last_assigned_at,
@@ -824,6 +826,7 @@ class RequestManager:
             if step_finished < step_total:
                 ret.append(
                     ProgressStat(
+                        pool_name=self._rm_name,
                         step=step,
                         total=step_total,
                         finished=step_finished,
@@ -846,4 +849,13 @@ def get_all_request_manager_actors() -> List[RequestManager]:
     rms = []
     for n in names:
         rms.append(RequestManagerRegisterCenter.get(n))
+    return rms
+
+
+def get_all_request_manager_actors_with_names() -> List[RequestManager]:
+    rmrc: RequestManagerRegisterCenter = ray.get_actor('RequestManagerRegisterCenter')  # noqa
+    names = ray.get(rmrc.get_all_names.remote())
+    rms = []
+    for n in names:
+        rms.append((n, RequestManagerRegisterCenter.get(n)))
     return rms

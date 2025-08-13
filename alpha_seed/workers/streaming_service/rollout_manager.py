@@ -294,10 +294,10 @@ class RolloutManager:
             raise ValueError(f"Unsupported executor class: {executor_cls}")
         self.train_client_executor = ExecutorCls("train", self.config, self.tokenizer, self.processor,
                                                  self.train_rollout_server.host, self.train_rollout_server.port,
-                                                 "train_rollout")
+                                                 "train_rollout", self.loop)
         self.val_client_executor = ExecutorCls("val", self.config, self.tokenizer, self.processor,
                                                self.val_rollout_server.host, self.val_rollout_server.port,
-                                               "val_rollout")
+                                               "val_rollout", self.loop)
 
     def initialize(self, hybrid_wg, rollout_pool=None, train_standalone_wg=None, val_standalone_wg=None):
         assert not self._initialized
