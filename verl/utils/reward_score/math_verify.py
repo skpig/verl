@@ -321,13 +321,13 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None, is_v
             LatexExtractionConfig(),
         )
 
-        # reduce computation time for training
-        with open(".cache/current_solution.log", 'w') as f:
-            f.write("====== Solution ======\n")
-            f.write(solution_str)
-            f.write("\n\n\n")
-            f.write("====== Ground Truth ======\n")
-            f.write(ground_truth)
+        # # reduce computation time for training
+        # with open(".cache/current_solution.log", 'w') as f:
+        #     f.write("====== Solution ======\n")
+        #     f.write(solution_str)
+        #     f.write("\n\n\n")
+        #     f.write("====== Ground Truth ======\n")
+        #     f.write(ground_truth)
 
 
         # print("====== Parse Golden ======")

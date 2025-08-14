@@ -23,8 +23,10 @@ from traitlets import default
 import numpy as np
 from typing import Deque, List, Dict
 import traceback
+from torch.utils.data import RandomSampler, SequentialSampler
 
 from verl import DataProto
+from verl.utils.dataset.rl_dataset import TreeNode
 
 
 class AbstractSampler(Sampler[int]):
@@ -43,7 +45,7 @@ class AbstractCurriculumSampler(AbstractSampler):
     """Experimental interface for curriculum learning samplers."""
 
     @abstractmethod
-    def update(self, batch: DataProto) -> None:
+    def update(self, batch: DataProto, step_num: int) -> None:
         pass
 
 class AbstractBatchSampler(Sampler[List[int]]):
@@ -55,8 +57,34 @@ class AbstractCurriculumBatchSampler(AbstractBatchSampler):
     """Experimental interface for curriculum learning samplers."""
 
     @abstractmethod
-    def update(self, batch: DataProto) -> None:
+    def update(self, batch: DataProto, step_num: int) -> None:
         pass
+
+class TreeSampler(AbstractCurriculumSampler):
+    def __init__(self, data_source: Sized, data_config: DictConfig):
+        super().__init__(data_source, data_config)
+    
+        self.data_source = data_source
+        self.original_len = len(data_source)
+        self.root = self.data_source.root
+        self.item2node: Dict[int, TreeNode] = self.data_source.item2node
+    
+    def __iter__(self):
+        self.idx = 0
+        while self.idx < self.original_len:
+            # \epsilon greedy sampling
+            if np.random.rand() < 0.5 or len(self.item2node[self.idx].children) == 0:
+                yield self.idx
+            else:
+                # 从当前节点的children中随机选择一个
+                children = self.item2node[self.idx].children
+                child_node = np.random.choice(children)
+                yield child_node.item
+            self.idx += 1
+    
+    def update(self, batch: DataProto, step_num: int) -> None:
+        self.data_source.update(batch, step_num=step_num)
+        return
 
 class MoPPSSampler(AbstractCurriculumBatchSampler):
     """
@@ -83,7 +111,7 @@ class MoPPSSampler(AbstractCurriculumBatchSampler):
         self.fill_queue()
 
     # ---------- 训练后更新 ----------
-    def update(self, batch: DataProto) -> None:
+    def update(self, batch: DataProto, step_num: int) -> None:
         """batch 内必须带 'item' (索引) 和 'score' (0/1 or 回归分数)"""
         indices = torch.tensor(batch.non_tensor_batch["item"].astype(np.int32))
         scores  = torch.tensor(batch.non_tensor_batch["score"])
@@ -202,7 +230,7 @@ class PrioritySampler(AbstractBatchSampler):
             self.queue.append(i)
     
 
-    def update(self, batch: DataProto) -> None:
+    def update(self, batch: DataProto, step_num: int) -> None:
         """Update the sampler with the current batch."""
         indices = torch.tensor(batch.non_tensor_batch['item'].astype(np.int32))  # item is the index passed to the dataset.__getitem__
         scores = torch.tensor(batch.non_tensor_batch['score'])

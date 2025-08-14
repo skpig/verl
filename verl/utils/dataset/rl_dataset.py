@@ -15,12 +15,15 @@
 # limitations under the License.
 
 import copy
+from hmac import new
 import logging
 import os
 import json
 import re
 from collections import defaultdict
 from typing import Optional
+
+from networkx import ancestors
 
 import datasets
 import numpy as np
@@ -213,6 +216,7 @@ class RLHFDataset(Dataset):
             dataframe = datasets.load_dataset("parquet", data_files=parquet_file)["train"]
             dataframes.append(dataframe)
         self.dataframe: datasets.Dataset = datasets.concatenate_datasets(dataframes)
+        # DEBUG:
         # self.dataframe = self.dataframe.select(range(50))
 
         print(f"dataset len: {len(self.dataframe)}")
@@ -417,6 +421,7 @@ class TreeNode:
     def __init__(self, 
                  item,
                  father_node: Optional['TreeNode'] = None,
+                 partial_rollout: Optional[list[int]] = None,
                  step_num=0):
         """
         Initialize the TreeNode with the given data.
@@ -426,6 +431,27 @@ class TreeNode:
         self.children = []
 
         self.step_num = step_num  # the number of steps in the training process
+
+        self.partial_rollout = partial_rollout  # the length of the partial rollout
+
+        assert step_num <= 0 or partial_rollout is not None and father_node is not None
+    
+    @property
+    def partial_rollout_len(self):
+        """
+        The length of the partial rollout.
+        If partial_rollout is None, return 0.
+        """
+        return len(self.partial_rollout)
+    
+    @property
+    def depth(self):
+        """
+        The depth of the node in the tree.
+        """
+        if self.step_num == 0:
+            return 0
+        return self.father_node.depth + 1
     
     def get_original_ancestor_item(self):
         """
@@ -443,9 +469,9 @@ class TreeNode:
         self.children.append(child_node)
 
     def __repr__(self):
-        return f"TreeNode(data={self.data})"
+        return f"TreeNode(item={self.item})"
 
-class TreeDataset(Dataset):
+class TreeDataset(RLHFDataset):
     """
     A dataset class that represents a tree structure.
     """
@@ -455,21 +481,28 @@ class TreeDataset(Dataset):
         Initialize the TreeDataset with the given arguments.
         """
         super().__init__(*args, **kwargs)
+        # breakpoint()
         self.original_datalength = len(self.dataframe)
 
         # Initialize an empty dataset for new data
         self.new_dataframe = datasets.Dataset.from_dict({})
 
-        self.root = TreeNode(item=-1, father_index=None, step_num=0)
+        self.root = TreeNode(item=-1, father_node=None, step_num=-1)
         self.item2node = {-1: self.root}
+        self.next_item = 0
 
         for i in range(self.original_datalength):
             node = TreeNode(item=i, father_node=self.root, step_num=0)
             self.root.add_child(node)
             self.item2node[i] = node
+            self.next_item += 1
+    
+    def __len__(self):
+        return self.next_item
+
 
     def __getitem__(self, item):
-        if item <= self.original_datalength:
+        if item < self.original_datalength:
             row_dict = super().__getitem__(item)
             row_dict['partial_rollout_len'] = 0  # no partial rollout for original data
             return row_dict
@@ -488,7 +521,7 @@ class TreeDataset(Dataset):
         # 上述这三个都是有严格的长度限制的，考虑不修改
         # raw_prompt_ids改为original prompt + partial rollout，这个是用于rollout作为input的
         original_row_dict["item"] = item
-        original_row_dict["raw_prompt_ids"] = node.raw_prompt_ids
+        original_row_dict["raw_prompt_ids"] = original_row_dict["raw_prompt_ids"] + node.partial_rollout
 
         # 加上一个partial rollout len (int) OR partial rollout mask (tensor[response_len])
         original_row_dict["partial_rollout_len"] = node.partial_rollout_len
@@ -501,47 +534,75 @@ class TreeDataset(Dataset):
         # 1. 更新max_new_tokens
         # 2. 更新input_ids, attention_mask, position_ids
         # 还需要更新对应的response_mask
-        return row_dict
+        return original_row_dict
         
-    
 
-    def update(self, batch: DataProto) -> None:
+    def update(self, batch: DataProto, step_num: int) -> None:
         """
         Update the dataset with the current batch.
         This method is called after each training batch.
         """
-        items = batch.batch['item']
-        scores = torch.tensor(batch.non_tensor_batch['score']) # raw score
+        items = torch.tensor(batch.non_tensor_batch['item'].astype(int))
 
         unique_indices, inverse_indices = torch.unique(items, return_inverse=True)
-        assert len(unique_indices) == len(set(items)), "Currently, items should be unique in the batch."
+
+        all_scores = torch.tensor(batch.non_tensor_batch['score']) # raw score
+        all_response_mask = batch.batch['response_mask_w_partial_rollouts'].bool()
+        all_response_len = all_response_mask.sum(dim=-1).tolist()
+        all_responses = batch.batch["responses"]
+        all_values = batch.batch["values"]
+        all_entropys = batch.batch["entropys"]
 
         # We can select the item with highest score as the new node
-        # if self.use_critic:
-        assert self.use_critic, "Currently only support use_critic=True for TreeDataset"
+        assert len(unique_indices) == len(set(items)), "Currently, items should be unique in the batch."
+        # assert self.use_critic, "Currently only support use_critic=True for TreeDataset"
 
-        
+        # breakpoint()
+        for i, index in enumerate(inverse_indices):
+            item = unique_indices[index].item()
+            father_node = self.item2node.get(item, None)
+            assert father_node is not None, f"Item {item} not found in the dataset."
+
+            # Currently only keep the correct response and the original data item
+            # DEBUG:
+            if all_scores[i] == 0 or father_node.depth > 0:
+                continue
+
+            valid_position = int(all_response_len[i] * 0.5) # only use the first half of the response as partial rollout
+
+            # V1: Use the index with highest value as the new node, should assert critic_lam == 1
+            values = all_values[i, :valid_position]
+            max_value_index = torch.argmax(values).item()
+
+            partial_rollout_len = max_value_index # the index with highest value should be excluded, since V[i] is the value of the previous token
+            partial_rollout = all_responses[i, :partial_rollout_len].tolist()
 
 
+            # Create new node
+            new_item = self.next_item
+            self.item2node[new_item] = TreeNode(
+                item=new_item,
+                father_node=father_node,
+                partial_rollout=partial_rollout,
+                step_num=step_num
+            )
+            father_node.add_child(self.item2node[new_item])
+            self.next_item += 1
+            
+        # Remove some old rollouts if log_prob of partial rollout is too low under current policy
 
-        # Update the nodes in the tree
-        for item, score_sum, count in zip(unique_indices.tolist(), score_sums.tolist(), counts.tolist()):
-            # newly added node
-            if item not in self.item2node:
-                node = TreeNode(item=item, father_node=self.item2node[0], step_num=0)
-                self.item2node[item] = node
-                self.root.add_child(node)
-            else:
-                node = self.item2node[item]
-            node.step_num += 1
 
-            # Update the new dataframe with the new data
-            new_data = {
-                "index": item,
-                "score_sum": score_sum,
-                "count": count,
-                "step_num": node.step_num,
-            }
-            self.new_dataframe = datasets.concatenate_datasets([self.new_dataframe, datasets.Dataset.from_dict(new_data)])
+    def state_dict(self):
+        """
+        Return the state dict of the dataset.
+        """
+        # TODO:
+        pass
 
+    def load_state_dict(self, state_dict):
+        """
+        Load the state dict of the dataset.
+        """
+        # TODO:
+        pass
 
