@@ -44,10 +44,14 @@ def get_xperf_gpt_weight_bind_fn(model_config: PretrainedConfig,
         from alpha_seed.workers.xperf_rollout.utils.custom_xperf_convert_helper import _reshard_state_dict_to_xperf_custom
         return partial(_reshard_state_dict_to_xperf_custom, model_config=model_config, backend=backend)
     if is_xperf_triton:
-        assert model_config.model_type == 'seed_m8', "Only support seed_m8 for xperf_triton"
-
-        from alpha_seed.workers.xperf_rollout.utils.xperf_gpt_triton_helper import _reshard_fsdp_state_dict_to_xperf_triton_m8
-        return partial(_reshard_fsdp_state_dict_to_xperf_triton_m8, model_config=model_config, backend=backend)
+        if model_config.model_type == 'seed_m8':
+            from alpha_seed.workers.xperf_rollout.utils.xperf_gpt_triton_helper import _reshard_fsdp_state_dict_to_xperf_triton_m8
+            return partial(_reshard_fsdp_state_dict_to_xperf_triton_m8, model_config=model_config, backend=backend)
+        elif model_config.model_type == 'seed_vl':
+            from alpha_seed.workers.xperf_rollout.utils.xperf_gpt_triton_helper import _reshard_fsdp_state_dict_to_xperf_triton_seed_vl
+            return partial(_reshard_fsdp_state_dict_to_xperf_triton_seed_vl, model_config=model_config, backend=backend)
+        else:
+            raise NotImplementedError(f"xperf_triton does not support model_type: {model_config.model_type}")
     if backend == 'fsdp':
         if model_config.model_type == 'deepseek_v3':
             if quant_mode == "WFP8":

@@ -318,39 +318,42 @@ class InferenceSession:
         default_logger = logging.getLogger()
         default_logger.setLevel(logging_level)
 
-    def _kwargs_wrapper(self, kwargs):
-        params_with_defaults = {
-            "vanilla_checkpoint_path": None,
-            "checkpoint_path": None,
-            "reshard_checkpoint_path": None,
-            "preshard_checkpoint_path": None,
-            "tokenizer_path": None,
-            "save_mp_checkpoint_path": None,
-            "return_full_hidden_states": False,
-            "return_padding_tensor": False,
-            "last_token_only": True,
-            "stop_sequence_tokens": None,
-            "record_input_prompt": None,
-            "enable_metrics": False,
-            "constraint_decoding": None,
-            "decode_output": True,
-        }
-
-        for param, default in params_with_defaults.items():
-            if param in kwargs:
-                value = kwargs.pop(param)
-                setattr(self, param, value)
-            else:
-                setattr(self, param, default)
-
-    def init_inference_engine(self,
-                              session_config_path,
-                              generation_config,
-                              use_xperf_custom=False,
-                              use_xperf_triton=False,
-                              vit_config=None,
-                              vit_model_cfg_path=None,
-                              **kwargs):
+    def init_inference_engine(
+            self,
+            session_config_path: str,
+            generation_config: dict,
+            # Model loading parameters
+            tokenizer_path: str = None,
+            checkpoint_path: str = None,
+            vanilla_checkpoint_path: str = None,
+            reshard_checkpoint_path: str = None,
+            preshard_checkpoint_path: str = None,
+            # XPerf custom parameters
+            use_xperf_custom: bool = False,
+            xperf_custom_backbone: str = None,
+            xperf_custom_preset: str = None,
+            # XPerf triton parameters
+            use_xperf_triton: bool = False,
+            xperf_triton_cfg: dict = None,
+            # Output and monitoring settings
+            enable_metrics: bool = False,
+            return_full_hidden_states: bool = False,
+            return_padding_tensor: bool = False,
+            last_token_only: bool = True,
+            # Additional parameters from kwargs
+            save_mp_checkpoint_path: str = None,
+            stop_sequence_tokens: list = None,
+            record_input_prompt: bool = None,
+            constraint_decoding: bool = None,
+            decode_output: bool = True,
+            # Vision model settings
+            vit_config: dict = None,
+            vit_model_cfg_path=None,
+            # Additional parameters
+            mp_size: int = None,
+            use_ep: bool = None,
+            multi_host_tp: bool = None,
+            **kwargs):
         """Initialize model engine and associated components
         
         Args:
@@ -359,11 +362,32 @@ class InferenceSession:
             use_xperf_custom: Whether use xperf_gpt_custom
             vit_config: vision config dict
             kwargs: Overrides for model loading
+            TODO: add more docstrings
         """
 
         if os.getenv("XPERF_SESSION_SET_TORCH_DEVICE", "1") == "1":
             torch.cuda.set_device(int(os.getenv('LOCAL_RANK', 0)))
-        self._kwargs_wrapper(kwargs)
+
+        # model loading
+        self.tokenizer_path = tokenizer_path
+        self.checkpoint_path = checkpoint_path
+        self.vanilla_checkpoint_path = vanilla_checkpoint_path
+        self.reshard_checkpoint_path = reshard_checkpoint_path
+        self.preshard_checkpoint_path = preshard_checkpoint_path
+        self.save_mp_checkpoint_path = save_mp_checkpoint_path
+
+        # output and monitoring
+        self.enable_metrics = enable_metrics
+        self.return_full_hidden_states = return_full_hidden_states
+        self.return_padding_tensor = return_padding_tensor
+        self.last_token_only = last_token_only
+        self.decode_output = decode_output
+
+        # generation control
+        self.stop_sequence_tokens = stop_sequence_tokens
+        self.record_input_prompt = record_input_prompt
+        self.constraint_decoding = constraint_decoding
+
         self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_path)
         self.tokenizer.padding_side = "left"
         if "eos_token_id" in generation_config:
@@ -375,48 +399,67 @@ class InferenceSession:
         self.pad_token_id = self.tokenizer.pad_token_id
         self.max_new_tokens = generation_config["max_new_tokens"]
         self.max_prompt_length = self.max_prompt_length or self.max_length - self.max_new_tokens
+
         init_inference_kwargs = dict(
+            # Model configuration
             model_config_path=session_config_path,
-            vanilla_checkpoint_path=self.vanilla_checkpoint_path if not self.checkpoint_path else None,
+            dtype=torch.bfloat16,
+            # Model checkpoint paths
             checkpoint_path=self.checkpoint_path,
+            vanilla_checkpoint_path=self.vanilla_checkpoint_path if not self.checkpoint_path else None,
             reshard_checkpoint_path=self.reshard_checkpoint_path,
             save_mp_checkpoint_path=self.save_mp_checkpoint_path,
-            eos_token_id=0,  # won't use
-            pad_token_id=0,  # won't use
-            use_xperf_gpt=True,
-            use_orca=True,
+            # Parallelism settings
+            vocab_tp=self.vocab_tp,
             rank0_split=not self.checkpoint_path,  # if preshard, turn off rank0_split
+            # Memory and batching settings
             use_vllm=self.enable_paged_attn,
             slot_block_size=self.slot_block_size,
             max_batch_size=self.max_batch_size,
             max_total_tokens=self.max_total_tokens,
+            # Sequence length settings
             max_length=self.max_length,
             max_context_shift=self.max_context_shift,
-            dtype=torch.bfloat16,
-            vocab_tp=self.vocab_tp,
-            multi_stream=1,
+            # Engine features
+            use_xperf_gpt=True,
+            use_orca=True,
             use_mtp=self.enable_mtp_decoding,
+            multi_stream=1,
+            # Token IDs (placeholders, not actually used)
+            eos_token_id=0,  # won't use
+            pad_token_id=0,  # won't use
             **generation_config)
-        init_inference_kwargs.update(kwargs)  # overridable by kwargs
+
+        # kwargs override
+        print("init_inference_engine kwargs", kwargs)
+        init_inference_kwargs.update(kwargs)
+
+        # Preserve legacy behavior: only set mp_size if explicitly provided
+        if mp_size is not None:
+            init_inference_kwargs['mp_size'] = mp_size
+        if use_ep is not None:
+            init_inference_kwargs['use_ep'] = use_ep
+        if multi_host_tp is not None:
+            init_inference_kwargs['multi_host_tp'] = multi_host_tp
 
         self.is_xperf_custom = use_xperf_custom
         self.is_xperf_triton = use_xperf_triton
         if use_xperf_custom:
             assert not self.enable_paged_attn, f"xperf custom for paged attention not supported yet."
             import xperf_gpt_custom
-            backbone = kwargs.pop('xperf_custom_backbone', None)
-            preset = kwargs.pop('xperf_custom_preset', None)
-            engine = xperf_gpt_custom.create_network(backbone=backbone, preset=preset, **init_inference_kwargs)
+            engine = xperf_gpt_custom.create_network(backbone=xperf_custom_backbone,
+                                                     preset=xperf_custom_preset,
+                                                     **init_inference_kwargs)
             module = XCustomInferenceModuleAdapter(engine)
             setattr(engine, "module", module)
             setattr(engine.config, "model_config", {"hidden_size": engine.config.hidden_size})
             self.engine = engine
         elif use_xperf_triton:
             from alpha_seed.workers.xperf_rollout.utils.xperf_gpt_triton_helper import init_inference_triton
-            xperf_triton_cfg = kwargs.pop('xperf_triton_cfg')
             init_inference_kwargs["eos_token_id"] = self.eos_token_id
             init_inference_kwargs['enable_cuda_graph'] = self.enable_cuda_graph
-            init_inference_kwargs['use_paged_attn'] = xperf_triton_cfg.use_paged_attn
+            init_inference_kwargs['max_ctx_batch_size'] = self.context_limit_bs
+            init_inference_kwargs['xperf_triton_cfg'] = xperf_triton_cfg
             init_inference_kwargs.pop('reshard_checkpoint_path')
             init_inference_kwargs['preshard_checkpoint_path'] = self.preshard_checkpoint_path
             self.engine = init_inference_triton(**init_inference_kwargs)
@@ -424,7 +467,6 @@ class InferenceSession:
         else:
             self.engine = init_inference(None, **init_inference_kwargs)
         self.sampler = Sampler(generation_config=generation_config)
-        self.num_return_sequences = self.engine.module.num_return_sequences
         self.oe_max_stride = max(getattr(self.engine.module.config, "over_enc_vocab_stride", [1]))
 
         self.reset_logging_level()
@@ -593,30 +635,30 @@ class InferenceSession:
             prompt = ""
             if self.record_input_prompt:
                 prompt = self.tokenizer.decode(input_ids, clean_up_tokenization_spaces=False)
-            for _ in range(self.num_return_sequences):
-                prefix_already_computed_len = self.common_prefix_tensor_len
-                if len(input_ids) <= prefix_already_computed_len:
-                    prefix_already_computed_len = len(input_ids) - 1
-                query = Query(copy.deepcopy(input_ids),
-                              code_book=code_book,
-                              input_prompt=prompt,
-                              idx=idx,
-                              prefix_already_computed_len=prefix_already_computed_len)
-                if len(input_ids) <= self.max_length:
-                    self.waiting.append(query)
-                query.off_policy_steps = off_policy_steps[idx]
-                query.meta_info = prompt_meta_info[idx] if prompt_meta_info is not None else {}
-                query.top_k = top_k[idx] if prompt_meta_info is not None else None
-                query.top_p = top_p[idx] if prompt_meta_info is not None else None
-                query.temperature = temperature[idx] if prompt_meta_info is not None else None
-                query.max_new_tokens = max_new_tokens[idx] if prompt_meta_info is not None else self.max_new_tokens
-                query.max_length = max_length[idx] if prompt_meta_info is not None else self.max_length
-                query.image_data = query.meta_info.pop("image_data", None)
-                query.prefill_only = self.mode != "rollout"
-                query.attach_session(session=self)
-                with self._accepted_queries_mutex:
-                    self.all_accepted_queries[query.id] = query
-                self.unfinished_off_policy_steps_set.add_one(query.off_policy_steps)
+            prefix_already_computed_len = self.common_prefix_tensor_len
+            if len(input_ids) <= prefix_already_computed_len:
+                prefix_already_computed_len = len(input_ids) - 1
+            query = Query(copy.deepcopy(input_ids),
+                          code_book=code_book,
+                          input_prompt=prompt,
+                          idx=idx,
+                          prefix_already_computed_len=prefix_already_computed_len)
+            query.off_policy_steps = off_policy_steps[idx]
+            query.meta_info = prompt_meta_info[idx] if prompt_meta_info is not None else {}
+            query.top_k = top_k[idx] if prompt_meta_info is not None else None
+            query.top_p = top_p[idx] if prompt_meta_info is not None else None
+            query.temperature = temperature[idx] if prompt_meta_info is not None else None
+            query.max_new_tokens = max_new_tokens[idx] if prompt_meta_info is not None else self.max_new_tokens
+            query.max_length = max_length[idx] if prompt_meta_info is not None else self.max_length
+            query.image_data = query.meta_info.pop("image_data", None)
+            query.prefill_only = self.mode != "rollout"
+            query.attach_session(session=self)
+            with self._accepted_queries_mutex:
+                self.all_accepted_queries[query.id] = query
+            self.unfinished_off_policy_steps_set.add_one(query.off_policy_steps)
+            # Add query to waiting queue if input length is within max_length limit
+            if len(input_ids) <= self.max_length:
+                self.waiting.append(query)
         logging_rank(logging.info, "[prepare_context_inputs] total queries: {}".format(idx + 1))
 
     def build_prefix_kv_cache(self):
@@ -670,16 +712,7 @@ class InferenceSession:
         ordered_query = list({
             k: v for k, v in sorted(self.all_accepted_queries.items(), key=lambda item: item[1].idx)
         }.values())
-        if self.num_return_sequences > 1:
-            responses = []
-            for i, query in enumerate(ordered_query):
-                if i > 0 and query.idx == responses[-1].idx:
-                    responses[-1].output_prompt.append(query.output_prompt[0])
-                else:
-                    responses.append(query)
-            return responses
-        else:
-            return ordered_query
+        return ordered_query
 
     def get_valid_history_ids(self) -> List[str]:
         history_ids = []

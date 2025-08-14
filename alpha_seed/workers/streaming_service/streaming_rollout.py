@@ -220,13 +220,12 @@ class AsyncXPerfGPTRollout(object):
         if enable_paged_attn:
             prophet_cfg = xperf_prophet.profile_available_vllm_cfg(gpu_memory_utilization=gpu_memory_utilization)
             max_batch_size = prophet_cfg["orca_max_batch_size"]
-            max_ctx_batch_size = self.config.get("max_ctx_batch_size", 8)
             num_slots = prophet_cfg["vllm_num_slots"]
         else:
             prophet_cfg = xperf_prophet.profile_available_orca_cfg(gpu_memory_utilization=gpu_memory_utilization)
             max_batch_size = prophet_cfg["orca_max_batch_size"]
-            max_ctx_batch_size = self.config.get("max_ctx_batch_size", 8)
             num_slots = max_batch_size
+        max_ctx_batch_size = self.config.get("max_ctx_batch_size", 8)
 
         # create a 2D device mesh
         world_size = torch.distributed.get_world_size()
@@ -253,10 +252,9 @@ class AsyncXPerfGPTRollout(object):
         step_profiler = StepProfiler(self.config.profile)
         if self.config.xperf_triton.enable:
             max_batch_size = self.config.xperf_triton.max_batch_size
-            max_ctx_batch_size = self.config.xperf_triton.max_ctx_batch_size
             num_slots = max_batch_size
-            if self.config.xperf_triton.use_paged_attn:
-                num_slots = self.config.xperf_triton.num_slots
+            if enable_paged_attn and self.config.num_slots:
+                num_slots = self.config.num_slots
 
         inference_sess = InferenceSession(num_slots=num_slots,
                                           max_batch_size=max_batch_size,
@@ -332,25 +330,32 @@ class AsyncXPerfGPTRollout(object):
                             f'XPerf init Global rank {global_rank}, tp_rank {tp_rank}, master_addr: {master_addr}, master_port: {master_port}'
                         )
                         with logging_set_level(self.config.get('logging_level', 'INFO')):
-                            xperf_custom_kwargs = {}
-                            if self.config.xperf_custom.enable:
-                                xperf_custom_kwargs['xperf_custom_backbone'] = self.config.xperf_custom.backbone
-                                xperf_custom_kwargs['xperf_custom_preset'] = self.config.xperf_custom.preset
-
-                            inference_sess.init_inference_engine(f.name,
-                                                                 generate_kwargs,
-                                                                 rank0_split=False,
-                                                                 mp_size=tp_size,
-                                                                 enable_metrics=True,
-                                                                 use_ep=use_ep,
-                                                                 tokenizer_path=self.tokenizer.name_or_path,
-                                                                 multi_host_tp=multi_host_tp,
-                                                                 use_xperf_custom=self.config.xperf_custom.enable,
-                                                                 use_xperf_triton=self.config.xperf_triton.enable,
-                                                                 vit_config=vision_cfg,
-                                                                 xperf_triton_cfg=self.config.xperf_triton,
-                                                                 vit_model_cfg_path=self.vit_model_path,
-                                                                 **xperf_custom_kwargs)
+                            inference_sess.init_inference_engine(
+                                session_config_path=f.name,
+                                generation_config=generate_kwargs,
+                                # Model loading parameters
+                                tokenizer_path=self.tokenizer.name_or_path,
+                                # XPerf custom parameters
+                                use_xperf_custom=self.config.xperf_custom.enable,
+                                xperf_custom_backbone=self.config.xperf_custom.backbone
+                                if self.config.xperf_custom.enable else None,
+                                xperf_custom_preset=self.config.xperf_custom.preset
+                                if self.config.xperf_custom.enable else None,
+                                # XPerf triton parameters
+                                use_xperf_triton=self.config.xperf_triton.enable,
+                                xperf_triton_cfg=omegaconf.OmegaConf.to_container(self.config.xperf_triton,
+                                                                                  resolve=True),
+                                # Distributed/parallel settings
+                                mp_size=tp_size,
+                                use_ep=use_ep,
+                                multi_host_tp=multi_host_tp,
+                                rank0_split=False,
+                                # Output and monitoring settings
+                                enable_metrics=True,
+                                # Vision model settings
+                                vit_config=vision_cfg,
+                                vit_model_cfg_path=self.vit_model_path,
+                            )
                     if dist.is_initialized() and tp_size > 1:
                         dist.barrier()
                         if tp_rank == 0:

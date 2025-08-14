@@ -19,7 +19,7 @@ class XCustomInferenceModuleAdapter:
         from xperf_gpt.inference.config import XPerfGPTConfig
         from xperf_gpt.utils import get_tp_rank
 
-        inference_config = XPerfGPTConfig(num_return_sequences=engine.num_return_sequences,
+        inference_config = XPerfGPTConfig(num_return_sequences=1,
                                           context_only=engine.context_only,
                                           config=engine.config)
         for key, val in inference_config.__dict__.items():

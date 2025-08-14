@@ -14,9 +14,8 @@
 """
 Contains utilities to bind weights to XPerfGPT-Triton. It is model agnostic
 """
-
+import os
 import torch
-import json
 import torch.distributed
 
 from torch.distributed._tensor import DTensor
@@ -24,17 +23,51 @@ from torch.distributed.device_mesh import DeviceMesh
 import logging
 
 try:
-    from xperf_gpt_triton.builder.model_builder import build_model_from_config
-    from xperf_gpt_triton.builder.config import XPerfTritonModelConfig
+    from xperf_gpt_triton.builder.model_builder import build_model
 except Exception as e:
     logging.warning(f"Failed to import xperf_gpt_triton: {e}")
-    build_model_from_config = None
-    XPerfTritonModelConfig = None
-import xperf_gpt.utils.comm as comm
+    build_model = None
 
 
 def init_inference_triton(**kwargs):
-    return XPerfTritonInferenceEngine(**kwargs)
+    """Transform messy init_inference_kwargs to clean xperf_triton parameters.
+    
+    This function maps parameters from alpha-seed's init_inference call to XPerfTritonModelConfig.
+    The xperf_triton_cfg dict has the highest priority and can override any field.
+    
+    Args:
+        **kwargs: Arguments from init_inference including:
+            - model_config_path: Path to model config JSON
+            - dtype, slot_block_size, max_total_tokens, max_batch_size, max_length
+            - vanilla_checkpoint_path, preshard_checkpoint_path  
+            - enable_cuda_graph: Maps to use_cuda_graph
+            - use_vllm: Maps to use_paged_attention
+            - xperf_triton_cfg: Dict to override any config field
+    """
+    # Map fields from kwargs to XPerfTritonModelConfig names
+    override_config_kwargs = {
+        'dtype': kwargs.get('dtype', torch.bfloat16),
+        'page_block_size': kwargs.get('slot_block_size', 1024),  # Default 1024
+        'max_total_tokens': kwargs.get('max_total_tokens', 0),
+        'max_batch_size': kwargs.get('max_batch_size', 16),
+        'max_length': kwargs.get('max_length', 2048),
+        'vanilla_checkpoint_path': kwargs.get('vanilla_checkpoint_path'),
+        'preshard_checkpoint_path': kwargs.get('preshard_checkpoint_path'),
+        'use_cuda_graph': kwargs.get('enable_cuda_graph', False),
+        'use_paged_attention': kwargs.get('use_vllm', False),
+        'world_size': int(os.getenv('WORLD_SIZE', 1)),
+        'tp_size': kwargs.get('mp_size', int(os.getenv('WORLD_SIZE', 1))),
+    }
+
+    # xperf_triton_cfg has highest priority
+    override_config_kwargs.update(kwargs.get('xperf_triton_cfg', {}))
+    override_config_kwargs.pop('enable', None)
+
+    return XPerfTritonInferenceEngine(
+        model_config_path=override_config_kwargs.pop('model_config_path', kwargs.get('model_config_path')),
+        override_config_kwargs=override_config_kwargs,
+        max_ctx_batch_size=kwargs.get('max_ctx_batch_size', 8),
+    )
 
 
 class XPerfTritonInferenceEngine:
@@ -55,56 +88,38 @@ class XPerfTritonInferenceEngine:
 
 class XPerfTritonInferenceModule:
 
-    def __init__(self, **kwargs):
-
-        config_dict = {}
-        config_dict["world_size"] = comm.get_world_size()
-        config_dict["global_rank"] = comm.get_rank()
-        config_dict["local_rank"] = comm.get_local_rank()
-        config_dict["dtype"] = kwargs.pop("dtype", torch.bfloat16)
-        config_dict["page_block_size"] = kwargs.pop("slot_block_size", 1024)
-        config_dict["max_total_tokens"] = kwargs.pop("max_total_tokens", 0)
-        config_dict["num_pages"] = config_dict["max_total_tokens"] // config_dict["page_block_size"]
-        config_dict["max_batch_size"] = kwargs.pop("max_batch_size", 16)
-        config_dict["max_length"] = kwargs.pop("max_length", 2048)
-        config_dict["vanilla_checkpoint_path"] = kwargs.pop("vanilla_checkpoint_path", None)
-        config_dict["preshard_checkpoint_path"] = kwargs.pop("preshard_checkpoint_path", None)
-        config_dict["use_cuda_graph"] = False  # avoid capture cuda graph in init
-        config_dict['use_paged_attention'] = kwargs.pop("use_paged_attn", False)
-
-        model_config_path = kwargs.pop('model_config_path')
-        with open(model_config_path, "r") as f:
-            model_config = json.load(f)
-            if "head_dim" not in model_config.keys():
-                assert ("hidden_size" in model_config.keys() and "num_heads" in model_config.keys())
-                assert model_config["hidden_size"] % model_config["num_heads"] == 0
-                model_config["head_dim"] = (model_config["hidden_size"] // model_config["num_heads"])
-            if "window_size" in model_config and model_config["window_size"] is None:
-                model_config.pop("window_size")
-            comm.logging_rank_only(logging.warning, 0, f"xgpt_triton config: {model_config}")
-
-        for k in XPerfTritonModelConfig.__fields__.keys():
-            if k in model_config:
-                config_dict[k] = model_config[k]
-        config_dict["model_name"] = "M8"
-        config_dict['mock_weights'] = True
-        config_dict["model_config"] = XPerfTritonModelConfig(**model_config)
-
-        config = XPerfTritonModelConfig(**config_dict)
-        self.model = build_model_from_config(config).eval()
+    def __init__(
+        self,
+        model_config_path: str,
+        override_config_kwargs: dict = None,
+        max_ctx_batch_size: int = 8,
+    ):
+        """Initialize with clean interface.
+        
+        Args:
+            model_config_path: Path to model configuration JSON
+            override_config_kwargs: Dict of fields to override in XPerfTritonModelConfig
+            max_ctx_batch_size: Maximum batch size for context phase. For CUDA graph capture.
+        """
+        override_config_kwargs = override_config_kwargs or {}
+        override_config_kwargs['use_cuda_graph'] = False  # avoid capture cuda graph in init
+        override_config_kwargs['mock_weights'] = not bool(override_config_kwargs.get('preshard_checkpoint_path'))
+        self.model = build_model(model_config_path, **override_config_kwargs).eval()
         self.config = self.model.config
-
-        # correct the config
-        self.config.use_cuda_graph = kwargs.pop("enable_cuda_graph", False)
+        # Correct config after model creation
+        self.config.use_cuda_graph = override_config_kwargs.get('use_cuda_graph', False)
         self.config.mock_weights = False
+
+        # Store runtime parameters
+        self.max_ctx_batch_size = max_ctx_batch_size
+
+        # Derived attributes
         self.num_layers = self.config.model_config.num_layers
         self.global_rank = self.config.global_rank
         self.world_size = self.config.world_size
-        self.quant_mode = self.config.model_config.quant_mode
-        self.num_return_sequences = kwargs.pop("num_return_sequences", 1)
-        self.tp_size = 1
+        self.tp_size = self.config.tp_size
         self.graph_captured = False
-        self.xperf_triton_cfg = kwargs.pop('xperf_triton_cfg')
+        self.quant_mode = 'NO_QUANT'
 
     def _get_kv_cache(self, layer_idx, is_quant=False):
         return self.model.layers[layer_idx].self_attention._kv_cache
@@ -132,8 +147,7 @@ class XPerfTritonInferenceModule:
 
             memory_pool = None
 
-            for bs in range(self.xperf_triton_cfg.max_ctx_batch_size, self.config.max_batch_size + 1,
-                            self.xperf_triton_cfg.max_ctx_batch_size):
+            for bs in range(self.max_ctx_batch_size, self.config.max_batch_size + 1, self.max_ctx_batch_size):
                 print(f"capture cuda graph with batch_size={bs}", flush=True)
                 inputs = init_dummy_input_buffers(bs)
                 self.model.forward(**inputs)
@@ -202,119 +216,68 @@ class XPerfTritonInferenceModule:
         return_full_hidden_states,
         return_padding_tensor,
         last_token_only,
+        # TODO(qingyuhao): not used by xperf_gpt_triton
+        context_max_kv_len=None,
+        context_total_kv_len=None,
+        decode_max_kv_len=None,
+        decode_total_kv_len=None,
     ):
+        outputs = []
         ctx_bsz = 0
 
-        ctx_output = None
+        def get_forward_params(input_len: int, **overrides):
+            dp_rank_input_len = self._get_dp_rank_input_lens(input_len)
+            params = {
+                'context_input_ids': None,
+                'context_input_embeds': None,
+                'decode_input_ids': None,
+                'total_length': None,
+                'kv_cache_index': kv_cache_index,
+                'orca_updated': orca_updated,
+                'context_shifts': context_shifts,
+                'return_full_hidden_states': return_full_hidden_states,
+                'return_padding_tensor': return_padding_tensor,
+                'last_token_only': last_token_only,
+                'dp_rank_input_len': dp_rank_input_len,
+                'is_nccl_use_padding': self.model.is_nccl_use_padding(dp_rank_input_len),
+            }
+            params.update(overrides)
+            return params
+
         if context_input_embeds is not None:
             ctx_bsz = context_input_embeds.shape[0]
-            ctx_total_length = total_length[:ctx_bsz]
-            ctx_kv_cache_index = kv_cache_index[:ctx_bsz]
-            ctx_context_shifts = context_shifts[:ctx_bsz]
-            ctx_output = self.forward_orca_context_input(
-                context_input_ids=None,
+            ctx_params = get_forward_params(
+                sum(total_length[:ctx_bsz]),
                 context_input_embeds=context_input_embeds,
-                decode_input_ids=None,
-                total_length=ctx_total_length,
-                kv_cache_index=ctx_kv_cache_index,
-                orca_updated=orca_updated,
-                context_shifts=ctx_context_shifts,
-                return_full_hidden_states=return_full_hidden_states,
-                return_padding_tensor=return_padding_tensor,
-                last_token_only=last_token_only,
+                total_length=total_length[:ctx_bsz],
+                kv_cache_index=kv_cache_index[:ctx_bsz],
+                context_shifts=context_shifts[:ctx_bsz] if context_shifts is not None else None,
             )
+            outputs.append(self.model.forward_orca(**ctx_params))
 
-        dec_output = None
         if decode_input_ids is not None:
-            dec_total_length = total_length[ctx_bsz:]
-            dec_kv_cache_index = kv_cache_index[ctx_bsz:]
-            dec_context_shifts = context_shifts[ctx_bsz:]
-            dec_output = self.forward_orca_decode_input(
-                context_input_ids=None,
-                context_input_embeds=None,
+            dec_len = decode_input_ids.shape[0] if hasattr(decode_input_ids, 'shape') and len(
+                decode_input_ids.shape) > 0 else len(decode_input_ids)
+            dec_params = get_forward_params(
+                dec_len,
                 decode_input_ids=decode_input_ids,
-                total_length=dec_total_length,
-                kv_cache_index=dec_kv_cache_index,
-                orca_updated=orca_updated,
-                context_shifts=dec_context_shifts,
-                return_full_hidden_states=return_full_hidden_states,
-                return_padding_tensor=return_padding_tensor,
-                last_token_only=last_token_only,
+                total_length=total_length[ctx_bsz:],
+                kv_cache_index=kv_cache_index[ctx_bsz:],
+                context_shifts=context_shifts[ctx_bsz:] if context_shifts is not None else None,
             )
-        if ctx_output is not None and dec_output is not None:
-            return torch.cat([ctx_output, dec_output], dim=0)
-        elif ctx_output is not None:
-            return ctx_output
-        elif dec_output is not None:
-            return dec_output
+            outputs.append(self.model.forward_orca(**dec_params))
 
-    def forward_orca_decode_input(
-        self,
-        context_input_ids,
-        context_input_embeds,
-        decode_input_ids,
-        total_length,
-        kv_cache_index,
-        orca_updated,
-        context_shifts,
-        return_full_hidden_states,
-        return_padding_tensor,
-        last_token_only,
-    ):
-        assert context_input_ids is None and context_input_embeds is None
-        local_rank_input_len = len(decode_input_ids)
-        all_rank_input_len = self._get_all_rank_input_len(local_rank_input_len)
-        return self.model.forward_orca(
-            context_input_ids=context_input_ids,
-            context_input_embeds=context_input_embeds,
-            decode_input_ids=decode_input_ids,
-            total_length=total_length,
-            kv_cache_index=kv_cache_index,
-            orca_updated=orca_updated,
-            context_shifts=context_shifts,
-            return_full_hidden_states=return_full_hidden_states,
-            return_padding_tensor=return_padding_tensor,
-            last_token_only=last_token_only,
-            dp_input_lens=all_rank_input_len,
-            is_nccl_use_padding=self.model.is_nccl_use_padding(all_rank_input_len),
-        )
+        if len(outputs) == 2:
+            return torch.cat(outputs, dim=0)
+        elif outputs:
+            return outputs[0]
+        return None
 
-    def forward_orca_context_input(
-        self,
-        context_input_ids,
-        context_input_embeds,
-        decode_input_ids,
-        total_length,
-        kv_cache_index,
-        orca_updated,
-        context_shifts,
-        return_full_hidden_states,
-        return_padding_tensor,
-        last_token_only,
-    ):
-        assert decode_input_ids is None
-        local_rank_input_len = sum(total_length)
-        all_rank_input_len = self._get_all_rank_input_len(local_rank_input_len)
-        return self.model.forward_orca(
-            context_input_ids=context_input_ids,
-            context_input_embeds=context_input_embeds,
-            decode_input_ids=None,
-            total_length=total_length,
-            kv_cache_index=kv_cache_index,
-            orca_updated=orca_updated,
-            context_shifts=context_shifts,
-            return_full_hidden_states=return_full_hidden_states,
-            return_padding_tensor=return_padding_tensor,
-            last_token_only=last_token_only,
-            dp_input_lens=all_rank_input_len,
-            is_nccl_use_padding=self.model.is_nccl_use_padding(all_rank_input_len),
-        )
-
-    def _get_all_rank_input_len(self, local_rank_input_len: int):
+    def _get_dp_rank_input_lens(self, local_rank_input_len: int):
         import torch.distributed as dist
-        if self.config.model_config.world_size > 1:
+        if self.config.dp_size > 1:
             local_rank_input_len = torch.tensor(local_rank_input_len, dtype=torch.int64, device="cuda")
-            all_rank_input_len = torch.empty(self.config.model_config.world_size, dtype=torch.int64, device="cuda")
+            all_rank_input_len = torch.empty(self.config.dp_size, dtype=torch.int64, device="cuda")
             dist.all_gather_into_tensor(all_rank_input_len, local_rank_input_len)
         else:
             all_rank_input_len = torch.tensor([local_rank_input_len], dtype=torch.int64, device="cuda")
@@ -329,14 +292,60 @@ def _reshard_fsdp_state_dict_to_xperf_triton_m8(tp_model: XPerfTritonInferenceMo
                                                 prefix=''):
     assert backend == 'fsdp', "Only support fsdp for xperf_triton"
 
-    def split_with_dim(tensor: torch.Tensor, dim: int):
+    def split_with_dim(tensor: torch.Tensor, dim: int, rank: int = None, num_split: int = None):
         if tensor is None:
             return None
-        splits = torch.split(tensor, tensor.shape[dim] // tp_model.world_size, dim=dim)
-        return splits[tp_model.global_rank]
+        rank = tp_model.global_rank % tp_model.world_size if rank is None else rank
+        num_split = tp_model.world_size if num_split is None else num_split
+        splits = torch.split(tensor, tensor.shape[dim] // num_split, dim=dim)
+        return splits[rank]
+
+    def split_qkv_project(c_attn: torch.Tensor):
+        if tp_model.tp_size == 1:
+            return c_attn.t().contiguous()
+        else:
+            q_dim = (tp_model.config.model_config.head_dim * tp_model.config.model_config.num_heads *
+                     tp_model.config.model_config.q_head_times)
+            kv_dim = (tp_model.config.model_config.head_dim * tp_model.config.model_config.num_kv_heads)
+            tensor_q = c_attn[:, :q_dim]
+            tensor_k = c_attn[:, q_dim:q_dim + kv_dim]
+            tensor_v = c_attn[:, q_dim + kv_dim:]
+            return torch.concat(
+                [
+                    split_with_dim(tensor_q, 1, tp_model.config.tp_rank, tp_model.config.tp_size),
+                    split_with_dim(tensor_k, 1, tp_model.config.tp_rank, tp_model.config.tp_size),
+                    split_with_dim(tensor_v, 1, tp_model.config.tp_rank, tp_model.config.tp_size),
+                ],
+                dim=1,
+            ).t().contiguous()
+
+    def split_out_project(c_proj: torch.Tensor):
+        if tp_model.config.tp_size == 1:
+            return c_proj.t().contiguous()
+        else:
+            return split_with_dim(c_proj, 0, tp_model.config.tp_rank, tp_model.config.tp_size).t().contiguous()
 
     def split_ffn_ep(tensor: torch.Tensor):
         return split_with_dim(tensor, 0)
+
+    def split_ffn0_tp(tensor: torch.Tensor):
+        # tensor: n, k
+        return split_with_dim(tensor, 0)
+
+    def split_ffn1_tp(tensor: torch.Tensor):
+        # tensor: n, k
+        return split_with_dim(tensor, 1)
+
+    def split_swiglu_ffn0_shared_expert_tp(tensor: torch.Tensor):
+        if tp_model.config.tp_size == 1:
+            return tensor
+        w1, w2 = torch.chunk(tensor, 2, dim=0)
+        return torch.cat([split_ffn0_tp(w1), split_ffn0_tp(w2)])
+
+    def split_swiglu_ffn1_shared_expert_tp(tensor: torch.Tensor):
+        if tp_model.config.tp_size == 1:
+            return tensor
+        return split_ffn1_tp(tensor)
 
     def get_tensor(tensor):
         if isinstance(tensor, DTensor):
@@ -386,19 +395,20 @@ def _reshard_fsdp_state_dict_to_xperf_triton_m8(tp_model: XPerfTritonInferenceMo
         self_attn.context_norm.weight.data = context_norm_weight.contiguous()
 
         k = prefix + f'transformer.h.{layer_index}.attn.q_proj.weight'
-        q_proj_weight = get_tensor(state_dict.pop(k)).to(torch.bfloat16).view(-1, hidden_size).contiguous()
+        q_proj_weight = get_tensor(state_dict.pop(k)).to(torch.bfloat16).view(-1, hidden_size)
         k = prefix + f'transformer.h.{layer_index}.attn.k_proj.weight'
         k_proj_weight = get_tensor(state_dict.pop(k)).to(torch.bfloat16).view(-1, hidden_size)
         k = prefix + f'transformer.h.{layer_index}.attn.v_proj.weight'
         v_proj_weight = get_tensor(state_dict.pop(k)).to(torch.bfloat16).view(-1, hidden_size)
 
-        qkv_weight = torch.cat((q_proj_weight, k_proj_weight, v_proj_weight), dim=0).contiguous()
+        qkv_weight = split_qkv_project(torch.cat((q_proj_weight, k_proj_weight, v_proj_weight), dim=0).transpose(0, 1))
 
         assert self_attn.qkv_proj.weight.data.shape == qkv_weight.shape, f"{self_attn.qkv_proj.weight.data.shape} == {qkv_weight.shape}"
         self_attn.qkv_proj.weight.data = qkv_weight.contiguous()
 
         k = prefix + f'transformer.h.{layer_index}.attn.o_proj.weight'
         o_proj_weight = get_tensor(state_dict.pop(k)).to(torch.bfloat16)
+        o_proj_weight = split_out_project(o_proj_weight.transpose(0, 1))
 
         assert self_attn.out_proj.weight.data.shape == o_proj_weight.shape, f"{self_attn.out_proj.weight.data.shape} == {o_proj_weight.shape}"
         self_attn.out_proj.weight.data = o_proj_weight.contiguous()
@@ -446,6 +456,8 @@ def _reshard_fsdp_state_dict_to_xperf_triton_m8(tp_model: XPerfTritonInferenceMo
         k = prefix + f'transformer.h.{layer_index}.mlp.moe.experts_share.fc2'
         share_fc2_weight = get_tensor(state_dict.pop(k).to(torch.bfloat16))
 
+        share_fc1_weight = split_swiglu_ffn0_shared_expert_tp(share_fc1_weight)
+        share_fc2_weight = split_swiglu_ffn1_shared_expert_tp(share_fc2_weight)
         assert experts_share.fc1.weight.shape == share_fc1_weight.shape, f"{experts_share.fc1.weight.shape} == {share_fc1_weight.shape}"
         assert experts_share.fc2.weight.shape == share_fc2_weight.shape, f"{experts_share.fc2.weight.shape} == {share_fc2_weight.shape}"
         experts_share.fc1.weight.data = share_fc1_weight.contiguous()
@@ -456,4 +468,67 @@ def _reshard_fsdp_state_dict_to_xperf_triton_m8(tp_model: XPerfTritonInferenceMo
     #     assert_not_nan(param.data), f"{name=} has nan weight"
 
     tp_model = tp_model.to("cuda")
+    torch.cuda.empty_cache()
+
+
+def _reshard_fsdp_state_dict_to_xperf_triton_seed_vl(
+        tp_model: XPerfTritonInferenceModule,
+        vit_model,  # TorchVitInferencer or other VIT model
+        state_dict,
+        device_mesh: DeviceMesh,
+        model_config,
+        backend='fsdp',
+        prefix=''):
+    """
+    Reshard FSDP state dict to XPerf Triton for seed_vl models.
+    
+    This function handles both the LLM and VIT components of VL models.
+    
+    Args:
+        tp_model: XPerf Triton inference module (LLM part)
+        vit_model: VIT inference module (TorchVitInferencer)
+        state_dict: FSDP state dict containing both LLM and VIT weights
+        device_mesh: Device mesh for distributed training
+        model_config: Model configuration (seed_vl config)
+        backend: Backend type (default: 'fsdp')
+        prefix: Prefix for state dict keys (default: '')
+    """
+    assert backend == 'fsdp', "Only support fsdp for xperf_triton"
+
+    # Import here to avoid circular dependency
+    from alpha_seed.workers.xperf_rollout.utils.vit_inferencer import TorchVitInferencer
+
+    # Ensure we're using TorchVitInferencer
+    if not isinstance(vit_model, TorchVitInferencer):
+        raise NotImplementedError(f"XPerf Triton with seed_vl models requires TorchVitInferencer. "
+                                  f"Set vit_use_xperf_gpt=False in rollout config. Got: {type(vit_model).__name__}")
+
+    # Define VIT prefixes for efficient checking
+    VIT_PREFIXES = ('vision_encoder.', 'ln_vision.', 'multi_modal_projector.')
+
+    # Separate VIT and LLM weights in a single pass
+    vit_state_dict = {}
+    llm_state_dict = {}
+
+    for key, value in state_dict.items():
+        if key.startswith(VIT_PREFIXES):
+            vit_state_dict[key] = value
+        else:
+            # Remove language_model prefix for LLM weights if present
+            llm_key = key[len('language_model.'):] if key.startswith('language_model.') else key
+            llm_state_dict[llm_key] = value
+
+    # Update VIT model weights
+    vit_model.weights_update(vit_state_dict)
+
+    # Update LLM weights using the existing M8 function
+    llm_model_config = getattr(model_config, 'text_config', model_config)
+
+    _reshard_fsdp_state_dict_to_xperf_triton_m8(tp_model=tp_model,
+                                                state_dict=llm_state_dict,
+                                                device_mesh=device_mesh,
+                                                model_config=llm_model_config,
+                                                backend=backend,
+                                                prefix=prefix)
+
     torch.cuda.empty_cache()

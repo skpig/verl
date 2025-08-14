@@ -37,7 +37,8 @@ class PytestXdistEnv:
 @pytest.fixture(scope='function')
 def ray_fixture():
     import ray
-    ray.init()
+    # stream every worker's stdout/stderr back to the driver
+    ray.init(log_to_driver=os.environ.get('RAY_DEDUP_LOGS', 'false') == 'true')
     yield
     ray.shutdown()
 
@@ -49,6 +50,11 @@ def gpu_allocator(request, monkeypatch):
 
     gpu_count = request.param
     xdist_env = PytestXdistEnv()
+
+    # Skip check for the head node
+    if avail_gpu_count == 0:
+        yield
+        return
 
     assert xdist_env.worker_count * gpu_count <= avail_gpu_count, (
         f"gpu_count={gpu_count} * xdist_env.worker_count={xdist_env.worker_count} > avail_gpu_count={avail_gpu_count}")
