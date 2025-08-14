@@ -10,14 +10,14 @@ Example:
 `h800_128_m8_20b_18k.yaml`
 
 python3 -m alpha_seed.tuner.auto_tuner \
-    --model hdfs://haruna/home/byte_data_seed/lf_lq/user/zhiqi.0/models/p6dense-72B-Instruct \
+    --model hdfs://haruna/home/byte_data_seed/ssd_lq/public/seed_models/m10_680m_new \
     --max-seqlen 22528 \
     --gpu-type H800 \
     --nnodes 32 \
     --ngpus-per-node 8 \
     --export test.yaml \
-    --tp-size 1
-
+    --tp-size 4 \
+    --strategy vescale-fsdp2
 ```
 
 * Run with generated recipe
@@ -42,12 +42,11 @@ import os
 
 from transformers import AutoConfig, AutoModelForCausalLM
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from alpha_seed.workers.fsdp.initialize import create_mesh, meta_device_init
+from alpha_seed.workers.fsdp.initialize import meta_device_init
 from alpha_seed.workers.hybrid_engine.fsdp_gather import ulysses_pad_and_slice_inputs
 from dist_attn.ulysses.parallel_states import set_ulysses_sequence_parallel_group
 from dist_attn.ulysses.ops import gather_outputs
 from mono_rl.models.seed_models.monkey_patch import apply_monkey_patch, get_parallel_plan
-from alpha_seed.workers.fsdp import fully_shard
 from alpha_seed.workers.fsdp.offload import offload_fsdp_optimizer, load_fsdp_optimizer
 import hdfs_io
 import verl.utils.torch_functional as verl_F
@@ -127,12 +126,12 @@ class Env:
 
 def print0(*msg):
     if dist.get_rank() == 0:
-        print(*msg)
+        print(*msg, flush=True)
 
 
 class AutoTuner:
 
-    def __init__(self, model_path: str, max_seqlen: int, env: Env):
+    def __init__(self, model_path: str, max_seqlen: int, env: Env, strategy: str, shrink_to_nlayers: int):
 
         self.env = env
         self.model_path = copy_local_path_from_hdfs(model_path)
@@ -141,8 +140,13 @@ class AutoTuner:
         self.total_params = None  # will be set in init_model_info
         self.root_params = None  # will be set in init_model_info
         self.default_filename = None  # will be set in init_model_info
-        self.init_model_info()
         self.seed = 42
+        assert strategy in ('fsdp', 'vescale-fsdp2'), f"Unknown strategy: {strategy}"
+        self.strategy = strategy
+        self.shrink_to_nlayers = shrink_to_nlayers
+        print(f"start auto-tuning using strategy {strategy}")
+        self.wrap_block_cls: List[str] = None
+        self.init_model_info()
 
     def init_model_info(self):
         # init original model
@@ -151,14 +155,23 @@ class AutoTuner:
             model = AutoModelForCausalLM.from_config(config=self.config,
                                                      torch_dtype=torch.float32,
                                                      attn_implementation="flash_attention_2")
+            self.wrap_block_cls = list(model._no_split_modules)
             self.total_params = sum(p.numel() for p in model.parameters())
             self.root_params = sum(p.numel() for p in model.parameters(recurse=False))
             nparams = self.total_params / (1e9)
             nparams_str = f"{int(nparams)}B" if nparams > 1 else f"{int(nparams*1000)}M"
             print0(f"total parameters of the model: {self.total_params / (1024 ** 3):.2f} B")
-            self.default_filename = f"{self.env.gpu_type}.{self.env.ngpus}.{self.config.model_type}.{nparams_str}.seq{self.max_seqlen//1024}k.yaml"
+            self.default_filename = f"{self.env.gpu_type}.{self.env.ngpus}.{self.config.model_type}.{nparams_str}.seq{self.max_seqlen//1024}k.{self.strategy}.yaml"
 
-    def init_model_and_optimizer(self, parallel_config: ParallelConfig, num_layers: int = 10):
+    def init_model_and_optimizer(self, parallel_config: ParallelConfig):
+
+        if self.strategy == 'fsdp':
+            from mono_rl.worker.engine.fsdp.initialize import create_mesh
+            from mono_rl.worker.engine.fsdp.fully_shard import fully_shard
+        elif self.strategy == 'vescale-fsdp2':
+            from mono_rl.worker.engine.fsdp.vescale.initialize import create_mesh
+            from mono_rl.worker.engine.fsdp.vescale.fully_shard import fully_shard
+
         meshes = create_mesh(parallel_config.fsdp_size, parallel_config.tp_size, 1, parallel_config.sp_size)
         fsdp_mesh, tp_mesh = meshes[:2]
 
@@ -173,8 +186,12 @@ class AutoTuner:
             config = copy.deepcopy(self.config)
 
             # shrink layers
+            num_layers = self.shrink_to_nlayers if self.shrink_to_nlayers > 0 else config.num_hidden_layers
             if config.num_hidden_layers > num_layers:
                 setattr(config, 'num_hidden_layers', num_layers)
+                if hasattr(config, "sliding_window"):
+                    if isinstance(config.sliding_window, (tuple, list)):
+                        config.sliding_window = config.sliding_window[:num_layers]
                 if config.model_type == "seed_m8":
                     mirror_layers = int(num_layers * 0.2)
                     setattr(config, "kv_mirror_imitated_layers", list(range(0, mirror_layers)))
@@ -189,9 +206,12 @@ class AutoTuner:
             warnings.simplefilter("ignore")
             model, _ = fully_shard(
                 model=model,
-                block_cls=model._no_split_modules[0],
+                block_cls=self.wrap_block_cls,
                 fsdp_mesh=fsdp_mesh,
-                tp_plan=get_parallel_plan(config, tp_mesh),
+                # FIXME: take uniform name of strategy for vescale
+                tp_plan=get_parallel_plan(config,
+                                          tp_mesh,
+                                          strategy='vescale' if self.strategy == 'vescale-fsdp2' else self.strategy),
                 tp_mesh=tp_mesh,
                 recompute=True,
                 act_offload=True,
@@ -236,6 +256,14 @@ class AutoTuner:
             input_ids_rolled, _, _ = ulysses_pad_and_slice_inputs(input_ids_rolled.unsqueeze(0), None, sp_mesh.size())
             input_ids_rolled = input_ids_rolled.squeeze(0)
 
+        # add mtp labels
+        mtp_labels = []  # mimic, not real
+        if hasattr(model.config, "mtp_mode"):
+            mtp_n_heads = model.config.mtp_n_heads
+            for i in range(1, mtp_n_heads):
+                input_ids_rolled_mtp = torch.roll(input_ids, shifts=-i - 1, dims=1)
+                mtp_labels.append(input_ids_rolled_mtp)
+
         for _ in range(max(2, accum_steps)):
             # forward
             output = model(input_ids=input_ids,
@@ -243,7 +271,8 @@ class AutoTuner:
                            use_cache=False,
                            labels=input_ids_rolled,
                            temperature=1.0,
-                           fuse_lm_head_ce_loss=True)
+                           fuse_lm_head_ce_loss=True,
+                           mtp_labels=mtp_labels)
             log_probs = output.loss
             if sp_mesh.size() > 1:
                 log_probs = gather_outputs(log_probs, gather_dim=0, padding_dim=0, unpad_dim_size=unpad_size)
@@ -261,8 +290,13 @@ class AutoTuner:
             optimizer.step()
             optimizer.zero_grad()
             offload_fsdp_optimizer(optimizer)
-        for module in FSDP.fsdp_modules(model):
-            module._flat_param.grad = None
+
+        # remove gradient
+        if self.strategy == 'fsdp':
+            for module in FSDP.fsdp_modules(model):
+                module._flat_param.grad = None
+        else:
+            model.zero_grad()
 
         print0(f"seqlen: {input_ids.size(1)}, max allocated: {torch.cuda.max_memory_allocated() / (1024**3):.2f} GB")
         torch.cuda.empty_cache()
@@ -296,10 +330,12 @@ class AutoTuner:
         nparams = sum(p.numel() for p in model.parameters())
         memory_at_update = (nparams * 16) / (1024**3)
         print0(f"state memory at update: {memory_at_update:.2f} GB")
-        num_layers = len(FSDP.fsdp_modules(model)) - 1  # -1 remove root module
+        num_layers = model.config.num_hidden_layers
         print0(f"detected fsdp wrapped layers: {num_layers}")
         # root module params doesn't use tp
         num_param_per_layer = (nparams - self.root_params / fsdp_size) / num_layers * fsdp_size
+        if self.strategy == 'vescale-fsdp2':
+            num_param_per_layer /= tp_size
         memory_at_fbw = (nparams * 8 + num_param_per_layer * 10) / (1024**3)
         print0(f"layer params: {num_param_per_layer / 1e9:.2f}B | memory: {num_param_per_layer * 4 / (1024**3):.2f} GB")
         print0(f"state memory at fw/bw: {memory_at_fbw:.2f} GB")
@@ -345,7 +381,12 @@ class AutoTuner:
         print0(f"act_memory = {slope} * tokens + {intercept}")
 
         tp_size, sp_size = tp_mesh.size(), sp_mesh.size()
-        assert self.env.ngpus % (tp_size * sp_size) == 0
+        if self.strategy == 'fsdp':
+            assert self.env.ngpus % (tp_size * sp_size) == 0
+        else:
+            assert self.env.ngpus % tp_size == 0
+            assert self.env.ngpus % sp_size == 0
+
         fsdp_size = self.env.ngpus // tp_size
 
         def estimate_memory(max_tokens: int):
@@ -364,6 +405,8 @@ class AutoTuner:
     def empirical_config(self, constraints: Constraints = None):
         have_tp_implementation = self.config.model_type in (
             "seed_m8",
+            "seed_m10",
+            "seed_m11",
             "deepseek_v3",
             "seed_p6dense",
         )
@@ -381,8 +424,11 @@ class AutoTuner:
         if (not constraints) or (constraints.tp_size is None):
             tp_size = 1
             # we only enable tp for models > 60B
-            if have_tp_implementation and (self.total_params / 1e9) > 60:
-                tp_size = 2 if self.env.nvlink else 4
+            if have_tp_implementation:
+                if (self.total_params / 1e9) > 60:
+                    tp_size = 2 if self.env.nvlink else 4
+                if (self.total_params / 1e9) > 600:  # for 800B model
+                    tp_size = 32
             # shrink tp size to be divisible to num_heads
             while num_heads % tp_size != 0:
                 tp_size = max(tp_size // 2, 1)
@@ -390,17 +436,22 @@ class AutoTuner:
             tp_size = constraints.tp_size
         # determine sp size
         ngpus_per_node = min(self.env.ngpus_per_node, dist.get_world_size())
-        assert ngpus_per_node % tp_size == 0, f"{ngpus_per_node=}, {tp_size=}"
-        sp_size = ngpus_per_node // tp_size
+        if self.strategy == 'fsdp':
+            sp_size = ngpus_per_node // tp_size
+        else:
+            # vescale fsdp has pure sp for attention
+            sp_size = ngpus_per_node
         while num_heads % sp_size != 0:
             sp_size = max(sp_size // 2, 1)
-        return ParallelConfig(
+        parallel_config = ParallelConfig(
             max_token_len=self.max_seqlen,
             fsdp_size=-1,
             sp_size=sp_size,
             tp_size=tp_size,
             act_offload=True,
         )
+        print0(f"Empirical parallel config: {parallel_config}")
+        return parallel_config
 
     def search(
         self,
@@ -477,6 +528,8 @@ class AutoTuner:
         assert filepath.endswith(".yaml"), f"{filepath} must ends with .yaml"
         with open('tasks_scripts/recipes/template.yaml', "r") as f:
             template = yaml.safe_load(f)
+
+        template["actor_rollout_ref"]["actor"]["strategy"] = self.strategy
         template["actor_rollout_ref"]["actor"]["ppo_max_token_len"] = min(config.max_token_len, 200000)
         template["actor_rollout_ref"]["actor"]["fsdp_size"] = config.fsdp_size
         template["actor_rollout_ref"]["actor"]["tp_size"] = config.tp_size
@@ -485,11 +538,13 @@ class AutoTuner:
         # if config.act_offload:
         #     template["actor_rollout_ref"]["actor"]["gc_freq"] = "micro"
 
+        template["actor_rollout_ref"]["ref"]["strategy"] = self.strategy
         template["actor_rollout_ref"]["ref"]["max_token_len"] = min(config.max_token_len, 200000)
         template["actor_rollout_ref"]["ref"]["fsdp_size"] = config.fsdp_size
         template["actor_rollout_ref"]["ref"]["tp_size"] = config.tp_size
         template["actor_rollout_ref"]["ref"]["ulysses_sequence_parallel_size"] = config.sp_size
 
+        template["critic"]["strategy"] = self.strategy
         template["critic"]["ppo_max_token_len"] = min(config.max_token_len, 200000)
         template["critic"]["fsdp_size"] = config.fsdp_size
         template["critic"]["tp_size"] = config.tp_size
@@ -500,6 +555,8 @@ class AutoTuner:
 
         # calculate rollout tp size
         tp_size = self.env.ngpus_per_node
+        if (self.total_params / 1e9) > 800:
+            tp_size = 32
         num_heads = getattr(self.config, "num_attention_heads", None)
         # TODO(zhiqi.0): remove this constraints after the codebase supports
         # tp / sp on num_attention_heads for qwen
@@ -530,7 +587,12 @@ class AutoTuner:
 @ray.remote
 class RayAutoTuner(Worker):
 
-    def __init__(self, model_path: str, max_seqlen: int, env: Env = None, mem_margin: float = 0.15):
+    def __init__(self,
+                 model_path: str,
+                 max_seqlen: int,
+                 env: Env = None,
+                 strategy: str = 'fsdp',
+                 mem_margin: float = 0.15):
         super().__init__()
 
         if not dist.is_initialized():
@@ -538,8 +600,10 @@ class RayAutoTuner(Worker):
             torch.cuda.set_device(int(os.environ.get('LOCAL_RANK', 0)))
 
         ngpus = dist.get_world_size()
+        real_runtime = False
         if not env:
             # get from runtime
+            real_runtime = True
             gpu_type = torch.cuda.get_device_name().split()[-1]
             env = Env(
                 gpu_type,
@@ -550,7 +614,11 @@ class RayAutoTuner(Worker):
                 HaveNVLink.get(gpu_type, True),
             )
 
-        self.tuner = AutoTuner(model_path=model_path, max_seqlen=max_seqlen, env=env)
+        self.tuner = AutoTuner(model_path=model_path,
+                               max_seqlen=max_seqlen,
+                               env=env,
+                               strategy=strategy,
+                               shrink_to_nlayers=40 if real_runtime else 10)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def search(self, constraints: Constraints = None, export_path: str = None, export_dir: str = None):
@@ -567,22 +635,23 @@ class RayAutoTuner(Worker):
 
 
 @ray.remote
-def auto_tune_task(config, ngpus_per_node: int, nnodes: int, save_dir: str = None):
+def auto_tune_task(config, ngpus_per_node: int, nnodes: int, save_dir: str = None, strategy: str = 'fsdp'):
 
     # standalone run
+    assert strategy == 'vescale-fsdp2'
     if isinstance(config, Namespace):
         env = Env(
-            args.gpu_type,
-            args.nnodes,
-            args.ngpus_per_node,
-            args.nnodes * args.ngpus_per_node,
-            GpuMemorySpec[args.gpu_type] * (1.0 - args.mem_margin),
-            HaveNVLink[args.gpu_type],
+            config.gpu_type,
+            config.nnodes,
+            config.ngpus_per_node,
+            config.nnodes * config.ngpus_per_node,
+            GpuMemorySpec[config.gpu_type] * (1.0 - config.mem_margin),
+            HaveNVLink[config.gpu_type],
         )
         constraints = Constraints(tp_size=args.tp_size)
-        model_path = args.model
-        max_seqlen = args.max_seqlen
-        export_path = args.export
+        model_path = config.model
+        max_seqlen = config.max_seqlen
+        export_path = config.export
     # alphaseed rl job run
     else:
         env = None  # infer by runtime
@@ -598,6 +667,7 @@ def auto_tune_task(config, ngpus_per_node: int, nnodes: int, save_dir: str = Non
         model_path,
         max_seqlen,
         env,
+        strategy,
     )
     tuner = RayWorkerGroup(resource_pool, class_with_args, name_prefix="autotuner")
     filepath = tuner.search(constraints, export_path, save_dir)
@@ -618,6 +688,11 @@ if __name__ == '__main__':
     parser.add_argument("--mem-margin", type=float, default=0.15, help="ratio of reserved memory in GB of total memory")
     parser.add_argument("--export", type=str, default='./auto.yaml', help="can be local or hdfs path")
     parser.add_argument("--tp-size", type=int, default=None, help="constraints of tensor parallelism size")
+    parser.add_argument("--strategy",
+                        type=str,
+                        default="fsdp",
+                        choices=['fsdp', 'vescale-fsdp2'],
+                        help="strategy of auto tuning")
     args = parser.parse_args()
     print(args)
 
@@ -641,4 +716,4 @@ if __name__ == '__main__':
         }
         ray.init(runtime_env=runtime_env)
     # run the task
-    ray.get(auto_tune_task.remote(args, ngpus, 1))
+    ray.get(auto_tune_task.remote(args, ngpus, 1, None, args.strategy))

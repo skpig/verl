@@ -871,8 +871,8 @@ def main(config):
             from alpha_seed.tuner.auto_tuner import auto_tune_task
             init_ray(config)
             config.recipe = ray.get(
-                auto_tune_task.remote(config, config.trainer.n_gpus_per_node, config.trainer.nnodes,
-                                      config.recipe_hub))[0]
+                auto_tune_task.remote(config, config.trainer.n_gpus_per_node, config.trainer.nnodes, config.recipe_hub,
+                                      config.actor_rollout_ref.actor.strategy))[0]
             print(f"get auto-tuned recipe at {config.recipe}")
         filepath = copy_local_path_from_hdfs(config.recipe, always_recopy=True)
         recipe = omegaconf.OmegaConf.load(filepath)

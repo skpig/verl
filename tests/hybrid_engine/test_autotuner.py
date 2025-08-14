@@ -34,6 +34,8 @@ tuner = AutoTuner(
     model_path="hdfs://haruna/home/byte_data_seed/lf_lq/user/zhiqi.0/models/m8_680m_sft",
     max_seqlen=8192,
     env=env,
+    strategy="fsdp",
+    shrink_to_nlayers=10,
 )
 
 tuner.search(constraints=None, export_path=export_path, plot_file="search.png")
