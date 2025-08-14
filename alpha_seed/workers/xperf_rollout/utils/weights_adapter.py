@@ -114,7 +114,8 @@ class WeightsAdapter:
                                                                                 placements=placements)._local_tensor
 
     def _cast_to(self, tensor: Union[torch.Tensor, DTensor], dtype: torch.dtype) -> Union[torch.Tensor, DTensor]:
-
+        if tensor is None:
+            return tensor
         return tensor.to(dtype)
 
     def _assign_and_validate(self, src: Union[torch.Tensor, List[torch.Tensor]],
@@ -298,6 +299,8 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
                     loader(f"{layer_key}.hc2.dynamic_beta_scale"),
                 'vwn1_layer_norm':
                     loader(f"{layer_key}.hc2.layer_norm.weight"),
+                'vwn_extra_layernorm':
+                    loader(f"{layer_key}.extra_norm.weight"),
             }
 
         for mtp_idx in range(0, self.mtp_n_heads):
@@ -355,7 +358,8 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
                 qkv_weight, o_weight, fc1_weight, fc2_weight, share_fc1_weight, share_fc2_weight)
             gate_wg_weight = self._process_gate_weights(layer_idx)
             vwn0_static_alpha, vwn0_static_beta, vwn0_dynamic_alpha, vwn0_dynamic_alpha_scale, vwn0_dynamic_beta, vwn0_dynamic_beta_scale, vwn0_layer_norm, \
-            vwn1_static_alpha, vwn1_static_beta, vwn1_dynamic_alpha, vwn1_dynamic_alpha_scale, vwn1_dynamic_beta, vwn1_dynamic_beta_scale, vwn1_layer_norm = self._process_vwn_weights(layer_idx)
+            vwn1_static_alpha, vwn1_static_beta, vwn1_dynamic_alpha, vwn1_dynamic_alpha_scale, vwn1_dynamic_beta, vwn1_dynamic_beta_scale, vwn1_layer_norm, \
+            vwn_extra_layernorm_weight = self._process_vwn_weights(layer_idx)
 
             binding_weights = [
                 (xperf_weights.layer_weight, ln_1_weight, "norm0_gamma_beta"),
@@ -388,6 +392,7 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
                 (xperf_weights.layer_weight, vwn1_dynamic_beta, "vwn1_dynamic_beta"),
                 (xperf_weights.layer_weight, vwn1_dynamic_beta_scale, "vwn1_dynamic_beta_scale"),
                 (xperf_weights.layer_weight, vwn1_layer_norm, "vwn1_layernorm_weight"),
+                (xperf_weights.layer_weight, vwn_extra_layernorm_weight, "vwn_extra_layernorm_weight"),
                 (xperf_weights.quant_weight, wfp8_qscale, "wfp8_qscale"),
             ]
             assign_weights(binding_weights, layer_idx)
@@ -698,36 +703,42 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
 
     def _process_vwn_weights(self, layer_idx: int) -> Tuple[torch.Tensor, ...]:
 
-        vwn_weights = [None] * 14
+        vwn_weights = [None] * 15
         if self.has_over_encoding:
-            vwn_weights = (
-                self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn0_static_alpha']),
-                              torch.bfloat16),
-                self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn0_static_beta']),
-                              torch.bfloat16),
-                self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn0_dynamic_alpha']),
-                              torch.bfloat16).transpose(0, 1).contiguous(),
-                self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn0_dynamic_alpha_scale']),
-                              torch.bfloat16),
-                self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn0_dynamic_beta']),
-                              torch.bfloat16).transpose(0, 1).contiguous(),
-                self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn0_dynamic_beta_scale']),
-                              torch.bfloat16),
-                self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn0_layer_norm']), torch.bfloat16),
-                self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn1_static_alpha']),
-                              torch.bfloat16),
-                self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn1_static_beta']),
-                              torch.bfloat16),
-                self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn1_dynamic_alpha']),
-                              torch.bfloat16).transpose(0, 1).contiguous(),
-                self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn1_dynamic_alpha_scale']),
-                              torch.bfloat16),
-                self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn1_dynamic_beta']),
-                              torch.bfloat16).transpose(0, 1).contiguous(),
-                self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn1_dynamic_beta_scale']),
-                              torch.bfloat16),
-                self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn1_layer_norm']), torch.bfloat16),
-            )
+            vwn_weights = (self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn0_static_alpha']),
+                                         torch.bfloat16),
+                           self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn0_static_beta']),
+                                         torch.bfloat16),
+                           self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn0_dynamic_alpha']),
+                                         torch.bfloat16).transpose(0, 1).contiguous(),
+                           self._cast_to(
+                               self._get_full_tensor(self.source_weights[layer_idx]['vwn0_dynamic_alpha_scale']),
+                               torch.bfloat16),
+                           self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn0_dynamic_beta']),
+                                         torch.bfloat16).transpose(0, 1).contiguous(),
+                           self._cast_to(
+                               self._get_full_tensor(self.source_weights[layer_idx]['vwn0_dynamic_beta_scale']),
+                               torch.bfloat16),
+                           self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn0_layer_norm']),
+                                         torch.bfloat16),
+                           self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn1_static_alpha']),
+                                         torch.bfloat16),
+                           self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn1_static_beta']),
+                                         torch.bfloat16),
+                           self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn1_dynamic_alpha']),
+                                         torch.bfloat16).transpose(0, 1).contiguous(),
+                           self._cast_to(
+                               self._get_full_tensor(self.source_weights[layer_idx]['vwn1_dynamic_alpha_scale']),
+                               torch.bfloat16),
+                           self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn1_dynamic_beta']),
+                                         torch.bfloat16).transpose(0, 1).contiguous(),
+                           self._cast_to(
+                               self._get_full_tensor(self.source_weights[layer_idx]['vwn1_dynamic_beta_scale']),
+                               torch.bfloat16),
+                           self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn1_layer_norm']),
+                                         torch.bfloat16),
+                           self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['vwn_extra_layernorm']),
+                                         torch.bfloat16))
 
         return vwn_weights
 

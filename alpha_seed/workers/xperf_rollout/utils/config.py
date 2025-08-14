@@ -412,6 +412,9 @@ def _get_vl_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
     elif model_config.text_config.architectures[0] == "P6ForCausalLM":
         llm_config = _get_p6_xperf_gpt_config(model_config.text_config, tokenizer)
         vision_config = _get_vl_p6_xperf_vision_config(model_config.vision_config)
+    elif model_config.text_config.architectures[0] == "M11ForCausalLM":
+        llm_config = _get_m11_xperf_gpt_config(model_config.text_config, tokenizer)
+        vision_config = {}  # now xperf vit is not ready used in M11
     else:
         raise RuntimeError(f"Unsupported model type {model_config.text_config.architectures[0]}")
     return {"text_config": llm_config, "vision_config": vision_config}
@@ -676,7 +679,10 @@ def _get_m11_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
         "over_enc_n_in":
             config.vwn_n_in,
         "over_enc_n_out":
-            config.vwn_n_out
+            config.vwn_n_out,
+        "residual_post_ln_layers": [i + 1 for i in getattr(config, "pre_post_layernorm_layers", [])],
+        "vwn_full_post_norm":
+            getattr(config, "vwn_full_post_norm", False),
     }
 
     return xperf_config

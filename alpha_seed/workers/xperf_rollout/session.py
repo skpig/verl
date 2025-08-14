@@ -10,6 +10,7 @@ Handles end-to-end inference process including:
 """
 from dataclasses import dataclass
 from queue import Queue
+from typing import Optional
 
 from torch.distributed import get_rank
 from xperf_gpt.inference import init_inference
@@ -797,7 +798,7 @@ class InferenceSession:
             query.lazy_init_from_prompt_once(self.tokenizer)
         return self.cache_manager.update_queries(self.running, self.waiting, self.paused)
 
-    def _prepare_image_embeds(self, input_ids, query):
+    def _prepare_image_embeds(self, input_ids, query, is_oe):
         # image embeddings has already been computed
         if query.input_embedding is not None:
             return query.input_embedding
@@ -830,16 +831,16 @@ class InferenceSession:
             image_mask = input_ids == image_token_id
             # fill image tokens to padding tokens, to avoid negative token_ids for text embedding
             input_ids[image_mask] = 1
-            text_embeds = self.engine.get_input_embeddings(input_ids=input_ids)
+            text_embeds = self._get_input_embeddings(input_ids, query, is_oe)
             image_mask = image_mask.unsqueeze(-1).expand_as(text_embeds).to(text_embeds.device)
             img_emb = img_emb.to(text_embeds.device)
             text_embeds = text_embeds.masked_scatter(image_mask, img_emb)
         else:
-            text_embeds = self.engine.get_input_embeddings(input_ids=input_ids)
+            text_embeds = self._get_input_embeddings(input_ids, query, is_oe)
         query.input_embedding = text_embeds
         return query.input_embedding
 
-    def _prepare_image_embeds_dp(self, running):
+    def _prepare_image_embeds_dp(self, running, is_oe):
         image_queries = [
             query for query in running if query.is_context_computing and query.image_data is not None and
             query.input_embedding is None and query.image_shift < query.image_data['image_grid_hw'].shape[0]
@@ -880,15 +881,41 @@ class InferenceSession:
             torch.distributed.all_gather(all_emb_list, img_emb, group=self.tp_group)
 
             for i, query in enumerate(image_queries):
-                input_ids = torch.tensor(query.input_ids, device="cuda").unsqueeze(0)[:, query.context_shift:]
+                input_ids = torch.tensor(query.input_ids, device="cuda").unsqueeze(0)
+                input_ids = input_ids[:, query.context_shift:]
                 image_token_id = -100
                 image_mask = input_ids == image_token_id
                 input_ids[image_mask] = 1
-                text_embeds = self.engine.get_input_embeddings(input_ids=input_ids)
+                text_embeds = self._get_input_embeddings(input_ids, query, is_oe)
                 image_mask = image_mask.unsqueeze(-1).expand_as(text_embeds).to(text_embeds.device)
                 text_embeds = text_embeds.masked_scatter(image_mask, all_emb_list[i].to(text_embeds.device))
                 query.input_embedding = text_embeds
                 query.image_shift = query.image_data['image_grid_hw'].shape[0]
+
+    def _get_input_embeddings(self,
+                              input_ids,
+                              query,
+                              is_oe: Optional[bool] = False,
+                              start: int = None,
+                              end: int = None):
+        if start is not None and end is not None:  # text
+            input_ids = input_ids[:, start:end]
+            context_shift = start
+        else:  # vlm
+            context_shift = query.context_shift
+
+        if is_oe:
+            raw_inputs_id = torch.tensor(query.input_ids, device="cuda").unsqueeze(0)
+            oe_history = raw_inputs_id[:, max(context_shift - self.oe_max_stride + 1, 0):context_shift]
+            pad_len = (self.oe_max_stride - 1) - oe_history.shape[1]
+            oe_history = F.pad(oe_history, (pad_len, 0), value=self.pad_token_id)
+            step_seq_length = torch.tensor((input_ids.shape[1]), device=input_ids.device, dtype=torch.int).unsqueeze(0)
+            total_seq_length = torch.tensor((input_ids.shape[1] + context_shift),
+                                            device=input_ids.device,
+                                            dtype=torch.int).unsqueeze(0)
+            input_ids = torch.concat([oe_history, input_ids], dim=1)
+            return self.engine.get_input_oe_embeddings(input_ids, step_seq_length, total_seq_length)
+        return self.engine.get_input_embeddings(input_ids=input_ids)
 
     def _prepare_forward_inputs(self, running: List[Query]):
         max_context_len = -1
@@ -920,7 +947,7 @@ class InferenceSession:
         prefill_only = self.enable_mtp_decoding and any([query.is_context_computing for query in running])
 
         if self.vit_use_dp:
-            self._prepare_image_embeds_dp(running)
+            self._prepare_image_embeds_dp(running, self.oe_max_stride > 1)
 
         for index, query in enumerate(running):
             assert len(query.input_ids) > 0 and len(query.input_ids) <= self.max_length, \
@@ -936,28 +963,12 @@ class InferenceSession:
                     input_ids = torch.tensor(input_ids).cuda().unsqueeze(0)
                     is_oe = self.oe_max_stride > 1
                     if is_vlm:
-                        input_embs = self._prepare_image_embeds(input_ids, query)
+                        input_embs = self._prepare_image_embeds(input_ids, query, is_oe)
                         cur_shift = end - start
                         input_embs = input_embs[:, query.image_context_shift:query.image_context_shift + cur_shift, :]
                         query.image_context_shift += cur_shift
                     else:
-                        if is_oe:
-                            curr_input_ids = input_ids[:, start:end]
-                            step_seq_length = torch.tensor((curr_input_ids.shape[1]),
-                                                           device=curr_input_ids.device,
-                                                           dtype=torch.int).unsqueeze(0)
-                            total_seq_length = torch.tensor((curr_input_ids.shape[1] + start),
-                                                            device=curr_input_ids.device,
-                                                            dtype=torch.int).unsqueeze(0)
-                            oe_history = input_ids[:, start - self.oe_max_stride + 1:start]
-                            pad_len = (self.oe_max_stride - 1) - oe_history.shape[1]
-                            oe_history = F.pad(oe_history, (pad_len, 0), value=self.pad_token_id)
-                            curr_input_ids = torch.concat([oe_history, curr_input_ids], dim=1)
-                            input_embs = self.engine.get_input_oe_embeddings(curr_input_ids, step_seq_length,
-                                                                             total_seq_length)
-                        else:
-                            input_ids = input_ids[:, start:end]
-                            input_embs = self.engine.get_input_embeddings(input_ids=input_ids)
+                        input_embs = self._get_input_embeddings(input_ids, query, is_oe, start, end)
                     return input_embs, torch.tensor(labels_ids)
 
                 self.infer_scheduler.record("prefill_token_num", [len(query.input_ids)])

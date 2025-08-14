@@ -5,6 +5,8 @@ from seed_models.models.seed_vl import SeedVLConfig
 from transformers.modeling_utils import PreTrainedModel
 from seed_models.models.seed_vl.modeling_seed_vl import SeedVisionTransformer
 from transformers import AutoConfig
+import abc
+from torch.distributed._tensor import DTensor
 
 
 def gen_vit_cfg(vit_cfg_path):
@@ -12,8 +14,80 @@ def gen_vit_cfg(vit_cfg_path):
     return config.vision_config
 
 
+def assert_not_nan(tensor: torch.Tensor):
+    if torch.distributed.is_initialized():
+        rank = torch.distributed.get_rank()
+    else:
+        rank = 0
+
+    if os.getenv('XPERF_CHECK_NAN', '1') == '1':
+        assert not torch.any(torch.isnan(tensor)).item(), f'Got nan in parameter {tensor} on rank {rank}'
+
+
+def update_param(state_dict, key, vit_model_param):
+    if isinstance(key, str):
+        param_in_state_dict = state_dict.pop(key).to(torch.bfloat16)
+        if isinstance(param_in_state_dict, DTensor):
+            param_in_state_dict = param_in_state_dict.full_tensor()
+    else:
+        param_in_state_dict = key
+    assert vit_model_param.shape == param_in_state_dict.shape, f'{key=}, {vit_model_param.shape=}, {param_in_state_dict.shape=}'
+    vit_model_param.data = param_in_state_dict.contiguous()
+    assert_not_nan(vit_model_param.data)
+
+
+class BaseVitInferencer(PreTrainedModel):
+
+    def __init__(self, config: SeedVLConfig, *args, **kwargs) -> None:
+        super().__init__(config)
+
+    @abc.abstractmethod
+    @torch.no_grad()
+    def get_image_features(self):
+        raise NotImplementedError
+
+    def weights_update(self, train_state_dict):
+        self.auto_reshard_weights(train_state_dict)
+
+    @abc.abstractmethod
+    def update_standalone_weighs(self):
+        raise NotImplementedError
+
+    def post_init(self):
+        # default bf16 in xperf
+        self.cuda().to(dtype=torch.bfloat16)
+        print("init torch vit done...")
+
+    def auto_reshard_weights(self, train_state_dict, reshard_table=None):
+        # reshard_table type: list[list]
+        # | train_prefix | infer_prefix | infer_blocks |
+        # |--------------|--------------|--------------|
+        # |     ""       |     ""       |     self     |
+        # infer name driver to get train name, and then get train param
+        if reshard_table is None:
+            reshard_table = [["", "", self]]
+        for train_prefix, infer_prefix, infer_blocks in reshard_table:
+            self.reshard_blocks_weights(train_state_dict, infer_blocks, train_prefix, infer_prefix)
+
+    def reshard_blocks_weights(self, train_state_dict, infer_blocks, train_prefix="", infer_prefix=""):
+
+        def infer_to_train(infer_str: str, train_prefix: str, infer_prefix: str) -> str:
+            # remove infer_prefix, and add train_prefix
+            if not infer_str.startswith(infer_prefix):
+                raise ValueError(f"'{infer_str}' does not start with infer_prefix '{infer_prefix}'!")
+            suffix = infer_str[len(infer_prefix):]
+            return train_prefix + suffix
+
+        for infer_name, infer_params in infer_blocks.named_parameters():
+            train_name = infer_to_train(infer_name, train_prefix, infer_prefix)
+            self.reshard_single_weighs(train_state_dict, train_name, infer_params)
+
+    def reshard_single_weighs(self, train_state_dict, train_name, infer_params):
+        update_param(train_state_dict, train_name, infer_params)
+
+
 # torch vit model from seed_models
-class TorchVitInferencer(PreTrainedModel):
+class TorchVitInferencer(BaseVitInferencer):
 
     def __init__(self, config: SeedVLConfig, *args, **kwargs) -> None:
         super().__init__(config)
@@ -59,40 +133,20 @@ class TorchVitInferencer(PreTrainedModel):
         return image_embeds
 
     def weights_update(self, state_dict):
-
-        def assert_not_nan(tensor: torch.Tensor):
-            if torch.distributed.is_initialized():
-                rank = torch.distributed.get_rank()
-            else:
-                rank = 0
-
-            if os.getenv('XPERF_CHECK_NAN', '1') == '1':
-                assert not torch.any(torch.isnan(tensor)).item(), f'Got nan in parameter {tensor} on rank {rank}'
-
-        def update_param(vit_model_param, key):
-            if isinstance(key, str):
-                param_in_state_dict = state_dict.pop(key).to(torch.bfloat16).full_tensor()
-            else:
-                param_in_state_dict = key
-            assert vit_model_param.shape == param_in_state_dict.shape, f'{key=}, {vit_model_param.shape=}, {param_in_state_dict.shape=}'
-            vit_model_param.data = param_in_state_dict.contiguous()
-            assert_not_nan(vit_model_param.data)
-
         # for visual_encoder model
         for vision_key, param in self.visual_encoder.named_parameters():
             vision_key = "vision_encoder." + vision_key
-            update_param(param, vision_key)
+            update_param(state_dict, vision_key, param)
 
         for proj_key, proj_param in self.seed_proj.named_parameters():
             proj_key = "multi_modal_projector." + proj_key
-            update_param(proj_param, proj_key)
+            update_param(state_dict, proj_key, proj_param)
 
         for ln_key, ln_param in self.ln_vision.named_parameters():
             ln_key = "ln_vision." + ln_key
-            update_param(ln_param, ln_key)
+            update_param(state_dict, ln_key, ln_param)
 
         torch.cuda.empty_cache()
-        print('====>> resharding VIT finished !!!')
 
     def update_standalone_weights(self, comm_fn, comm_rank):
 
