@@ -638,7 +638,6 @@ class RayAutoTuner(Worker):
 def auto_tune_task(config, ngpus_per_node: int, nnodes: int, save_dir: str = None, strategy: str = 'fsdp'):
 
     # standalone run
-    assert strategy == 'vescale-fsdp2'
     if isinstance(config, Namespace):
         env = Env(
             config.gpu_type,
