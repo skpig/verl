@@ -186,26 +186,53 @@ def is_multihost_model(model_parallel_size: int) -> bool:
     return gpu_per_node < model_parallel_size
 
 
-def _postprocess(off_p_list, on_p_list, target_length, pad_token=-1, mode="off_policy_step"):
+class FieldMeta(NamedTuple):
+    dtype: torch.dtype
+    pad_val: Union[float, int]
+
+
+def _get_field_meta(name: str) -> FieldMeta:
+    FIELD_META_INFO = {
+        'rollout_behavior_log_probs': FieldMeta(dtype=torch.bfloat16, pad_val=1.0),
+        'off_policy_steps': FieldMeta(dtype=torch.int8, pad_val=-1),
+        'model_output_mask': FieldMeta(dtype=torch.int8, pad_val=-1),
+    }
+    return FIELD_META_INFO[name]
+
+
+def create_response_tensor(name: str, bs: int, length: int, device: torch.device) -> torch.Tensor:
+    field_meta = _get_field_meta(name)
+    return torch.empty(
+        bs,
+        length,
+        dtype=field_meta.dtype,
+        device=device,
+    ).fill_(field_meta.pad_val)
+
+
+def _postprocess(off_p_list, on_p_list, target_length, mode: str):
+    field_meta = _get_field_meta(mode)
+
     assert (
         len(off_p_list) == len(on_p_list)
     ), f"off-policy and on-policy list should have the same length, but got {len(off_p_list)} and {len(on_p_list)}, mode = {mode}"
     list_padded = []
     for i, on_p_list_i in enumerate(on_p_list):
         off_p_list_i = off_p_list[i]
-        prev_index = torch.nonzero(off_p_list_i == pad_token)
+        prev_index = torch.nonzero(
+            torch.isnan(off_p_list_i) if field_meta.pad_val is torch.nan else (off_p_list_i == field_meta.pad_val))
         if prev_index.numel() == 0:
             prev_index = -1
         else:
             prev_index = prev_index[0]
         cur_list_i = off_p_list_i[:prev_index].tolist() + on_p_list_i
-        if mode == "off_policy_step":
+        if mode == "off_policy_steps":
             cur_list_i = [x + 1 for x in cur_list_i]
         # off-policy + on-policy might exceeds the target length
         if len(cur_list_i) > target_length:
             padded_list = cur_list_i[:target_length]
         else:
-            padded_list = cur_list_i + [pad_token] * (target_length - len(cur_list_i))
+            padded_list = cur_list_i + [field_meta.pad_val] * (target_length - len(cur_list_i))
         list_padded.append(padded_list)
     t_padded = torch.tensor(list_padded)
     return t_padded
@@ -276,17 +303,16 @@ def pack_to_dataproto(prompts, tokenizer, data_pack: DataPack, config) -> DataPr
     response_log_probs = _postprocess(off_policy_response_log_probs,
                                       data_pack.response_log_probs,
                                       max_new_tokens,
-                                      mode="log_prob")
+                                      mode="rollout_behavior_log_probs")
     response_off_policy = _postprocess(off_turn_off_policy_steps,
                                        data_pack.this_turn_off_policy_steps,
                                        max_new_tokens,
-                                       mode="off_policy_step")
+                                       mode="off_policy_steps")
     if off_policy_model_output_mask is not None:
         response_model_output_mask = _postprocess(off_policy_model_output_mask,
                                                   data_pack.response_model_output_mask,
                                                   max_new_tokens,
-                                                  mode='model_output_mask',
-                                                  pad_token=-1)
+                                                  mode='model_output_mask')
     else:
         response_model_output_mask = None
     response_ids = response_outputs["input_ids"][:, :max_new_tokens].to(torch.int32)

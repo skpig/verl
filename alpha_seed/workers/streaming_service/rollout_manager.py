@@ -37,7 +37,7 @@ from alpha_seed.utils.functional import print_dataproto_size
 from alpha_seed.workers.streaming_service.streaming_utils import record_xperf_metrics
 from alpha_seed.workers.agents.handlers import select_handler_fn
 from alpha_seed.workers.agents.handlers import TaskContext
-from alpha_seed.workers.streaming_service.streaming_utils import pad, process_output
+from alpha_seed.workers.streaming_service.streaming_utils import pad, process_output, create_response_tensor
 
 
 class SaveDataProtoFunc(Protocol):
@@ -1016,27 +1016,24 @@ class RolloutManager:
         return gen_out
 
     def _prepare_gen_batch(self, batch: DataProto, step, is_train: bool):
-
-        def _get_response_tensor(dtype, pad_val=-1):
-            return torch.zeros(
-                batch.batch["input_ids"].shape[0],
-                self.config.data.max_response_length,
-                dtype=dtype,
-                device=batch.batch["input_ids"].device,
-            ).fill_(pad_val)
-
         gen_batch_required_keys = ["input_ids", "attention_mask"]
         for key in [
                 "rollout_behavior_log_probs",
                 "off_policy_steps",
         ]:
             if key not in batch:
-                batch.batch[key] = _get_response_tensor(dtype=torch.bfloat16)
+                batch.batch[key] = create_response_tensor(name=key,
+                                                          bs=batch.batch["input_ids"].shape[0],
+                                                          length=self.config.data.max_response_length,
+                                                          device=batch.batch["input_ids"].device)
             gen_batch_required_keys.append(key)
 
         if is_train and self.config.algorithm.use_model_output_mask:
             if (key := "model_output_mask") not in batch:
-                batch.batch[key] = _get_response_tensor(dtype=torch.int8, pad_val=-1)
+                batch.batch[key] = create_response_tensor(name=key,
+                                                          bs=batch.batch["input_ids"].shape[0],
+                                                          length=self.config.data.max_response_length,
+                                                          device=batch.batch['input_ids'].device)
             gen_batch_required_keys.append(key)
 
         if self.config.trainer.use_grm:
