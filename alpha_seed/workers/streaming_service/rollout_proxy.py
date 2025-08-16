@@ -605,8 +605,10 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
     def step(self, global_step):
         self._metrics_logger.step(global_step)
 
-    def get_step_metrics(self):
-        return {}
+    def get_step_metrics(self) -> dict:
+        step = self._metrics_logger.global_step
+        metrics = ray.get(self.request_manager.get_step_metrics.remote(step))
+        return metrics
 
     def _finalize(self, wg: RayWorkerGroup, e: Exception):
         # proactively kill the actor who causes any RayTaskErrors, RayTaskErrors or so on..
@@ -883,13 +885,14 @@ class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
         return
 
     def get_step_metrics(self) -> dict:
+        super_metrics = super().get_step_metrics()
         metrics = self._metrics_logger.get_last_step_metrics()
         try:
             num_ready_replicas = metrics['num_ready_replicas']
             loop_cost = metrics['loop_cost']
             gmem_insufficient_rebalanced_count = metrics['gmem_insufficient_rebalanced_count']
             load_rebalanced_count = metrics['load_rebalanced_count']
-            return {
+            this_metrics = {
                 'rollout/elastic/num_ready_replicas_mean': num_ready_replicas.mean,
                 'rollout/elastic/num_ready_replicas_min': num_ready_replicas.minimum,
                 'rollout/elastic/num_ready_replicas_max': num_ready_replicas.maximum,
@@ -899,5 +902,7 @@ class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
                 'rollout/proxy/total_token_TPS': metrics['total_token_TPS'].mean,
                 'rollout/proxy/total_processes_queries': metrics['total_processes_queries'].maximum,
             }
+            super_metrics.update(this_metrics)
         except KeyError as e:
-            return {}
+            pass
+        return super_metrics

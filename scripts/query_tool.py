@@ -33,7 +33,7 @@ yaml.add_representer(FlowStyleList, represent_flow_list)
 
 def handle_client(conn, server):
     from alpha_seed.workers.streaming_service.rollout_request_manager import RequestManagerRegisterCenter, RequestManager, get_all_request_manager_actors
-    from alpha_seed.workers.streaming_service.rollout_request_manager import ProgressStat
+    from alpha_seed.workers.streaming_service.rollout_request_manager_diagnosis import ProgressStat
     from alpha_seed.workers.agents.metrics_collector import get_agent_metrics_collector
 
     @dataclass

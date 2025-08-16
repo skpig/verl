@@ -2,7 +2,7 @@ import asyncio
 import copy
 import threading
 import time
-from typing import Dict, List, Optional, Tuple, Union, Container, Set
+from typing import Dict, List, Optional, Tuple, Union, Container, Set, Any
 from dataclasses import dataclass, field
 from collections import defaultdict
 
@@ -11,7 +11,7 @@ from omegaconf import DictConfig
 
 from alpha_seed.utils.server_client import is_local_ray_instance
 from alpha_seed.workers.streaming_service.rollout_request_manager_diagnosis import FinishedEventStats, RequestDigest, \
-    FiniteDict
+    FiniteDict, ProgressStat, RequestStatCollector
 from alpha_seed.workers.xperf_rollout.component.query import Query
 from alpha_seed.utils.profile.timeline import CoherentCompleteEvent, Tracer, TracingEvent, CompleteEvent, \
     FlowEvent, \
@@ -24,6 +24,7 @@ class StaleHistory:
     assigned_engine_name: str
     start_step: int  # 最早开始的step
     # 下面时间戳均为stale之前在engine侧的时间戳 (默认unit: ms)
+    last_pending_reschedule_ts: float  # 此history span进入request pool的时间
     dispatch_time: float  # 从request pool分出去的时间 (unit: s)
     received_time: float  # 进入engine waiting队列的时间
     first_scheduled_time: float  # 开始prefill时间
@@ -46,6 +47,7 @@ class StaleHistory:
             assigned_engine_id=req.assigned_engine_id,  # noqa
             assigned_engine_name=req.assigned_engine_name,
             start_step=req.global_step,
+            last_pending_reschedule_ts=req.last_pending_reschedule_ts,
             dispatch_time=req.last_assigned_at,
             received_time=received_time,
             first_scheduled_time=first_scheduled_time,
@@ -98,25 +100,72 @@ class Request:
         return False
 
 
-@dataclass
-class ProgressStat:
-    pool_name: str
-    step: int
-    total: int
-    finished: int
-    token_throughput: float
-    running_queries: int
-    pending_queries: int
-    active_engines: int
-    oldest_updated_time: float  # 最老的更新时间
-    oldest_query_time: float  # 目前最老的query开始跑的时间戳
-    latest_query_time: float  # 目前最新的query开始的时间戳
+class FIFOListIter:
+
+    def __init__(self, lst: list, head_idx: int):
+        self.lst = lst
+        self.cur_idx = head_idx - 1
+
+    def __next__(self):
+        while True:
+            self.cur_idx += 1
+            if self.cur_idx >= len(self.lst):
+                raise StopIteration
+            val = self.lst[self.cur_idx]
+            if val is None:
+                continue
+            else:
+                return val
+
+
+class FIFOList:
+    """
+    一个简单数据结构用来做快速fifo，元素值存request_id
+    先进来的先被分发，直到finish了才从list里移除掉，
+    """
+
+    def __init__(self):
+        self.lst = []
+        self.index_map: Dict[Any, int] = {}  # value -> index反向映射
+        self.head_idx = 0
+        self.mutex = threading.Lock()
+
+    def append(self, item):
+        with self.mutex:
+            idx = len(self.lst)
+            self.lst.append(item)
+            self.index_map[item] = idx
+
+    def remove(self, val):
+        with self.mutex:
+            idx = self.index_map.pop(val, None)
+            if idx is not None:
+                self.lst[idx] = None  # 用None标记删除
+                # 如果删掉的是head idx所在的元素，才有可能需要移动head
+                if idx == self.head_idx:
+                    # 尝试移动head idx到最近一个非None元素
+                    while self.head_idx < len(self.lst) and self.lst[self.head_idx] is None:
+                        self.head_idx += 1
+
+                    # 头部空到一定程度再截断
+                    if self.head_idx > 1000 or self.head_idx > len(self.lst) // 4:
+                        # 更新index_map中的索引：直接减去偏移量
+                        for item in self.index_map:
+                            self.index_map[item] -= self.head_idx
+                        self.lst = self.lst[self.head_idx:]
+                        self.head_idx = 0
+
+    def __iter__(self):
+        # 只读： iter里不能修改内容
+        # 脏读： iter过程中不保证lst内容不变，可能还没iter到某个item时，这个item被删掉了
+        return FIFOListIter(self.lst, self.head_idx)
 
 
 class RequestPool:
 
     def __init__(self):
         self.requests: Dict[str, Request] = {}  # {query_id -> } 中间结果会被update进来
+        self.fifo = FIFOList()  # 按顺序记录每个request id，分发的时候优先从取更早的，锁跟着self.requests的一起就好
         self.finished_requests: Dict[str, Request] = {}  # finished部分会被移到这里
         self.historical_finished_requests = FiniteDict(204800)  # 记录所有完成的query，FIFO，便于query_tool查询诊断
         self.finished_counter = defaultdict(int)  # {step -> count} 统计每个step完成的数量(因为多轮每个step数量是会变化的)
@@ -137,6 +186,7 @@ class RequestPool:
             for r in reqs:
                 self.requests[r.request_id] = r
                 self._finished_events[r.request_id] = asyncio.Event()
+                self.fifo.append(r.request_id)
 
     def get_pending_size(self):
         # 返回还未分发出去的请求的数量
@@ -159,7 +209,11 @@ class RequestPool:
         with self._mutex:
             batch_size = min(batch_size, len(self.requests))
             ret = {}
-            for request_id, request in self.requests.items():
+            for request_id in self.fifo:
+                request = self.requests.get(request_id)
+                if request is None:
+                    # 可能在迭代中已经完成了，忽略
+                    continue
                 # 跳过已分发
                 if request.assigned or request.assigned_engine_id is not None:
                     continue
@@ -232,6 +286,7 @@ class RequestPool:
                 self.historical_finished_requests.add(r.request_id, r)
                 self.finished_counter[r.global_step] += 1
                 self.requests.pop(r.request_id)
+                self.fifo.remove(r.request_id)
                 # 注意event不要pop，可能调用方还没开始wait
                 evt = self._finished_events.get(r.request_id)
                 if evt is not None:
@@ -439,6 +494,7 @@ class RequestManager:
 
     def __init__(self, tracer_store_decoding_output: bool):
         self.req_pool = RequestPool()
+        self.req_stat = RequestStatCollector()
         self._step = 0
         self._tracer_store_decoding_output = tracer_store_decoding_output
         self.tracer = Tracer.get_instance()
@@ -471,6 +527,7 @@ class RequestManager:
     async def wait_until_finished(self, query_id: str) -> Query:
         req = await self.req_pool.wait(query_id)
         events = self._make_trace_event(req)
+        self.req_stat.finish(self._rm_name, req)
         for evt in events:
             self.waterfall_tracer.trace(evt)
         self._pending_events_to_flows.append(events)
@@ -608,7 +665,8 @@ class RequestManager:
                 'step': req.global_step,
                 'stale_count': len(req.stale_histories),
                 'abort_count': len(req.abort_histories),
-                'age': (received_time - query.created_time) / 1e3,
+                'age': (received_time - query.created_time) / 1e3,  # 相对于query生命周期的延迟
+                'shed_delay': (received_time - req.last_pending_reschedule_ts) / 1e3,  # 相对于上次进入request pool的延迟
                 'enqueue_delay': query.enqueue_time - query.created_time,
             },
         )
@@ -666,6 +724,8 @@ class RequestManager:
                     'stale_count': idx,
                     'query_id': query.id,
                     'step': his.start_step,
+                    'age': (his.received_time - req.query.created_time) / 1e3,
+                    'shed_delay': (his.received_time - his.last_pending_reschedule_ts) / 1e3,
                 },
             )
             stale_prefill = CompleteEvent(
@@ -726,6 +786,9 @@ class RequestManager:
 
     def dump_request_trace(self) -> List[dict]:
         return Tracer.merge_all()
+
+    def get_step_metrics(self, step) -> Dict[str, float]:
+        return self.req_stat.get_step_metrics(step)
 
     ## query_tool util function ##
 
