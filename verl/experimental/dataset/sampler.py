@@ -93,6 +93,10 @@ class MoPPSSampler(AbstractCurriculumBatchSampler):
         counts = torch.bincount(inverse, minlength=len(unique_idx))
         score_sum = torch.bincount(inverse, weights=scores, minlength=len(unique_idx))
         score_comp = counts.to(torch.float32) - score_sum
+        if len(unique_idx) == len(indices):
+            print("[Sampler] All indices are unique, reweight score by eight")
+            score_sum = score_sum * 8
+            score_comp = score_comp * 8
 
         # 指数衰减 + 观测更新
         self.alpha[unique_idx] = (

@@ -1,8 +1,47 @@
-MY_CKPT_DIR=/mnt/hdfs/huangbaizhou/tmp/ckpt/
-BASE_MODEL=${MY_MODEL_DIR}Qwen/Qwen2.5-3B-Instruct
+RUN_ID=30
+WANDB_VERSION=bwandb
+# one node
+FORWARD_RATIO=10
+BACKWARD_RATIO=3
+
+resume=auto
+
+# for qwen3
+VAL_TEMP=0.6
+VAL_TOPP=0.95
+VAL_TOPK=20
+
+# Model settings
+SAMPLER=mopps # null, tree
+DATA_WORKERS=0
+CLIP_HIGHER=0.28
+PROMPT_ID=4
+ROLLOUT_N=8
+BATCH_SIZE=512
+MINI_BSZ=64
+OVERLONG_BUFFER_LEN=$((1024 * 1))
+MAX_PROMPT_LEN=$((1024 * 1))
+MAX_RESPONSE_LEN=$((1024 * 5 + OVERLONG_BUFFER_LEN))
+
+# Performance tuning
+N_NODES=${ARNOLD_WORKER_NUM:-1}
+N_GPUS=${ARNOLD_WORKER_GPU:-16}
+ROLLOUT_TP_SIZE=1
+OFFLOAD=True
+# SP_SIZE=4 # TODO:
+FORWARD_BSZ=16 # no use
+BACKWARD_BSZ=2 # no use
+TOTAL_EPOCHS=100
+FORWARD_MAX_TOKEN_LEN=$((FORWARD_RATIO * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN))) # 12 for 40GB
+BACKWARD_MAX_TOKEN_LEN=$((BACKWARD_RATIO * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN)))  # 4 for 40GB
+
+
+
+MY_CKPT_DIR=/mnt/hdfs/huangbaizhou/tmp/ckpt
+BASE_MODEL=${MY_MODEL_DIR}Qwen/Qwen3-8B-Base
 TEMPLATE_TYPE=chat
 TRAIN_FILE="${MY_DATA_DIR}DAPO-Math-17k/train.parquet"
-TEST_FILES="['${MY_DATA_DIR}DAPO-Math-17k/test.parquet', '${MY_DATA_DIR}MATH-500/test.parquet', '${MY_DATA_DIR}aimo-validation-amc/test.parquet']"
+TEST_FILES="${MY_DATA_DIR}merged_math_datasets/merged_test.parquet"
 
 # BASE_MODEL=/tmp/pretrain/Qwen/Qwen2.5-3B-Instruct
 # TEMPLATE_TYPE=chat # or chat# TRAIN_FILE="${MY_DATA_DIR}Eurus-2-RL-Data/train.parquet"
@@ -11,37 +50,10 @@ TEST_FILES="['${MY_DATA_DIR}DAPO-Math-17k/test.parquet', '${MY_DATA_DIR}MATH-500
 # train_files="['$gsm8k_train_path']"
 # test_files="['$gsm8k_test_path']"
 
-RUN_ID=$1
-WANDB_VERSION=bwandb
-
-# Model settings
-PROMPT_ID=$2
-ROLLOUT_N=16
-OVERLONG_BUFFER_LEN=$((1024 * 1))
-MAX_PROMPT_LEN=$((1024 * 1))
-MAX_RESPONSE_LEN=$((1024 * 5 + OVERLONG_BUFFER_LEN))
-BATCH_SIZE=512
-MINI_BSZ=32
-
-# Performance tuning
-N_NODES=${ARNOLD_WORKER_NUM:-1}
-N_GPUS=${ARNOLD_WORKER_GPU:-16}
-# one node
-FORWARD_RATIO=16
-BACKWARD_RATIO=2
-ROLLOUT_TP_SIZE=1
-OFFLOAD=True
-# SP_SIZE=4 # TODO:
-FORWARD_BSZ=16 # no use
-BACKWARD_BSZ=2 # no use
-TOTAL_EPOCHS=1
-FORWARD_MAX_TOKEN_LEN=$((FORWARD_RATIO * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN))) # 12 for 40GB
-BACKWARD_MAX_TOKEN_LEN=$((BACKWARD_RATIO * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN)))  # 4 for 40GB
-
 PROJ_NAME="debug_hbz"
 MODEL_NAME=$(basename $BASE_MODEL)
 DATA_NAME=DAPOMATH
-EXPERIMENT_NAME="ID${RUN_ID}_${DATA_NAME}_grpo_${MODEL_NAME}_prompt${PROMPT_ID}_n${ROLLOUT_N}_resplen${MAX_RESPONSE_LEN}_bsz${BATCH_SIZE}-${MINI_BSZ}"
+EXPERIMENT_NAME="ID${RUN_ID}_${DATA_NAME}_grpo_sampler${SAMPLER}_clip${CLIP_HIGHER}_${MODEL_NAME}_prompt${PROMPT_ID}_n${ROLLOUT_N}_resplen${MAX_RESPONSE_LEN}_bsz${BATCH_SIZE}-${MINI_BSZ}"
 
 python3 examples/data_preprocess/custom.py \
     --resume
@@ -55,6 +67,12 @@ export PYTHONPATH="."
 
 # 定义要执行的命令
 CMD="python3 -m verl.trainer.main_ppo \
+    data.sampler.name=$SAMPLER \
+    data.dataloader_num_workers=${DATA_WORKERS} \
+    actor_rollout_ref.actor.clip_ratio_high=${CLIP_HIGHER} \
+    +actor_rollout_ref.model.override_config.attention_dropout=0. \
+    +actor_rollout_ref.model.override_config.embd_pdrop=0. \
+    +actor_rollout_ref.model.override_config.resid_pdrop=0. \
     algorithm.adv_estimator=grpo \
     data.prompt_id=$PROMPT_ID \
     data.train_files=$TRAIN_FILE \
@@ -71,30 +89,30 @@ CMD="python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.ppo_mini_batch_size=$MINI_BSZ \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=$BACKWARD_MAX_TOKEN_LEN \
-    actor_rollout_ref.actor.use_kl_loss=True \
-    actor_rollout_ref.actor.kl_loss_coef=0.001 \
-    actor_rollout_ref.actor.kl_loss_type=low_var_kl \
+    actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.entropy_coeff=0 \
-    actor_rollout_ref.actor.clip_ratio_high=0.28 \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=$OFFLOAD \
     actor_rollout_ref.actor.fsdp_config.param_offload=$OFFLOAD \
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=$FORWARD_MAX_TOKEN_LEN \
-    actor_rollout_ref.ref.fsdp_config.param_offload=False \
+    actor_rollout_ref.ref.fsdp_config.param_offload=$OFFLOAD \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=$FORWARD_MAX_TOKEN_LEN \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP_SIZE \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
     actor_rollout_ref.rollout.n=$ROLLOUT_N \
-    actor_rollout_ref.rollout.max_num_batched_tokens=$(($MAX_PROMPT_LEN + $MAX_RESPONSE_LEN)) \
-    algorithm.use_kl_in_reward=False \
+    actor_rollout_ref.rollout.val_kwargs.temperature=${VAL_TEMP} \
+    actor_rollout_ref.rollout.val_kwargs.top_k=${VAL_TOPK} \
+    actor_rollout_ref.rollout.val_kwargs.top_p=${VAL_TOPP} \
+    algorithm.use_kl_in_reward=True \
+    algorithm.kl_ctrl.kl_coef=0.0 \
     reward_model.launch_reward_fn_async=True \
     reward_model.overlong_buffer.enable=True \
     reward_model.overlong_buffer.len=$OVERLONG_BUFFER_LEN \
     trainer.critic_warmup=0 \
     trainer.logger=['console','$WANDB_VERSION'] \
-    trainer.val_before_train=False \
+    trainer.val_before_train=True \
     trainer.n_gpus_per_node=$N_GPUS \
     trainer.nnodes=$N_NODES \
     trainer.save_freq=10 \
@@ -102,26 +120,8 @@ CMD="python3 -m verl.trainer.main_ppo \
     trainer.project_name=$PROJ_NAME \
     trainer.experiment_name=$EXPERIMENT_NAME \
     trainer.total_epochs=$TOTAL_EPOCHS \
-    trainer.default_local_dir=$MY_CKPT_DIR/$PROJ_NAME/$EXPERIMENT_NAME"
-
-# 获取vllm版本号
-verl_version=$(conda list | grep 'vllm' | awk '{print $2}')
-
-# 定义比较函数
-function version_gt() {
-    dpkg --compare-versions "$1" gt "$2"
-}
-
-# 条件判断分支语句
-if version_gt "$verl_version" "0.8"; then
-    echo "vllm版本${verl_version}大于0.8"
-    CMD="${CMD} \
-        actor_rollout_ref.rollout.enforce_eager=False \
-        actor_rollout_ref.rollout.free_cache_engine=False "
-else
-    echo "vllm版本小于等于0.8"
-    export VLLM_ATTENTION_BACKEND=XFORMERS
-fi
+    trainer.default_local_dir=$MY_CKPT_DIR/$PROJ_NAME/$EXPERIMENT_NAME \
+    trainer.resume_mode=${resume}"
 
 
 # 打印要执行的命令

@@ -326,6 +326,7 @@ def create_rl_sampler(data_config, dataset):
     
     elif data_config.sampler.name == 'mopps':
         from verl.experimental.dataset.sampler import MoPPSSampler
+        print(f"[Sampler] Using MoPPS sampler")
 
         sampler = MoPPSSampler(
             data_source=dataset,
@@ -340,6 +341,7 @@ def create_rl_sampler(data_config, dataset):
     
     elif data_config.sampler.name == 'priority':
         from verl.experimental.dataset.sampler import PrioritySampler
+        print(f"[Sampler] Using Priority sampler")
 
         sampler = PrioritySampler(
             data_source=dataset,
@@ -355,10 +357,12 @@ def create_rl_sampler(data_config, dataset):
     # Use a sampler to facilitate checkpoint resumption.
     # If shuffling is enabled in the data configuration, create a random sampler.
     elif data_config.shuffle:
+        print(f"[Sampler] Using Random sampler")
         train_dataloader_generator = torch.Generator()
         train_dataloader_generator.manual_seed(data_config.get("seed", 1))
         sampler = RandomSampler(data_source=dataset, generator=train_dataloader_generator)
     else:
+        print(f"[Sampler] Using Sequential sampler")
         # If shuffling is disabled, use a sequential sampler to iterate through the dataset in order.
         sampler = SequentialSampler(data_source=dataset)
 
