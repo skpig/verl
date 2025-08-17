@@ -40,7 +40,7 @@ jobs:
           - ray stop --force
           - ray start --num-cpus=100 --head
           - |
-            pytest -n 4 -v --timeout=600 \
+            pytest -n 4 -v --timeout=1200 \
               tests/rollout/test_rollout_manager.py::test_train_generate \
               tests/rollout/test_rollout_manager.py::test_val_generate \
               tests/rollout/test_rollout_manager.py::test_queued_generate

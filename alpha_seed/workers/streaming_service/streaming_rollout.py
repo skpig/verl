@@ -645,7 +645,6 @@ class AsyncXPerfGPTRollout(object):
                 model_output_masks.append(v.model_output_mask)
                 query_metrics.append(v.metrics)
                 extra_data.append(v.extra_data)
-
             metrics = {}
             if hasattr(self.inference_engine.infer_scheduler,
                        "init_metrics") and self.inference_engine.infer_scheduler.enable_metrics:
