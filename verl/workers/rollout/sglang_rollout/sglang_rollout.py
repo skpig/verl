@@ -794,12 +794,14 @@ class SGLangRollout(BaseRollout):
         if self.config.calculate_log_probs:
             rollout_log_probs = out[1].to(idx.device) # each rollout log prob is concat of [1,...,1, current_rollouts_log_probs]
 
-        if response.shape[1] < self.config.response_length:
+        if response.shape[1] <= self.config.response_length:
             response = pad_sequence_to_length(response, self.config.response_length, self.pad_token_id)
             if self.config.calculate_log_probs:
                 rollout_log_probs = pad_sequence_to_length(
                     rollout_log_probs, self.config.response_length, self.pad_token_id
                 )
+        else:
+            raise ValueError(f"Rollout length should never exceed the max response length, but got: {response.shape[1]} > {self.config.response_length}")
 
         seq = torch.cat([idx, response], dim=-1) # [bsz, max_prompt_len + max_response_len]
 
@@ -849,8 +851,10 @@ class SGLangRollout(BaseRollout):
         sampling_params,
         return_logprob=True,
     ):
-        sampling_params = sampling_params.copy()
+        # sampling_params = sampling_params.copy()
+        sampling_params = deepcopy(sampling_params)
         sampling_params.update({"max_new_tokens": max_new_tokens})
+        print("max_new_tokens", max_new_tokens)
         output = await self._engine.async_generate(
             input_ids=input_ids,
             sampling_params=sampling_params,
