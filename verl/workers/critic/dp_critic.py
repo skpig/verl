@@ -193,10 +193,14 @@ class DataParallelPPOCritic(BasePPOCritic):
         metrics = {}
 
         select_keys = ["input_ids", "responses", "response_mask", "attention_mask", "position_ids", "values", "returns"]
+        if 'response_mask_w_partial_rollouts' in data.batch.keys():
+            select_keys.append("response_mask_w_partial_rollouts")
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
         non_tensor_select_keys = ["multi_modal_inputs"] if has_multi_modal_inputs else []
 
         data = data.select(batch_keys=select_keys, non_tensor_batch_keys=non_tensor_select_keys)
+        if 'response_mask_w_partial_rollouts' in data.batch.keys():
+            data.batch['response_mask'] = data.batch['response_mask_w_partial_rollouts']
 
         # Split to make minibatch iterator for updating the actor
         # See PPO paper for details. https://arxiv.org/abs/1707.06347

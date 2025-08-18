@@ -667,6 +667,9 @@ class RayPPOTrainer:
         # check sampling related config
         if config.algorithm.filter_groups.enable:
             assert not self.config.reward_model.launch_reward_fn_async, "filter_groups(dynamic sampling) is not supported with async reward function"
+        
+        # sampler related
+        assert not (self.config.actor_rollout_ref.rollout.name == 'vllm' and  'tree' in self.config.data.sampler.name)
 
         print("[validate_config] All configuration checks passed successfully!")
 
@@ -1334,6 +1337,8 @@ class RayPPOTrainer:
                 # pop those keys for generation
                 batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
                 non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
+                if "partial_rollout_len" in batch.non_tensor_batch:
+                    non_tensor_batch_keys_to_pop.append("partial_rollout_len")
                 if "multi_modal_data" in batch.non_tensor_batch:
                     non_tensor_batch_keys_to_pop.append("multi_modal_data")
                 if "raw_prompt" in batch.non_tensor_batch:
@@ -1397,6 +1402,11 @@ class RayPPOTrainer:
                     batch.batch['response_mask'] = compute_response_mask(batch) # TODO: the response_mask here should be handled carefully，可以保持原有的形状，但是需要移除开头的partial rollout的mask，但需要搜索所有使用它的地方是否存在可能的错误
                     metrics['perf/total_dedup_num_response_tokens'] += batch.batch['response_mask'].sum().item()
                     metrics['perf/total_dedup_num_prompt_tokens'] += sum(len(i) for i in gen_batch.non_tensor_batch['raw_prompt_ids'])
+                    if 'partial_rollout_len' in batch.non_tensor_batch:
+                        batch.batch['response_mask_w_partial_rollouts'] = batch.batch['response_mask'].clone()
+                        for i in range(len(batch)):
+                            batch.batch['response_mask_w_partial_rollouts'][i, :batch.non_tensor_batch['partial_rollout_len'][i]] = 0
+                        metrics['perf/total_dedup_num_response_tokens'] -= batch.non_tensor_batch['partial_rollout_len'].sum()
                     # compute_rollout_metrics(batch=batch, tokenizer=self.tokenizer)
                     rollout_metrics = compute_rollout_metrics.remote(batch=batch, tokenizer=self.tokenizer)
 
@@ -1686,6 +1696,7 @@ class RayPPOTrainer:
                         self.async_tracking_running_tasks.remove(t)
                     print(f"remaining async tracking tasks {len(self.async_tracking_running_tasks)}")
 
+                    # DEBUG:
                     task = self.async_tracking_pool.submit(async_tracking_log_samples, *(batch.select_idxs(list(range(50))), self.tokenizer, self.global_steps))
                     self.async_tracking_running_tasks.add(task)
 
@@ -1700,9 +1711,9 @@ class RayPPOTrainer:
 
                 # this is experimental and may be changed/removed in the future in favor of a general-purpose one
                 if isinstance(self.train_dataloader.sampler, AbstractCurriculumSampler):
-                    self.train_dataloader.sampler.update(batch=batch)
+                    self.train_dataloader.sampler.update(batch=batch, step_num=self.global_steps)
                 elif isinstance(self.train_dataloader.batch_sampler, AbstractCurriculumBatchSampler):
-                    self.train_dataloader.batch_sampler.update(batch=batch)
+                    self.train_dataloader.batch_sampler.update(batch=batch, step_num=self.global_steps)
 
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)

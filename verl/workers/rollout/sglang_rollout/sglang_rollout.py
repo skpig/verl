@@ -212,7 +212,7 @@ def _pre_process_inputs(
 
 
 # NOTE(linjunrong): adhoc
-def _post_process_outputs(processing_class, output):
+def _post_process_outputs(processing_class, output, partial_rollouts=None) -> Tuple[torch.Tensor, torch.Tensor]:
     try:
         # This is when processing_class is a processor
         tokenizer = processing_class.tokenizer
@@ -223,16 +223,24 @@ def _post_process_outputs(processing_class, output):
         except AttributeError as e:
             raise ValueError(f"Cannot get tokenizer from processing_class {processing_class}") from e
 
-    def _map_each_response(resp):
+    def _map_each_response(resp, prefix_ids=[]):
         output_token_logprobs = resp["meta_info"]["output_token_logprobs"]
         log_probs, output_token_ids = zip(
             *[(log_prob, token_ids) for log_prob, token_ids, _ in output_token_logprobs], strict=True
         )
-        return torch.tensor(output_token_ids), torch.tensor(log_probs)
+        if prefix_ids:
+            prefix_log_probs = [0.] * len(prefix_ids) # should be useless
+            return torch.tensor(prefix_ids + list(output_token_ids)), torch.tensor(prefix_log_probs + list(log_probs))
+        else:
+            return torch.tensor(output_token_ids), torch.tensor(log_probs)
 
-    out_map = map(lambda x: _map_each_response(x), output)
+    if partial_rollouts:
+        out_map = map(lambda x: _map_each_response(x[0], x[1]), zip(output, partial_rollouts))
+    else:
+        out_map = map(lambda x: _map_each_response(x), output)
     batched_output_token_ids = []
     batched_logprobs = []
+    # breakpoint()
     for output_token_ids, log_probs in out_map:
         batched_output_token_ids.append(output_token_ids)
         batched_logprobs.append(log_probs)
@@ -461,6 +469,7 @@ class SGLangRollout(BaseRollout):
             rank = dist.get_rank()
             os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
             all_open_ports = ray.get(self.port_manager.get_ports.remote(self.cuda_visible_device_ids[0]))
+            print(f"node address: {ray.get_runtime_context().get_node_id()}, rank: {rank}, all_open_ports: {all_open_ports}")
             self._engine = AsyncEngine(
                 model_path=actor_module,
                 dtype=self.config.dtype,
@@ -664,6 +673,7 @@ class SGLangRollout(BaseRollout):
                 dtype=object,
             )
 
+        partial_rollouts = None
         if "multi_modal_data" in non_tensor_batch:
             sglang_inputs = []
             for raw_prompt_ids, multi_modal_data in zip(
@@ -681,9 +691,21 @@ class SGLangRollout(BaseRollout):
                     }
                 )
         else:
-            sglang_inputs = [
-                {"prompt_token_ids": raw_prompt_ids} for raw_prompt_ids in non_tensor_batch.pop("raw_prompt_ids")
-            ]
+            if "partial_rollout_len" not in non_tensor_batch:
+                sglang_inputs = [
+                    {"prompt_token_ids": raw_prompt_ids} for raw_prompt_ids in non_tensor_batch.pop("raw_prompt_ids")
+                ]
+            else:
+                # breakpoint()
+                sglang_inputs = [
+                    {
+                        "prompt_token_ids": raw_prompt_ids,
+                        "partial_rollout_len": partial_rollout_len
+                    }
+                    for raw_prompt_ids, partial_rollout_len in zip(non_tensor_batch["raw_prompt_ids"], non_tensor_batch["partial_rollout_len"])
+                ]
+                #preprocess partial rollouts
+                partial_rollouts = [i['prompt_token_ids'][-i['partial_rollout_len']:] if i['partial_rollout_len'] > 0 else [] for i in sglang_inputs]
 
         # Ensure token IDs are lists or numpy arrays
         for input_data in sglang_inputs:
@@ -696,6 +718,7 @@ class SGLangRollout(BaseRollout):
 
         # Extract token IDs and image data for SGLang Engine
         idx_list = [input_data["prompt_token_ids"] for input_data in sglang_inputs]
+        max_length_list = [self.config.response_length - input_data.get("partial_rollout_len", 0) for input_data in sglang_inputs]
         image_list = [input_data.get("image_data", None) for input_data in sglang_inputs]
 
         do_sample = prompts.meta_info.get("do_sample", True)
@@ -721,6 +744,7 @@ class SGLangRollout(BaseRollout):
                 }
             )
         elif is_validate:
+            assert "partial_rollout_len" not in non_tensor_batch
             request_sampling_params.update(
                 {
                     "top_k": self.config.val_kwargs.top_k,
@@ -735,15 +759,22 @@ class SGLangRollout(BaseRollout):
 
         if self._tp_rank == 0:
             loop = asyncio.get_event_loop()
-            output = loop.run_until_complete(
-                self._engine.async_generate(
-                    prompt=None,  # because we have already convert it to prompt token id
-                    sampling_params=request_sampling_params,
-                    return_logprob=True,
-                    input_ids=idx_list,
-                    image_data=image_list,
+            if "partial_rollout_len" not in non_tensor_batch:
+                output = loop.run_until_complete(
+                    self._engine.async_generate(
+                        prompt=None,  # because we have already convert it to prompt token id
+                        sampling_params=request_sampling_params,
+                        return_logprob=True,
+                        input_ids=idx_list,
+                        image_data=image_list,
+                    )
                 )
-            )
+            else:
+                output = loop.run_until_complete(
+                    asyncio.gather(
+                        *[self._async_rollout_a_sequence(input_ids, max_new_tokens, request_sampling_params) for input_ids, max_new_tokens in zip(idx_list, max_length_list)]
+                    )
+                )
         else:
             output = None
 
@@ -756,21 +787,23 @@ class SGLangRollout(BaseRollout):
             src=self._device_mesh_cpu["tp"].mesh[0].item(),
             force_cpu_device=False,
         )
-        out = _post_process_outputs(self.processing_class, output)
+        out = _post_process_outputs(self.processing_class, output, partial_rollouts=partial_rollouts)
 
-        response = out[0].to(idx.device)
+        response = out[0].to(idx.device) # each response is concat of [partial_rollouts, current_rollous]
         rollout_log_probs = None
         if self.config.calculate_log_probs:
-            rollout_log_probs = out[1].to(idx.device)
+            rollout_log_probs = out[1].to(idx.device) # each rollout log prob is concat of [1,...,1, current_rollouts_log_probs]
 
-        if response.shape[1] < self.config.response_length:
+        if response.shape[1] <= self.config.response_length:
             response = pad_sequence_to_length(response, self.config.response_length, self.pad_token_id)
             if self.config.calculate_log_probs:
                 rollout_log_probs = pad_sequence_to_length(
                     rollout_log_probs, self.config.response_length, self.pad_token_id
                 )
+        else:
+            raise ValueError(f"Rollout length should never exceed the max response length, but got: {response.shape[1]} > {self.config.response_length}")
 
-        seq = torch.cat([idx, response], dim=-1)
+        seq = torch.cat([idx, response], dim=-1) # [bsz, max_prompt_len + max_response_len]
 
         response_length = response.size(1)
         delta_position_id = torch.arange(1, response_length + 1, device=position_ids.device)
@@ -792,10 +825,10 @@ class SGLangRollout(BaseRollout):
         # all the tp ranks should contain the same data here. data in all ranks are valid
         batch = TensorDict(
             {
-                "prompts": idx,
-                "responses": response,
-                "input_ids": seq,  # here input_ids become the whole sentences
-                "attention_mask": attention_mask,
+                "prompts": idx, # only prompts, without partial_rollouts
+                "responses": response, # conclude both partial_rollouts + current_rollouts
+                "input_ids": seq,  # here input_ids become the whole sentences, include both prompt and partial_rollouts and current_rollouts
+                "attention_mask": attention_mask, # [bsz, max_prompt_len + max_response_len]
                 "position_ids": position_ids,
             },
             batch_size=batch_size,
@@ -810,6 +843,24 @@ class SGLangRollout(BaseRollout):
             loop.run_until_complete(self._engine.flush_cache())
 
         return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)
+
+    async def _async_rollout_a_sequence(
+        self,
+        input_ids,
+        max_new_tokens,
+        sampling_params,
+        return_logprob=True,
+    ):
+        # sampling_params = sampling_params.copy()
+        sampling_params = deepcopy(sampling_params)
+        sampling_params.update({"max_new_tokens": max_new_tokens})
+        print("max_new_tokens", max_new_tokens)
+        output = await self._engine.async_generate(
+            input_ids=input_ids,
+            sampling_params=sampling_params,
+            return_logprob=return_logprob,
+        )
+        return output
 
     async def _async_rollout_a_request(
         self,

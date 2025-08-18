@@ -277,7 +277,9 @@ def create_rl_dataset(data_paths, data_config, tokenizer, processor, is_train=Tr
 
         dataset_cls = DynamicGenDataset
         print("Using DynamicGenDataset for data generation.")
-
+    elif 'tree' in data_config.sampler.name:
+        from verl.utils.dataset.rl_dataset import TreeDataset
+        dataset_cls = TreeDataset
     else:
         # Use the default RLHFDataset class if no custom class is specified
         dataset_cls = RLHFDataset
@@ -322,6 +324,14 @@ def create_rl_sampler(data_config, dataset):
             "If using curriculum, num_workers must be 0 to prevent data caching. "
             "If the dataloader caches data before the batch is done the "
             "curriculum sampler won't have the opportunity to reorder it. "
+        )
+    
+    elif data_config.sampler.name == 'tree':
+        from verl.experimental.dataset.sampler import TreeSampler
+
+        sampler = TreeSampler(
+            data_source=dataset,
+            data_config=data_config,
         )
     
     elif data_config.sampler.name == 'mopps':

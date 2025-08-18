@@ -93,7 +93,7 @@ return_multi_modal_inputs: True
 
 # settings related to data sampler
 sampler:
-  name: null
+  name: null # mopps, tree, etc.
 
   # the path to the module containing a curriculum class which implements the
   # AbstractSampler interface
