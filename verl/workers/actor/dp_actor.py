@@ -422,6 +422,14 @@ class DataParallelPPOActor(BasePPOActor):
                         model_inputs, temperature=temperature, calculate_entropy=calculate_entropy
                     )
 
+                    if self.config.dynamic_clip.enable:
+                        clip_ratio_low = clip_ratio_low * (torch.exp(log_prob) ** self.config.dynamic_clip.coefficient)
+                        clip_ratio_high = clip_ratio_high * ((1-torch.exp(log_prob)) ** self.config.dynamic_clip.coefficient)
+                        valid_clip_ratio_low_mean = verl_F.masked_mean(clip_ratio_low, response_mask)
+                        valid_clip_ratio_high_mean = verl_F.masked_mean(clip_ratio_high, response_mask)
+                        valid_clip_ratio_low_std = verl_F.masked_std(clip_ratio_low, response_mask)
+                        valid_clip_ratio_high_std = verl_F.masked_std(clip_ratio_high, response_mask)
+
                     loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
 
                     if self.config.policy_loss.loss_mode == "vanilla":
@@ -481,6 +489,10 @@ class DataParallelPPOActor(BasePPOActor):
                             "actor/pg_clipfrac": pg_clipfrac.detach().item(),
                             "actor/ppo_kl": ppo_kl.detach().item(),
                             "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
+                            "actor/clip_ratio_low_mean": valid_clip_ratio_low_mean.detach().item(),
+                            "actor/clip_ratio_high_mean": valid_clip_ratio_high_mean.detach().item(),
+                            "actor/clip_ratio_low_std": valid_clip_ratio_low_std.detach().item(),
+                            "actor/clip_ratio_high_std": valid_clip_ratio_high_std.detach().item(),
                         }
                     )
                     append_to_dict(metrics, micro_batch_metrics)
