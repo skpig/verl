@@ -12,6 +12,12 @@ from alpha_seed.workers.agents.envs import BaseEnv
 from alpha_seed.workers.agents.envs.utils import parse_func_call_kwargs, truncate_str_by_tokens, is_url_blocked
 from alpha_seed.workers.agents.handlers.base_tool import BaseTool, ToolResult
 from verl.tools.schemas import OpenAIFunctionToolSchema
+import warnings
+try:
+    from seed.auth import apihub_auth_proxy
+except ImportError:
+    warnings.warn("apihub_auth_proxy is not available, must install byted-seed-sandbox latest version")
+    apihub_auth_proxy = None
 
 PRINT_ERROR = os.getenv('AGENT_TEXTBROWSER_PRINT_ERROR', '0') == '1'
 TRIAL_ID = os.getenv("MERLIN_JOB_ID", "0")
@@ -57,12 +63,22 @@ async def TextBrowserAPI(url: str, description: str, metrics: Dict[str, List],
         retries = i
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post("https://gpt.bytedance.net/admin/prompt/apihub/fc_proxy",
-                                        json=body,
-                                        headers=headers,
-                                        timeout=60) as resp:
-                    resp = await resp.json()
-                    content = resp.get('data', {}).get('model_final_text', '')
+                if apihub_auth_proxy:
+                    async with apihub_auth_proxy.session_post(
+                            session,
+                            url="https://gpt.bytedance.net/admin/prompt/apihub/fc_proxy",
+                            json=body,
+                            headers=headers,
+                            timeout=60) as resp:
+                        resp = await resp.json()
+                        content = resp.get('data', {}).get('model_final_text', '')
+                else:
+                    async with session.post("https://gpt.bytedance.net/admin/prompt/apihub/fc_proxy",
+                                            json=body,
+                                            headers=headers,
+                                            timeout=60) as resp:
+                        resp = await resp.json()
+                        content = resp.get('data', {}).get('model_final_text', '')
         except Exception as e:
             PRINT_ERROR and print(f'[call_textbrowser_apihub] Error: {e}')
         if content:

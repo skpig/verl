@@ -14,7 +14,12 @@ from verl.tools.schemas import OpenAIFunctionToolSchema
 from alpha_seed.workers.agents.envs import BaseEnv
 from alpha_seed.workers.agents.envs.utils import truncate_str_by_tokens, parse_func_call_kwargs
 from transformers import AutoTokenizer
-
+import warnings
+try:
+    from seed.auth import apihub_auth_proxy
+except ImportError:
+    warnings.warn("apihub_auth_proxy is not available, must install byted-seed-sandbox latest version")
+    apihub_auth_proxy = None
 PRINT_ERROR = os.getenv("AGENT_SEARCH_PRINT_ERROR", "0") == "1"
 SUBMITTER = os.getenv("ARNOLD_TRIAL_OWNER", "")
 TRIAL_ID = os.getenv("MERLIN_JOB_ID", "0")
@@ -54,11 +59,20 @@ async def apihub(query, search_engine, max_pages, global_step=0):
         retries = i
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post("https://gpt.bytedance.net/admin/prompt/apihub/fc_proxy",
-                                        json=body,
-                                        headers=headers,
-                                        timeout=30) as resp:
-                    resp = await resp.json()
+                if apihub_auth_proxy:
+                    async with apihub_auth_proxy.session_post(
+                            session,
+                            url="https://gpt.bytedance.net/admin/prompt/apihub/fc_proxy",
+                            json=body,
+                            headers=headers,
+                            timeout=30) as resp:
+                        resp = await resp.json()
+                else:
+                    async with session.post("https://gpt.bytedance.net/admin/prompt/apihub/fc_proxy",
+                                            json=body,
+                                            headers=headers,
+                                            timeout=30) as resp:
+                        resp = await resp.json()
         except Exception as e:
             PRINT_ERROR and print(f'[apihub] Error: {e}')
             continue
