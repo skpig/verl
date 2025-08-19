@@ -40,14 +40,15 @@ import warnings
 import torch
 import os
 
-from transformers import AutoConfig, AutoModelForCausalLM
+from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForVision2Seq
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from alpha_seed.workers.fsdp.initialize import meta_device_init
-from alpha_seed.workers.hybrid_engine.fsdp_gather import ulysses_pad_and_slice_inputs
+from alpha_seed.workers.hybrid_engine.fsdp_gather import ulysses_pad_and_slice_inputs, ulysses_pad
 from dist_attn.ulysses.parallel_states import set_ulysses_sequence_parallel_group
 from dist_attn.ulysses.ops import gather_outputs
 from mono_rl.models.seed_models.monkey_patch import apply_monkey_patch, get_parallel_plan
 from alpha_seed.workers.fsdp.offload import offload_fsdp_optimizer, load_fsdp_optimizer
+from alpha_seed.utils.functional import get_text_config
 import hdfs_io
 import verl.utils.torch_functional as verl_F
 import torch.distributed as dist
@@ -135,7 +136,8 @@ class AutoTuner:
 
         self.env = env
         self.model_path = copy_local_path_from_hdfs(model_path)
-        self.config = AutoConfig.from_pretrained(self.model_path)
+        self.model_config = AutoConfig.from_pretrained(self.model_path)
+        self.config = get_text_config(self.model_config)
         self.max_seqlen: int = max_seqlen
         self.total_params = None  # will be set in init_model_info
         self.root_params = None  # will be set in init_model_info
@@ -152,10 +154,15 @@ class AutoTuner:
         # init original model
         with meta_device_init(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            model = AutoModelForCausalLM.from_config(config=self.config,
-                                                     torch_dtype=torch.float32,
-                                                     attn_implementation="flash_attention_2")
-            self.wrap_block_cls = list(model._no_split_modules)
+            AutoModel = AutoModelForVision2Seq if self.model_config.model_type == 'seed_vl' else AutoModelForCausalLM
+            model = AutoModel.from_config(config=self.model_config,
+                                          torch_dtype=torch.float32,
+                                          attn_implementation="flash_attention_2")
+            if hasattr(model, "vision_encoder"):
+                self.wrap_block_cls = model.language_model._no_split_modules + model.vision_encoder._no_split_modules
+            else:
+                self.wrap_block_cls = list(model._no_split_modules)
+
             self.total_params = sum(p.numel() for p in model.parameters())
             self.root_params = sum(p.numel() for p in model.parameters(recurse=False))
             nparams = self.total_params / (1e9)
@@ -183,25 +190,27 @@ class AutoTuner:
         # init a layer-shrinked model for evaluation
         with meta_device_init(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            config = copy.deepcopy(self.config)
+            config = copy.deepcopy(self.model_config)
+            text_config = get_text_config(config)
 
             # shrink layers
-            num_layers = self.shrink_to_nlayers if self.shrink_to_nlayers > 0 else config.num_hidden_layers
-            if config.num_hidden_layers > num_layers:
-                setattr(config, 'num_hidden_layers', num_layers)
-                if hasattr(config, "sliding_window"):
+            num_layers = self.shrink_to_nlayers if self.shrink_to_nlayers > 0 else text_config.num_hidden_layers
+            if text_config.num_hidden_layers > num_layers:
+                setattr(text_config, 'num_hidden_layers', num_layers)
+                if hasattr(text_config, "sliding_window"):
                     if isinstance(config.sliding_window, (tuple, list)):
-                        config.sliding_window = config.sliding_window[:num_layers]
-                if config.model_type == "seed_m8":
+                        text_config.sliding_window = text_config.sliding_window[:num_layers]
+                if text_config.model_type == "seed_m8":
                     mirror_layers = int(num_layers * 0.2)
-                    setattr(config, "kv_mirror_imitated_layers", list(range(0, mirror_layers)))
-                    setattr(config, "kv_mirror_layers", list(range(num_layers - mirror_layers, num_layers)))
-                    setattr(config, "pre_post_layernorm_layers", list(range(0, num_layers)))
+                    setattr(text_config, "kv_mirror_imitated_layers", list(range(0, mirror_layers)))
+                    setattr(text_config, "kv_mirror_layers", list(range(num_layers - mirror_layers, num_layers)))
+                    setattr(text_config, "pre_post_layernorm_layers", list(range(0, num_layers)))
 
             apply_monkey_patch(config)
-            model = AutoModelForCausalLM.from_config(config=config,
-                                                     torch_dtype=torch.float32,
-                                                     attn_implementation="flash_attention_2")
+            AutoModel = AutoModelForVision2Seq if config.model_type == 'seed_vl' else AutoModelForCausalLM
+            model = AutoModel.from_config(config=config,
+                                          torch_dtype=torch.float32,
+                                          attn_implementation="flash_attention_2")
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             model, _ = fully_shard(
@@ -252,7 +261,10 @@ class AutoTuner:
         unpad_size = input_ids.size(1)
         if sp_mesh.size() > 1:
             set_ulysses_sequence_parallel_group(sp_mesh.get_group())
-            input_ids, position_ids, _ = ulysses_pad_and_slice_inputs(input_ids, position_ids, sp_mesh.size())
+            if self.model_config.model_type == 'seed_vl':
+                input_ids, position_ids, _ = ulysses_pad(input_ids, position_ids, sp_mesh.size())
+            else:
+                input_ids, position_ids, _ = ulysses_pad_and_slice_inputs(input_ids, position_ids, sp_mesh.size())
             input_ids_rolled, _, _ = ulysses_pad_and_slice_inputs(input_ids_rolled.unsqueeze(0), None, sp_mesh.size())
             input_ids_rolled = input_ids_rolled.squeeze(0)
 
@@ -330,7 +342,7 @@ class AutoTuner:
         nparams = sum(p.numel() for p in model.parameters())
         memory_at_update = (nparams * 16) / (1024**3)
         print0(f"state memory at update: {memory_at_update:.2f} GB")
-        num_layers = model.config.num_hidden_layers
+        num_layers = self.config.num_hidden_layers
         print0(f"detected fsdp wrapped layers: {num_layers}")
         # root module params doesn't use tp
         num_param_per_layer = (nparams - self.root_params / fsdp_size) / num_layers * fsdp_size
