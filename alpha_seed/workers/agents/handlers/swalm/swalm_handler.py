@@ -239,7 +239,12 @@ def pack_to_dataproto_multi_turn(prompts,
         out.meta_info["xperf_metrics"] = data_pack.metrics
         out.meta_info["generation_kwargs"] = prompts.meta_info['generation_kwargs']
         out.non_tensor_batch = copy.deepcopy(prompts.non_tensor_batch)
-        out.non_tensor_batch['extra_data'] = np.array(data_pack.extra_data, dtype=object)
+        if data_pack.extra_data is not None:
+            out.non_tensor_batch['extra_data'] = np.array(data_pack.extra_data, dtype=object)
+        if data_pack.image_data_ref is not None and any(i is not None for i in data_pack.image_data_ref):
+            out.non_tensor_batch['image_data_ref'] = np.fromiter(data_pack.image_data_ref, dtype=object)
+        if data_pack.raw_output_ref is not None:
+            out.non_tensor_batch['raw_output_ref'] = np.fromiter(data_pack.raw_output_ref, dtype=object)
         outs.append(out)
     return outs, is_truncated, is_right_truncated
 
@@ -598,6 +603,8 @@ class SwalmAgent(AsyncAgent):
 
         fake_data = copy.deepcopy(item)
         fake_data.batch['swalm_agent_score'] = torch.Tensor([SWALM_ENV_FAIL_SCORE]).to(torch.float32)
+        fake_data.non_tensor_batch['agent_num_turns'] = np.array([SWALM_ENV_FAIL_SCORE])
+        fake_data.non_tensor_batch['agent_num_tool_calls'] = np.array([SWALM_ENV_FAIL_SCORE])
         fake_data.meta_info['cur_step'] = cur_step
 
         task_uuid = meta_info['uid']
@@ -687,6 +694,8 @@ class SwalmAgent(AsyncAgent):
                 final_outs.batch['swalm_agent_score'] = torch.Tensor([final_score
                                                                      ]).to(torch.float32).repeat(len(final_outs))
                 final_outs.non_tensor_batch["extra_info"][0]['all_turns_sum'] = all_turns_sum
+                final_outs.non_tensor_batch['agent_num_turns'] = np.array([all_turns_sum])
+                final_outs.non_tensor_batch['agent_num_tool_calls'] = np.array([all_turns_sum])
                 final_outs.meta_info['agent_metrics'] = {"finish_reason": finish_reason, "all_turns_sum": all_turns_sum}
                 return final_outs
             outs = DataProto.concat(outs)
@@ -702,6 +711,8 @@ class SwalmAgent(AsyncAgent):
                 outs.non_tensor_batch["extra_info"][0]['is_success_to_fail'] = is_success_to_fail
             for _idx in range(len(outs)):
                 outs.non_tensor_batch["extra_info"][_idx]['all_turns_sum'] = all_turns_sum
+            outs.non_tensor_batch['agent_num_turns'] = np.array([all_turns_sum] * len(outs))
+            outs.non_tensor_batch['agent_num_tool_calls'] = np.array([all_turns_sum] * len(outs))
             return outs
         except Exception as e:
             full_traceback_str = traceback.format_exc()

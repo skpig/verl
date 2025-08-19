@@ -135,8 +135,11 @@ class RolloutPool:
                     continue
                 ready_uids = set()
                 for batch in ready_batch:
-                    start_step = batch.meta_info["cur_step"]
-                    if cur_step - start_step <= rollout_offpolicy_step_th:
+                    if "cur_step" in batch.meta_info:
+                        start_step = batch.meta_info["cur_step"]
+                        if cur_step - start_step <= rollout_offpolicy_step_th:
+                            ready_uids.add(batch.non_tensor_batch['uid'][0])
+                    else:
                         ready_uids.add(batch.non_tensor_batch['uid'][0])
                 if len(ready_uids) >= num_fillin_th:
                     keep_bon_ready_batch.append(index)
