@@ -146,7 +146,7 @@ def pg_loss_fn(config: Dict, output: TensorDict, micro_data: TensorDict):
     ppo_mini_batch_size = config.get("ppo_mini_batch_size", -1)
     ppo_micro_batch_size = config.get("ppo_micro_batch_size", -1)
     mini_batch_full_token_count = config.get("mini_batch_full_token_count", -1)
-    batch_full_token_count = config.get("mini_batch_full_token_count", -1)
+    batch_full_token_count = config.get("batch_full_token_count", -1)
     dataloader_length = config.get("dataloader_length", -1)
     full_entropy = output['entropy']
     log_prob = output['logprobs']
