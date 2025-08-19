@@ -44,37 +44,38 @@ class RLHFDatasetSwalm(RLHFDataset):
         ability = row_dict[self.ability_key]
 
         if ability == "swalm_env":
-            chat = row_dict.pop(self.prompt_key)
-            extra_agent_info = chat[0].get("extra_agent_info", {})
-            chat = chat[0]["meta"]
-            segs = chat.split(":")
-            agent_id = segs[0]
-            dataset_id = segs[1]
-            instance_id = segs[2].lower()
+            prompt = row_dict.pop(self.prompt_key)
+            extra_info = row_dict.get("extra_info", {})
+            if len(prompt):
+                extra_info.update({"prompt": prompt})
+            task_type = extra_info.get("task_type", "")
+            dataset_id = extra_info.get("dataset_id", "")
+            instance_id = extra_info.get("instance_id", "")
+            index = extra_info.get("index", item)
 
-            index = row_dict.get("extra_info", {}).get("index", item)
+            if self.return_raw_chat:
+                if len(prompt):
+                    row_dict['raw_prompt'] = prompt
+                else:
+                    row_dict['raw_prompt'] = []
+
             row_dict["index"] = index
             row_dict['prompt_names'] = [""]
 
             logging.info(
-                f"agent task {index} ->  agent_id: {agent_id}, dataset_id: {dataset_id}, instance_id: {instance_id}")
+                f"agent task {index} ->  task_type: {task_type}, dataset_id: {dataset_id}, instance_id: {instance_id}")
 
             # fake input_ids as placeholder
             row_dict['input_ids'] = torch.zeros(self.max_prompt_length, dtype=torch.int32)
             row_dict['attention_mask'] = torch.zeros(self.max_prompt_length, dtype=torch.int32)
             row_dict['answer_input_ids'] = torch.zeros(self.max_prompt_length, dtype=torch.int32)
             row_dict['answer_attention_mask'] = torch.zeros(self.max_prompt_length, dtype=torch.int32)
-            row_dict['agent_info'] = {
-                "agent_id": agent_id,
-                "dataset_id": dataset_id,
-                "instance_id": instance_id,
-                "is_eval": self.is_eval,
-                "data_index": item,
-                **extra_agent_info
-            }
+            extra_info.update({"is_eval": self.is_eval})
+            row_dict['extra_info'] = extra_info
         else:
             row_dict = super().__getitem__(item)
-            row_dict['agent_info'] = {}
+            extra_info = row_dict.get("extra_info", {})
+            row_dict['extra_info'] = extra_info
         return row_dict
 
 

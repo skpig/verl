@@ -38,7 +38,10 @@ class DataParallelPPOCritic(BasePPOCritic):
         self.engine = model_engine
 
     def _make_minibatch_iterator(self, data: DataProto) -> Iterable[DataProto]:
-        select_keys = ['input_ids', 'responses', 'attention_mask', 'values', 'returns']
+        if self.config.get("use_decouple_critic", False):
+            select_keys = ['input_ids_critic', 'responses', 'attention_mask_critic', 'values', 'returns']
+        else:
+            select_keys = ['input_ids', 'responses', 'attention_mask', 'values', 'returns']
         for opt_key in ['overlong_mask', 'model_output_mask']:
             if opt_key in data.batch:
                 select_keys.append(opt_key)
@@ -49,7 +52,10 @@ class DataParallelPPOCritic(BasePPOCritic):
                                   dataloader_kwargs={'shuffle': self.config.shuffle})
 
     def compute_values(self, data: DataProto) -> torch.Tensor:
-        select_keys = ['responses', 'input_ids', 'attention_mask']
+        if self.config.get("use_decouple_critic", False):
+            select_keys = ['responses', 'input_ids_critic', 'attention_mask_critic']
+        else:
+            select_keys = ['responses', 'input_ids', 'attention_mask']
         image_keys = get_image_keys(data.non_tensor_batch)
         selected_data = data.select(batch_keys=select_keys, non_tensor_batch_keys=image_keys)
         values_lst = []
@@ -58,6 +64,11 @@ class DataParallelPPOCritic(BasePPOCritic):
         # batch into mini batches (same with training).
         chunk_size = math.ceil(selected_data.batch.batch_size[0] / self.config.ppo_mini_batch_size)
         for _, mini_batch in enumerate(selected_data.chunk(chunk_size)):
+            if self.config.get("use_decouple_critic", False):
+                mini_batch.batch['attention_mask'] = mini_batch.batch['attention_mask_critic']
+                mini_batch.batch['input_ids'] = mini_batch.batch['input_ids_critic']
+                mini_batch.batch.pop('attention_mask_critic')
+                mini_batch.batch.pop('input_ids_critic')
             output_proto = self.engine.forward_backward_step(data=mini_batch, forward_only=True)
             if isinstance(self.engine.model_module, FSDP):
                 self.engine.model_module._handle.reshard(True)  # release memory
@@ -77,7 +88,10 @@ class DataParallelPPOCritic(BasePPOCritic):
             dataloader = self._make_minibatch_iterator(data)
             chunk_size = math.ceil(data.batch.batch_size[0] / self.config.ppo_mini_batch_size)
         else:
-            dataloader = make_mini_step_dataloader(data, self.config.ppo_mini_batch_size, return_dataproto=True)
+            dataloader = make_mini_step_dataloader(data,
+                                                   self.config.ppo_mini_batch_size,
+                                                   return_dataproto=True,
+                                                   use_decouple_critic=self.config.get("use_decouple_critic", False))
             chunk_size = len(dataloader)
 
         metrics = {}
@@ -85,6 +99,11 @@ class DataParallelPPOCritic(BasePPOCritic):
         self.engine.set_loss(vf_loss_fn, config_dict)
 
         for batch_idx, mini_batch in enumerate(dataloader):
+            if self.config.get("use_decouple_critic", False):
+                mini_batch.batch['attention_mask'] = mini_batch.batch['attention_mask_critic']
+                mini_batch.batch['input_ids'] = mini_batch.batch['input_ids_critic']
+                mini_batch.batch.pop('attention_mask_critic')
+                mini_batch.batch.pop('input_ids_critic')
             # Set the loss function of update actor function for every mini batch
             output_proto = self.engine.forward_backward_step(data=mini_batch, forward_only=False)
             if batch_idx < chunk_size:
@@ -156,8 +175,11 @@ def vf_loss_fn(config, output, micro_data):
     return vf_loss, metrics
 
 
-def make_mini_step_dataloader(data, ppo_mini_batch_size, return_dataproto=False):
-    select_keys = ['input_ids', 'responses', 'attention_mask', 'values', 'returns']
+def make_mini_step_dataloader(data, ppo_mini_batch_size, return_dataproto=False, use_decouple_critic=False):
+    if use_decouple_critic:
+        select_keys = ['input_ids_critic', 'responses', 'attention_mask_critic', 'values', 'returns']
+    else:
+        select_keys = ['input_ids', 'responses', 'attention_mask', 'values', 'returns']
     for opt_key in ['overlong_mask', 'model_output_mask']:
         if opt_key in data.batch.keys():
             select_keys.append(opt_key)

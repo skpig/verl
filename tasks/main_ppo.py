@@ -631,8 +631,10 @@ class RewardManager():
                     img = None
 
                 self.log_table.append([
-                    global_index, global_step, prompt_str, solution_str, ground_truth, raw_score, score, grm_score,
-                    grm_response, score_msg, solution_str_post_proc[-32:], is_para_dup, is_trunc, valid_response_length
+                    global_index, data[idx].non_tensor_batch.get("uid", ""), global_step, prompt_str, solution_str,
+                    ground_truth, raw_score, score, grm_score, grm_response, score_msg, solution_str_post_proc[-32:],
+                    is_para_dup, is_trunc, valid_response_length,
+                    data[idx].non_tensor_batch.get('extra_info', {}).get("all_turns_sum", -1)
                 ])
             send_to_kafka({
                 "global_index": global_index,
@@ -748,8 +750,9 @@ class RewardManager():
             log_table = {
                 f"gen&score_{self.rm_name}_{global_step}":
                     wandb.Table(columns=[
-                        "Index", "Step", "Prompt", "Gen Sequence", "GroundTruth", "Raw Score", "Score", "GRM Score",
-                        "GRM Response", "ScoreMsg", "Gen Sequence PostProc", "Is_Dup", "Is_Trunc", "Len"
+                        "Index", "Uid", "Step", "Prompt", "Gen Sequence", "GroundTruth", "Raw Score", "Score",
+                        "GRM Score", "GRM Response", "ScoreMsg", "Gen Sequence PostProc", "Is_Dup", "Is_Trunc", "Len",
+                        "Agent Turns"
                     ],
                                 data=self.log_table)
             }
@@ -1010,7 +1013,6 @@ def init_ray(config: DictConfig):
             with open(runtime_env_file) as fin:
                 extra_runtine_env = yaml.safe_load(fin)
                 runtime_env.update(extra_runtine_env)
-
         print(runtime_env)
         ray.init(namespace="alphaseed", runtime_env=runtime_env, address=address)
 
@@ -1024,6 +1026,9 @@ def validate_config(config):
     # data
     real_train_batch_size = config.data.train_batch_size * config.actor_rollout_ref.rollout.num_bon
     assert real_train_batch_size % n_gpus == 0
+    rollout_return_bsz = config.data.get("rollout_return_bsz", None)
+    if rollout_return_bsz is not None:
+        assert rollout_return_bsz % n_gpus == 0
 
     # rollout
     # assert real_train_batch_size % config.actor_rollout_ref.rollout.micro_batch_size == 0

@@ -10,6 +10,7 @@ import uuid
 import time
 import threading
 import json
+import random
 
 from concurrent.futures import ThreadPoolExecutor, wait, ALL_COMPLETED
 from alpha_seed.utils.debug.aiomonitor import get_aiomonitor_cls
@@ -39,6 +40,7 @@ from alpha_seed.workers.streaming_service.streaming_utils import record_xperf_me
 from alpha_seed.workers.agents.handlers import select_handler_fn
 from alpha_seed.workers.agents.handlers import TaskContext
 from alpha_seed.workers.streaming_service.streaming_utils import pad, process_output, create_response_tensor
+from alpha_seed.utils.reward_score import NON_AGENT_PLACE_HOLDER_SCORE
 
 
 class SaveDataProtoFunc(Protocol):
@@ -413,7 +415,8 @@ class RolloutManager:
             f"train step #{step} gen complete {finished_num}, incomplete {incomplete_num}, pending {len(self.pending_batch)}"
         )
         if len(ready_batch) > 0:
-            RolloutPool.dynamic_call(self.rollout_pool, "fill_rollout_pool", ready_batch)
+            fill_rollout_metrics = RolloutPool.dynamic_call(self.rollout_pool, "fill_rollout_pool", ready_batch, step)
+            metrics.update(fill_rollout_metrics)
 
     def train_generate_fetch(
         self,
@@ -435,7 +438,10 @@ class RolloutManager:
             return None
 
         # get the training batch
-        train_batch = RolloutPool.dynamic_call(self.rollout_pool, "get_train_batch")
+        train_batch, get_batch_metrics = RolloutPool.dynamic_call(self.rollout_pool, "get_train_batch")
+        metrics.update(get_batch_metrics)
+        if len(train_batch) == 0:
+            return None  # no batch ready, wait for next step
         batch = DataProto.concat(train_batch)
 
         if (key := 'model_output_mask') in batch.batch:
@@ -560,7 +566,7 @@ class RolloutManager:
                         if check_condition():
                             break
                         ready_batch = asyncio.run_coroutine_threadsafe(wait_for_pending(), self.loop).result()
-                        RolloutPool.dynamic_call(self.rollout_pool, "fill_rollout_pool", ready_batch)
+                        RolloutPool.dynamic_call(self.rollout_pool, "fill_rollout_pool", ready_batch, step)
                     else:
                         # if ready count in the pool is greater than max_buffer_size, stop adding new gen batch
                         if max_buffer_size > 0:
@@ -930,6 +936,41 @@ class RolloutManager:
             record_xperf_metrics(dummy_batch, metrics, self.logger, step, prefix="hybrid")
         metrics["rollout/standalone_completed_batch"] = finished_num
         metrics["rollout/standalone_incompleted_batch"] = len(pending_batch) + len(gen_batch) - finished_num
+
+        if self.config.data.get("enable_swalm_agent", False):
+            finish_reason_dict = {
+                "finish": 0,
+                "finish_with_early_stop_learn": 0,
+                "finish_with_prompt_truncated_learn": 0,
+                "finish_with_response_truncated_learn": 0,
+                "finish_with_max_turn_learn": 0,
+                "stop_wtih_early_stop_drop": 0,
+                "stop_wtih_prompt_truncated_drop": 0,
+                "stop_wtih_response_truncated_drop": 0,
+                "stop_wtih_max_turn_drop": 0,
+                "stop_with_no_valid_response": 0,
+                "stop_with_offpolicy_drop": 0,
+                "stop_with_error_stop": 0,
+            }
+            all_iterations = []
+            all_success_iterations = []
+            for batch in ready_batch:
+                agent_metrics = batch.meta_info.get("agent_metrics", {})
+                iterations = agent_metrics.get("all_turns_sum", 0)
+                all_iterations.append(iterations)
+                finish_reason = agent_metrics.get("finish_reason", "")
+                if finish_reason:
+                    assert finish_reason in finish_reason_dict, f"Unsupported finish_reason: {finish_reason} in {list(finish_reason_dict.keys())}"
+                    finish_reason_dict[finish_reason] += 1
+                    if "finish" in finish_reason:
+                        all_success_iterations.append(iterations)
+            metrics["rollout/agent/all_iterations"] = sum(all_iterations) / max(1, len(all_iterations))
+            metrics["rollout/agent/all_success_iterations"] = sum(all_success_iterations) / max(
+                1, len(all_success_iterations))
+            for finish_reason in finish_reason_dict:
+                metrics[f"rollout/agent/{finish_reason}_ratio"] = finish_reason_dict[finish_reason] / max(
+                    1, len(ready_batch))
+
         return ready_batch, pending
 
     def _val_batch_gen(self, gen_batch: DataProto, step: int, metrics: Dict, is_standalone: bool) -> DataProto:
@@ -1015,7 +1056,28 @@ class RolloutManager:
             else:
                 raise ValueError(
                     f"AgentLoop only support DataProto or list[DataProto] at this moment, got({type(results)})")
-        ready_batch = results
+
+        if self.config.data.get("enable_swalm_agent", False):
+            success_ready_batch = []
+            for res in ready_batch:
+                if ('swalm_agent_score' in res.batch):
+                    from alpha_seed.workers.agents.handlers.swalm.swalm_handler import SWALM_ENV_FAIL_SCORE
+                    if (res.batch['swalm_agent_score'][0].item() == SWALM_ENV_FAIL_SCORE):
+                        continue
+                    else:
+                        success_ready_batch.append(res)
+                else:
+                    res.batch['swalm_agent_score'] = torch.tensor(NON_AGENT_PLACE_HOLDER_SCORE).repeat(len(res))
+                    success_ready_batch.append(res)
+            failed_nums = len(ready_batch) - len(success_ready_batch)
+            fake_success_ready_batch = random.choices(success_ready_batch, k=failed_nums)
+            for res in fake_success_ready_batch:
+                res.batch['swalm_agent_score'] = torch.tensor(-1.).repeat(len(res))
+                res.non_tensor_batch["extra_info"][0]['all_turns_sum'] = -99  # -99 as the env failure flag
+                success_ready_batch.append(res)
+            ready_batch = success_ready_batch
+        else:
+            ready_batch = results
 
         gen_out = DataProto.concat(ready_batch)
         # only use DP[0] for metrics presentation
@@ -1036,6 +1098,14 @@ class RolloutManager:
                                                           device=batch.batch["input_ids"].device)
             gen_batch_required_keys.append(key)
 
+        if self.config.get("use_decouple_critic", False):
+            for key in [
+                    "input_ids_critic",
+                    "attention_mask_critic",
+            ]:
+                if key not in batch:
+                    batch.batch[key] = _get_response_tensor(dtype=torch.int64)
+                gen_batch_required_keys.append(key)
         if is_train and self.config.algorithm.use_model_output_mask:
             if (key := "model_output_mask") not in batch:
                 batch.batch[key] = create_response_tensor(name=key,

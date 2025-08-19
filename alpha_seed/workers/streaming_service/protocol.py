@@ -75,7 +75,7 @@ class ErrorResponse(BaseModel):
 
 
 class ChatCompletionRolloutMessageParam(TypedDict, total=False):
-    prompt: Required[Union[str, List[int]]]
+    prompt: Required[Union[str, List[int], List[dict]]]
     image_data_ref: Optional[Union[str, List[str]]]
     """The contents of the user message."""
 

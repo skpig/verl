@@ -262,9 +262,13 @@ def compute_advantage(data: DataProto,
 
     if adv_estimator == 'gae':
         values = data.batch['values']
+        step_level_scores = None
+        if 'step_level_scores' in data.batch:
+            step_level_scores = data.batch['step_level_scores']
         origin_advantages, advantages, returns = core_algos.compute_gae_advantage_return(
             token_level_rewards=token_level_rewards,
             values=values,
+            step_level_scores=step_level_scores,
             eos_mask=response_mask,
             gamma=gamma,
             lam=lam,
@@ -1706,7 +1710,7 @@ class RayPPOTrainer(object):
             self.validation_manager.validate(val_epoch=self.config.trainer.val_epoch,
                                              need_log=self.config.trainer.need_log,
                                              log_file=self.config.trainer.log_file,
-                                             is_async=False,
+                                             is_async=self.use_standalone_validator,
                                              global_step=self.global_step)
         if self.config.trainer.val_only:
             if self.config.trainer.save_train_batch_dir is not None and self.config.trainer.need_log:
@@ -1787,8 +1791,10 @@ class RayPPOTrainer(object):
                                                                         metrics=metrics)
                         metrics['timing/generate'] = timer.last
                         if batch is None or len(batch) == 0 or is_warmup_step:
-                            self.logger.log(data=metrics, step=self.global_step)
-                            self.global_step += 1
+                            if not self.config.data.get("enable_swalm_agent", False):
+                                self.logger.log(data=metrics, step=self.global_step)
+                                self.global_step += 1
+                            start_data_time = time.time()
                             continue
                         if self.config.trainer.save_train_batch_dir is not None:
                             makedirs(self.config.trainer.save_train_batch_dir, exist_ok=True)

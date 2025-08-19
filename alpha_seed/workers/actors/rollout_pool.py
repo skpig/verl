@@ -52,13 +52,13 @@ class RolloutPool:
         self.mode = mode
         self.num_bon = self.config.actor_rollout_ref.rollout.get("num_bon", 1)
         self.fn_map = {"default": self.get_train_batch_default}
-        self.pre_preocess_stats_fn_map = {
-            "default": lambda batch_lst, num_fillin_th: batch_lst,  # 默认策略什么都不做，直接返回
-            "swalm": self.pre_preocess_stats_swalm
+        self.pre_process_stats_fn_map = {
+            "default": lambda batch_lst, cur_step, num_fillin_th: (batch_lst, {}),  # 默认策略什么都不做，直接返回
+            "swalm": self.pre_process_stats_swalm
         }
-        self.post_preocess_stats_fn_map = {
+        self.post_process_stats_fn_map = {
             "default": lambda batch, rollout_id: batch,  # 默认策略什么都不做，直接返回
-            "swalm": self.post_preocess_stats_swalm
+            "swalm": self.post_process_stats_swalm
         }
         self.strategy = self.config.actor_rollout_ref.rollout.get("strategy", "default")
         self.process_stats_strategy = self.config.data.get("process_stats_strategy", "default")
@@ -66,11 +66,12 @@ class RolloutPool:
             self.strategy, self.fn_map.keys())
         assert (
             self.process_stats_strategy
-            in self.pre_preocess_stats_fn_map), "strategy {} not in pre_preocess_stats_fn_map, expected in [{}]".format(
-                self.process_stats_strategy, self.pre_preocess_stats_fn_map.keys())
-        assert (self.process_stats_strategy in self.post_preocess_stats_fn_map
-               ), "strategy {} not in post_preocess_stats_fn_map, expected in [{}]".format(
-                   self.process_stats_strategy, self.post_preocess_stats_fn_map.keys())
+            in self.pre_process_stats_fn_map), "strategy {} not in pre_process_stats_fn_map, expected in [{}]".format(
+                self.process_stats_strategy, self.pre_process_stats_fn_map.keys())
+        assert (
+            self.process_stats_strategy
+            in self.post_process_stats_fn_map), "strategy {} not in post_process_stats_fn_map, expected in [{}]".format(
+                self.process_stats_strategy, self.post_process_stats_fn_map.keys())
         self.replay_buffer_type = self.config.actor_rollout_ref.rollout.get("replay_buffer_type", "default")
         assert self.replay_buffer_type in ["default", "persistable"]
         if self.replay_buffer_type == "default":
@@ -111,9 +112,40 @@ class RolloutPool:
     def get_train_batch(self):
         return self.fn_map[self.strategy]()
 
-    def pre_preocess_stats_swalm(self, batch_lst, num_fillin_th=None):
+    def pre_process_stats_swalm(self, batch_lst, cur_step, num_fillin_th=None):
+        ready_bon_num = 0
+        ready_traj_num = 0
+        dropped_env_failure_traj_num = 0
+        dropped_dynamic_sampling_traj_num = 0
+        dropped_offpolicy_sample_num = 0
+        success_to_fail_traj_num = 0
+        total_raw_score = []
+
         if num_fillin_th is None:
             num_fillin_th = self.num_bon
+
+        # drop offpolocy
+        rollout_offpolicy_step_th = self.config.trainer.get("rollout_agent_offpolicy_step_th", -1)
+        if rollout_offpolicy_step_th >= 0:
+            keep_bon_ready_batch = []
+            while not self.bon_ready_batch.empty():
+                index = self.bon_ready_batch.get()
+                ready_batch = self.pool.get(index)
+                if ready_batch is None:
+                    continue
+                ready_uids = set()
+                for batch in ready_batch:
+                    start_step = batch.meta_info["cur_step"]
+                    if cur_step - start_step <= rollout_offpolicy_step_th:
+                        ready_uids.add(batch.non_tensor_batch['uid'][0])
+                if len(ready_uids) >= num_fillin_th:
+                    keep_bon_ready_batch.append(index)
+                else:
+                    dropped_offpolicy_sample_num += len(
+                        self.rollout_id2uid[index])  # agent metric: dropped_offpolicy_sample_num
+                    self.rollout_id2uid.pop(index)
+            for index in keep_bon_ready_batch:
+                self.bon_ready_batch.put(index)
 
         bon_ready_rollout_id = set()
         keep_batch_lst = []
@@ -122,14 +154,19 @@ class RolloutPool:
                 rollout_id = batch.non_tensor_batch['rollout_id'][0]
                 uid = batch.non_tensor_batch['uid'][0]
                 if batch.non_tensor_batch['ability'][0] == "swalm_env":
-                    swalm_agent_score = batch.batch["swalm_agent_score"][0]
-                    if swalm_agent_score.item() in [-1, 1]:
+                    swalm_agent_score = batch.batch["swalm_agent_score"][0].item()
+                    from alpha_seed.workers.agents.handlers.swalm.swalm_handler import SWALM_ENV_FAIL_SCORE
+                    if swalm_agent_score != SWALM_ENV_FAIL_SCORE:
                         self.uid2score[uid] = swalm_agent_score
                         keep_batch_lst.append(batch)
+                        total_raw_score.append(swalm_agent_score)
                     else:
+                        dropped_env_failure_traj_num += 1  # agent metric: dropped_env_failure_traj_num
                         continue
                 else:
                     batch.batch["swalm_agent_score"] = torch.tensor(NON_AGENT_PLACE_HOLDER_SCORE).repeat(len(batch))
+                    if batch.non_tensor_batch["extra_info"][0].get('is_success_to_fail', False):
+                        success_to_fail_traj_num += 1
                     keep_batch_lst.append(batch)
 
                 self.rollout_id2uid[rollout_id].add(uid)
@@ -137,7 +174,10 @@ class RolloutPool:
                     self.bon_ready_batch.put(rollout_id)
                     bon_ready_rollout_id.add(rollout_id)
 
+            agent_bon_strategy = self.config.actor_rollout_ref.rollout.get("agent_bon_strategy", "all")
             for rollout_id in bon_ready_rollout_id:
+                ready_bon_num += 1  # agent metric: ready_bon_num
+                ready_traj_num += len(self.rollout_id2uid[rollout_id])  # agent metric: ready_traj_num
                 swalm_agent_scores = []
                 for uid in self.rollout_id2uid[rollout_id]:
                     if uid in self.uid2score:
@@ -148,29 +188,51 @@ class RolloutPool:
                     self.rid2score_std[rollout_id] = torch.tensor(1.0)
                 elif len(swalm_agent_scores) > 1:
                     swalm_agent_scores = torch.tensor(swalm_agent_scores)
-                    self.rid2score_mean[rollout_id] = torch.mean(swalm_agent_scores)
-                    self.rid2score_std[rollout_id] = torch.std(swalm_agent_scores)
-        return keep_batch_lst
+                    mean_score = torch.mean(swalm_agent_scores)
+                    std_score = torch.std(swalm_agent_scores)
+                    if (agent_bon_strategy != "bon_filter") or ((agent_bon_strategy == "bon_filter") and
+                                                                (std_score == 0)):
+                        self.rid2score_mean[rollout_id] = mean_score
+                        self.rid2score_std[rollout_id] = std_score
+                    else:
+                        dropped_dynamic_sampling_traj_num += len(
+                            self.rollout_id2uid[rollout_id])  # agent metric: dropped_dynamic_sampling_traj_num
+                        self.rollout_id2uid.pop(
+                            rollout_id
+                        )  # attention: drop rollout_id in rollout_id2uid, will drop rollout_id in self.bon_ready_batch laterly
+        metrics = {
+            "rollout/agent/ready_bon_num": ready_bon_num,
+            "rollout/agent/ready_traj_num": ready_traj_num,
+            "rollout/agent/dropped_env_failure_traj_num": dropped_env_failure_traj_num,
+            "rollout/agent/dropped_dynamic_sampling_traj_num": dropped_dynamic_sampling_traj_num,
+            "rollout/agent/dropped_offpolicy_sample_num": dropped_offpolicy_sample_num,
+            "rollout/agent/success_to_fail_traj_num": success_to_fail_traj_num,
+            "score/agent/total_raw": sum(total_raw_score) / max(1, len(total_raw_score))
+        }
+        return keep_batch_lst, metrics
 
-    def fill_rollout_pool(self, batch_lst):
+    def fill_rollout_pool(self, batch_lst, cur_step):
 
+        metrics = {}
+        fill_sample_num = 0
         rollout_fillin_bon_rate = self.config.data.get("rollout_fillin_bon_rate", -1)
         if rollout_fillin_bon_rate > 0:
             num_fillin_th = max(int(rollout_fillin_bon_rate * self.num_bon), 1)
         else:
             num_fillin_th = self.num_bon
 
-        batch_lst = self.pre_preocess_stats_fn_map[self.process_stats_strategy](batch_lst, num_fillin_th)
+        batch_lst, pre_process_metrics = self.pre_process_stats_fn_map[self.process_stats_strategy](batch_lst, cur_step,
+                                                                                                    num_fillin_th)
         if len(batch_lst) != 0:
             batch_lst = DataProto.concat(batch_lst)
             batch_lst = batch_lst.chunk(len(batch_lst))
-
             for batch in batch_lst:
                 rollout_id = batch.non_tensor_batch['rollout_id'][0]
                 uid = batch.non_tensor_batch['uid'][0]
                 batch.meta_info = copy.deepcopy(batch.meta_info)
                 self.pool.push(rollout_id, batch)
                 self.pool_size += 1
+                fill_sample_num += 1
 
                 if self.process_stats_strategy == "default":
                     self.rollout_id2uid[rollout_id].add(uid)
@@ -180,6 +242,10 @@ class RolloutPool:
 
         print("[fill_rollout_pool] fill_batch:", len(batch_lst), "bon_ready_batch:",
               self.bon_ready_batch.qsize() * self.num_bon, "pool_size:", self.pool_size)
+
+        metrics.update({"rollout/fill_sample_num": fill_sample_num})
+        metrics.update(pre_process_metrics)
+        return metrics
 
     def fill_rollout_pool_dynamic_sampling(self, batch):
         batch_lst = batch.chunk(len(batch))
@@ -222,7 +288,7 @@ class RolloutPool:
     def pool_with_grad_clear(self):
         self.pool_with_grad = queue.Queue()
 
-    def post_preocess_stats_swalm(self, ready_batch, rollout_id):
+    def post_process_stats_swalm(self, ready_batch, rollout_id):
         for batch in ready_batch:
             if rollout_id in self.rid2score_mean:
                 batch.batch['token_level_scores_mean'] = self.rid2score_mean[rollout_id].repeat(len(batch))
@@ -232,14 +298,36 @@ class RolloutPool:
                 batch.batch['token_level_scores_std'] = torch.tensor(NON_AGENT_PLACE_HOLDER_SCORE).repeat(len(batch))
         return ready_batch
 
+    def get_agent_bon_ready_bsz(self):
+        batch_size = 0
+        rollout_fillin_bon_rate = self.config.data.get("rollout_fillin_bon_rate", -1)
+        if rollout_fillin_bon_rate > 0:
+            num_fillin_th = max(int(rollout_fillin_bon_rate * self.num_bon), 1)
+        else:
+            num_fillin_th = self.num_bon
+        for rollout_id in self.rollout_id2uid:
+            if len(self.rollout_id2uid[rollout_id]) >= num_fillin_th:
+                batch_size += len(self.pool.get(rollout_id))
+        return batch_size
+
     def get_train_batch_default(self):
-        return_batch_size = self.config.data.train_batch_size * self.config.trainer.league_training_config.buffer_size * self.config.actor_rollout_ref.rollout.get(
-            "num_bon", 1)
+        rollout_return_bsz = self.config.data.get("rollout_return_bsz", None)
+        if rollout_return_bsz is None:
+            return_batch_size = self.config.data.train_batch_size * self.config.trainer.league_training_config.buffer_size * self.config.actor_rollout_ref.rollout.get(
+                "num_bon", 1)
+        else:
+            return_batch_size = rollout_return_bsz
+        total_bon_ready_batch_size = self.get_agent_bon_ready_bsz()
+        print(f"[get_train_batch] total_bon_ready_bsz: {total_bon_ready_batch_size}")
+        if (rollout_return_bsz is not None) and (total_bon_ready_batch_size < return_batch_size):
+            return [], {}
         return_batch = []
         while not self.bon_ready_batch.empty() and (
                 self.config.actor_rollout_ref.rollout.rollout_pool.clear_rollout_pool or
                 len(return_batch) < return_batch_size):
             index = self.bon_ready_batch.get()
+            if index not in self.rollout_id2uid:  # attention: drop rollout_id in self.bon_ready_batch for dynamic sampling
+                continue
             ready_batch = self.pool.get(index)
             if ready_batch is None:
                 continue
@@ -247,7 +335,7 @@ class RolloutPool:
                     > return_batch_size) and not self.config.actor_rollout_ref.rollout.rollout_pool.clear_rollout_pool:
                 self.bon_ready_batch.put(index)
                 break
-            ready_batch = self.post_preocess_stats_fn_map[self.process_stats_strategy](ready_batch, index)
+            ready_batch = self.post_process_stats_fn_map[self.process_stats_strategy](ready_batch, index)
             return_batch.extend(ready_batch)
             uids = self.rollout_id2uid.pop(index)
             # self.history_pool[index] = ready_batch
@@ -289,7 +377,11 @@ class RolloutPool:
         print("[get_train_batch] total_train_bsz:", len(return_batch), "complete_bon_bsz:", complete_bon_bsz,
               "incomplete_bon_bsz:", incomplete_bon_bsz, "pool size:", self.pool_size, "history_pool size:",
               len(self.history_pool) * self.num_bon)
-        return return_batch
+        metrics = {
+            "rollout/total_bon_ready_batch_size": total_bon_ready_batch_size,
+            "rollout/complete_bon_bsz": complete_bon_bsz,
+        }
+        return return_batch, metrics
 
     def get_train_batch_grad(self, return_batch_size):
         return_batch = []

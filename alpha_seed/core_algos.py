@@ -67,10 +67,17 @@ def get_kl_controller(config):
     return kl_ctrl
 
 
-def compute_gae_advantage_return(token_level_rewards: torch.Tensor, values: torch.Tensor, eos_mask: torch.Tensor,
-                                 gamma: torch.Tensor, lam: torch.Tensor, use_variable_lambda: torch.Tensor,
-                                 variable_lambda_scalar: torch.Tensor, adv_whiten: bool, use_separate_critic_lam: bool,
-                                 critic_lam: torch.Tensor):
+def compute_gae_advantage_return(token_level_rewards: torch.Tensor,
+                                 values: torch.Tensor,
+                                 eos_mask: torch.Tensor,
+                                 gamma: torch.Tensor,
+                                 lam: torch.Tensor,
+                                 use_variable_lambda: torch.Tensor,
+                                 variable_lambda_scalar: torch.Tensor,
+                                 adv_whiten: bool,
+                                 use_separate_critic_lam: bool,
+                                 critic_lam: torch.Tensor,
+                                 step_level_scores: torch.Tensor = None):
     """Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py
 
     Args:
@@ -84,6 +91,8 @@ def compute_gae_advantage_return(token_level_rewards: torch.Tensor, values: torc
             discounted factor used in RL
         lam: `(float)`
             lambda value when computing Generalized Advantage Estimation (https://arxiv.org/abs/1506.02438)
+        step_level_scores: `(torch.Tensor)`
+            shape: (bs, total_steps). Total step level scores, the total_steps is related to the conversation(agent) loops.
 
     Returns:
         advantages: `(torch.Tensor)`
@@ -92,7 +101,35 @@ def compute_gae_advantage_return(token_level_rewards: torch.Tensor, values: torc
             shape: (bs, response_length)
 
     """
+
+    # 计算output mask区间
+    def find_consecutive_ones(tensor):
+        if tensor.numel() == 0:
+            return torch.empty((0, 2), dtype=torch.long)
+        diff = tensor[1:] - tensor[:-1]
+        starts = torch.where(diff == 1)[0] + 1
+        ends = torch.where(diff == -1)[0]
+        if tensor[0] == 1:
+            starts = torch.cat([torch.tensor([0], device=tensor.device), starts])
+        if tensor[-1] == 1:
+            ends = torch.cat([ends, torch.tensor([tensor.numel() - 1], device=tensor.device)])
+        if starts.numel() != ends.numel():
+            raise ValueError(f"invalid starts and ends number: {starts.numel()}, {ends.numel()}")
+        return torch.stack([starts, ends], dim=1)
+
     token_level_rewards = token_level_rewards * eos_mask
+
+    response_intervals = []
+    for _idx in range(eos_mask.size(0)):
+        response_intervals += [find_consecutive_ones(eos_mask[_idx])]
+
+    # update
+    if step_level_scores is not None:
+        for _idx, _intervals in enumerate(response_intervals):
+            for _ii in range(_intervals.size(0) - 1):
+                e = int(_intervals[_ii, 1].item())
+                token_level_rewards[_idx, e] += step_level_scores[_idx, _ii]
+
     values = values * eos_mask
     if use_variable_lambda:
         seq_len_per_sample = torch.clamp(torch.sum(eos_mask, dim=1), min=1.0)
