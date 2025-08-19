@@ -282,7 +282,6 @@ class ImageManager:
             self.uid2refs[ref.hex()] = ref
             if persistent:
                 self.persistent_refs.add(ref.hex())
-            self.ref_counts[ref.hex()] = 0
             self.history_refs.add(ref.hex())
             if indices is not None:
                 if indices[i] not in self.index2refs:
