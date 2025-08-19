@@ -202,6 +202,16 @@ class AsyncXPerfGPTRollout(object):
         else:
             text_cfg = model_cfg
         text_cfg["quant_mode"] = self.config.get("quant_mode", "NO_QUANT")
+        text_cfg["dynamic_quant"] = self.config.get("use_fp8_attention", False)
+        if "W4A8" in text_cfg["quant_mode"]:
+            text_cfg["attn_use_w8"] = True
+            text_cfg["has_output_quant"] = False
+            text_cfg["use_perrank_qscale"] = False
+            text_cfg["use_perexpert_qscale"] = True
+            text_cfg["has_kv_qscale"] = False
+            text_cfg["m8_optimal_fusion"] = True
+            if text_cfg["quant_mode"] == "W4A8C8":
+                text_cfg["has_kv_qscale"] = True
         sched_cfg = {
             "max_sequence_length": self.config.prompt_length + self.config.response_length,
             "max_context_len": self.config.prompt_length,
@@ -211,6 +221,7 @@ class AsyncXPerfGPTRollout(object):
         use_ep = self.config.get('use_ep', False)
         use_vocab_tp = self.config.get('vocab_tp', False)
         use_mtp = self.config.get('use_mtp', False)
+        use_fp8_attention = self.config.get("use_fp8_attention", False)
         use_custom_allreduce = tp_size <= 8 and get_gpu_support_nvlink()
         multi_host_tp = is_multihost_model(tp_size)
 
@@ -355,6 +366,7 @@ class AsyncXPerfGPTRollout(object):
                                 # Vision model settings
                                 vit_config=vision_cfg,
                                 vit_model_cfg_path=self.vit_model_path,
+                                use_fp8_attention=use_fp8_attention,
                             )
                     if dist.is_initialized() and tp_size > 1:
                         dist.barrier()
@@ -413,14 +425,22 @@ class AsyncXPerfGPTRollout(object):
 
     def _set_tuner_config(self):
         os.environ["USE_SESSION_CACHE"] = "0"
-        if self.config.get("quant_mode", "NO_QUANT") == "WFP8":
+        quant_mode = self.config.get("quant_mode", "NO_QUANT")
+        if quant_mode in ["WFP8", "W4A8", "W4A8C8"]:
             # set environment variables for tuner
             os.environ["XGPT_TUNER_ENABLE"] = os.getenv("XGPT_TUNER_ENABLE", "1")
             os.environ["XPERF_TUNER_ONLINE_PRIORITY"] = os.getenv("XPERF_TUNER_ONLINE_PRIORITY", "1")
-            os.environ["XPERF_TUNER_ONLINE_VERSION"] = "2.0.0+xgpt"
-            base_dir = os.path.normpath(os.path.dirname(os.path.dirname(__file__)))
-            tuning_path = os.path.join(base_dir, "xperf_rollout", "tuning")
-            os.environ["XPERF_TUNER_CONFIG_LOAD_PATH"] = tuning_path
+            if quant_mode in ["W4A8", "W4A8C8"]:
+                os.environ["XPERF_TUNER_ONLINE_VERSION"] = "2.1.4+xgpt"
+                base_dir = os.path.normpath(os.path.dirname(os.path.dirname(__file__)))
+                tuning_path = os.path.join(base_dir, "xperf_rollout", "tuning", "w4a8")
+                os.environ["XPERF_TUNER_CONFIG_LOAD_PATH"] = tuning_path
+            else:
+                # TODO: config does not take effect
+                os.environ["XPERF_TUNER_ONLINE_VERSION"] = "2.0.0+xgpt"
+                base_dir = os.path.normpath(os.path.dirname(os.path.dirname(__file__)))
+                tuning_path = os.path.join(base_dir, "xperf_rollout", "tuning")
+                os.environ["XPERF_TUNER_CONFIG_LOAD_PATH"] = tuning_path
 
     def _set_multihost_env(self):
         os.environ["NCCL_SOCKET_IFNAME"] = os.getenv("NCCL_SOCKET_IFNAME", "eth0")
@@ -600,6 +620,7 @@ class AsyncXPerfGPTRollout(object):
                     self._dump_context()
                     self._process_thread_last_error = e
                     self._process_thread_last_tb = traceback.format_exc()
+                    breakpoint()
                     raise
 
     def generate(self):
@@ -627,6 +648,7 @@ class AsyncXPerfGPTRollout(object):
                     self._dump_context()
                     self._process_thread_last_error = e
                     self._process_thread_last_tb = traceback.format_exc()
+                    breakpoint()
                     raise
 
             response_outputs = []

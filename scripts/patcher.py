@@ -13,9 +13,11 @@ class Patcher:
 
     def prepare_python3_env(self):
         # os.system("git config pull.ff only")
-        os.system(
-            "pip3 install --no-cache-dir https://luban-source.byted.org/repository/scm/data.aml.xperf_gpt_th24_cu124_abi0_sdist_1.0.0.272.tar.gz"
-        )
+        os.system("cp -rp /mnt/hdfs/models_m10/ /opt/tiger/models_m10/")
+        # os.system(
+        # "sudo pip3 install --no-cache-dir https://luban-source.byted.org/repository/scm/data.aml.xperf_gpt_th24_cu124_abi0_sdist_1.0.0.1245.tar.gz"
+        # )
+
         # os.system("cd /opt/tiger && rm -rf mariana && git clone https://yipzlf:vwZZ_JYy7mkx-1zUjyeR@code.byted.org/seed/mariana && cd mariana && git checkout zr/sc/xperf_infer")
         # os.system("cd /opt/tiger/mariana && git pull")
         # os.system("cd /opt/tiger && rm -rf seed_models && git clone https://yipzlf:vwZZ_JYy7mkx-1zUjyeR@code.byted.org/seed/seed_models && cd seed_models && git checkout chi/feat/p6_ggemm_ckpt")

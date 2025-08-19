@@ -27,6 +27,7 @@ class XperfModelProphet:
         self.max_position_embeddings = model_cfg.get("max_position_embeddings", sched_cfg["max_sequence_length"])
         self.has_ptb = model_cfg.get("has_ptb", False)
         self.quant_type = get_quant_option(model_cfg.get("quant_mode", "NO_QUANT"))
+        self.fp8_kv_cache = model_cfg.get("dynamic_quant", False)
         self.hidden_size = model_cfg["hidden_size"]
         self.window_size = model_cfg.get("window_size", [])
         self.vocab_size = model_cfg["vocab_size"]
@@ -66,10 +67,15 @@ class XperfModelProphet:
             QuantOption.W8C8_PerChannelSymm: 1,
             QuantOption.W4_ChannelGroupAsymm: 0.5,
             QuantOption.W4C8_ChannelGroupAsymm: 0.5,
+            QuantOption.W4A8_ChannelGroupAsymm: 0.5,
+            QuantOption.W4A8C8_ChannelGroupAsymm: 0.5,
             QuantOption.W8A8_PerChannelSymm: 1,
             QuantOption.FP8_W8_PerTensor: 1,
         }
         element_sz = element_size_map[self.quant_type]
+        dense_element_sz = element_sz
+        if self.quant_type in [QuantOption.W4A8_ChannelGroupAsymm, QuantOption.W4A8C8_ChannelGroupAsymm]:
+            dense_element_sz = 1
 
         def get_wpe_wte_weight_size():
             wpe_weight_size = self.max_position_embeddings * self.hidden_size * 2
@@ -81,14 +87,15 @@ class XperfModelProphet:
 
         def get_attn_weight_size():
             # attn
-            c_attn_weight = element_sz * self.hidden_size * (self.num_kv_heads * 2 + self.num_heads) * self.head_dim
-            c_proj_weight = element_sz * self.hidden_size * self.num_heads * self.head_dim
+            c_attn_weight = dense_element_sz * self.hidden_size * (self.num_kv_heads * 2 +
+                                                                   self.num_heads) * self.head_dim
+            c_proj_weight = dense_element_sz * self.hidden_size * self.num_heads * self.head_dim
 
             norm_size = 0
             if getattr(self.model_cfg, 'querynorm', False):
-                norm_size += element_sz * self.head_dim
+                norm_size += 2 * self.head_dim
             if getattr(self.model_cfg, 'keynorm', False):
-                norm_size += element_sz * self.head_dim
+                norm_size += 2 * self.head_dim
 
             return c_attn_weight + c_proj_weight + norm_size
 
@@ -238,10 +245,14 @@ class XperfModelProphet:
             QuantOption.W8C8_PerChannelSymm: 1,
             QuantOption.W4_ChannelGroupAsymm: 2,
             QuantOption.W4C8_ChannelGroupAsymm: 1,
+            QuantOption.W4A8_ChannelGroupAsymm: 2,
+            QuantOption.W4A8C8_ChannelGroupAsymm: 1,
             QuantOption.W8A8_PerChannelSymm: 1,
             QuantOption.FP8_W8_PerTensor: 2,
         }
         kv_cache_element_sz = kv_cache_element_size_map[self.quant_type]
+        if self.fp8_kv_cache:
+            kv_cache_element_sz = 1
         num_kv_heads_per_card = self.num_kv_heads // self.mp_size if self.num_kv_heads > self.mp_size else 1
         kv_cache_size_per_token = self.kv_num_layers * num_kv_heads_per_card * 2 * kv_cache_element_sz * self.head_dim
 

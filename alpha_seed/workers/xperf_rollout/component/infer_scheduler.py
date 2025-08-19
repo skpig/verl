@@ -1,6 +1,10 @@
 import torch
 import time
+import bisect
+import re
+import logging
 from typing import *
+from xperf_gpt.utils import (logging_rank, logging_rank_only)
 
 
 class InferScheduler():
@@ -32,6 +36,49 @@ class InferScheduler():
         self.enable_mtp_decoding = enable_mtp_decoding
         self.init_cuda_graph()
         self.init_metrics()
+
+    def get_roofline(self):
+        device_intensity_map = {
+            "NO_QUANT": {
+                "A100": 156,
+                "H20": 40,
+                "L20": 149,
+                "H800": 295,
+            },
+            "WFP8": {
+                "A100": 312,
+                "H20": 79,
+                "L20": 299,
+                "H800": 590,
+            },
+            "W4A8": {
+                "A100": 312,
+                "H20": 79,
+                "L20": 299,
+                "H800": 590,
+            }
+        }
+        gemm_intensity_map = {
+            "NO_QUANT": 1,
+            "WFP8": 2,
+            "W4A8": 4,
+        }
+        quant_mode = self.engine.module.quant_mode
+        if quant_mode not in gemm_intensity_map:
+            logging_rank(logging.info, f"gemm intensity is not found for {quant_mode} quant mode")
+        gemm_intensity = gemm_intensity_map.get(quant_mode, 1)
+
+        current_device = torch.cuda.current_device()
+        device_name = torch.cuda.get_device_name(current_device)
+        device_name = re.split("[ |-]", device_name)[1]
+        if device_name not in device_intensity_map[quant_mode]:
+            logging_rank(logging.info, f"device intensity is not found for {device_name} device")
+        device_intensity = device_intensity_map[quant_mode].get(device_name, 1)
+
+        roofline = device_intensity / gemm_intensity
+        if hasattr(self.engine.module.config, "moe_expert_num"):
+            roofline *= self.engine.module.config.moe_expert_num / self.engine.module.config.moe_topk
+        return roofline
 
     def record(self, key, value):
         if not self.enable_metrics:
@@ -89,6 +136,7 @@ class InferScheduler():
         self.metrics['prefix_cache_hit_length'] = []
         self.metrics['evict_count'] = 0
         self.metrics['accept_len'] = []
+        self.metrics['roofline'] = self.get_roofline()
         self.sampler.metrics = self.metrics
         self.step_time = None
 
@@ -112,9 +160,14 @@ class InferScheduler():
         self.graph_total_length_placeholder = {}
         self.graph_kv_cache_index_placeholder = {}
         self.output_placeholder = {}
+        self.graph_capture_bs_list = []
+        self.graph_capture_max_bs = 0
         if not self.enable_cuda_graph or self.engine.module.wte_weight.is_meta or self.engine.is_xperf_triton:
             return
-        for bs in [1, 2, 4]:
+        memory_pool = None
+        self.graph_capture_bs_list = [1, 2, 4] + list(range(8, 128 + 1, 8))
+        self.graph_capture_max_bs = max(self.graph_capture_bs_list)
+        for bs in self.graph_capture_bs_list:
             self.graph_decode_input_ids_placeholder[bs] = torch.zeros(bs, 1).cuda().int()
             self.graph_total_length_placeholder[bs] = torch.Tensor([1024] * bs).cuda().int()
             if not self.cache_manager.use_vllm:
@@ -124,7 +177,7 @@ class InferScheduler():
             self.output_placeholder[bs] = torch.zeros(bs, self.engine.module.config.vocab_size).cuda().bfloat16()
 
             self.bs_graph_map[bs] = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(self.bs_graph_map[bs]):
+            with torch.cuda.graph(self.bs_graph_map[bs], pool=memory_pool):
                 output = self.engine.forward_orca(context_labels_ids=None,
                                                   decode_input_ids=self.graph_decode_input_ids_placeholder[bs],
                                                   total_length=self.graph_total_length_placeholder[bs],
@@ -135,20 +188,50 @@ class InferScheduler():
                                                   return_padding_tensor=False,
                                                   last_token_only=True)
                 self.output_placeholder[bs].copy_(output)
+            if memory_pool is None:
+                memory_pool = self.bs_graph_map[bs].pool()
 
     def internal_inference_orca(self, context_input: torch.Tensor, decode_input: torch.Tensor,
                                 total_length: torch.Tensor, kv_index: torch.Tensor, orca_updated: bool,
                                 context_shifts: torch.Tensor):
-        if decode_input is not None and decode_input.shape[0] in self.bs_graph_map.keys() and context_input is None:
+        if decode_input is not None and decode_input.shape[0] <= self.graph_capture_max_bs and context_input is None:
             bs = decode_input.shape[0]
-            self.graph_decode_input_ids_placeholder[bs].copy_(decode_input)
-            self.graph_total_length_placeholder[bs].copy_(total_length)
+            pos = bisect.bisect_left(self.graph_capture_bs_list, bs)
+            cuda_graph_bs = self.graph_capture_bs_list[pos]
+            padding_bs = cuda_graph_bs - bs
+            if padding_bs > 0:
+                # add padding
+                decode_input = torch.cat(
+                    [decode_input,
+                     torch.zeros(padding_bs, dtype=decode_input.dtype, device=decode_input.device)])
+                total_length = torch.cat(
+                    [total_length,
+                     torch.ones(padding_bs, dtype=total_length.dtype, device=total_length.device)])
+                kv_slot_for_padding = self.cache_manager.slot_num
+                if self.cache_manager.use_vllm:
+                    kv_index = torch.cat([
+                        kv_index,
+                        torch.full([padding_bs, kv_index.shape[1]],
+                                   kv_slot_for_padding,
+                                   dtype=kv_index.dtype,
+                                   device=kv_index.device)
+                    ],
+                                         dim=0)
+                else:
+                    kv_index = torch.cat([
+                        kv_index,
+                        torch.full(padding_bs, kv_slot_for_padding, dtype=kv_index.dtype, device=kv_index.device)
+                    ])
+
+            self.graph_decode_input_ids_placeholder[cuda_graph_bs].copy_(decode_input)
+            self.graph_total_length_placeholder[cuda_graph_bs].copy_(total_length)
             if self.cache_manager.use_vllm:
-                self.graph_kv_cache_index_placeholder[bs][:, :kv_index.shape[1]].copy_(kv_index)
+                self.graph_kv_cache_index_placeholder[cuda_graph_bs][:, :kv_index.shape[1]].copy_(kv_index)
             else:
-                self.graph_kv_cache_index_placeholder[bs].copy_(kv_index)
-            self.bs_graph_map[bs].replay()
-            return self.output_placeholder[bs]
+                self.graph_kv_cache_index_placeholder[cuda_graph_bs].copy_(kv_index)
+            self.bs_graph_map[cuda_graph_bs].replay()
+            output = self.output_placeholder[cuda_graph_bs]
+            return output[:bs]
         else:
             context_max_kv_len = context_total_kv_len = -1
             decode_max_kv_len = decode_total_kv_len = -1

@@ -429,7 +429,6 @@ class InferenceSession:
             eos_token_id=0,  # won't use
             pad_token_id=0,  # won't use
             **generation_config)
-
         # kwargs override
         print("init_inference_engine kwargs", kwargs)
         init_inference_kwargs.update(kwargs)
@@ -466,12 +465,18 @@ class InferenceSession:
             self.enable_cuda_graph = False
         else:
             self.engine = init_inference(None, **init_inference_kwargs)
+            print("init_inference_kwargs: ", init_inference_kwargs)
         self.sampler = Sampler(generation_config=generation_config)
         self.oe_max_stride = max(getattr(self.engine.module.config, "over_enc_vocab_stride", [1]))
 
         self.reset_logging_level()
 
-        self.cache_manager = CacheManager(slot_num=self.num_slots,
+        cache_manager_num_slots = self.num_slots
+        if self.enable_cuda_graph and not use_xperf_triton:
+            # reserve one as cuda graph padding
+            print(f"reserve slot {cache_manager_num_slots} as cuda_graph padding")
+            cache_manager_num_slots -= 1
+        self.cache_manager = CacheManager(cache_manager_num_slots,
                                           max_batch_size=self.max_batch_size,
                                           use_vllm=self.enable_paged_attn,
                                           slot_block_size=self.slot_block_size,

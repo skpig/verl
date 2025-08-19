@@ -1,20 +1,20 @@
 set -x
 
-NUM_STEPS="${NUM_STEPS:-2000}"
+NUM_STEPS="${NUM_STEPS:-120}"
 echo $NUM_STEPS
 
 N_GPUS_PER_NODE="${N_GPUS_PER_NODE:-8}"
 
 # ckpt和路径
-SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/M8_680m_SFT_hf
+SFT_MODEL_PATH=/opt/tiger/models/p6dense-0.5B-Instruct
 RM_MODEL_PATH=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/seed_rl/models/rm_p6_moe_400m_0716_sftv27_stage2_hf
 TRAIN_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/train_with_ref_ans.parquet
 TEST_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/test_with_ref_ans_top_100.parquet
-default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/test/m8_680m_grpo
+default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/test/p6_400m_omnistore_test_1
 
 # 训练长度
-max_prompt_length=1024
-max_response_length=1024
+max_prompt_length=128
+max_response_length=128
 # batch size && 训练epoch
 train_batch_size=32
 ppo_mini_batch_size=32
@@ -23,12 +23,12 @@ total_epochs=100
 test_freq=5
 save_freq=-1
 # 算法相关的参数
-actor_lr=1e-6
+actor_lr=1e-5
 critic_lr=2e-6
 lr_warmup_steps=10
-kl_coef=0.00
+kl_coef=0.0
 use_last_response=False
-use_ref_answer=True
+use_ref_answer=False
 gae_gamma=1.0
 gae_lam=0.95
 force_append_eos=True
@@ -37,7 +37,7 @@ upgo_loss_version=1
 clip_ratio2=2.0
 weight_decay=0.1
 adv_estimator=grpo
-kl_loss_weight=0.00
+kl_loss_weight=0.1
 num_bon=2
 bon_strategy=all
 kl_penalty=low_var_kl
@@ -49,17 +49,18 @@ gen_micro_batch_size=512 # use_dynamic_bsz=True时仍然生效
 infer_micro_batch_size=512 # use_dynamic_bsz=True时不生效
 train_micro_batch_size=64 # use_dynamic_bsz=True时不生效
 use_dynamic_bsz=True
-actor_ppo_max_token_len=18432
-critic_ppo_max_token_len=18432
-infer_ppo_max_token_len=18432
+actor_ppo_max_token_len=3072
+critic_ppo_max_token_len=3072
+infer_ppo_max_token_len=3072
 actor_sp_size=2
 critic_sp_size=2
 ref_sp_size=1
 reward_sp_size=1
 fsdp_size=8
 xperf_tp_size=2
-tp_size=2
+offload=True
 offload_train_memory=True
+act_offload=True
 
 python3 tasks/main_ppo.py \
     data.train_files=${TRAIN_FILE} \
@@ -72,7 +73,6 @@ python3 tasks/main_ppo.py \
     data.train_batch_size=${train_batch_size} \
     data.val_batch_size=${val_batch_size} \
     data.truncation='left' \
-    +data.chat_template=seed \
     actor_rollout_ref.actor.use_dynamic_bsz=${use_dynamic_bsz} \
     actor_rollout_ref.ref.use_dynamic_bsz=${use_dynamic_bsz} \
     actor_rollout_ref.rollout.use_dynamic_bsz=${use_dynamic_bsz} \
@@ -93,9 +93,11 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.actor.entropy_coeff=0.0 \
     actor_rollout_ref.actor.clip_ratio2=${clip_ratio2} \
     actor_rollout_ref.rollout.name=xperf_gpt \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.2 \
     +actor_rollout_ref.rollout.num_slots=256 \
-    +actor_rollout_ref.rollout.slot_block_size=1024 \
+    +actor_rollout_ref.rollout.slot_block_size=256 \
     actor_rollout_ref.ref.log_prob_micro_batch_size=${infer_micro_batch_size} \
+    actor_rollout_ref.actor.act_offload=${act_offload} \
     actor_rollout_ref.actor.scale_pg_by_kl=False \
     actor_rollout_ref.actor.upgo_loss_weight=${upgo_loss_weight} \
     actor_rollout_ref.actor.upgo_loss_version=${upgo_loss_version} \
@@ -142,7 +144,7 @@ python3 tasks/main_ppo.py \
     trainer.save_freq=${save_freq} \
     trainer.test_freq=${test_freq} \
     trainer.total_epochs=${total_epochs} \
-    trainer.eval_before_training=True \
+    trainer.eval_before_training=False \
     trainer.val_only=False \
     trainer.val_epoch=1 \
     trainer.need_log=False \
@@ -154,6 +156,7 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.ref.fsdp_size=${fsdp_size} \
     critic.fsdp_size=${fsdp_size} \
     reward_model.fsdp_size=${fsdp_size} \
+    critic.act_offload=${act_offload} \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=${actor_sp_size} \
     actor_rollout_ref.ref.ulysses_sequence_parallel_size=${ref_sp_size} \
     actor_rollout_ref.actor.kl_loss_weight=${kl_loss_weight} \
@@ -162,22 +165,12 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.actor.shuffle=False \
     critic.ulysses_sequence_parallel_size=${critic_sp_size} \
     reward_model.ulysses_sequence_parallel_size=${reward_sp_size} \
-    +actor_rollout_ref.rollout.use_ep=True \
-    actor_rollout_ref.rollout.quant_mode=W4A8 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${xperf_tp_size} \
     +actor_rollout_ref.rollout.use_vllm=True \
     actor_rollout_ref.rollout.micro_batch_size=${gen_micro_batch_size} \
     actor_rollout_ref.rollout.log_prob_micro_batch_size=${infer_micro_batch_size} \
     trainer.offload_train_memory=${offload_train_memory} \
-    critic.profile.enable=True \
-    critic.profile.upload_to_mlx=True \
-    critic.profile.filename=actor.tp${xperf_tp_size}.fsdp${fsdp_size} \
-    actor_rollout_ref.actor.profile.enable=True \
-    actor_rollout_ref.actor.profile.upload_to_mlx=True \
-    actor_rollout_ref.actor.profile.filename=actor.tp${xperf_tp_size}.fsdp${fsdp_size} \
     trainer.total_steps=${NUM_STEPS} \
-    actor_rollout_ref.actor.tp_size=${tp_size} \
-    actor_rollout_ref.ref.tp_size=${tp_size} \
-    critic.tp_size=${tp_size} \
-    +actor_rollout_ref.rollout.use_ep=True \
-    2>&1 | tee log.txt
+    actor_rollout_ref.rollout.quant_mode=W4A8 \
+    # trainer.save_train_batch_dir=${default_hdfs_dir}/train_batch \
+    # trainer.load_train_batch_path=${default_hdfs_dir}/train_batch/train_batch_1.pt

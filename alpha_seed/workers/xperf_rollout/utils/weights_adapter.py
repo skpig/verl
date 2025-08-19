@@ -6,6 +6,7 @@ from transformers import PretrainedConfig
 from typing import Tuple, Union, List, Dict, Optional, Protocol
 from torch.distributed._tensor import DTensor, Shard, Replicate
 from alpha_seed.workers.xperf_rollout.utils.vit_inferencer import TorchVitInferencer
+from alpha_seed.workers.xperf_rollout.utils.quant_utils import quant_gemm_weight_w8a8, quant_group_gemm_weight_w4a8
 
 logger = logging.getLogger(__name__)
 
@@ -124,17 +125,32 @@ class WeightsAdapter:
             return tensor
         return tensor.to(dtype)
 
-    def _assign_and_validate(self, src: Union[torch.Tensor, List[torch.Tensor]],
-                             dst: Union[torch.Tensor, List[torch.Tensor]], name: str) -> None:
+    def _assign_and_validate(self,
+                             src: Union[torch.Tensor, List[torch.Tensor]],
+                             dst: Union[torch.Tensor, List[torch.Tensor]],
+                             name: str,
+                             is_int4: bool = False) -> None:
 
         if src is None:
             return
         if isinstance(src, list):
             for i, (src_item, dst_item) in enumerate(zip(src, dst)):
-                self._assign_and_validate(src_item, dst_item, f"{name}_{i}")
+                if src_item is not None:
+                    if is_int4:
+                        assert src_item.numel() == dst_item.numel() or src_item.numel() * 2 == dst_item.numel(
+                        ), f"Weight {name} shape mismatch: src {src_item.shape} vs dst {dst_item.shape}"
+                    else:
+                        assert src_item.shape == dst_item.shape or src_item.numel() == dst_item.numel(
+                        ), f"Weight {name} shape mismatch: src {src_item.shape} vs dst {dst_item.shape}"
+                    assert not torch.isnan(src_item).any(), f"Weight {name} contains NaN values"
+                    torch.utils.swap_tensors(dst_item, src_item)
         else:
-            assert src.shape == dst.shape or src.numel() == dst.numel(
-            ), f"Weight {name} shape mismatch: src {src.shape} vs dst {dst.shape}"
+            if is_int4:
+                assert src.numel() == dst.numel() or src.numel() * 2 == dst.numel(
+                ), f"Weight {name} shape mismatch: src {src.shape} vs dst {dst.shape}"
+            else:
+                assert src.shape == dst.shape or src.numel() == dst.numel(
+                ), f"Weight {name} shape mismatch: src {src.shape} vs dst {dst.shape}"
             assert not torch.isnan(src).any(), f"Weight {name} contains NaN values"
             torch.utils.swap_tensors(dst, src)
 
@@ -148,6 +164,8 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
         self.quant_mode = quant_mode
         self.enable_actor_critic_spatial_mux = enable_actor_critic_spatial_mux
         self.source_weights: Dict[str, Union[torch.Tensor, DTensor]] = {}
+        self.need_amax = "A8" in self.quant_mode
+        self.amax_ready = False
 
     def get_model_info(self, xperf_model: torch.nn.Module) -> None:
 
@@ -309,6 +327,28 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
                     loader(f"{layer_key}.extra_norm.weight"),
             }
 
+            if self.need_amax:
+                self.source_weights[layer_idx].update({
+                    "qkv_proj_amax":
+                        loader(f"{layer_key}.attn.input_amax_qkv", f"{layer_key}.self_attn.input_amax_qkv"),
+                    "o_proj_amax":
+                        loader(f"{layer_key}.attn.input_amax_o", f"{layer_key}.self_attn.input_amax_o"),
+                    "fc1_amax":
+                        loader(f"{layer_key}.mlp.moe.input_amax_fc1", f"{layer_key}.mlp.input_amax_fc1"),
+                    "fc2_amax":
+                        loader(f"{layer_key}.mlp.moe.input_amax_fc2", f"{layer_key}.mlp.input_amax_fc2"),
+                    "share_fc1_amax":
+                        loader(f"{layer_key}.mlp.moe.share_input_amax_fc1"),
+                    "share_fc2_amax":
+                        loader(f"{layer_key}.mlp.moe.share_input_amax_fc2")
+                })
+                if self.source_weights[layer_idx]["qkv_proj_amax"].max() > 0:
+                    # 第一次rollout的时候没有amax信息，使用全1作为smoothQuant scale
+                    self.amax_ready = True
+                else:
+                    self.amax_ready = False
+                    print("amax is not ready, will use all ones as smoothQuant scale")
+
         for mtp_idx in range(0, self.mtp_n_heads):
             layer_idx = self.num_layers - self.mtp_n_heads + mtp_idx
 
@@ -337,7 +377,7 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
 
         xperf_weights = xperf_model.weights
 
-        def assign_weights(binding_weights, layer_idx=None):
+        def assign_weights(binding_weights, layer_idx=None, is_int4=False):
             for xperf_weight, weight, name in binding_weights:
                 if weight is None:
                     continue
@@ -345,7 +385,7 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
                 if layer_idx is not None:
                     dst = dst[layer_idx]
                     name = f"{layer_idx}_{name}"
-                self._assign_and_validate(src=weight, dst=dst, name=name)
+                self._assign_and_validate(src=weight, dst=dst, name=name, is_int4=is_int4)
 
         wte_weight, lm_head_weight, ln_f_weight, oe_weight, oe_proj = self._process_top_level_weights()
         binding_weights = [(xperf_weights.module_weight, wte_weight, "wte_weight"),
@@ -360,8 +400,59 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
                 layer_idx)
             qkv_weight, qkv_bias, o_weight, o_bias = self._process_attention_weights(layer_idx)
             fc1_weight, share_fc1_weight, fc2_weight, share_fc2_weight = self._process_ffn_weights(layer_idx)
-            qkv_weight, o_weight, fc1_weight, fc2_weight, share_fc1_weight, share_fc2_weight, wfp8_qscale = self._process_quant_wfp8(
-                qkv_weight, o_weight, fc1_weight, fc2_weight, share_fc1_weight, share_fc2_weight)
+            wfp8_qscale = []
+            w4_qscale = []
+            a8_qscale = []
+            if self.quant_mode == "WFP8":
+                qkv_weight, o_weight, fc1_weight, fc2_weight, share_fc1_weight, share_fc2_weight, wfp8_qscale = self._process_quant_wfp8(
+                    qkv_weight, o_weight, fc1_weight, fc2_weight, share_fc1_weight, share_fc2_weight)
+            elif "W4A8" in self.quant_mode:
+                qkv_proj_amax, o_proj_amax = self._process_attention_amax(layer_idx)
+                fc1_amax, fc2_amax, share_fc1_amax, share_fc2_amax = self._process_ffn_amax(layer_idx)
+                dense_gemm_w8a8_weights, dense_gemm_w8a8_smooth_quant_scale, dense_gemm_w8a8_weight_qscale, \
+                    group_gemm_w4a8_weights, group_gemm_w4a8_smooth_quant_scale, group_gemm_w4a8_i8_weight_qscale, \
+                    group_gemm_w4a8_i4_weight_qscale_zero = self._process_quant_w4a8(
+                        [qkv_weight, o_weight, share_fc1_weight, share_fc2_weight],
+                        [qkv_proj_amax, o_proj_amax, share_fc1_amax, share_fc2_amax],
+                        [fc1_weight, fc2_weight],
+                        [fc1_amax, fc2_amax])
+                qkv_weight, o_weight, share_fc1_weight, share_fc2_weight = dense_gemm_w8a8_weights
+                fc1_weight, fc2_weight = group_gemm_w4a8_weights
+                w4_qscale = [
+                    # attn_qkv
+                    dense_gemm_w8a8_weight_qscale[0],
+                    None,
+                    # attn_proj
+                    dense_gemm_w8a8_weight_qscale[1],
+                    None,
+                    # ff0
+                    group_gemm_w4a8_i8_weight_qscale[0],
+                    group_gemm_w4a8_i4_weight_qscale_zero[0],
+                    # ffn1
+                    group_gemm_w4a8_i8_weight_qscale[1],
+                    group_gemm_w4a8_i4_weight_qscale_zero[1],
+                ]
+                if self.share_expert_num > 0:
+                    w4_qscale.extend([
+                        # shared_expert0
+                        dense_gemm_w8a8_weight_qscale[2],
+                        # shared_expert1
+                        dense_gemm_w8a8_weight_qscale[3]
+                    ])
+                a8_qscale = [
+                    # attn_qkv
+                    dense_gemm_w8a8_smooth_quant_scale[0],
+                    # attn_proj
+                    dense_gemm_w8a8_smooth_quant_scale[1],
+                    # ff0
+                    group_gemm_w4a8_smooth_quant_scale[0],
+                    # ff1
+                    group_gemm_w4a8_smooth_quant_scale[1],
+                    # shared_expert0
+                    dense_gemm_w8a8_smooth_quant_scale[2],
+                    # shared_expert1
+                    dense_gemm_w8a8_smooth_quant_scale[3],
+                ]
             gate_wg_weight = self._process_gate_weights(layer_idx)
             vwn0_static_alpha, vwn0_static_beta, vwn0_dynamic_alpha, vwn0_dynamic_alpha_scale, vwn0_dynamic_beta, vwn0_dynamic_beta_scale, vwn0_layer_norm, \
             vwn1_static_alpha, vwn1_static_beta, vwn1_dynamic_alpha, vwn1_dynamic_alpha_scale, vwn1_dynamic_beta, vwn1_dynamic_beta_scale, vwn1_layer_norm, \
@@ -379,9 +470,7 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
                 (xperf_weights.layer_weight, qkv_bias, "qkv_proj_bias"),
                 (xperf_weights.layer_weight, o_weight, "out_proj_weight"),
                 (xperf_weights.layer_weight, o_bias, "out_proj_bias"),
-                (xperf_weights.layer_weight, fc1_weight, "FFN0_weight"),
                 (xperf_weights.layer_weight, share_fc1_weight, "FFN0_share_weight"),
-                (xperf_weights.layer_weight, fc2_weight, "FFN1_weight"),
                 (xperf_weights.layer_weight, share_fc2_weight, "FFN1_share_weight"),
                 (xperf_weights.layer_weight, gate_wg_weight, "moe_gate_weight"),
                 (xperf_weights.layer_weight, vwn0_static_alpha, "vwn0_static_alpha"),
@@ -399,9 +488,29 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
                 (xperf_weights.layer_weight, vwn1_dynamic_beta_scale, "vwn1_dynamic_beta_scale"),
                 (xperf_weights.layer_weight, vwn1_layer_norm, "vwn1_layernorm_weight"),
                 (xperf_weights.layer_weight, vwn_extra_layernorm_weight, "vwn_extra_layernorm_weight"),
-                (xperf_weights.quant_weight, wfp8_qscale, "wfp8_qscale"),
             ]
             assign_weights(binding_weights, layer_idx)
+            binding_weights = [
+                (xperf_weights.layer_weight, fc1_weight, "FFN0_weight"),
+                (xperf_weights.layer_weight, fc2_weight, "FFN1_weight"),
+            ]
+            assign_weights(binding_weights, layer_idx, "W4A8" in self.quant_mode)
+            if "W4A8" in self.quant_mode:
+                if hasattr(xperf_weights.layer_weight, "expert_size"):
+                    xperf_weights.layer_weight.expert_size = [
+                        xperf_model.config.moe_ffn_internal_dim // self.tp_size
+                        for _ in range(len(xperf_weights.layer_weight.expert_size))
+                    ]
+                binding_weights = [
+                    (xperf_weights.quant_weight, w4_qscale, "w4_qscale"),
+                    (xperf_weights.quant_weight, a8_qscale, "a8_qscale"),
+                ]
+                assign_weights(binding_weights, layer_idx)
+            elif self.quant_mode == "WFP8":
+                binding_weights = [
+                    (xperf_weights.quant_weight, wfp8_qscale, "wfp8_qscale"),
+                ]
+                assign_weights(binding_weights, layer_idx)
 
         for mtp_idx in range(0, self.mtp_n_heads):
 
@@ -623,6 +732,20 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
 
         return qkv_proj, qkv_proj_b, o_proj, o_proj_b
 
+    def _process_attention_amax(self, layer_idx: int) -> Tuple[torch.Tensor, ...]:
+        if self.amax_ready:
+            qkv_proj_amax = self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['qkv_proj_amax']),
+                                          torch.bfloat16)
+            o_proj_amax = self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['o_proj_amax']),
+                                        torch.bfloat16)
+            if self.device_mesh is not None:
+                o_proj_amax = self._redistribute_dtensor(
+                    DTensor.from_local(o_proj_amax, self.device_mesh, [Replicate(), Replicate()]),
+                    [Replicate(), Shard(0)])
+            return qkv_proj_amax, o_proj_amax
+        else:
+            return None, None
+
     def _process_ffn_weights_local(self, layer_idx: int) -> Tuple[torch.Tensor, ...]:
         dt1_1 = self._cast_to(self.source_weights[layer_idx]['fc1_1'], torch.bfloat16)
         dt1_2 = self._cast_to(self.source_weights[layer_idx]['fc1_2'], torch.bfloat16)
@@ -752,6 +875,35 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
                 share_fc2_weight = None
 
         return fc1_weight, share_fc1_weight, fc2_weight, share_fc2_weight
+
+    def _process_ffn_amax(self, layer_idx: int) -> Tuple[torch.Tensor, ...]:
+        if self.amax_ready:
+            fc1_amax = self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['fc1_amax']), torch.bfloat16)
+            fc2_amax = self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['fc2_amax']), torch.bfloat16)
+
+            if self.share_expert_num > 0:
+                share_fc1_amax = self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['share_fc1_amax']),
+                                               torch.bfloat16)
+                share_fc2_amax = self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['share_fc2_amax']),
+                                               torch.bfloat16)
+            else:
+                share_fc1_amax, share_fc2_amax = None, None
+
+            if self.device_mesh is not None:
+                fc1_amax = self._redistribute_dtensor(
+                    DTensor.from_local(fc1_amax, self.device_mesh, [Replicate(), Replicate()]),
+                    [Replicate(), Shard(0)])
+                fc2_amax = self._redistribute_dtensor(
+                    DTensor.from_local(fc2_amax, self.device_mesh, [Replicate(), Replicate()]),
+                    [Replicate(), Shard(0)])
+                if self.share_expert_num > 0:
+                    share_fc2_amax = self._redistribute_dtensor(
+                        DTensor.from_local(share_fc2_amax, self.device_mesh, [Replicate(), Replicate()]),
+                        [Replicate(), Shard(0)])
+
+            return fc1_amax, fc2_amax, share_fc1_amax, share_fc2_amax
+        else:
+            return None, None, None, None
 
     def _process_gate_weights(self, layer_idx: int) -> torch.Tensor:
 
@@ -888,6 +1040,65 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
             fp8_qscale = fp8_qscale[:14]
 
         return *fp8_weights, fp8_qscale
+
+    def _process_quant_w4a8(self, dense_gemm_weights: List[torch.Tensor], dense_gemm_amax: List[torch.Tensor],
+                            group_gemm_weights: List[torch.Tensor], group_gemm_amax: List[torch.Tensor]):
+
+        dense_gemm_w8a8_weights = []
+        dense_gemm_w8a8_smooth_quant_scale = []
+        dense_gemm_w8a8_weight_qscale = []
+        group_gemm_w4a8_weights = []
+        group_gemm_w4a8_smooth_quant_scale = []
+        group_gemm_w4a8_i8_weight_qscale = []
+        group_gemm_w4a8_i4_weight_qscale_zero = []
+
+        for weight, amax in zip(dense_gemm_weights, dense_gemm_amax):
+            if weight is None:
+                smooth_quant_scale, weight, i8_weight_qscale = None, None, None
+            else:
+                smooth_quant_scale, weight, i8_weight_qscale = quant_gemm_weight_w8a8(weight, amax)
+                smooth_quant_scale = (1.0 / smooth_quant_scale).to(smooth_quant_scale.dtype)
+            dense_gemm_w8a8_weights.append(weight)
+            dense_gemm_w8a8_smooth_quant_scale.append(smooth_quant_scale)
+            dense_gemm_w8a8_weight_qscale.append(i8_weight_qscale)
+
+        for weight, amax in zip(group_gemm_weights, group_gemm_amax):
+            is_dense = False
+            if weight.dim() == 2:
+                weight = weight.unsqueeze(0)
+                is_dense = True
+            smooth_quant_scale, i4_weight, i8_weight_qscale, i4_weight_qscale, i4_weight_qzero = \
+                quant_group_gemm_weight_w4a8(weight, amax)
+            smooth_quant_scale = (1.0 / smooth_quant_scale).to(smooth_quant_scale.dtype)
+            i4_scale_zero = torch.stack([i4_weight_qscale, -i4_weight_qscale * i4_weight_qzero], dim=-1)
+
+            # need process
+            from xperf_gpt.utils.quant_utils import get_w4a8_weight_preprocessor
+            i4_weight_out = []
+            i8_weight_qscale_out = []
+            i4_scale_zero_out = []
+            e, n, k = i4_weight.shape
+            group_size = 64
+            for i in range(e):
+                preprocessor = get_w4a8_weight_preprocessor(group_size, k, n)
+                i4_weight_out.append(preprocessor.convert_weight(i4_weight[i].t()))
+                i8_weight_qscale_out.append(preprocessor.convert_perchannel_scale(i8_weight_qscale[i]))
+                i4_scale_zero_out.append(preprocessor.convert_group_scale(i4_scale_zero[i]))
+
+            group_gemm_w4a8_weights.append(torch.stack(i4_weight_out, dim=0))
+            group_gemm_w4a8_smooth_quant_scale.append(smooth_quant_scale)
+            group_gemm_w4a8_i8_weight_qscale.append(torch.stack(i8_weight_qscale_out, dim=0))
+            group_gemm_w4a8_i4_weight_qscale_zero.append(torch.stack(i4_scale_zero_out, dim=0))
+
+            if is_dense:
+                group_gemm_w4a8_weights[-1] = group_gemm_w4a8_weights[-1].squeeze(0)
+                group_gemm_w4a8_smooth_quant_scale[-1] = group_gemm_w4a8_smooth_quant_scale[-1].squeeze(0)
+                group_gemm_w4a8_i8_weight_qscale[-1] = group_gemm_w4a8_i8_weight_qscale[-1].squeeze(0)
+                group_gemm_w4a8_i4_weight_qscale_zero[-1] = group_gemm_w4a8_i4_weight_qscale_zero[-1].squeeze(0)
+
+        return dense_gemm_w8a8_weights, dense_gemm_w8a8_smooth_quant_scale, dense_gemm_w8a8_weight_qscale, \
+            group_gemm_w4a8_weights, group_gemm_w4a8_smooth_quant_scale, group_gemm_w4a8_i8_weight_qscale, \
+            group_gemm_w4a8_i4_weight_qscale_zero
 
 
 class FSDPVLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
