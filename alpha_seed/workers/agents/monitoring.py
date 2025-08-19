@@ -11,7 +11,7 @@ import ray
 from alpha_seed.workers.agents.monitor_ctx import current_agent_tracker, set_current_agent_tracker
 
 
-def avg(l: list | deque) -> float:
+def avg(l: list) -> float:
     if not l:
         return 0
     return sum(l) / len(l)
@@ -75,6 +75,8 @@ class TaskTypePerfMetrics:
     # tool/env/llm
     tool_success: int = 0
     tool_error: int = 0
+    tool_retries: int = 0
+    tool_max_attempts_exceeds: int = 0
     llm_success: int = 0
 
     @staticmethod
@@ -84,46 +86,44 @@ class TaskTypePerfMetrics:
             return TaskTypePerfMetrics(agent_name=task_type)
 
         # 收集所有时间数据
-        all_creation_times = []
-        all_waiting_times = []
-        all_exec_times = []
-        all_tool_call_times = []
-        total_executions = 0
+        creation_time_accumulate = 0.0
+        waiting_time_accumulate = 0.0
+        exec_time_accumulate = 0.0
+        total_executions = sum(m.total_executions for m in metrics_list)
+        tool_call_time_accumulate = 0.0
+        total_tool_calls = sum(m.tool_success for m in metrics_list)
 
         for metrics in metrics_list:
             # 根据执行次数加权收集时间数据
-            exec_count = metrics.total_executions
-            total_executions += exec_count
+            if metrics.total_executions > 0:
+                creation_time_accumulate += metrics.avg_creation_time * metrics.total_executions
+                waiting_time_accumulate += metrics.avg_waiting_time * metrics.total_executions
+                exec_time_accumulate += metrics.avg_execution_time * metrics.total_executions
+            if metrics.tool_success:
+                tool_call_time_accumulate += metrics.avg_tool_call_time * metrics.tool_success
 
-            if exec_count > 0:
-                all_creation_times.extend([metrics.avg_creation_time] * exec_count)
-                all_waiting_times.extend([metrics.avg_waiting_time] * exec_count)
-                all_exec_times.extend([metrics.avg_execution_time] * exec_count)
-                all_tool_call_times.extend([metrics.avg_tool_call_time] * exec_count)
-
-        if total_executions > 0:
-            return TaskTypePerfMetrics(
-                agent_name=task_type,
-                avg_creation_time=sum(all_creation_times) / len(all_creation_times),
-                min_creation_time=min(m.min_creation_time for m in metrics_list),
-                max_creation_time=max(m.max_creation_time for m in metrics_list),
-                avg_waiting_time=sum(all_waiting_times) / len(all_waiting_times),
-                min_waiting_time=min(m.min_waiting_time for m in metrics_list),
-                max_waiting_time=max(m.max_waiting_time for m in metrics_list),
-                avg_execution_time=sum(all_exec_times) / len(all_exec_times),
-                min_execution_time=min(m.min_execution_time for m in metrics_list),
-                max_execution_time=max(m.max_execution_time for m in metrics_list),
-                avg_tool_call_time=sum(all_tool_call_times) / len(all_tool_call_times),
-                min_tool_call_time=min(m.min_tool_call_time for m in metrics_list),
-                max_tool_call_time=max(m.max_tool_call_time for m in metrics_list),
-                total_executions=total_executions,
-                throughput_per_second=sum(m.throughput_per_second for m in metrics_list),
-                tool_success=sum(m.tool_success for m in metrics_list),
-                tool_error=sum(m.tool_error for m in metrics_list),
-                llm_success=sum(m.llm_success for m in metrics_list),
-            )
-        else:
-            return TaskTypePerfMetrics(agent_name=task_type)
+        return TaskTypePerfMetrics(
+            agent_name=task_type,
+            avg_creation_time=creation_time_accumulate / total_executions if total_executions else 0,
+            min_creation_time=min(m.min_creation_time for m in metrics_list),
+            max_creation_time=max(m.max_creation_time for m in metrics_list),
+            avg_waiting_time=waiting_time_accumulate / total_executions if total_executions else 0,
+            min_waiting_time=min(m.min_waiting_time for m in metrics_list),
+            max_waiting_time=max(m.max_waiting_time for m in metrics_list),
+            avg_execution_time=exec_time_accumulate / total_executions if total_executions else 0,
+            min_execution_time=min(m.min_execution_time for m in metrics_list),
+            max_execution_time=max(m.max_execution_time for m in metrics_list),
+            avg_tool_call_time=tool_call_time_accumulate / total_tool_calls if total_tool_calls else 0,
+            min_tool_call_time=min(m.min_tool_call_time for m in metrics_list),
+            max_tool_call_time=max(m.max_tool_call_time for m in metrics_list),
+            total_executions=total_executions,
+            throughput_per_second=sum(m.throughput_per_second for m in metrics_list),
+            tool_success=total_tool_calls,
+            tool_error=sum(m.tool_error for m in metrics_list),
+            tool_retries=sum(m.tool_retries for m in metrics_list),
+            tool_max_attempts_exceeds=sum(m.tool_max_attempts_exceeds for m in metrics_list),
+            llm_success=sum(m.llm_success for m in metrics_list),
+        )
 
 
 @dataclass
@@ -132,6 +132,7 @@ class ToolUsePerfMetrics:
     success_count: int = 0  # 成功的次数(最终成功了都算1)
     retried_count: int = 0  # 环境失败重试的次数(除了第一次，每重试1次+1，无论最后重试多少次以及是否失败)
     error_count: int = 0  # 环境导致的失败的次数，因为llm给错输入导致的错误不算
+    max_attempts_exceeds: int = 0  # 重试达到最大次数的call次数(通常用来表示这个环境彻底坏掉)
     avg_time: float = 0.0  # 平均时间
 
     @staticmethod
@@ -145,7 +146,8 @@ class ToolUsePerfMetrics:
             success_count=total_success,
             retried_count=sum(m.retried_count for m in metrics_list),
             error_count=sum(m.error_count for m in metrics_list),
-            avg_time=sum(m.avg_time / m.success_count * total_success for m in metrics_list),  # 按成功次数加权
+            max_attempts_exceeds=sum(m.max_attempts_exceeds for m in metrics_list),
+            avg_time=sum(m.avg_time * m.success_count / total_success for m in metrics_list),  # 按成功次数加权
         )
 
 
@@ -173,7 +175,7 @@ class AgentWorkerStats:
     queue_stats: AgentWorkerQueueStats
     perf_metrics: WorkerPerfMetrics = field(default_factory=WorkerPerfMetrics)
     task_type_perf_metrics: Dict[str, TaskTypePerfMetrics] = field(default_factory=TaskTypePerfMetrics)  # task_type ->
-    tool_use_perf_metrics: Dict[str, ToolUsePerfMetrics] = field(default_factory=ToolUsePerfMetrics)
+    tool_use_perf_metrics: Dict[str, ToolUsePerfMetrics] = field(default_factory=ToolUsePerfMetrics)  # tool_name ->
 
     @staticmethod
     def merge(stats: List['AgentWorkerStats']) -> 'AgentWorkerStats':
@@ -294,7 +296,7 @@ class AgentTaskTracker:
                                                     total_time=self.execution_finish_time - self.creation_start_time)
 
     @contextmanager
-    def tool_call(self, agent_class_name: str, tool_class_name: str):
+    def tool_call(self, tool_class_name: str):
         if not self.monitor.enabled:
             yield
             return
@@ -302,24 +304,18 @@ class AgentTaskTracker:
         start = time.time()
         try:
             yield
-            self.incr_tool_call_success(tool_class_name)
-        except Exception:
-            self.incr_tool_call_error(tool_class_name)
-            raise
         finally:
             finish = time.time()
-            self.monitor.record_tool_call(task_type=agent_class_name,
+            self.monitor.record_tool_call(task_type=self.agent_cls.__name__,
                                           tool_type=tool_class_name,
                                           call_time=finish - start)
 
-    def incr_tool_call_success(self, tool_class_name: str):
-        self.monitor.incr_tool_call_success(self.agent_cls.__name__, tool_class_name)
-
-    def incr_tool_call_error(self, tool_class_name: str):
-        self.monitor.incr_tool_call_error(self.agent_cls.__name__, tool_class_name)
-
     def incr_llm_call(self):
         self.monitor.incr_llm_call(self.agent_cls.__name__)
+
+    def incr_tool_call_counter(self, tool_class_name: str, retries: int, exceeded_max_attempts: bool, success: bool):
+        self.monitor.incr_tool_call_counter(self.agent_cls.__name__, tool_class_name, retries, exceeded_max_attempts,
+                                            success)
 
 
 class AgentWorkerMonitor:
@@ -342,6 +338,9 @@ class AgentWorkerMonitor:
         # task内的调用的统计(tool/env/llm/...)
         self.tool_call_success = defaultdict(lambda: defaultdict(int))  # {agent_cls -> tool_cls -> count}
         self.tool_call_error = defaultdict(lambda: defaultdict(int))  # {agent_cls -> tool_cls -> count}
+        self.tool_call_retries = defaultdict(lambda: defaultdict(int))  # {agent_cls -> tool_cls -> count}
+        # 统计超过最大尝试次数的tool call的数量
+        self.tool_call_max_attempts_exceeds = defaultdict(lambda: defaultdict(int))  # {agent_cls -> tool_cls -> count}
         self.llm_call_success = defaultdict(int)  # {agent_cls -> count} 暂时没有区分模型的必要性
         # {agent_cls -> tool_cls -> [dur, ...]
         self.tool_call_times = defaultdict(lambda: defaultdict(lambda: deque(maxlen=window_size)))
@@ -392,6 +391,8 @@ class AgentWorkerMonitor:
                                           [list(v) for v in self.tool_call_times[agent_name].values()], [])
                 tool_calls_success = sum(self.tool_call_success[agent_name].values())
                 tool_calls_error = sum(self.tool_call_error[agent_name].values())
+                tool_calls_retries = sum(self.tool_call_retries[agent_name].values())
+                tool_calls_max_attempts_exceeds = sum(self.tool_call_max_attempts_exceeds[agent_name].values())
                 llm_calls_success = self.llm_call_success[agent_name]
 
                 if not exec_times:
@@ -402,22 +403,24 @@ class AgentWorkerMonitor:
 
                 metrics = TaskTypePerfMetrics(
                     agent_name=agent_name,
-                    avg_creation_time=sum(creation_times) / len(creation_times),
+                    avg_creation_time=avg(creation_times),
                     min_creation_time=min(creation_times),
                     max_creation_time=max(creation_times),
-                    avg_waiting_time=sum(waiting_times) / len(waiting_times),
+                    avg_waiting_time=avg(waiting_times),
                     min_waiting_time=min(waiting_times),
                     max_waiting_time=max(waiting_times),
-                    avg_execution_time=sum(exec_times) / len(exec_times),
+                    avg_execution_time=avg(exec_times),
                     min_execution_time=min(exec_times),
                     max_execution_time=max(exec_times),
-                    avg_tool_call_time=sum(tool_calls_times) / len(tool_calls_times),
+                    avg_tool_call_time=avg(tool_calls_times),
                     min_tool_call_time=min(tool_calls_times),
                     max_tool_call_time=max(tool_calls_times),
                     total_executions=len(exec_times),
                     throughput_per_second=len(exec_times) / (sum(exec_times) + 1e-6),
                     tool_success=tool_calls_success,
                     tool_error=tool_calls_error,
+                    tool_retries=tool_calls_retries,
+                    tool_max_attempts_exceeds=tool_calls_max_attempts_exceeds,
                     llm_success=llm_calls_success,
                 )
 
@@ -431,16 +434,28 @@ class AgentWorkerMonitor:
         with self._lock, self._tool_call_mutex:
             # succ
             for task_name, tool_calls in self.tool_call_success.items():
-                for tool_name, success_count in tool_calls.items():
+                for tool_name, count in tool_calls.items():
                     if tool_name not in perf:
                         perf[tool_name] = ToolUsePerfMetrics(tool_name=tool_name)
-                    perf[tool_name].success_count += success_count
+                    perf[tool_name].success_count += count
             # error
             for task_name, tool_calls in self.tool_call_error.items():
-                for tool_name, error_count in tool_calls.items():
+                for tool_name, count in tool_calls.items():
                     if tool_name not in perf:
                         perf[tool_name] = ToolUsePerfMetrics(tool_name=tool_name)
-                    perf[tool_name].error_count += error_count
+                    perf[tool_name].error_count += count
+            # retries
+            for task_name, tool_calls in self.tool_call_retries.items():
+                for tool_name, count in tool_calls.items():
+                    if tool_name not in perf:
+                        perf[tool_name] = ToolUsePerfMetrics(tool_name=tool_name)
+                    perf[tool_name].retried_count += count
+            # max attempts exceeds
+            for task_name, tool_calls in self.tool_call_max_attempts_exceeds.items():
+                for tool_name, count in tool_calls.items():
+                    if tool_name not in perf:
+                        perf[tool_name] = ToolUsePerfMetrics(tool_name=tool_name)
+                    perf[tool_name].max_attempts_exceeds += count
 
             # call time
             for task_name, tool_calls in self.tool_call_times.items():
@@ -477,13 +492,16 @@ class AgentWorkerMonitor:
         with self._lock:
             self.task_stats.failed_tasks += 1
 
-    def incr_tool_call_success(self, agent_cls: str, tool_cls: str):
+    def incr_tool_call_counter(self, agent_cls: str, tool_cls: str, retries: int, exceeded_max_attempts: bool,
+                               success: bool):
         with self._tool_call_mutex:
-            self.tool_call_success[agent_cls][tool_cls] += 1
-
-    def incr_tool_call_error(self, agent_cls: str, tool_cls: str):
-        with self._tool_call_mutex:
-            self.tool_call_error[agent_cls][tool_cls] += 1
+            if success:
+                self.tool_call_success[agent_cls][tool_cls] += 1
+            else:
+                self.tool_call_error[agent_cls][tool_cls] += 1
+            self.tool_call_retries[agent_cls][tool_cls] += retries
+            if exceeded_max_attempts:
+                self.tool_call_max_attempts_exceeds[agent_cls][tool_cls] += 1
 
     def incr_llm_call(self, agent_cls: str):
         with self._tool_call_mutex:

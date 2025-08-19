@@ -38,6 +38,7 @@ class ProgressStat:
     total: int
     finished: int
     token_throughput: float
+    prefill_throughput: float
     running_queries: int
     pending_queries: int
     active_engines: int

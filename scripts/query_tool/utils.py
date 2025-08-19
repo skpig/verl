@@ -70,7 +70,7 @@ def render_rollout_progress(stats: List[dict]) -> str:
         line = (f"{stat['pool_name']:13s} | "
                 f"Step {stat['step']}: {bar} | "
                 f"done {stat['finished']} / {stat['total']} | "
-                f"{stat['token_throughput']:.1f} TPS | "
+                f"P/D {stat['prefill_throughput']:.0f}/{stat['token_throughput']:.1f} TPS | "
                 f"running {stat['running_queries']} pending {stat['pending_queries']} | "
                 f"old {oldest} LRU {least_recent_update} new {latest} (sec ago) | "
                 f"Engine: active {stat['active_engines']}")

@@ -9,7 +9,7 @@ from transformers import PreTrainedTokenizer
 from alpha_seed.utils.tokenizer.async_tokenizer import AsyncTokenizer
 from alpha_seed.workers.agents.handlers import register_handler, TaskContext
 from alpha_seed.workers.agents.handlers.base import AsyncAgent
-from alpha_seed.workers.agents.handlers.base_tool import BaseTool
+from alpha_seed.workers.agents.handlers.base_tool import BaseTool, ToolResult
 from alpha_seed.workers.agents.llm import AsyncLLMInterface
 from alpha_seed.workers.agents.handlers.tool.parser import FunctionCall, ToolParser, _extract_messages_from_dataproto
 from mono_rl import DataProto
@@ -51,7 +51,7 @@ class Calculator(BaseTool):
         tool_schema = OpenAIFunctionToolSchema.model_validate(schema)
         return tool_schema
 
-    async def execute(self, instance_id: str, parameters: dict[str, Any], **kwargs) -> Tuple[str, float, dict]:
+    async def execute(self, instance_id: str, parameters: dict[str, Any], **kwargs) -> ToolResult:
         """Execute the tool.
 
         Args:
@@ -69,7 +69,7 @@ class Calculator(BaseTool):
             fn_output = f"Error: {e}"
 
         fn_res: str = json.dumps(fn_output)
-        return fn_res, 0.0, {}
+        return ToolResult(fn_res)
 
 
 @register_handler("agent/tool/special_calculator")
@@ -337,7 +337,8 @@ class SpecialCalculator(AsyncAgent):
             instance_id = str(uuid4())
 
             # Execute the tool
-            tool_response, tool_reward_score, tool_metrics = await tool.execute(instance_id, tool_args)
+            tool_result = await tool.execute(instance_id, tool_args)
+            tool_response = tool_result.result
 
             return {"role": "tool", "content": tool_response, "tool_name": tool_name}
 

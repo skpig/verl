@@ -2,13 +2,14 @@ import json
 import os
 import signal
 import socket
+import subprocess
 import sys
 import threading
 import time
+import traceback
 import warnings
 from functools import reduce
 
-from alpha_seed.workers.streaming_service.rollout_request_manager import get_all_request_manager_actors_with_names
 from scripts.query_tool.agent_monitor import render_agent_watch_data
 from scripts.query_tool.rollout_monitor import list_running_queries_str, list_finished_queries_str, \
     get_query_details_str, evict_query, list_all_pools_str, get_statistics_str
@@ -32,7 +33,7 @@ yaml.add_representer(FlowStyleList, represent_flow_list)
 
 
 def handle_client(conn, server):
-    from alpha_seed.workers.streaming_service.rollout_request_manager import RequestManagerRegisterCenter, RequestManager, get_all_request_manager_actors
+    from alpha_seed.workers.streaming_service.rollout_request_manager import get_all_request_manager_actors_with_names
     from alpha_seed.workers.streaming_service.rollout_request_manager_diagnosis import ProgressStat
     from alpha_seed.workers.agents.metrics_collector import get_agent_metrics_collector
 
@@ -40,13 +41,19 @@ def handle_client(conn, server):
     class RealTimeStats:
         rollout: ProgressStat
         agent: dict  # 定义见 collector.get_basic_stats
+        agent_collector_info: dict  # 见 collector.agent_collector_info
+        query_cost: float  # 读取一轮数据花多久
 
     try:
-        data = conn.recv(4096).decode()
-        print(f"[daemon] cmd received: {data}")
-        args = json.loads(data)
+        while True:
+            data = conn.recv(4096).decode().strip()
+            if not data:
+                time.sleep(0.1)
+                continue
+            print(f"[daemon] cmd received: {data}")
+            args = json.loads(data)
+            break
 
-        pool = args.get("pool")
         cmd = args["command"]
         response = ""
 
@@ -55,6 +62,10 @@ def handle_client(conn, server):
             print("Stopping daemon ...")
             conn.sendall("daemon stopped".encode())
             server.close()
+            try:
+                os.remove(SOCKET_PATH)
+            except FileNotFoundError:
+                pass
             os.kill(os.getpid(), signal.SIGTERM)
         elif cmd == "list-pools":
             response = list_all_pools_str()
@@ -62,6 +73,7 @@ def handle_client(conn, server):
         # 其他所有需要request manager的命令
         else:
             rms = get_all_request_manager_actors_with_names()
+            assert rms, "no request manager found, please check the actors of your job"
 
             if cmd == "list":
                 response = list_running_queries_str(rms)
@@ -77,31 +89,63 @@ def handle_client(conn, server):
                 response = ""
                 for _, rm in rms:
                     response += get_statistics_str(rm) + "\n\n"
+            elif cmd == "dump-trace":
+                spans = []
+                task_runner = ray.get_actor("task_runner")
+                task_runner_spans = ray.get(task_runner.dump_trace_spans.remote())
+                spans.extend(task_runner_spans)
+                for _, rm in rms:
+                    request_spans = ray.get(rm.dump_request_trace.remote())
+                    spans.extend(request_spans)
+                from alpha_seed.utils.profile.timeline import export_chrome_trace
+                save_path = export_chrome_trace('query_trace.json.gz', spans)
+                response = f"trace.json.gz saved to {save_path} with {len(spans)} spans"
+                will_upload = args.get("upload")
+                if will_upload:
+                    time.sleep(1)  # 等flush完成，被subprocess可见
+                    result = subprocess.run(
+                        f"/opt/tiger/mlx_deploy/bin/mlx asset upload {save_path}",
+                        shell=True,
+                        capture_output=True,
+                        text=True,
+                    )
+                    stdout = result.stdout
+                    stderr = result.stderr
+                    response += f"\n{stdout}\n{stderr}"
+                    if result.returncode != 0:
+                        response += "\n[ERROR] upload profiler trace fail. please see the log around"
             elif cmd == "watch-all":
                 collector = get_agent_metrics_collector()
                 while True:
                     try:
+                        t0 = time.time()
                         rollout_stats = ray.get([rm.get_progress.remote() for _, rm in rms])
                         rollout_stats = reduce(lambda x, y: x + y,
                                                rollout_stats)  # [[rollout], [val]] => [rollout, val]
                         agent_stats = ray.get(collector.get_basic_stats.remote())
-                        rt_stats = RealTimeStats(rollout_stats, agent_stats)
+                        agent_collector_info = ray.get(collector.get_collector_info.remote())
+                        t1 = time.time()
+                        rt_stats = RealTimeStats(rollout_stats, agent_stats, agent_collector_info, t1 - t0)
 
                         # flush frame buffer
                         payload = json.dumps(asdict(rt_stats)) + '\n'
                         conn.sendall(payload.encode())
                         time.sleep(2)
-                    except Exception:
-                        print("\n[client disconnected]\n")
+                    except BrokenPipeError as e:
+                        print(f"\n[client disconnected]\n")
+                        break
+                    except Exception as e:
+                        print(f"\n[client disconnected] with error {e}\n")
+                        traceback.print_exc()
                         break
             else:
-                response = f"Unknown command: {cmd}"
+                response = f"Unknown command: {cmd}\n"
 
         if response:
             conn.sendall(response.encode())
 
     except Exception as e:
-        conn.sendall(f"Error: {str(e)}".encode())
+        conn.sendall(f"Error: {str(e)}\n".encode())
     finally:
         conn.close()
 
@@ -155,6 +199,8 @@ def send_to_daemon(cmd, args_dict):
         # response
         try:
             if cmd in ['watch-all']:
+                show_debug_info = args_dict.get("debug", False)
+
                 # watch 类的用console实时刷新画面
                 console = Console()
                 with Live(auto_refresh=True, console=console) as live:
@@ -180,12 +226,16 @@ def send_to_daemon(cmd, args_dict):
                                     rollout_frame_buf = "\n(no running steps, please hold on ...)\n"
 
                                 # agent
-                                agent_frame_buf = render_agent_watch_data(rt_stats['agent'])
+                                agent_frame_buf = render_agent_watch_data(rt_stats['agent'],
+                                                                          rt_stats['agent_collector_info'],
+                                                                          rt_stats['query_cost'], show_debug_info)
 
                                 # flush frame
                                 live.update(f'{rollout_frame_buf}\n{agent_frame_buf}')
+                            except ValueError as e:
+                                console.print(f"[red]Parse error:[/red] {e}, {line}")
                             except Exception as e:
-                                console.print(f"[red]Parse error:[/red] {e}")
+                                console.print(f"[red]error:[/red] {e}, {line}")
             else:
                 # 非watch类的直接打印
                 response_chunks = []
@@ -232,7 +282,8 @@ def main():
     subparsers.add_parser('list-finished', help='List finished queries')
 
     # watch queries
-    subparsers.add_parser('watch-all', help='watch query processing progress')
+    watch_all_parser = subparsers.add_parser('watch-all', help='watch query processing progress')
+    watch_all_parser.add_argument('--debug', action='store_true', help='show query tool internal diagnosis info')
 
     # get query details
     get_parser = subparsers.add_parser('get', help='Get details of a query')
@@ -244,6 +295,10 @@ def main():
 
     # show stats
     subparsers.add_parser('show-stats', help='Show statistics')
+
+    # dump query trace
+    dump_trace_parser = subparsers.add_parser('dump-trace', help='dump query trace intermediately')
+    dump_trace_parser.add_argument('--upload', action='store_true', help='to upload to merlin or not')
 
     args = parser.parse_args()
     if args.command == 'daemon':

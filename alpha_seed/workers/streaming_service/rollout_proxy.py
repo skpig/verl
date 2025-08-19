@@ -584,8 +584,8 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
                     self._finalize(wg, e)
 
             total, pending_size = ray.get(self.request_manager.get_size.remote())
-            throughput = ray.get(self.request_manager.get_estimated_throughput.remote())
-            self._trace_load_metrics(loads, throughput, total, pending_size)
+            prefill_throughput, decode_throughput = ray.get(self.request_manager.get_estimated_throughput.remote())
+            self._trace_load_metrics(loads, prefill_throughput, decode_throughput, total, pending_size)
 
             loop_cost = time.time() - t0  # noqa: for py-spy
             sleep_interval = max(0., self.poll_interval - loop_cost)
@@ -630,12 +630,17 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
                   'will teardown to process to propagate errors in time')
             os._exit(11)  # noqa
 
-    def _trace_load_metrics(self, loads: Dict[Tuple[str, str], LoadMetric], throughput: Dict[str, float], total: int,
-                            global_pending: int):
+    def _trace_load_metrics(self, loads: Dict[Tuple[str, str], LoadMetric], prefill_throughput: Dict[str, float],
+                            decode_throughput: Dict[str, float], total: int, global_pending: int):
+        total_waiting_num = 0
+        total_prefilling_num = 0
         total_decoding_num = 0
         for (wg_id, wg_name), metric in loads.items():
+            total_waiting_num += metric.num_waiting
+            total_prefilling_num += metric.num_prefilling
             total_decoding_num += metric.num_decoding
-            tp = throughput.get(wg_id) or 0
+            prefill_tps = prefill_throughput.get(wg_id) or 0
+            decode_tps = decode_throughput.get(wg_id) or 0
             evt = CounterEvent(
                 name='load metrics:',
                 pid=f'{self._request_manager_name} {wg_name}',
@@ -646,7 +651,8 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
                     'decoding': metric.num_decoding,
                     'pending': metric.num_pending,
                     'waiting': metric.num_waiting,
-                    'decode TPS': tp,
+                    'prefill TPS': prefill_tps,
+                    'decode TPS': decode_tps,
                 },
             )
             self._tracer.trace(evt)
@@ -657,10 +663,13 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
             pid=f'RequestManager/{self._request_manager_name}',  # 不区分hybrid/standalone
             ts=time.time() * 1e6,
             data={
+                '$waiting': total_waiting_num,
+                '$prefilling': total_prefilling_num,
                 '$decoding': total_decoding_num,
                 '$processing': total,
                 '$pending dispatch': global_pending,
-                '$decode TPS': sum(throughput.values()),
+                '$prefill TPS': sum(prefill_throughput.values()),
+                '$decode TPS': sum(decode_throughput.values()),
             },
         )
         self._tracer.trace(evt)
@@ -845,9 +854,9 @@ class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
             # observability
             total, pending_size = ray.get(self.request_manager.get_size.remote())
             num_ready_replicas = len(self.replicas.ready_worker_group_ids)
-            throughput = ray.get(self.request_manager.get_estimated_throughput.remote())
+            prefill_throughput, decode_throughput = ray.get(self.request_manager.get_estimated_throughput.remote())
             finished_stats = ray.get(self.request_manager.get_finished_stats.remote(self._metrics_logger.global_step))
-            self._trace_load_metrics(loads, throughput, total, pending_size)
+            self._trace_load_metrics(loads, prefill_throughput, decode_throughput, total, pending_size)
 
             loop_cost = time.time() - t0
             sleep_interval = max(0., self.poll_interval - loop_cost)
@@ -877,12 +886,9 @@ class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
                 'loop_cost': loop_cost,
                 'gmem_insufficient_rebalanced_count': gmem_insufficient_relabenced_count,
                 'load_rebalanced_count': load_rebalanced_count,
-                'total_token_TPS': sum(throughput.values()),
+                'total_token_TPS': sum(decode_throughput.values()),
                 'total_processes_queries': finished_stats.finished_size,
             })
-
-    def _aggregate_throughput(self, throughput: Dict[str, float]):
-        return
 
     def get_step_metrics(self) -> dict:
         super_metrics = super().get_step_metrics()

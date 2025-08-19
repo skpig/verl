@@ -1,7 +1,7 @@
 import functools
 
 import async_timeout
-from alpha_seed.workers.agents.handlers.base_tool import BaseTool
+from alpha_seed.workers.agents.handlers.base_tool import BaseTool, ToolResult
 from verl.tools.schemas import OpenAIFunctionToolSchema
 import re
 import os
@@ -60,12 +60,12 @@ class JupyterCI(BaseTool):
         tool_schema = OpenAIFunctionToolSchema.model_validate(schema)
         return tool_schema
 
-    async def execute(self, instance_id: str, tool_args: dict[str, Any], **kwargs) -> Tuple[str, float, dict]:
+    async def execute(self, instance_id: str, tool_args: dict[str, Any], **kwargs) -> ToolResult:
         # try:
-        response = await self.submit_python_jupyter(tool_args['code'], kwargs['ci_sandbox_psm'])
+        response, retries, max_attempts = await self.submit_python_jupyter(tool_args['code'], kwargs['ci_sandbox_psm'])
         if os.getenv('PRINT_JUPYTER_RESPONSE', '0') == '1':
             print('[doubao_code_interpreter] jupyter_response:', response)
-        return response, 0, {}
+        return ToolResult(response, retries, max_attempts)
         # except Exception as e:
         #     # Must handle this
         #     print(f"[CI] Error: {e}")
@@ -86,7 +86,10 @@ class JupyterCI(BaseTool):
         eval_response = None
         rsp_str = ''
         plugin_failed_message = ''
-        for _ in range(3):
+        retries = 0
+        max_attempts = 3
+        for i in range(max_attempts):
+            retries = i
             try:
                 await self.get_endpoint(psm)
                 print('current_end_point', self.sandbox_endpoint)
@@ -126,7 +129,7 @@ class JupyterCI(BaseTool):
 
         if rsp_str == "":
             rsp_str = "tool_call error:" + plugin_failed_message
-        return rsp_str
+        return rsp_str, retries, max_attempts
 
     async def get_endpoint(self, psm):
         code_sandbox_psm = psm if psm else SANDBOX_PSM
@@ -218,14 +221,15 @@ class JupyterCI_stateful(BaseTool):
         tool_schema = OpenAIFunctionToolSchema.model_validate(schema)
         return tool_schema
 
-    async def execute(self, instance_id: str, tool_args: dict[str, Any], initial_files,
-                      **kwargs) -> Tuple[str, float, dict]:
+    async def execute(self, instance_id: str, tool_args: dict[str, Any], **kwargs) -> ToolResult:
+        initial_files = kwargs.get("initial_files")
+        assert initial_files is None, f"initial_files kwargs required, got {kwargs.keys()}"
         _start_time = time.time()
         # try:
         if self.jupyter_env_id is None:
             await self.start_up_jupyter_w_state(initial_files)
-        response = await self.submit_python_jupyter_w_state({'code_blocks': tool_args['code']},
-                                                            env_id=self.jupyter_env_id)
+        response, retries, max_attempts = await self.submit_python_jupyter_w_state({'code_blocks': tool_args['code']},
+                                                                                   env_id=self.jupyter_env_id)
         if "⚠️ Jupyter Sandbox Restarted" in response:
             self.jupyter_env_id = None
 
@@ -237,7 +241,7 @@ class JupyterCI_stateful(BaseTool):
             print(
                 f'[doubao_code_interpreter] WARNING: The current search step runs for {_step_time:.2f} seconds with result {response}'
             )
-        return response, 0, {}
+        return ToolResult(response, retries, max_attempts)
         # except Exception as e:
         #     # Must handle this
         #     print(f"[CI] Error: {e}")
@@ -293,9 +297,9 @@ class JupyterCI_stateful(BaseTool):
                         print("All start jupyter retry attempts failed.")
 
             start_up_test_action_dict = {'code_blocks': ['print("sucess start up")']}
-            start_up_test_response = await self.submit_python_jupyter_w_state(start_up_test_action_dict,
-                                                                              env_id=text['env_id'],
-                                                                              files=initial_files)
+            start_up_test_response, _, _ = await self.submit_python_jupyter_w_state(start_up_test_action_dict,
+                                                                                    env_id=text['env_id'],
+                                                                                    files=initial_files)
             if 'sucess start up' in start_up_test_response:
                 self.jupyter_env_id = text['env_id']
                 print('jupyter start up sucess')
@@ -329,7 +333,10 @@ class JupyterCI_stateful(BaseTool):
         eval_response = None
         rsp_str = ''
         plugin_failed_message = ''
-        for _ in range(3):
+        retries = 0
+        max_attempts = 3
+        for i in range(max_attempts):
+            retries = i
             # try:
             url = f"{self.jupyter_w_state_endpoint}/run_jupyter"
             async with aiohttp.ClientSession() as session:
@@ -400,7 +407,7 @@ class JupyterCI_stateful(BaseTool):
 
         if rsp_str == "":
             rsp_str = "plugin_error:" + plugin_failed_message
-        return rsp_str
+        return rsp_str, retries, max_attempts
 
     async def get_endpoint(self, psm):
         code_sandbox_psm = psm if psm else SANDBOX_PSM

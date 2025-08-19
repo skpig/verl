@@ -1,3 +1,4 @@
+import copy
 import itertools
 import warnings
 from contextlib import contextmanager
@@ -485,18 +486,19 @@ class WaterfallSlotTracer:
 
     def __init__(self, tracer: Tracer):
         self.tracer = tracer
-        self._thread_slots = defaultdict(list)
+        self._thread_slots = defaultdict(list)  # pid: int -> List[ThreadSlot]
         self._buffered_events: List[TracingEvent] = []
 
     def trace(self, evt: TracingEvent):
         self._buffered_events.append(evt)
 
-    def allocate_thread_slot(self, evt: Union[CompleteEvent, CoherentCompleteEvent]):
+    def allocate_thread_slot(self, evt: Union[CompleteEvent, CoherentCompleteEvent],
+                             _thread_slots: Dict[int, List[ThreadSlot]]):
         pid = evt.pid
 
         # get available thread slot
         available_slot = None
-        for t in self._thread_slots[pid]:
+        for t in _thread_slots[pid]:
             if t.latest_end_ts <= evt.ts:
                 available_slot = t
                 break
@@ -504,10 +506,10 @@ class WaterfallSlotTracer:
         # update latest empty ts
         if available_slot is None:
             available_slot = ThreadSlot(
-                tid=len(self._thread_slots[pid]),
+                tid=len(_thread_slots[pid]),
                 latest_end_ts=evt.ts + evt.dur,
             )
-            self._thread_slots[pid].append(available_slot)
+            _thread_slots[pid].append(available_slot)
         else:
             available_slot.latest_end_ts = evt.ts + evt.dur
 
@@ -520,9 +522,19 @@ class WaterfallSlotTracer:
         # then allocate slot to be compacted in threads
         for evt in self._buffered_events:
             if isinstance(evt, (CompleteEvent, CoherentCompleteEvent)):
-                self.allocate_thread_slot(evt)
+                self.allocate_thread_slot(evt, self._thread_slots)
             self.tracer.trace(evt)
         self._buffered_events = []
+
+    def dump(self) -> List[dict]:
+        # 返回此tracer中buffered的events的span dump，但又不影响tracer本身继续trace
+        events = copy.copy(self._buffered_events)
+        slots = copy.deepcopy(self._thread_slots)
+        events.sort(key=lambda e: (e.tid, e.ts_to_sort))
+        for evt in events:
+            if isinstance(evt, (CompleteEvent, CoherentCompleteEvent)):
+                self.allocate_thread_slot(evt, slots)
+        return CombinedEvents(events).to_objects()
 
 
 class OrderedTracer:

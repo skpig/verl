@@ -1,0 +1,45 @@
+name: unit tests
+trigger:
+  change
+jobs:
+  gen_ut_train_gen:
+    # Merlin - data.aml.verl:v205 
+    image: hub.byted.org/reckon/data.reckon.mlx.image_5940:26def500fbbd577bdfd57f100f6aa993
+    if: ${{ !contains(Event.Change.Title, "WIP") }}
+    runs-on:
+      cluster: NVIDIA_L20_16-4|hub.byted.org/reckon/data.reckon.mlx.image_5940:26def500fbbd577bdfd57f100f6aa993
+    envs:
+      LIBHDFS_OPTS: -Dhadoop.root.logger=warn,console
+      SEC_TOKEN_PATH: ${{SEC_TOKEN_PATH}}
+      CI_DEBUG_ENABLE: 1
+    timeout: 60
+    retry: 2
+    steps:
+      - name: check env
+        commands:
+          - nvidia-smi
+
+      - name: setup dependency
+        commands:
+          - cd /opt/tiger
+          - git clone -b v1.3.0 --single-branch git@code.byted.org:seed/seed_models.git
+          - git clone git@code.byted.org:seed/mono_rl.git
+          - sudo pip3 install --upgrade byted-wandb
+          - sudo pip3 install --upgrade bytedance.ndtimeline
+          - sudo pip3 install byted-omnistore==0.7.14
+          - sudo pip3 install pylatexenc
+          - sudo pip3 install openai
+          - sudo pip3 install pytest-xdist pytest-timeout
+
+      - name: rollout
+        commands:
+          - export NCCL_SHM_DISABLE=1
+          - export PYTHONPATH=$PYTHONPATH:/opt/tiger/mono_rl:/opt/tiger/seed_models
+          - export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+          - cd /home/code
+          - ray stop --force
+          - ray start --num-cpus=100 --head
+          - |
+            pytest -v --timeout=600 \
+              tests/rollout/test_rollout_manager.py::test_train_generate
+          - ray stop --force

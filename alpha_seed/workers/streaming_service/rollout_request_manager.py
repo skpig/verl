@@ -173,9 +173,10 @@ class RequestPool:
         self._mutex = threading.Lock()
 
         # metrics for observability
-        self._metrics_max_retain_seconds = 1200
+        self._metrics_max_retain_seconds = 600
         # ts_bucket(?s) -> engine_id -> step -> count
         self._accumulated_token_counts = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+        self._accumulated_prefill_token_counts = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
 
     def __len__(self) -> int:
         return len(self.requests)
@@ -277,9 +278,10 @@ class RequestPool:
                 # (out of order) in coming request is out of date, skip
                 continue
 
-            # compute decoding throughput
+            # compute prefilling/decoding throughput
             new_decoded_len = r.query.new_token_len - this_req.query.new_token_len
             self._accumulated_token_counts[ts_bucket_2s][r.assigned_engine_id][r.global_step] += new_decoded_len
+            self.accumulate_prefilling_throughput(r, this_req)
 
             if r.finished:
                 self.finished_requests[r.request_id] = r
@@ -362,8 +364,23 @@ class RequestPool:
                     ret.append((req_id, req.assigned_engine_id))
         return ret
 
+    def accumulate_prefilling_throughput(self, new_req: Request, prev_req: Request):
+        if new_req.query.recent_first_token_time > prev_req.query.recent_first_token_time:
+            prefill_dur = (new_req.query.recent_first_token_time - new_req.query.recent_scheduled_time) / 1e3  # unit: s
+            input_token_len = len(new_req.query.input_ids)
+            # 因为是实时数据，只算最近30s的interval，超过的部分不用算了，并按等比例折算
+            if prefill_dur > 30:
+                input_token_len *= 30 / prefill_dur
+                prefill_dur = 30
+            # 保持整2s一个bucket
+            prefill_end_bucket = int(new_req.query.recent_first_token_time / 1e3) // 2 * 2
+            prefill_start_bucket = int(prefill_end_bucket - prefill_dur) // 2 * 2
+            for ts_bucket in range(prefill_start_bucket, prefill_end_bucket, 2):
+                self._accumulated_prefill_token_counts[ts_bucket][new_req.assigned_engine_id][
+                    new_req.global_step] += input_token_len
+
     # 返回每个engine_id在最近给定的interval里的throughput
-    def get_throughput(self, /, step: Optional[int] = None, interval=30) -> Dict[str, float]:
+    def get_decode_throughput(self, /, step: Optional[int] = None, interval=30) -> Dict[str, float]:
         # step: 查属于第几个step的query的吞吐，None则不区分step算总吞吐
         # interval: 从前interval seconds到现在区间的统计的吞吐
         now = time.time()
@@ -390,6 +407,40 @@ class RequestPool:
         for bucket in ts_buckets:
             if bucket < out_dated_ts:
                 self._accumulated_token_counts.pop(bucket, None)
+            else:
+                break
+
+        return ret
+
+    def get_prefill_throughput(self, /, step: Optional[int] = None, interval=10) -> Dict[str, float]:
+        # step: 查属于第几个step的query的吞吐，None则不区分step算总吞吐
+        # interval: 从前interval seconds到现在区间的统计的吞吐
+        now = time.time()
+        since = now - interval
+        ts_buckets = sorted(self._accumulated_prefill_token_counts.keys())
+        token_count = defaultdict(int)
+        for bucket in reversed(ts_buckets):
+            if bucket > since:
+                for engine_id in list(self._accumulated_prefill_token_counts[bucket].keys()):
+                    if step is None:
+                        count_all_steps = list(self._accumulated_prefill_token_counts[bucket][engine_id].values())
+                        for count in count_all_steps:
+                            token_count[engine_id] += count
+                    else:
+                        count = self._accumulated_prefill_token_counts[bucket][engine_id][step]
+                        token_count[engine_id] += count
+
+        ret = {}
+        for engine_id, count in token_count.items():
+            ret[engine_id] = count / interval
+
+        # clean up out dated ts buckets
+        out_dated_ts = now - self._metrics_max_retain_seconds
+        for bucket in ts_buckets:
+            if bucket < out_dated_ts:
+                self._accumulated_prefill_token_counts.pop(bucket, None)
+            else:
+                break
 
         return ret
 
@@ -606,9 +657,9 @@ class RequestManager:
         pending = self.req_pool.get_pending_size()
         return total, pending
 
-    def get_estimated_throughput(self) -> Dict[str, float]:
+    def get_estimated_throughput(self) -> Tuple[Dict[str, float], Dict[str, float]]:
         # 返回{engine_id -> 最近interval内的平均throughput}
-        return self.req_pool.get_throughput()
+        return self.req_pool.get_prefill_throughput(), self.req_pool.get_decode_throughput()
 
     def get_concurrency(self) -> Dict[str, int]:
         return self.req_pool.get_concurrency()
@@ -785,7 +836,14 @@ class RequestManager:
         return history_flows
 
     def dump_request_trace(self) -> List[dict]:
-        return Tracer.merge_all()
+        tracer_spans = Tracer.merge_all()
+        buffered_spans = self.waterfall_tracer.dump()
+        pending_events_to_flows = copy.copy(self._pending_events_to_flows)
+        flow_spans = []
+        for events in pending_events_to_flows:
+            flows = self._make_stale_flow_trace_event(events)
+            flow_spans.extend(CombinedEvents(flows).to_objects())
+        return tracer_spans + buffered_spans + flow_spans
 
     def get_step_metrics(self, step) -> Dict[str, float]:
         return self.req_stat.get_step_metrics(step)
@@ -852,8 +910,10 @@ class RequestManager:
             step_total = len(self._query_id_log[step])
             step_finished = step_total - len(current_inflight.intersection(self._query_id_log[step]))
 
-            throughput = self.req_pool.get_throughput(step=step)
-            total_throughput = sum(throughput.values())
+            decode_throughput = self.req_pool.get_decode_throughput(step=step)
+            total_decode_tps = sum(decode_throughput.values())
+            prefill_throughput = self.req_pool.get_prefill_throughput(step=step)
+            total_prefill_tps = sum(prefill_throughput.values())
 
             # 为当前step计算指标
             step_running = 0
@@ -893,7 +953,8 @@ class RequestManager:
                         step=step,
                         total=step_total,
                         finished=step_finished,
-                        token_throughput=total_throughput,
+                        token_throughput=total_decode_tps,
+                        prefill_throughput=total_prefill_tps,
                         running_queries=step_running,
                         pending_queries=step_pending,
                         active_engines=len(step_active_engines),

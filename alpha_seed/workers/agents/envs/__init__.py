@@ -41,12 +41,11 @@ class BaseEnv(ABC):
             async def wrapped_step(*args, **kwargs):
                 try:
                     tracker: AgentTaskTracker = current_agent_tracker.get()
-                    agent_class_name = current_agent.get()
                 except LookupError:
                     # skip if not tracker not set
                     return await orig_call(*args, **kwargs)
 
-                with tracker.tool_call(agent_class_name, self.__class__.__name__):
+                with tracker.tool_call(self.__class__.__name__):
                     result = await orig_call(*args, **kwargs)
                     return result
 

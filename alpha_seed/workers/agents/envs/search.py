@@ -2,9 +2,13 @@ import os
 import json
 import time
 import asyncio
+from typing import Tuple
+
 import aiohttp
 import numpy as np
 from collections import defaultdict
+
+from alpha_seed.workers.agents.handlers.base_tool import BaseTool, ToolResult
 from verl.tools.schemas import OpenAIFunctionToolSchema
 
 from alpha_seed.workers.agents.envs import BaseEnv
@@ -44,7 +48,10 @@ async def apihub(query, search_engine, max_pages, global_step=0):
 
     pages = []
 
-    for _ in range(3):
+    retries = 0
+    max_attempts = 3
+    for i in range(max_attempts):
+        retries = i
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post("https://gpt.bytedance.net/admin/prompt/apihub/fc_proxy",
@@ -69,7 +76,7 @@ async def apihub(query, search_engine, max_pages, global_step=0):
         if pages:
             break
 
-    return pages[:max_pages]
+    return pages[:max_pages], retries, max_attempts
 
 
 def GlobalSearch(query: str) -> str:
@@ -86,7 +93,7 @@ def GlobalSearch(query: str) -> str:
 
 
 async def SearchAPI(query: str, max_pages: int, search_engine: str, max_token_len: int, tokenizer: AutoTokenizer,
-                    metrics: dict, global_step: int, **kwargs) -> str:
+                    metrics: dict, global_step: int, **kwargs) -> Tuple[str, int, int]:
     """
     Access search engines to obtain information.
 
@@ -98,17 +105,19 @@ async def SearchAPI(query: str, max_pages: int, search_engine: str, max_token_le
     snippets = f"Result from search query: {query}\nNo results found."
 
     if search_engine == "mix":
-        pages_usbing, pages_toutiao = await asyncio.gather(
+        usbing_resp, toutiao_resp = await asyncio.gather(
             apihub(query, search_engine="usbing", max_pages=max_pages, global_step=global_step),
             apihub(query, search_engine="toutiao", max_pages=max_pages, global_step=global_step))
+        retries = usbing_resp[1] + toutiao_resp[1]
+        max_attempts = usbing_resp[2] + toutiao_resp[2]
         pages = []
         url_set = set()
-        for page in pages_usbing + pages_toutiao:
+        for page in usbing_resp[0] + toutiao_resp[0]:
             if page["url"] not in url_set:
                 pages.append(page)
                 url_set.add(page["url"])
     else:
-        pages = await apihub(query, search_engine=search_engine, max_pages=max_pages)
+        pages, retries, max_attempts = await apihub(query, search_engine=search_engine, max_pages=max_pages)
 
     if pages:
         snippets = f"Result from search query: {query}\n"
@@ -122,12 +131,14 @@ async def SearchAPI(query: str, max_pages: int, search_engine: str, max_token_le
     metrics['len'].append(content_length)
     metrics['failure'].append(int(len(pages) == 0))
 
-    return response
+    return response, retries, max_attempts
 
 
-class SearchEnv(BaseEnv):
+class SearchEnv(BaseTool):
 
     def __init__(self, tokenizer, **kwargs):
+        tool_schema = self.get_openai_tool_schema()
+        super().__init__({}, tool_schema)
         self._call_count = 0
         self._call_history = []
         self._metrics = defaultdict(list)
@@ -144,12 +155,15 @@ class SearchEnv(BaseEnv):
         func_name, _ = parse_func_call_kwargs(action)
         return func_name in ["Search", "GlobalSearch"]
 
-    async def step(self, instance_id, tool_name, tool_args: dict, global_step: int, **kwargs) -> str:
+    async def execute(self, instance_id, tool_args: dict, **kwargs) -> ToolResult:
+        tool_name: str = kwargs.get("tool_name")
+        global_step: int = kwargs.get("global_step")
         assert tool_name in ["Search", "GlobalSearch"]
         action = tool_args["query"]
         self._call_count += 1
         if action in self._call_history:
             response = "This search query has been called before. Please try again with another query."
+            retries, max_attempts = 0, 0
         else:
             self._call_history.append(action)
 
@@ -162,8 +176,8 @@ class SearchEnv(BaseEnv):
                 "global_step": global_step,
             })
 
-            response = await SearchAPI(**tool_args)
-        return response
+            response, retries, max_attempts = await SearchAPI(**tool_args)
+        return ToolResult(response, retries, max_attempts)
 
     @property
     def metrics(self) -> dict:
@@ -207,5 +221,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
     print(args)
     env = create_from_env_str(f"deep_research/search@{json.dumps(vars(args))}", tokenizer=tokenizer)
-    print(asyncio.run(env.step("", "Search", {"query": f'Search(query="{args.query}")'})))
+    print(asyncio.run(env.execute("", {"query": f'Search(query="{args.query}")'}, tool_name="Search", global_step=0)))
     print(env.get_openai_tool_schema())

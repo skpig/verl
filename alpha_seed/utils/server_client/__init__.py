@@ -1,6 +1,10 @@
+from typing import List
+
 import ray
 import omegaconf
 from omegaconf import OmegaConf, DictConfig
+
+from alpha_seed.utils.profile.timeline import Tracer
 
 
 class KVStore:
@@ -20,6 +24,9 @@ class TaskRunnerBase:
 
     def main(self, func, *args, **kwargs):
         return func(*args, **kwargs)
+
+    def dump_trace_spans(self) -> List[dict]:
+        return Tracer.merge_all()
 
 
 @ray.remote

@@ -56,13 +56,12 @@ class AgentWorker:
         self.global_state = GlobalState()
 
         # 添加监控
+        self.worker_name = f"{request_manager_name}.w{worker_id}"
         self.monitor = AgentWorkerMonitor(
-            worker_id=f'{request_manager_name}.{worker_id}',
+            worker_id=self.worker_name,
             enabled=config.rollout_server.agent.enable_monitoring,
         )
-        stable_pool_names = self.config.elastic.resource_pools.stable_pool_names
-        stable_pool_name = stable_pool_names[0] if stable_pool_names else ''
-        self.collector = init_agent_metrics_collector(stable_pool_name)
+        self.collector = get_agent_metrics_collector()
 
         self._metrics_enabled = config.rollout_server.agent.enable_monitoring
         self._last_metrics_emit = 0
@@ -71,12 +70,18 @@ class AgentWorker:
         # metrics collector loop
         self._metrics_task = self.get_event_loop().create_task(self._metrics_collection_loop())
 
-    async def execute(self, agent_cls: Type[AsyncAgent] | Type[ThreadedAgent], /, *args, **kwargs):
+    async def execute(self, agent_cls: Type[AsyncAgent] | Type[ThreadedAgent], /, item: DataProto, *args, **kwargs):
         # 兼容旧的functional handler，保持task context中有tokenizer赋值
         for a in args:
             if isinstance(a, TaskContext):
                 a.tokenizer = self.tokenizer
         agent_init_kwargs = self._make_essential_init_kwargs()
+
+        # 给item增加必要的agent worker相关的元数据
+        item.meta_info.update({
+            'agent_worker_name': self.worker_name,
+            'agent_class': agent_cls.__name__,
+        })
 
         if issubclass(agent_cls, AsyncAgent):
             tracker = self.monitor.task_tracker()
@@ -84,7 +89,7 @@ class AgentWorker:
                 agent = agent_cls(self.async_tokenizer, self.llm, **agent_init_kwargs)
             async with self.concurrency_limit:
                 with tracker.execution(agent_cls):
-                    return await agent.run_task(*args, **kwargs)
+                    return await agent.run_task(item, *args, **kwargs)
 
         elif issubclass(agent_cls, ThreadedAgent):
             tracker = self.monitor.task_tracker()
@@ -95,7 +100,7 @@ class AgentWorker:
                 with tracker.execution(agent_cls):
                     agent_task = partial(agent.run_task, **kwargs) if kwargs else agent.run_task
                     loop = self.get_event_loop()
-                    return await loop.run_in_executor(self._thread_executor, agent_task, *args)
+                    return await loop.run_in_executor(self._thread_executor, agent_task, item, *args)
         else:
             raise TypeError(f"agent_cls must be a subclass of AsyncAgent or ThreadedAgent. got {type(agent_cls)}")
 
@@ -152,7 +157,7 @@ class AgentWorker:
 
 class ExecutorBase:
 
-    async def submit(self, cls: Type[callable], /, *args, **kwargs) -> DataProto | List[DataProto]:
+    async def submit(self, cls: Type[callable], /, item: DataProto, *args, **kwargs) -> DataProto | List[DataProto]:
         """
         提交一个prompt到AgentWorker里运行(rollout)，
         返回rollout的结果，DataProto或者List[DataProto]，1个prompt可以返回0～N条
@@ -172,7 +177,6 @@ class RayActorExecutor(ExecutorBase):
         self.name = name
         self.max_workers = config.rollout_server.agent.max_workers
         self.worker_max_concurrency = config.rollout_server.agent.worker_max_concurrency
-        worker_oob_concurrency = 10  # 允许worker额外的并发度，用于控制指令和其他非rollout调用
         resources = {}
         stable_pool_names = config.elastic.resource_pools.stable_pool_names
         stable_pool_name = stable_pool_names[0] if stable_pool_names else ''
@@ -180,29 +184,22 @@ class RayActorExecutor(ExecutorBase):
             resources = {stable_pool_name: 1}
         RemoteAgentWorker = ray.remote(AgentWorker)
         self.workers = [
-            RemoteAgentWorker.options(scheduling_strategy="SPREAD",
-                                      max_concurrency=self.worker_max_concurrency + worker_oob_concurrency,
-                                      resources=resources,
-                                      name=f"{name}-agent_worker_{idx}").remote(idx, config, tokenizer, processor, host,
-                                                                                port, request_manager_name, None)
-            for idx in range(self.max_workers)
-        ]
-
-        self.worker_in_band_concurrency_limits = [
-            asyncio.Semaphore(self.worker_max_concurrency) for idx in range(self.max_workers)
+            RemoteAgentWorker.options(
+                scheduling_strategy="SPREAD",
+                max_concurrency=999999999,  # 非常大，不可能超过的数字就行，内部有另外的并发限制
+                resources=resources,
+                name=f"{name}-agent_worker_{idx}").remote(idx, config, tokenizer, processor, host, port,
+                                                          request_manager_name, None) for idx in range(self.max_workers)
         ]
         self.worker_pointer = cycle(range(self.max_workers))
 
-    async def submit(self, agent_cls: Type[AsyncAgent] | Type[ThreadedAgent] | callable, /, *args, **kwargs):
+    async def submit(self, agent_cls: Type[AsyncAgent] | Type[ThreadedAgent], /, item: DataProto, *args, **kwargs):
         worker_idx = next(self.worker_pointer)
         worker = self.workers[worker_idx]
         # 兼容旧的functional handler
         if inspect.isfunction(agent_cls):
             agent_cls = functional_agent(agent_cls)
-
-        # 这里统一控制ray actor in-band并发度，预留一小部分给控制
-        async with self.worker_in_band_concurrency_limits[worker_idx]:
-            return await worker.execute.remote(agent_cls, *args, **kwargs)
+        return await worker.execute.remote(agent_cls, item, *args, **kwargs)
 
     def set_global_step(self, global_step: int):
         refs = []
@@ -226,13 +223,13 @@ class LocalExecutor(ExecutorBase):
 
         self.worker_pointer = cycle(range(self.max_workers))
 
-    async def submit(self, agent_cls: Type[AsyncAgent] | Type[ThreadedAgent] | callable, /, *args, **kwargs):
+    async def submit(self, agent_cls: Type[AsyncAgent] | Type[ThreadedAgent], /, item: DataProto, *args, **kwargs):
         worker_idx = next(self.worker_pointer)
         worker = self.workers[worker_idx]
         # 兼容旧的functional handler
         if inspect.isfunction(agent_cls):
             agent_cls = functional_agent(agent_cls)
-        return await worker.execute(agent_cls, *args, **kwargs)
+        return await worker.execute(agent_cls, item, *args, **kwargs)
 
     def set_global_step(self, global_step: int):
         for w in self.workers:

@@ -9,8 +9,9 @@ from transformers import PreTrainedTokenizer
 from alpha_seed.utils.tokenizer.async_tokenizer import AsyncTokenizer
 from alpha_seed.workers.agents.handlers import register_handler, TaskContext
 from alpha_seed.workers.agents.handlers.base import AsyncAgent, AsyncLLMInterface
-from alpha_seed.workers.agents.envs.textbrowser import create_from_env_str as create_textbrowser_env_from_env_str
-from alpha_seed.workers.agents.envs.search import create_from_env_str as create_search_env_from_env_str
+from alpha_seed.workers.agents.envs.textbrowser import create_from_env_str as create_textbrowser_env_from_env_str, \
+    TextBrowserEnv
+from alpha_seed.workers.agents.envs.search import create_from_env_str as create_search_env_from_env_str, SearchEnv
 from alpha_seed.workers.agents.handlers.tool.parser import FunctionCall, ToolParser, _extract_messages_from_dataproto
 from mono_rl import DataProto
 from typing import List, Dict
@@ -26,8 +27,9 @@ class SearchAgent(AsyncAgent):
 
     def __init__(self, tokenizer: AsyncTokenizer | PreTrainedTokenizer, llm: AsyncLLMInterface, **kwargs):
         super().__init__(tokenizer, llm, **kwargs)
-        self.search = create_search_env_from_env_str("deep_research/search@{}", tokenizer=tokenizer)
-        self.textbrowser = create_textbrowser_env_from_env_str("deep_research/textbrowser@{}", tokenizer=tokenizer)
+        self.search: SearchEnv = create_search_env_from_env_str("deep_research/search@{}", tokenizer=tokenizer)
+        self.textbrowser: TextBrowserEnv = create_textbrowser_env_from_env_str("deep_research/textbrowser@{}",
+                                                                               tokenizer=tokenizer)
         self.tool_parser = ToolParser(tokenizer, self.config)
         self.tools = {
             "Search": self.search,
@@ -280,8 +282,8 @@ class SearchAgent(AsyncAgent):
 
     async def _call_tool(self, tool_call: FunctionCall, global_step: int) -> Dict[str, str]:
         """Execute a tool call and return the response"""
+        tool_name = tool_call.name
         try:
-            tool_name = tool_call.name
             tool_args = json.loads(tool_call.arguments)
 
             if tool_name not in self.tools:
@@ -291,7 +293,8 @@ class SearchAgent(AsyncAgent):
             instance_id = str(uuid4())
 
             # Execute the tool
-            tool_response = await tool.step(instance_id, tool_name, tool_args, global_step)
+            tool_result = await tool.execute(instance_id, tool_args, tool_name=tool_name, global_step=global_step)
+            tool_response = tool_result.result
 
             return {"role": "tool", "content": tool_response, "name": tool_name}
 

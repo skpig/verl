@@ -2,12 +2,12 @@ name: unit tests
 trigger:
   change
 jobs:
-  gen_ut2:
+  gen_ut_val_gen:
     # Merlin - data.aml.verl:v205 
     image: hub.byted.org/reckon/data.reckon.mlx.image_5940:26def500fbbd577bdfd57f100f6aa993
     if: ${{ !contains(Event.Change.Title, "WIP") }}
     runs-on:
-      cluster: NVIDIA_L20_16|hub.byted.org/reckon/data.reckon.mlx.image_5940:26def500fbbd577bdfd57f100f6aa993
+      cluster: NVIDIA_L20_16-4|hub.byted.org/reckon/data.reckon.mlx.image_5940:26def500fbbd577bdfd57f100f6aa993
     envs:
       LIBHDFS_OPTS: -Dhadoop.root.logger=warn,console
       SEC_TOKEN_PATH: ${{SEC_TOKEN_PATH}}
@@ -40,8 +40,6 @@ jobs:
           - ray stop --force
           - ray start --num-cpus=100 --head
           - |
-            pytest -n 4 -v --timeout=1200 \
-              tests/rollout/test_rollout_manager.py::test_train_generate \
-              tests/rollout/test_rollout_manager.py::test_val_generate \
-              tests/rollout/test_rollout_manager.py::test_queued_generate
+            pytest -v --timeout=900 \
+              tests/rollout/test_rollout_manager.py::test_val_generate
           - ray stop --force

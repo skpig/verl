@@ -383,10 +383,11 @@ class CIAgent(AsyncAgent):
             instance_id = str(uuid4())
 
             # Execute the tool
-            tool_response, tool_reward_score, tool_metrics = await tool.execute(instance_id,
-                                                                                tool_args,
-                                                                                ci_sandbox_psm=ci_sandbox_psm,
-                                                                                initial_files=initial_files)
+            tool_result = await tool.execute(instance_id,
+                                             tool_args,
+                                             ci_sandbox_psm=ci_sandbox_psm,
+                                             initial_files=initial_files)
+            tool_response = tool_result.result
 
             return {"role": "tool", "content": tool_response}
 

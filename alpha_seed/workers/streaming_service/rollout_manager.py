@@ -20,6 +20,7 @@ from omegaconf import OmegaConf, DictConfig
 from ray import ObjectRef
 
 from alpha_seed.workers.agents.executor import RayActorExecutor, ExecutorBase, LocalExecutor
+from alpha_seed.workers.agents.metrics_collector import init_agent_metrics_collector
 from alpha_seed.workers.streaming_service.elastic_rollout_manager import ElasticRolloutManager
 from alpha_seed.workers.streaming_service.rollout_proxy import FixedReplicatedRayWorkerGroupAdapter, \
     RolloutWorkerGroupProxy, BalancedRolloutWorkerGroupProxy, CombinedRayWorkerGroupAdapter
@@ -110,8 +111,6 @@ class RolloutManager:
         self.logger = logger
         self.tokenizer = tokenizer
         self.processor = processor
-        self.train_client_executor: Optional[ExecutorBase] = None
-        self.val_client_executor: Optional[ExecutorBase] = None
 
         self._initialized = False
 
@@ -143,6 +142,13 @@ class RolloutManager:
         self.val_rollout_proxy = None
         self.train_replicas: CombinedRayWorkerGroupAdapter = None
         self.val_replicas: CombinedRayWorkerGroupAdapter = None
+
+        # agent
+        stable_pool_names = self.config.elastic.resource_pools.stable_pool_names
+        stable_pool_name = stable_pool_names[0] if stable_pool_names else ''
+        self.agent_metrics_collector = init_agent_metrics_collector(self.config, stable_pool_name)
+        self.train_client_executor: Optional[ExecutorBase] = None
+        self.val_client_executor: Optional[ExecutorBase] = None
 
         # xperf openai servers
         self.train_rollout_server = None
@@ -461,7 +467,9 @@ class RolloutManager:
         # collect metrics from proxy on server mode
         if self._use_server:
             proxy_metrics = self.train_rollout_proxy.get_step_metrics()
+            agent_metrics = ray.get(self.agent_metrics_collector.get_current_metrics.remote(step))
             metrics.update(proxy_metrics)
+            metrics.update(agent_metrics)
 
         if 'step' in batch.non_tensor_batch:
             min_gen_start_step = batch.non_tensor_batch['step'].min()
@@ -1057,8 +1065,6 @@ class RolloutManager:
                 if not pd.isna(agent_env_initial_files):
                     gen_batch.non_tensor_batch['extra_data'][i].update(
                         {'agent_env_initial_files': json.loads(agent_env_initial_files)['initial_files']})
-        for i in range(len(gen_batch)):
-            gen_batch.non_tensor_batch['extra_data'][i].update({'config': self.config_dict})
         # More efficient for server-client interaction
         if (key := "prompt") not in gen_batch.non_tensor_batch and self._use_server:
             input_ids_list = gen_batch.batch["input_ids"].tolist()

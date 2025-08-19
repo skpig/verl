@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 import os
 import json
@@ -10,6 +10,7 @@ from collections import defaultdict
 
 from alpha_seed.workers.agents.envs import BaseEnv
 from alpha_seed.workers.agents.envs.utils import parse_func_call_kwargs, truncate_str_by_tokens, is_url_blocked
+from alpha_seed.workers.agents.handlers.base_tool import BaseTool, ToolResult
 from verl.tools.schemas import OpenAIFunctionToolSchema
 
 PRINT_ERROR = os.getenv('AGENT_TEXTBROWSER_PRINT_ERROR', '0') == '1'
@@ -31,10 +32,11 @@ def TextBrowserView(description: str, url: str) -> str:
     pass
 
 
-async def TextBrowserAPI(url: str, description: str, metrics: Dict[str, List], global_step: int) -> str:
+async def TextBrowserAPI(url: str, description: str, metrics: Dict[str, List],
+                         global_step: int) -> Tuple[str, int, int]:
 
     if is_url_blocked(url):
-        return 'This url is blocked, please try another one.'
+        return 'This url is blocked, please try another one.', 0, 0
 
     _start_time = time.time()
     headers = {
@@ -49,7 +51,10 @@ async def TextBrowserAPI(url: str, description: str, metrics: Dict[str, List], g
     body = {"api_id": "6231", "name": "TextBrowserView", "input_params": input_str}
 
     content = ''
-    for retry in range(3):
+    retries = 0
+    max_attempts = 3
+    for i in range(max_attempts):
+        retries = i
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post("https://gpt.bytedance.net/admin/prompt/apihub/fc_proxy",
@@ -63,16 +68,18 @@ async def TextBrowserAPI(url: str, description: str, metrics: Dict[str, List], g
         if content:
             break
 
-    metrics['retry'].append(retry)
+    metrics['retry'].append(retries)
     metrics['time'].append(time.time() - _start_time)
     metrics['failure'].append(int(content == ''))
 
-    return content
+    return content, retries, max_attempts
 
 
-class TextBrowserEnv(BaseEnv):
+class TextBrowserEnv(BaseTool):
 
     def __init__(self, tokenizer, **kwargs):
+        tool_schema = self.get_openai_tool_schema()
+        super().__init__({}, tool_schema)
         self._call_count = 0
         self._call_history = []
         self._metrics = defaultdict(list)
@@ -83,7 +90,9 @@ class TextBrowserEnv(BaseEnv):
         func_name, _ = parse_func_call_kwargs(action)
         return func_name in ["TextBrowser", "TextBrowserView"]
 
-    async def step(self, instance_id, tool_name, tool_args: dict, global_step: int) -> str:
+    async def execute(self, instance_id, tool_args: dict, **kwargs) -> ToolResult:
+        tool_name: str = kwargs.get("tool_name")
+        global_step: int = kwargs.get("global_step")
         assert tool_name in ["TextBrowser", "TextBrowserView"]
         action = tool_args["url"] + "\n" + tool_args["description"]
         self._call_count += 1
@@ -91,12 +100,14 @@ class TextBrowserEnv(BaseEnv):
             return "This URL and description has been called before. Please try again with another URL or description."
         self._call_history.append(action)
 
-        content = await TextBrowserAPI(**tool_args, metrics=self._metrics, global_step=global_step)
+        content, retries, max_attempts = await TextBrowserAPI(**tool_args,
+                                                              metrics=self._metrics,
+                                                              global_step=global_step)
         content, content_token_len = truncate_str_by_tokens(text=content,
                                                             max_token_len=self.max_token_len,
                                                             tokenizer=self.tokenizer)
         self._metrics['len'].append(content_token_len)
-        return content
+        return ToolResult(content, retries, max_attempts)
 
     @property
     def metrics(self) -> dict:
@@ -142,5 +153,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
     print(args)
     env = create_from_env_str(f"deep_research/textbrowser@{json.dumps(vars(args))}", tokenizer=tokenizer)
-    print(asyncio.run(env.step("", "TextBrowser", {"url": args.url, "description": args.description})))
+    print(
+        asyncio.run(
+            env.execute("", {
+                "url": args.url,
+                "description": args.description
+            }, tool_name="TextBrowser", global_step=0)))
     print(env.get_openai_tool_schema())

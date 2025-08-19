@@ -922,7 +922,7 @@ def main(config):
                 stable_res = {
                     os.getenv('TASK_RUNNER_NODE', 'worker'): 1,
                 }
-            runner = TaskRunner.options(name=TaskRunner.name, resources=stable_res).remote()
+            runner = TaskRunner.options(name=TaskRunner.name, resources=stable_res, max_concurrency=2).remote()
         ray.get(runner.main.remote(main_task, config=config))
 
 

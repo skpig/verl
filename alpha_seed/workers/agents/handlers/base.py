@@ -41,9 +41,9 @@ class AsyncAgent:
         """
         raise NotImplementedError
 
-    async def run_task(self, *args, **kwargs) -> DataProto:
+    async def run_task(self, item: DataProto, *args, **kwargs) -> DataProto:
         current_agent.set(self.__class__.__name__)
-        return await self.__call__(*args, **kwargs)
+        return await self.__call__(item, *args, **kwargs)
 
     def get_name(self):
         """
@@ -73,9 +73,9 @@ class ThreadedAgent:
     def __call__(self, item: DataProto, context: TaskContext, **kwargs) -> DataProto | List[DataProto]:
         raise NotImplementedError
 
-    def run_task(self, *args, **kwargs) -> DataProto:
+    def run_task(self, item: DataProto, *args, **kwargs) -> DataProto:
         set_current_agent(self.__class__.__name__)
-        return self.__call__(*args, **kwargs)
+        return self.__call__(item, *args, **kwargs)
 
     def get_name(self):
         """

@@ -85,11 +85,12 @@ def get_query_details_str(request_managers: list, query_id: str) -> Tuple[str, s
             obj = compact_list_fields(obj)
             yaml_str = yaml.dump(obj, sort_keys=False, allow_unicode=True, default_flow_style=False)
             meta_info = f"Query from {name}, "
+            now = time.time()
             if req.finished:
-                finished_ago = time.time() - req.query.finished_time / 1e3
+                finished_ago = now - req.query.finished_time / 1e3
                 meta_info += f"finished {finished_ago:.0f}s ago"
             else:
-                run_time = req.query.created_time / 1e3
+                run_time = now - req.query.created_time / 1e3
                 meta_info += f"still running for {run_time:.0f}s"
             return f"---\n{yaml_str}\n", meta_info
     return "", f"Query with ID {query_id} not found."
@@ -126,7 +127,9 @@ def list_all_pools_str():
 
 def get_statistics_str(request_manager) -> str:
     from alpha_seed.workers.streaming_service.rollout_request_manager_diagnosis import FinishedEventStats
-    throughput = ray.get(request_manager.get_estimated_throughput.remote()).values() or [0]
+    prefill_throughput, decode_throughput = ray.get(request_manager.get_estimated_throughput.remote())
+    prefill_throughput = prefill_throughput.values() or [0]
+    decode_throughput = decode_throughput.values() or [0]
     concurrency = ray.get(request_manager.get_concurrency.remote())
     concurrency_values = concurrency.values() or [0]
     finished_stats: FinishedEventStats = ray.get(request_manager.get_finished_stats.remote())
@@ -139,9 +142,12 @@ def get_statistics_str(request_manager) -> str:
 
     # Add throughput and concurrency rows
     table.add_row("Active engines", f"{len(concurrency)}", "")
-    table.add_row("Rollout throughput(min)", f"{min(throughput)}", "TPS")
-    table.add_row("Rollout throughput(max)", f"{max(throughput)}", "TPS")
-    table.add_row("Rollout throughput(total)", f"{sum(throughput)}", "TPS")
+    table.add_row("Rollout prefill throughput(min)", f"{min(prefill_throughput):.1f}", "TPS")
+    table.add_row("Rollout prefill throughput(max)", f"{max(prefill_throughput):.1f}", "TPS")
+    table.add_row("Rollout prefill throughput(total)", f"{sum(prefill_throughput):.1f}", "TPS")
+    table.add_row("Rollout decode throughput(min)", f"{min(decode_throughput):.1f}", "TPS")
+    table.add_row("Rollout decode throughput(max)", f"{max(decode_throughput):.1f}", "TPS")
+    table.add_row("Rollout decode throughput(total)", f"{sum(decode_throughput):.1f}", "TPS")
     table.add_row("Rollout concurrency(min)", f"{min(concurrency_values)}", "requests")
     table.add_row("Rollout concurrency(max)", f"{max(concurrency_values)}", "requests")
     table.add_row("Rollout concurrency(total)", f"{sum(concurrency_values)}", "requests")
