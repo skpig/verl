@@ -383,11 +383,16 @@ class DataParallelPPOActor(BasePPOActor):
         print("[INFO] mini batch size is ", self.config.ppo_mini_batch_size)
 
         metrics = {}
+        pg_clip_mask_lst = []
+        pg_clip_high_mask_lst = []
+        pg_clip_low_mask_lst = []
+        clip_ratio_high_lst = []
+        clip_ratio_low_lst = []
         for _ in range(self.config.ppo_epochs):
             for batch_idx, mini_batch in enumerate(mini_batches):
                 if self.config.use_dynamic_bsz:
                     max_token_len = self.config.ppo_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
-                    micro_batches, _ = prepare_dynamic_batch(mini_batch, max_token_len=max_token_len)
+                    micro_batches, batch_idx_list = prepare_dynamic_batch(mini_batch, max_token_len=max_token_len)
                 else:
                     self.gradient_accumulation = (
                         self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
@@ -396,12 +401,23 @@ class DataParallelPPOActor(BasePPOActor):
 
                 self.actor_optimizer.zero_grad()
 
+                cur_pg_clip_mask_lst = []
+                cur_pg_clip_high_mask_lst = []
+                cur_pg_clip_low_mask_lst = []
+                if self.config.dynamic_clip.enable:
+                    cur_clip_ratio_high_lst = []
+                    cur_clip_ratio_low_lst = []
+
                 for micro_batch in micro_batches:
                     micro_batch_metrics = {}
+
                     model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
                     response_mask = model_inputs["response_mask"]
                     old_log_prob = model_inputs["old_log_probs"]
                     advantages = model_inputs["advantages"]
+                    
+                    # some dummy tensors
+                    pg_clip_mask = torch.zeros_like(response_mask, dtype=torch.bool)
 
                     clip_ratio = self.config.clip_ratio
                     clip_ratio_low = (
@@ -425,15 +441,11 @@ class DataParallelPPOActor(BasePPOActor):
                     if self.config.dynamic_clip.enable:
                         clip_ratio_low = clip_ratio_low * (torch.exp(log_prob) ** self.config.dynamic_clip.coefficient)
                         clip_ratio_high = clip_ratio_high * ((1-torch.exp(log_prob)) ** self.config.dynamic_clip.coefficient)
-                        valid_clip_ratio_low_mean = verl_F.masked_mean(clip_ratio_low, response_mask)
-                        valid_clip_ratio_high_mean = verl_F.masked_mean(clip_ratio_high, response_mask)
-                        valid_clip_ratio_low_std = verl_F.masked_std(clip_ratio_low, response_mask)
-                        valid_clip_ratio_high_std = verl_F.masked_std(clip_ratio_high, response_mask)
 
                     loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
 
                     if self.config.policy_loss.loss_mode == "vanilla":
-                        pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = compute_policy_loss(
+                        pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower, pg_clip_mask, pg_clip_high_mask, pg_clip_low_mask = compute_policy_loss(
                             old_log_prob=old_log_prob,
                             log_prob=log_prob,
                             advantages=advantages,
@@ -447,7 +459,7 @@ class DataParallelPPOActor(BasePPOActor):
 
                     else:
                         policy_loss_fn = get_policy_loss_fn(loss_mode)
-                        pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_fn(
+                        pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower, pg_clip_high_mask, pg_clip_low_mask = policy_loss_fn(
                             old_log_prob=old_log_prob,
                             log_prob=log_prob,
                             advantages=advantages,
@@ -489,21 +501,61 @@ class DataParallelPPOActor(BasePPOActor):
                             "actor/pg_clipfrac": pg_clipfrac.detach().item(),
                             "actor/ppo_kl": ppo_kl.detach().item(),
                             "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
-                            "actor/clip_ratio_low_mean": valid_clip_ratio_low_mean.detach().item(),
-                            "actor/clip_ratio_high_mean": valid_clip_ratio_high_mean.detach().item(),
-                            "actor/clip_ratio_low_std": valid_clip_ratio_low_std.detach().item(),
-                            "actor/clip_ratio_high_std": valid_clip_ratio_high_std.detach().item(),
+                            # move to outside metrics
+                            # "actor/clip_ratio_low_mean": valid_clip_ratio_low_mean.detach().item(),
+                            # "actor/clip_ratio_high_mean": valid_clip_ratio_high_mean.detach().item(),
+                            # "actor/clip_ratio_low_std": valid_clip_ratio_low_std.detach().item(),
+                            # "actor/clip_ratio_high_std": valid_clip_ratio_high_std.detach().item(),
                         }
                     )
                     append_to_dict(metrics, micro_batch_metrics)
+                    # breakpoint()
+                    cur_pg_clip_mask_lst.append(pg_clip_mask)
+                    cur_pg_clip_high_mask_lst.append(pg_clip_high_mask)
+                    cur_pg_clip_low_mask_lst.append(pg_clip_low_mask)
+                    if self.config.dynamic_clip.enable:
+                        cur_clip_ratio_high_lst.append(clip_ratio_high)
+                        cur_clip_ratio_low_lst.append(clip_ratio_low)
 
                 grad_norm = self._optimizer_step()
                 mini_batch_metrics = {"actor/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, mini_batch_metrics)
+                
+                """Addtional Return Tensors"""
+                cur_pg_clip_mask = torch.cat(cur_pg_clip_mask_lst, dim=0)
+                cur_pg_clip_high_mask = torch.cat(cur_pg_clip_high_mask_lst, dim=0)
+                cur_pg_clip_low_mask = torch.cat(cur_pg_clip_low_mask_lst, dim=0)
+                if self.config.use_dynamic_bsz:
+                    cur_pg_clip_mask = restore_dynamic_batch(cur_pg_clip_mask, batch_idx_list)
+                    cur_pg_clip_high_mask = restore_dynamic_batch(cur_pg_clip_high_mask, batch_idx_list)
+                    cur_pg_clip_low_mask = restore_dynamic_batch(cur_pg_clip_low_mask, batch_idx_list)
+                pg_clip_mask_lst.append(cur_pg_clip_mask)
+                pg_clip_high_mask_lst.append(cur_pg_clip_high_mask)
+                pg_clip_low_mask_lst.append(cur_pg_clip_low_mask)
+                if self.config.dynamic_clip.enable:
+                    cur_clip_ratio_high = torch.cat(cur_clip_ratio_high_lst, dim=0)
+                    cur_clip_ratio_low = torch.cat(cur_clip_ratio_low_lst, dim=0)
+                    if self.config.use_dynamic_bsz:
+                        cur_clip_ratio_high = restore_dynamic_batch(cur_clip_ratio_high, batch_idx_list)
+                        cur_clip_ratio_low = restore_dynamic_batch(cur_clip_ratio_low, batch_idx_list)
+                    clip_ratio_high_lst.append(cur_clip_ratio_high)
+                    clip_ratio_low_lst.append(cur_clip_ratio_low)
+                    
         self.actor_optimizer.zero_grad()
+
+        rtn_data_proto = DataProto.from_dict(tensors={
+            "pg_clip_mask": torch.cat(pg_clip_mask_lst, dim=0),
+            "pg_clip_high_mask": torch.cat(pg_clip_high_mask_lst, dim=0),
+            "pg_clip_low_mask": torch.cat(pg_clip_low_mask_lst, dim=0),
+        })
+        if self.config.dynamic_clip.enable:
+            rtn_data_proto.batch["clip_ratio_high_tensor"] = torch.cat(clip_ratio_high_lst, dim=0)
+            rtn_data_proto.batch["clip_ratio_low_tensor"] = torch.cat(clip_ratio_low_lst, dim=0)
+
+        assert rtn_data_proto.batch.batch_size == data.batch.batch_size, f"rtn_data_proto.batch.batch_size: {rtn_data_proto.batch.batch_size}, data.batch.batch_size: {data.batch.batch_size}"
 
         # delete all unused torch tensors
         del loss, entropy, log_prob
         if self.config.use_kl_loss:
             del kl_loss, policy_loss
-        return metrics
+        return rtn_data_proto, metrics
