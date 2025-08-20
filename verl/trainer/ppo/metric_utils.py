@@ -34,7 +34,7 @@ from traitlets import default
 from verl.trainer.ppo import core_algos
 from verl import DataProto
 from verl.utils.import_utils import deprecated
-from verl.utils.torch_functional import masked_mean
+from verl.utils.torch_functional import masked_mean, masked_var
 
 
 @deprecated("verl.utils.metric.reduce_metrics")
@@ -290,6 +290,49 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         num_partial_rollouts_tokens_ratio = num_partial_rollouts_tokens / response_length.sum().item()
         real_prompt_length = prompt_length + torch.tensor(batch.non_tensor_batch['partial_rollout_len'].astype(int))
         real_response_length = response_length - torch.tensor(batch.non_tensor_batch['partial_rollout_len'].astype(int))
+    
+
+    # clip related
+    if 'pg_clip_mask' in batch.batch.keys():
+        pg_clip_mask = batch.batch["pg_clip_mask"].bool() # (batch_size, response_length)
+        pg_clip_high_mask = batch.batch["pg_clip_high_mask"].bool() # (batch_size, response_length)
+        pg_clip_low_mask = batch.batch["pg_clip_low_mask"].bool() # (batch_size, response_length)
+    if 'clip_ratio_high_tensor' in batch.batch.keys():
+        clip_ratio_high_tensor = batch.batch["clip_ratio_high_tensor"] # (batch_size, response_length)
+        clip_ratio_low_tensor = batch.batch["clip_ratio_low_tensor"] # (batch_size, response_length)
+        valid_clip_ratio_high = torch.masked_select(clip_ratio_high_tensor, response_mask.bool()) # (num_valid_tokens, )
+        valid_clip_ratio_low = torch.masked_select(clip_ratio_low_tensor, response_mask.bool()) # (num_valid_tokens, )
+        valid_clip_ratio_high_mean = torch.mean(valid_clip_ratio_high) # (1,)
+        valid_clip_ratio_low_mean = torch.mean(valid_clip_ratio_low) # (1,)
+        valid_clip_ratio_high_std = torch.std(valid_clip_ratio_high) # (1,)
+        valid_clip_ratio_low_std = torch.std(valid_clip_ratio_low) # (1,)
+
+    # prob & entropy related
+    old_probs = torch.exp(batch.batch["old_log_probs"]) # (batch_size, response_length)
+    entropys = batch.batch['entropys'] # (batch_size, response_length)
+    valid_old_probs = torch.masked_select(old_probs, response_mask.bool()) # (num_valid_tokens, )
+    valid_old_probs_mean = torch.mean(valid_old_probs) # (1,)
+    valid_old_probs_std = torch.std(valid_old_probs) # (1,)
+    valid_entropys = torch.masked_select(entropys, response_mask.bool()) # (num_valid_tokens, )
+    valid_entropys_mean = torch.mean(valid_entropys) # (1,)
+    valid_entropys_std = torch.std(valid_entropys) # (1,)
+    if 'new_log_probs' in batch.batch.keys():
+        new_probs = torch.exp(batch.batch['new_log_probs']) # (batch_size, response_length)
+    else:
+        new_probs = old_probs
+    step_prob_diff = (new_probs - old_probs) # (batch_size, response_length)
+    step_prob_ratio = new_probs / old_probs # (batch_size, response_length)
+    valid_step_prob_diff = torch.masked_select(step_prob_diff, response_mask.bool()) # (num_valid_tokens, )
+    valid_step_prob_ratio = torch.masked_select(step_prob_ratio, response_mask.bool()) # (num_valid_tokens, )
+    valid_step_prob_diff_mean = torch.mean(valid_step_prob_diff) # (1,)
+    valid_step_prob_ratio_mean = torch.mean(valid_step_prob_ratio) # (1,)
+    valid_step_prob_diff_std = torch.std(valid_step_prob_diff) # (1,)
+    valid_step_prob_ratio_std = torch.std(valid_step_prob_ratio) # (1,)
+
+
+
+
+
 
     metrics = {
         # kl penalty
@@ -369,7 +412,62 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         "rollout/#steps/mean": np.mean(num_steps).item(),
         "rollout/#steps/max": np.max(num_steps).item(),
         "rollout/#steps/min": np.min(num_steps).item(),
+
+        # prob related
+        "prob/old_probs_mean": valid_old_probs_mean.detach().item(),
+        "prob/old_probs_std": valid_old_probs_std.detach().item(),
+        "prob/step_prob_diff_mean": valid_step_prob_diff_mean.detach().item(),
+        "prob/step_prob_diff_std": valid_step_prob_diff_std.detach().item(),
+        "prob/step_prob_ratio_mean": valid_step_prob_ratio_mean.detach().item(),
+        "prob/step_prob_ratio_std": valid_step_prob_ratio_std.detach().item(),
+
+        # clip related
+        **(
+            {
+                "clip/clip_ratio_high_mean": valid_clip_ratio_high_mean.detach().item(),
+                "clip/clip_ratio_high_std": valid_clip_ratio_high_std.detach().item(),
+                "clip/clip_ratio_low_mean": valid_clip_ratio_low_mean.detach().item(),
+                "clip/clip_ratio_low_std": valid_clip_ratio_low_std.detach().item(),
+            }
+            if 'clip_ratio_high_tensor' in batch.batch.keys()
+            else {}
+        ),
+
     }
+
+    # prob-threshold related
+    for i, threshold in enumerate([0.75, 0.5, 0.2, 0.1, 0.01, 0.001]):
+        small_prob_mask = torch.logical_and(response_mask, old_probs < threshold)
+        small_prob_mask_sum = small_prob_mask.float().sum()
+        small_prob_frac = small_prob_mask_sum / response_mask.float().sum() # (1,) the fraction of current small-prob-tokens in the batch
+
+        small_prob_adv = masked_mean(advantages, small_prob_mask) # (1,) the mean of advantages of current small-prob-tokens
+
+        # clip-related
+        if 'clip_ratio_high_tensor' in batch.batch.keys():
+            small_prob_clip_ratio_high = masked_mean(clip_ratio_high_tensor, small_prob_mask) # (1,) the mean of clip_ratio_high of current small-prob-tokens
+            small_prob_clip_ratio_low = masked_mean(clip_ratio_low_tensor, small_prob_mask) # (1,) the mean of clip_ratio_low of current small-prob-tokens
+            small_prob_clip_fraction_high = masked_mean(pg_clip_high_mask, small_prob_mask) # (1,) the fraction of current small-prob-tokens that are clipped
+            small_prob_clip_fraction_low = masked_mean(pg_clip_low_mask, small_prob_mask) # (1,) the fraction of current small-prob-tokens that are clipped
+            metrics.update({
+                f'clip/id{i}_prob_lt_{threshold}_clip_ratio_high': small_prob_clip_ratio_high.detach().item(),
+                f'clip/id{i}_prob_lt_{threshold}_clip_ratio_low': small_prob_clip_ratio_low.detach().item(),
+                f'clip/id{i}_prob_lt_{threshold}_clip_fraction_high': small_prob_clip_fraction_high.detach().item(),
+                f'clip/id{i}_prob_lt_{threshold}_clip_fraction_low': small_prob_clip_fraction_low.detach().item(),
+            })
+
+
+        # new-prob-related
+        small_prob_new_prob_diff = masked_mean(new_probs - old_probs, small_prob_mask) # (1,) the mean of new_probs - old_probs of current small-prob-tokens
+        small_prob_new_prob_ratio = masked_mean(new_probs / old_probs, small_prob_mask) # (1,) the mean of new_probs / old_probs of current small-prob-tokens
+
+        metrics.update({
+            f'prob/id{i}_prob_lt_{threshold}_frac': small_prob_frac.detach().item(),
+            f'critic/advantages/id{i}_prob_lt_{threshold}_adv': small_prob_adv.detach().item(),
+            f'prob/id{i}_prob_lt_{threshold}_new_prob_diff': small_prob_new_prob_diff.detach().item(),
+            f'prob/id{i}_prob_lt_{threshold}_new_prob_ratio': small_prob_new_prob_ratio.detach().item(),
+        })
+
 
     # multi-turn conversation
     if "__num_turns__" in batch.non_tensor_batch:

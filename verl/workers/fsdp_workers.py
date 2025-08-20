@@ -699,7 +699,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             log_gpu_memory_usage("After preprocessing data during update_actor", logger=logger)
             # perform training
             with Timer(name="update_policy", logger=None) as timer:
-                metrics = self.actor.update_policy(data=data)
+                rtn_data_proto, metrics = self.actor.update_policy(data=data)
+
+            for key in rtn_data_proto.batch.keys():
+                assert key not in data.batch, f"key {key} in rtn_data_proto.batch but also in data.batch"
+
             log_gpu_memory_usage("After actor update_policy", logger=logger)
             delta_time = timer.last
             global_num_tokens = data.meta_info["global_token_num"]
@@ -716,7 +720,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.actor_lr_scheduler.step()
 
             # TODO: here, we should return all metrics
-            output = DataProto(meta_info={"metrics": metrics})
+            output = DataProto(batch=rtn_data_proto.batch, meta_info={"metrics": metrics})
+
+            # One step further to compute new_log_prob
+            if self.config.actor.calculate_new_log_prob:
+                with Timer("new_log_probs", None, color="blue"):
+                    log_prob_output, _ = self.actor.compute_log_prob(data=data, calculate_entropy=False)
+                output.batch["new_log_probs"] = log_prob_output
 
             output = self.ulysses_sharding_manager.postprocess_data(data=output)
             output = output.to("cpu")
