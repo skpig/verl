@@ -1,6 +1,8 @@
 import asyncio
 import inspect
 import time
+import traceback
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from itertools import cycle
@@ -18,6 +20,8 @@ from alpha_seed.workers.agents.llm import OpenAIAsyncClient, OpenAIClient, Direc
 from alpha_seed.workers.agents.metrics_collector import get_agent_metrics_collector, init_agent_metrics_collector
 from alpha_seed.workers.agents.monitoring import (AgentWorkerMonitor, AgentWorkerTaskStats, AgentWorkerStats,
                                                   AgentWorkerQueueStats)
+from alpha_seed.workers.agents.trajectory import Trajectory, TrajectoryFactory, get_agent_trajectory_collector, \
+    AgentIdentity
 from mono_rl import DataProto
 
 
@@ -54,28 +58,37 @@ class AgentWorker:
         self.concurrency_limit = asyncio.Semaphore(self.worker_max_concurrency)
         self.config = config
         self.global_state = GlobalState()
+        self.collector = get_agent_metrics_collector()
+        self.traj_collector = get_agent_trajectory_collector()
+
+        # 暂存running tasks
+        self.tasks: Dict[str, AsyncAgent | ThreadedAgent] = {}  # uid -> agent
 
         # 添加监控
+        self.worker_id = worker_id
         self.worker_name = f"{request_manager_name}.w{worker_id}"
         self.monitor = AgentWorkerMonitor(
             worker_id=self.worker_name,
             enabled=config.rollout_server.agent.enable_monitoring,
         )
-        self.collector = get_agent_metrics_collector()
 
         self._metrics_enabled = config.rollout_server.agent.enable_monitoring
         self._last_metrics_emit = 0
         self._metrics_emit_interval = 2.0  # 至少间隔N秒提交一次
+        self._traj_emit_interval = 5.0
 
-        # metrics collector loop
+        # collector tasks
         self._metrics_task = self.get_event_loop().create_task(self._metrics_collection_loop())
+        self._traj_task = self.get_event_loop().create_task(self._trajectory_collection_loop())
 
     async def execute(self, agent_cls: Type[AsyncAgent] | Type[ThreadedAgent], /, item: DataProto, *args, **kwargs):
         # 兼容旧的functional handler，保持task context中有tokenizer赋值
         for a in args:
             if isinstance(a, TaskContext):
                 a.tokenizer = self.tokenizer
-        agent_init_kwargs = self._make_essential_init_kwargs()
+
+        # 用来跟踪整个trajectory
+        uid = item.non_tensor_batch['uid'][0]
 
         # 给item增加必要的agent worker相关的元数据
         item.meta_info.update({
@@ -83,29 +96,48 @@ class AgentWorker:
             'agent_class': agent_cls.__name__,
         })
 
+        agent_init_kwargs = self._make_essential_init_kwargs(uid, agent_cls.__name__)
+
         if issubclass(agent_cls, AsyncAgent):
             tracker = self.monitor.task_tracker()
             with tracker.creation(agent_cls):
                 agent = agent_cls(self.async_tokenizer, self.llm, **agent_init_kwargs)
+                self.tasks[agent.uid] = agent
             async with self.concurrency_limit:
-                with tracker.execution(agent_cls):
-                    return await agent.run_task(item, *args, **kwargs)
+                with tracker.execution(agent):
+                    ret = await agent.run_task(item, *args, **kwargs)
 
         elif issubclass(agent_cls, ThreadedAgent):
             tracker = self.monitor.task_tracker()
             with tracker.creation(agent_cls):
                 agent = agent_cls(self.tokenizer, self.sync_llm, **agent_init_kwargs)
+                self.tasks[agent.uid] = agent
             async with self.concurrency_limit:
                 # 不要漏了threaded agent也算在总并发度里
-                with tracker.execution(agent_cls):
+                with tracker.execution(agent):
                     agent_task = partial(agent.run_task, **kwargs) if kwargs else agent.run_task
                     loop = self.get_event_loop()
-                    return await loop.run_in_executor(self._thread_executor, agent_task, item, *args)
+                    ret = await loop.run_in_executor(self._thread_executor, agent_task, item, *args)
         else:
             raise TypeError(f"agent_cls must be a subclass of AsyncAgent or ThreadedAgent. got {type(agent_cls)}")
 
-    def _make_essential_init_kwargs(self):
+        self.tasks.pop(agent.uid, None)
+
+        # flush metrics and trace
+        agent.trajectory_factory.finish(self.tokenizer)
+        await self.traj_collector.collect.remote(agent.trajectory_factory.trajectories)
+
+        return ret
+
+    def _make_essential_init_kwargs(self, uid: str, agent_name: str):
+        """
+        :param uid: 追踪整个trajectory的id，会一路传到train那边，数据集那边也可以加上，构造来源见
+                    alpha_seed.trainer.ppo.RayPPOTrainer._preprocess_batch_before_gen
+        :param agent_name: agent class name
+        """
         return {
+            'uid': uid,
+            'trajectory_factory': TrajectoryFactory(uid, agent_name),
             'config': self.config,
             'executor': self._thread_executor,
             'global_state': self.global_state,
@@ -135,6 +167,25 @@ class AgentWorker:
             loop_cost = time.time() - t0
             sleep_interval = max(0.01, self._metrics_emit_interval - loop_cost)
 
+    async def _trajectory_collection_loop(self):
+        if not self._metrics_enabled:
+            return
+        sleep_interval = self._traj_emit_interval
+        while True:
+            await asyncio.sleep(sleep_interval)
+            try:
+                staging_segs = {}
+                idents_map = {}
+                for agent in list(self.tasks.values()):
+                    segs = agent.trajectory_factory.get_staging_segments(self.tokenizer)
+                    ident = AgentIdentity(agent.uid, agent.__class__.__name__)
+                    staging_segs[agent.uid] = segs
+                    idents_map[agent.uid] = ident
+                await self.traj_collector.collect_segments.remote(staging_segs, idents_map)
+            except Exception as e:
+                traceback.print_exc()
+                print(f"Failed to submit traj: {e}, ignoring")
+
     def get_stats(self) -> AgentWorkerStats:
         """获取worker统计信息"""
         task_stats = self.monitor.get_task_stats()
@@ -156,6 +207,7 @@ class AgentWorker:
 
     def stop(self):
         self._metrics_task.cancel()
+        self._traj_task.cancel()
 
 
 class ExecutorBase:
@@ -175,7 +227,7 @@ class ExecutorBase:
 
     async def stop(self):
         """
-        executor立即结束当前task和workers
+        executor结束当前task和workers，给executor内部清场用
         """
         raise NotImplementedError()
 
@@ -214,6 +266,13 @@ class RayActorExecutor(ExecutorBase):
         refs = []
         for w in self.workers:
             ref = w.set_global_step.remote(global_step)
+            refs.append(ref)
+        ray.get(refs)
+
+    def stop(self):
+        refs = []
+        for w in self.workers:
+            ref = w.stop.remote()
             refs.append(ref)
         ray.get(refs)
 

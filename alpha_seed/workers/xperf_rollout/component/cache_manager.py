@@ -5,7 +5,7 @@ import time
 import uuid
 from collections import deque
 import logging
-from alpha_seed.workers.xperf_rollout.component.query import Query
+from alpha_seed.workers.xperf_rollout.component.query import Query, ProcessEventType
 from xperf_gpt.utils import logging_rank_only
 
 
@@ -87,7 +87,7 @@ class CacheManager:
         self.page_swap_out_bs += 1
         self.page_swap_out_token += len(query.input_ids) + len(query.new_token_ids)
         self.release_query(query)
-        query.reset_compute()
+        query.reset_compute(info={'reason': 'paused'})
         return True
 
     def _update_queries_default(self, running_queries: List[Query], waiting_queries: List[Query],
@@ -120,7 +120,7 @@ class CacheManager:
                 self.page_swap_out_bs += 1
                 self.page_swap_out_token += len(query.input_ids) + len(query.new_token_ids)
                 self.release_query(query)
-                query.reset_compute()
+                query.reset_compute(info={'reason': 'insufficient_slots'})
                 waiting.append(query)
 
         # See if any query from the waiting-list can be activated
@@ -138,6 +138,7 @@ class CacheManager:
                 self.cur_context_bs_this_run += int(query.is_context_computing)
                 self.cur_bs_this_run += 1
                 query.recent_scheduled_time = time.time() * 1000
+                query.add_event(ProcessEventType.PREFILL_START)
                 if not query.first_scheduled_time:
                     query.first_scheduled_time = query.recent_scheduled_time
             else:
@@ -182,7 +183,7 @@ class CacheManager:
                 self.page_swap_out_bs += 1
                 self.page_swap_out_token += len(to_swap_query.input_ids) + len(to_swap_query.new_token_ids)
                 self.release_query(to_swap_query)
-                to_swap_query.reset_compute()
+                to_swap_query.reset_compute(info={'reason': 'insufficient_slots_fifo'})
                 status = self._update_query(query)
 
             if status == UpdateQueryStatus.SUCCESS:
@@ -196,7 +197,7 @@ class CacheManager:
                     self.page_swap_out_bs += 1
                     self.page_swap_out_token += len(query.input_ids) + len(query.new_token_ids)
                     self.release_query(query)
-                    query.reset_compute()
+                    query.reset_compute(info={'reason': 'insufficient_slots_fifo'})
 
         waiting = sort_queue(waiting, reverse=True)
         phase0_running = []
@@ -212,10 +213,10 @@ class CacheManager:
                 status = self._update_query(query, threshold=threshold)
 
             if status == UpdateQueryStatus.SUCCESS:
-                if not query.recent_scheduled_time:
-                    query.recent_scheduled_time = time.time() * 1000
-                    if not query.first_scheduled_time:
-                        query.first_scheduled_time = query.recent_scheduled_time
+                query.recent_scheduled_time = time.time() * 1000
+                query.add_event(ProcessEventType.PREFILL_START)
+                if not query.first_scheduled_time:
+                    query.first_scheduled_time = query.recent_scheduled_time
                 # move to running
                 phase0_running.append(query)
                 waiting.pop()

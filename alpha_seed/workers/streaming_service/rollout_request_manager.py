@@ -1,103 +1,19 @@
 import asyncio
-import copy
 import threading
 import time
-from typing import Dict, List, Optional, Tuple, Union, Container, Set, Any
-from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple, Container, Set, Any
 from collections import defaultdict
 
 import ray
 from omegaconf import DictConfig
 
 from alpha_seed.utils.server_client import is_local_ray_instance
+from alpha_seed.workers.streaming_service.rollout_query_trace import QueryTracer
+from alpha_seed.workers.streaming_service.rollout_request import StaleHistory, AbortHistory, Request
 from alpha_seed.workers.streaming_service.rollout_request_manager_diagnosis import FinishedEventStats, RequestDigest, \
     FiniteDict, ProgressStat, RequestStatCollector
 from alpha_seed.workers.xperf_rollout.component.query import Query
-from alpha_seed.utils.profile.timeline import CoherentCompleteEvent, Tracer, TracingEvent, CompleteEvent, \
-    FlowEvent, \
-    CombinedEvents, WaterfallSlotTracer, CounterEvent
-
-
-@dataclass
-class StaleHistory:
-    assigned_engine_id: str
-    assigned_engine_name: str
-    start_step: int  # 最早开始的step
-    # 下面时间戳均为stale之前在engine侧的时间戳 (默认unit: ms)
-    last_pending_reschedule_ts: float  # 此history span进入request pool的时间
-    dispatch_time: float  # 从request pool分出去的时间 (unit: s)
-    received_time: float  # 进入engine waiting队列的时间
-    first_scheduled_time: float  # 开始prefill时间
-    first_token_time: float  # 最早开始decode时间(prefill完成时间)
-    end_ts: float  # 发现stale的时刻
-    stale_action: str  # 是什么直接导致的stale，如release/engine-died/...
-    stale_reason: str  # 基于什么原因要做这个stale的操作，如内存不够/rebalance/...
-    length_generated: int  # 在这一次stale之前，decode了多少(不含prefill部分)
-    update_count: int  # stale之前update过多少次
-    release_count: int  # 这次stale区间内kv cache 被release的次数
-
-    @classmethod
-    def from_request(cls, req: 'Request', stale_action, stale_reason) -> 'StaleHistory':
-        delta_generated = req.query.new_token_len - (len(req.query.input_ids) - req.query.original_input_len)
-        # 时间单位都是ms
-        received_time = req.query.received_time or req.last_pending_reschedule_ts
-        first_scheduled_time = req.query.first_scheduled_time or (received_time + 1e-3)
-        first_token_time = req.query.first_token_time or (first_scheduled_time + 1e-3)
-        history = StaleHistory(
-            assigned_engine_id=req.assigned_engine_id,  # noqa
-            assigned_engine_name=req.assigned_engine_name,
-            start_step=req.global_step,
-            last_pending_reschedule_ts=req.last_pending_reschedule_ts,
-            dispatch_time=req.last_assigned_at,
-            received_time=received_time,
-            first_scheduled_time=first_scheduled_time,
-            first_token_time=first_token_time,
-            end_ts=time.time() * 1e3,
-            stale_action=stale_action,
-            stale_reason=stale_reason,
-            length_generated=delta_generated,
-            update_count=req.update_count,
-            release_count=req.query.release_count,
-        )
-        return history
-
-
-@dataclass
-class AbortHistory:
-    engine_id: str  # 从哪个engine abort
-    timestamp: float  # 何时abort
-
-
-@dataclass
-class Request:
-    request_id: str  # 同Query.id
-    query: Query
-    finished: bool = False  # 是否已经结束生成
-    assigned: bool = False  # 是否已经分出去了（分出去了，但不确定具体分配的engine_id，取决于passive/active模式
-    assigned_engine_id: Optional[str] = None  # 被分配到的engine
-    assigned_engine_name: Optional[str] = None  # 比engine_id更可读的name，作为key优先使用engine_id
-    updated_at: float = None  # 标记最后更新时间，并发更新时可以判断数据是否过期 (unit: s)
-
-    # fields need to assign back
-    global_step: int = 0  # 当前这个query来自哪个global step的sample
-    last_assigned_at: float = 0  # 最近一次调度到此engine的时间 (unit: s)
-    last_pending_reschedule_ts: float = 0  # 最近一次各种原因被重新放回池里等待调度的时间戳 (unit: ms)
-    update_count: int = 0  # 统计更新了多少次
-    stale_histories: List[StaleHistory] = field(default_factory=list)  # 记录所有更换过的engine
-    # 只记录从proxy主动abort的记录（新的在前），在重新分发时，会跳过从最近abort的engine，避免抖动
-    abort_histories: List[AbortHistory] = field(default_factory=list)
-
-    def is_recent_aborted_from(self, engine_id: str, cool_down_seconds) -> bool:
-        now = time.time()
-        for his in reversed(self.abort_histories):
-            elapsed = now - his.timestamp
-            if elapsed > cool_down_seconds:
-                # 由于abort_histories是新的在后面，那前面的超过CD的都不管了
-                break
-            if his.engine_id == engine_id:
-                # 遇到任意一个engine则true
-                return True
-        return False
+from alpha_seed.utils.profile.timeline import CounterEvent
 
 
 class FIFOListIter:
@@ -341,8 +257,8 @@ class RequestPool:
                     # skip this if never been scheduled
                     history = StaleHistory.from_request(req, "engine-died", "engine-died")
                     req.stale_histories.append(history)
-                    req.query.reset_timestamp()
                     req.query.reset_compute()
+                    req.query.reset_timestamp()
                     req.assigned_engine_id = None
                     req.assigned_engine_name = None
                     req.assigned = False
@@ -366,8 +282,8 @@ class RequestPool:
                 )
                 req.stale_histories.append(history)
                 req.abort_histories.append(abort_history)
-                req.query.reset_timestamp()
                 req.query.reset_compute()
+                req.query.reset_timestamp()
                 req.assigned_engine_id = None
                 req.assigned_engine_name = None
                 req.assigned = False
@@ -397,6 +313,14 @@ class RequestPool:
                     continue
                 if now - req.updated_at > threshold:
                     ret.append((req_id, req.assigned_engine_id))
+        return ret
+
+    def get_running_requests(self) -> List[Request]:
+        ret = []
+        with self._mutex:
+            for req_id, req in self.requests.items():
+                if req.assigned:
+                    ret.append(req)
         return ret
 
     def accumulate_prefilling_throughput(self, new_req: Request, prev_req: Request):
@@ -525,10 +449,10 @@ class RequestManagerRegisterCenter:
             # 非local模式下，让RequestManager只跑在stable resources上
             resources = {"worker": 1}
         # note(lixiang): concurrency必须超过global batch size才行，不然会卡住更新不了请求，导致死锁
-        store_decoding_output = self.config.streaming_rollout.query_trace.store_decoding_output
+        query_trace_config = self.config.streaming_rollout.query_trace
         request_manager = RequestManager.options(name=f'RequestManager/{instance_name}',
                                                  resources=resources,
-                                                 max_concurrency=102400).remote(store_decoding_output)
+                                                 max_concurrency=102400).remote(query_trace_config)
         ray.wait([request_manager.ready.remote()])
         self.registry.append(request_manager)
         self.names.add(instance_name)
@@ -578,16 +502,14 @@ class ProgressBar:
 @ray.remote
 class RequestManager:
 
-    def __init__(self, tracer_store_decoding_output: bool):
+    def __init__(self, query_trace_config: DictConfig):
         self.req_pool = RequestPool()
         self.req_stat = RequestStatCollector()
+        self.query_trace_config = query_trace_config
         self._step = 0
-        self._tracer_store_decoding_output = tracer_store_decoding_output
-        self.tracer = Tracer.get_instance()
-        self.waterfall_tracer = WaterfallSlotTracer(self.tracer)
-        self._pending_events_to_flows = []
         self.actor_name = ray.get_runtime_context().get_actor_name()
         self._rm_name = self.actor_name.removeprefix('RequestManager/')
+        self.query_tracer = QueryTracer(self.query_trace_config, self._rm_name)
         self._progress_bar = ProgressBar(self.actor_name)
         self._query_id_log = defaultdict(set)  # step -> set(query.id)
 
@@ -596,14 +518,15 @@ class RequestManager:
         return True
 
     async def put_new_query(self, query: Query) -> str:
-        query.enqueue_time = time.time() * 1e3
+        now = time.time()
+        query.enqueue_time = now * 1e3  # first enqueue time
         step = query.meta_info.get('step', self._step)
         self.req_pool.put_new_requests([
             Request(
                 request_id=query.id,
                 query=query,
                 global_step=step,
-                last_pending_reschedule_ts=query.created_time,
+                last_pending_reschedule_ts=now * 1e3,
                 updated_at=time.time(),
             )
         ])
@@ -612,11 +535,8 @@ class RequestManager:
 
     async def wait_until_finished(self, query_id: str) -> Query:
         req = await self.req_pool.wait(query_id)
-        events = self._make_trace_event(req)
         self.req_stat.finish(self._rm_name, req)
-        for evt in events:
-            self.waterfall_tracer.trace(evt)
-        self._pending_events_to_flows.append(events)
+        self.query_tracer.trace(req)
         return req.query
 
     def update_intermediate_queries(self, queries: List[Query], engine_id: str, wg_name: str, ts: float):
@@ -642,7 +562,7 @@ class RequestManager:
                                           "#update": len(queries),
                                           "#finished": finished,
                                       })
-        self.tracer.trace(update_metrics)
+        self.query_tracer.trace_event(update_metrics)
 
     def _debug(self):
         return self.req_pool.requests, self.req_pool.finished_requests
@@ -687,13 +607,7 @@ class RequestManager:
     def set_global_step(self, global_step: int):
         self._step = global_step
         self._progress_bar.reset()
-        self.waterfall_tracer.flush()
-        # reorder后，重新确定了tid，这时再计算flows
-        evts_to_flows = self._pending_events_to_flows
-        self._pending_events_to_flows = []
-        for events in evts_to_flows:
-            flows = self._make_stale_flow_trace_event(events)
-            self.tracer.trace(CombinedEvents(flows))
+        self.query_tracer.set_global_step(global_step)
 
     def get_pending_size(self):
         return self.req_pool.get_pending_size()
@@ -710,202 +624,32 @@ class RequestManager:
     def get_concurrency(self) -> Dict[str, int]:
         return self.req_pool.get_concurrency()
 
-    def _normalize_output(self, output: str) -> str:
-        # 有些输出的字符会导致perfetto UI显示不了，因此可以通过开关关掉输出，要看rollout具体输出内容可以去tracking里
-        if self._tracer_store_decoding_output:
-            return output.replace("\"", ".").replace("\'", ".").replace("$", ".").replace("{", ".").replace("}", ".")
-        else:
-            return ""
-
-    def _make_trace_event(self, req: Request) -> List[Union[CompleteEvent, CoherentCompleteEvent]]:
-        # [C][W][P][D](stale) --> [W][P][D]
-        # [C]Query对象被创建出来的时刻，也就是从dataloader里取出来的时刻，每个batch应该几乎统一开始
-        # [W]始终以re/scheduled ts开始，
-        # [P]尽量以engine里的first_scheduled_time作为开始
-        # [D]尽量以first_token_time作为开始
-        # 如果任意一个时间为0，则往前回退一个已标记的时间
-
-        query = req.query
-        received_time = query.received_time
-        first_scheduled_time = query.first_scheduled_time or query.created_time
-        first_token_time = query.first_token_time or first_scheduled_time
-        meta_info = copy.deepcopy(query.meta_info)
-        meta_info.get("extra_data", {}).pop("config", None)  # pop掉没用又冗余的字段
-
-        # 暂时不记录C，因为C属于driver/cpu上的时间分配，不属于engine那边的分配，从W开始才算时engine的
-        new_created = CompleteEvent(
-            name='C',
-            cat='rollout-new',
-            pid=f'{self._rm_name} {req.assigned_engine_name}',
-            tid=0,
-            ts=req.last_pending_reschedule_ts * 1000,
-            dur=(received_time - req.last_pending_reschedule_ts) * 1000,
-            args={
-                'query_id': query.id,
-                'input_len': query.original_input_len,
-                'step': req.global_step,
-                'stale_count': len(req.stale_histories),
-            },
-        )
-        wait = CompleteEvent(
-            name='W',
-            cat='rollout-wait',
-            pid=f'{self._rm_name} {req.assigned_engine_name}',
-            tid=0,
-            ts=received_time * 1000 + 1,
-            dur=(first_scheduled_time - received_time) * 1000 - 1,
-            args={
-                'query_id': query.id,
-                'original_input_len': query.original_input_len,
-                # 如果engine更新过参数，这个值也会显示为更新参数前已经decode的长度
-                'previous_generated_len': len(query.input_ids) - query.original_input_len,
-                'step': req.global_step,
-                'stale_count': len(req.stale_histories),
-                'abort_count': len(req.abort_histories),
-                'age': (received_time - query.created_time) / 1e3,  # 相对于query生命周期的延迟
-                'shed_delay': (received_time - req.last_pending_reschedule_ts) / 1e3,  # 相对于上次进入request pool的延迟
-                'enqueue_delay': query.enqueue_time - query.created_time,
-            },
-        )
-        prefill = CompleteEvent(
-            name='P',
-            cat='rollout-prefill',
-            pid=f'{self._rm_name} {req.assigned_engine_name}',
-            tid=0,
-            ts=first_scheduled_time * 1000 + 1,  # 处理渲染上对齐的误差，偏移1us
-            dur=(first_token_time - first_scheduled_time) * 1000 - 1,
-            args={
-                'query_id': query.id,
-                'prefill_len': len(query.input_ids),  # 用这个表示prefill里真正输入的token数，可能包含中途decode中断重新prefill的token
-                'step': req.global_step,
-                'stale_count': len(req.stale_histories),
-                'age': (first_scheduled_time - query.created_time) / 1e3,
-            },
-        )
-        decode = CompleteEvent(
-            name='D',
-            cat='rollout-decode',
-            pid=f'{self._rm_name} {req.assigned_engine_name}',
-            tid=0,
-            ts=first_token_time * 1000 + 1,
-            dur=(query.finished_time - first_token_time) * 1000 - 1,
-            args={
-                'query_id': query.id,
-                'input': query.input_prompt,
-                'output': self._normalize_output(query.output_prompt[0]) if query.output_prompt else "",
-                'original_input_len': query.original_input_len,  # 原始输入给定的prefill token数，对齐openai usage的指标
-                'length_generated': query.new_token_len -
-                                    (len(query.input_ids) - query.original_input_len),  # 本次decode的token数
-                'total_output_len': query.new_token_len,  # 总共decode的token数
-                'update_count': req.update_count,
-                'release_count': req.query.release_count,
-                'step': req.global_step,
-                'meta_info': meta_info,
-                'sample_kwargs': {
-                    'top_k': query.top_k,
-                    'top_p': query.top_p,
-                    'temperature': query.temperature,
-                }
-            },
-        )
-        histories = []
-        for idx, his in enumerate(req.stale_histories):
-            stale_wait = CompleteEvent(
-                name='W',
-                cat='rollout-wait',
-                pid=f'{self._rm_name} {his.assigned_engine_name}',
-                tid=0,
-                ts=his.received_time * 1000 + 1,
-                dur=(his.first_scheduled_time - his.received_time) * 1000 - 1,
-                args={
-                    'stale_count': idx,
-                    'query_id': query.id,
-                    'step': his.start_step,
-                    'age': (his.received_time - req.query.created_time) / 1e3,
-                    'shed_delay': (his.received_time - his.last_pending_reschedule_ts) / 1e3,
-                },
-            )
-            stale_prefill = CompleteEvent(
-                name='P',
-                cat='rollout-prefill',
-                pid=f'{self._rm_name} {his.assigned_engine_name}',
-                tid=0,
-                ts=his.first_scheduled_time * 1000 + 1,
-                dur=(his.first_token_time - his.first_scheduled_time) * 1000 - 1,
-                args={
-                    'stale_count': idx,
-                    'query_id': query.id,
-                    'step': his.start_step,
-                },
-            )
-            stale_decode = CompleteEvent(
-                name=his.stale_reason,
-                cat='rollout-stale',
-                pid=f'{self._rm_name} {his.assigned_engine_name}',
-                tid=0,
-                ts=his.first_token_time * 1000 + 1,
-                dur=(his.end_ts - his.first_token_time) * 1000 - 1,
-                args={
-                    'stale_count': idx,
-                    'query_id': query.id,
-                    'step': his.start_step,
-                    'stale_action': his.stale_action,
-                    'stale_reason': his.stale_reason,
-                    'length_generated': his.length_generated,
-                    'update_count': his.update_count,
-                    'release_count': his.release_count,
-                },
-            )
-            histories.append(CoherentCompleteEvent([stale_wait, stale_prefill, stale_decode], 1))
-
-        return [CoherentCompleteEvent([wait, prefill, decode], 1)] + histories
-
-    def _make_stale_flow_trace_event(self, events: List[TracingEvent]) -> List[TracingEvent]:
-        # 这个函数跟上面那个_make_trace_event配合用，先通过waterfall tracer分配了tid之后，再调用这个构造flow
-        working, *histories = events
-        working: CoherentCompleteEvent
-        history_flows = []
-        for i in range(len(histories) - 1):
-            his0 = histories[i]
-            his1 = histories[i + 1]
-            from_ = (his0.pid, his0.tid, his0.ts + his0.dur - 2)
-            to = (his1.pid, his1.tid, his1.ts + 2)
-            flow = FlowEvent(name=f'stale-flow-{his0.args["query_id"]}-{i}', cat='stale-flow', flows=[from_, to])
-            history_flows.append(flow)
-        # from last stale to final prefill
-        if len(histories) > 0:
-            last_one = histories[-1]
-            from_ = (last_one.pid, last_one.tid, last_one.ts + last_one.dur - 2)
-            to = (working.pid, working.tid, working.ts + 2)
-            flow = FlowEvent(name=f'stale-flow-last-{last_one.args["query_id"]}', cat='stale-flow', flows=[from_, to])
-            history_flows.append(flow)
-        return history_flows
-
     def dump_request_trace(self) -> List[dict]:
-        tracer_spans = Tracer.merge_all()
-        buffered_spans = self.waterfall_tracer.dump()
-        pending_events_to_flows = copy.copy(self._pending_events_to_flows)
-        flow_spans = []
-        for events in pending_events_to_flows:
-            flows = self._make_stale_flow_trace_event(events)
-            flow_spans.extend(CombinedEvents(flows).to_objects())
-        return tracer_spans + buffered_spans + flow_spans
+        running_reqs = self.req_pool.get_running_requests()
+        extra_events = []
+        for r in running_reqs:
+            cce = self.query_tracer.trace(r, persist=False)
+            extra_events.append(cce)
+        return self.query_tracer.dump_request_trace(extra_events)
 
     def get_step_metrics(self, step) -> Dict[str, float]:
         return self.req_stat.get_step_metrics(step)
 
     ## query_tool util function ##
 
-    def get_inflight_query_digest(self) -> List[RequestDigest]:
+    def get_inflight_query_digest(self, step: Optional[int] = None) -> List[RequestDigest]:
         ret = []
         query_ids = list(self.req_pool.requests.keys())
         for query_id in query_ids:
             req = self.req_pool.requests.get(query_id)
+            if step is not None and req.global_step != step:
+                continue
             reg_digest = RequestDigest(
                 query_id=query_id,
                 pool_name=self._rm_name,
                 assigned_engine_id=req.assigned_engine_id,
                 assigned_engine_name=req.assigned_engine_name,
+                global_step=req.global_step,
                 assigned_at=req.last_assigned_at,
                 updated_at=req.updated_at,
                 input_length=req.query.original_input_len,

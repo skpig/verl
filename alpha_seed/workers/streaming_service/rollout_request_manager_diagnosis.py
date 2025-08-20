@@ -3,6 +3,8 @@ import threading
 from dataclasses import dataclass, field
 from typing import List, Dict
 
+from alpha_seed.workers.streaming_service.rollout_request import Request
+
 
 @dataclass
 class FinishedEventStats:
@@ -23,6 +25,7 @@ class RequestDigest:
     pool_name: str  # 属于哪个request manager
     assigned_engine_id: str
     assigned_engine_name: str
+    global_step: int  # 从第几个global step提交的
     assigned_at: float
     updated_at: float
     input_length: int
@@ -147,13 +150,13 @@ class RequestStatCollector:
         self.steps: Dict[int, StepStat] = {}  # step ->
         self.mutex = threading.Lock()
 
-    def finish(self, pool_name: str, req):
-        # req: Request
+    def finish(self, pool_name: str, req: Request):
+        shed_delays = []
         en_pool = req.last_pending_reschedule_ts
-        first_recv = req.query.received_time
-        shed_delays = [(first_recv - en_pool) / 1e3]
+        last_recv = req.query.received_time
+        shed_delays.append((last_recv - en_pool) / 1e3)
         for his in req.stale_histories:
-            delay = (his.last_pending_reschedule_ts - his.received_time) / 1e3
+            delay = (his.received_time - his.last_pending_reschedule_ts) / 1e3
             shed_delays.append(delay)
         with self.mutex:
             if req.global_step not in self.steps:

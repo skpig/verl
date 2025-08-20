@@ -1,6 +1,8 @@
 import asyncio
 import copy
+import inspect
 from abc import ABC, abstractmethod
+from functools import wraps
 
 import aiohttp
 import httpx
@@ -53,6 +55,37 @@ def make_reqeust_data_and_metadata(item: DataProto, prompt: str, host, port):
     return data, meta_info
 
 
+def trace_llm_call(func):
+    if inspect.iscoroutinefunction(func):
+
+        @wraps(func)
+        async def wrapper(self, item: DataProto, config: DictConfig, prompt: str = ''):
+            try:
+                tracker: AgentTaskTracker = current_agent_tracker.get()
+            except LookupError:
+                return await func(self, item, config, prompt)
+
+            with tracker.llm_call(item) as capturer:
+                completion = await func(self, item, config, prompt)
+                capturer.capture_output(completion)
+                return completion
+    else:
+
+        @wraps(func)
+        def wrapper(self, item: DataProto, config: DictConfig, prompt: str = ''):
+            try:
+                tracker: AgentTaskTracker = get_current_agent_tracker()
+            except AttributeError:
+                return func(self, item, config, prompt)
+
+            with tracker.llm_call(item) as capturer:
+                completion = func(self, item, config, prompt)
+                capturer.capture_output(completion)
+                return completion
+
+    return wrapper
+
+
 class AsyncLLMInterface(ABC):
 
     @abstractmethod
@@ -69,13 +102,8 @@ class AsyncLLMInterface(ABC):
     def port(self) -> int:
         raise NotImplementedError()
 
-    async def complete(self, item: DataProto, config: DictConfig, prompt: str = ''):
-        try:
-            tracker: AgentTaskTracker = current_agent_tracker.get()
-            tracker.incr_llm_call()
-        except LookupError:
-            pass
-
+    @trace_llm_call
+    async def complete(self, item: DataProto, config: DictConfig, prompt: str = '') -> dict:
         completion = None
         data, meta_info = make_reqeust_data_and_metadata(item, prompt, self.host, self.port)
         try:
@@ -257,22 +285,12 @@ class SyncLLMInterface(ABC):
     def port(self) -> int:
         raise NotImplementedError()
 
-    def complete(self, item: DataProto, config: DictConfig, prompt: str = ''):
-        try:
-            tracker: AgentTaskTracker = get_current_agent_tracker()
-            tracker.incr_llm_call()
-        except AttributeError:
-            # ignore if context var not set
-            pass
-
+    @trace_llm_call
+    def complete(self, item: DataProto, config: DictConfig, prompt: str = '') -> dict:
         completion = None
         try:
             data, meta_info = make_reqeust_data_and_metadata(item, prompt, self.host, self.port)
             completion = self.chat_completions(data, meta_info, config)
-        except asyncio.CancelledError:
-            # Handle task cancellation (e.g., cleanup)
-            print("Request was cancelled!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-            raise  # Re-raise to propagate the cancellation
         except Exception as e:
             print(f"Error occurred!!!!!!!!!!!!!!!!!!", e)
             raise  # Re-raise the exception to propagate it further

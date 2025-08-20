@@ -10,22 +10,33 @@ from alpha_seed.workers.agents.handlers import TaskContext, GlobalState
 from alpha_seed.workers.agents.llm import AsyncLLMInterface, SyncLLMInterface
 from alpha_seed.workers.agents.monitor_ctx import current_agent, set_current_agent
 from alpha_seed.workers.agents.monitoring import AgentWorkerMonitor
+from alpha_seed.workers.agents.trajectory import TrajectoryFactory
 from mono_rl import DataProto
 
 
-class AsyncAgent:
+class AgentInjection:
+    """
+    这个类用来赋值Agentloop里所有需要用到的对象，
+    AgentWorker会负责把这些对象都构造好，然后通过kwargs传给每个Agentloop。
+    为了方便代码inspection，每个对象在下面区域做一下类型注解
+    """
+    # type annotations
+    uid: str  # trajectory 唯一的uid
+    trajectory_factory: TrajectoryFactory
+    config: DictConfig
+    executor: ThreadPoolExecutor
+    global_state: GlobalState
+    monitor: AgentWorkerMonitor
 
     def __new__(cls, *args, **kwargs):
-        config: DictConfig = kwargs.pop('config')
-        executor: ThreadPoolExecutor = kwargs.pop('executor')
-        global_state: GlobalState = kwargs.pop('global_state')
-        monitor: AgentWorkerMonitor = kwargs.pop('monitor')
         instance = super().__new__(cls)
-        instance.config = config
-        instance.executor = executor
-        instance.global_state = global_state
-        instance.monitor = monitor
+        while len(kwargs) > 0:
+            key, val = kwargs.popitem()
+            setattr(instance, key, val)
         return instance
+
+
+class AsyncAgent(AgentInjection):
 
     def __init__(self, tokenizer: AsyncTokenizer | PreTrainedTokenizer, llm: AsyncLLMInterface, **kwargs):
         # async tokenizer can be used as the normal pretrained tokenizer
@@ -52,19 +63,7 @@ class AsyncAgent:
         return f"{self.__class__.__name__}.async"
 
 
-class ThreadedAgent:
-
-    def __new__(cls, *args, **kwargs):
-        config: DictConfig = kwargs.pop('config')
-        executor: ThreadPoolExecutor = kwargs.pop('executor')
-        global_state: GlobalState = kwargs.pop('global_state')
-        monitor: AgentWorkerMonitor = kwargs.pop('monitor')
-        instance = super().__new__(cls)
-        instance.config = config
-        instance.executor = executor
-        instance.global_state = global_state
-        instance.monitor = monitor
-        return instance
+class ThreadedAgent(AgentInjection):
 
     def __init__(self, tokenizer: PreTrainedTokenizer, llm: SyncLLMInterface, **kwargs):
         self.tokenizer: PreTrainedTokenizer = tokenizer

@@ -34,24 +34,6 @@ class BaseEnv(ABC):
     def load_state_dict(self, state_dict: Dict):
         pass
 
-    def __getattribute__(self, name):
-        if name == "step":
-            orig_call = super().__getattribute__(name)
-
-            async def wrapped_step(*args, **kwargs):
-                try:
-                    tracker: AgentTaskTracker = current_agent_tracker.get()
-                except LookupError:
-                    # skip if not tracker not set
-                    return await orig_call(*args, **kwargs)
-
-                with tracker.tool_call(self.__class__.__name__):
-                    result = await orig_call(*args, **kwargs)
-                    return result
-
-            return wrapped_step
-        return super().__getattribute__(name)
-
 
 def create_agent_envs_from_str(env_strs: Union[None, List[str], str],
                                external_lib: str = None,

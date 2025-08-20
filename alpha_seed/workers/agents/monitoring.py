@@ -3,12 +3,15 @@ from collections import defaultdict, deque
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import reduce
-from typing import Dict, Any, List, Type, Iterable, Container
+from typing import Dict, Any, List, Type, Iterable, Container, Optional
 import threading
 
-import ray
+import torch
 
+from alpha_seed.utils.profile.timeline import CompleteEvent
 from alpha_seed.workers.agents.monitor_ctx import current_agent_tracker, set_current_agent_tracker
+from alpha_seed.workers.agents.tool import ToolResult
+from mono_rl import DataProto
 
 
 def avg(l: list) -> float:
@@ -147,7 +150,8 @@ class ToolUsePerfMetrics:
             retried_count=sum(m.retried_count for m in metrics_list),
             error_count=sum(m.error_count for m in metrics_list),
             max_attempts_exceeds=sum(m.max_attempts_exceeds for m in metrics_list),
-            avg_time=sum(m.avg_time * m.success_count / total_success for m in metrics_list),  # 按成功次数加权
+            # 按成功次数加权
+            avg_time=sum(m.avg_time * m.success_count / total_success for m in metrics_list) if total_success else 0,
         )
 
 
@@ -239,16 +243,81 @@ class AgentWorkerStats:
                                 tool_use_perf_metrics=merged_tool_use_perf_metrics)
 
 
+class NullLLMCapturer:
+
+    def capture_input(self, item):
+        pass
+
+    def capture(self, item, completion):
+        pass
+
+
+class LLMResultCapturer:
+
+    def __init__(self):
+        self.input_ids: List[int] = []
+        self.output_ids: List[int] = []
+
+    def capture_input(self, prompt: DataProto):
+        if isinstance(prompt, DataProto):
+            input_ids = prompt.batch['input_ids']
+            attention_mask = prompt.batch['attention_mask']
+            valid_input_len = torch.sum(attention_mask)
+            prompt_ids = input_ids[0, -valid_input_len:].tolist()
+            self.input_ids = prompt_ids
+
+    def capture_output(self, completion: dict):
+        # ignore if not dict
+        if isinstance(completion, dict):
+            if completion and 'choices' in completion:
+                choices = completion['choices']
+                if choices:
+                    self.output_ids = choices[0].get('message', {}).get('raw_output_ids', [])
+
+
+class NullToolCapturer:
+
+    def capture_input(self, instance_id: str, parameter: dict):
+        pass
+
+    def capture_output(self, instance_id: str, parameter: dict, result):
+        pass
+
+    def capture_exception(self, e: Exception, tb: str):
+        pass
+
+
+class ToolResultCapturer:
+
+    def __init__(self):
+        from alpha_seed.workers.agents.tool import ToolResult
+        self.instance_id: str = ''
+        self.parameter: dict = {}
+        self.result: Optional[ToolResult] = None
+
+    def capture_input(self, instance_id: str, parameter: dict):
+        self.instance_id = instance_id
+        self.parameter = parameter
+
+    def capture_output(self, result):
+        self.result = result
+
+    def capture_exception(self, e: Exception, tb: str):
+        self.result = ToolResult(f"exception during tool call, e={e}\n{tb}", success=False)
+
+
 class AgentTaskTracker:
     """单次agent执行的跟踪器，分别统计创建和执行时间"""
 
     def __init__(self, monitor: 'AgentWorkerMonitor'):
+        from alpha_seed.workers.agents.handlers.base import AsyncAgent, ThreadedAgent
         self.monitor = monitor
         self.creation_start_time = None
         self.creation_finish_time = None
         self.execution_start_time = None
         self.execution_finish_time = None
         self.agent_cls = None
+        self.agent: Optional[AsyncAgent | ThreadedAgent] = None
 
     @contextmanager
     def creation(self, agent_cls: Type):
@@ -259,6 +328,7 @@ class AgentTaskTracker:
 
         current_agent_tracker.set(self)
         set_current_agent_tracker(self)
+        self.agent_cls = agent_cls
         self.creation_start_time = time.time()
         self.monitor.increment_pending_tasks(agent_cls.__name__)
         try:
@@ -268,47 +338,88 @@ class AgentTaskTracker:
                 self.creation_finish_time = time.time()
 
     @contextmanager
-    def execution(self, agent_cls: Type):
+    def execution(self, agent):
         """统计agent执行时间"""
         if not self.monitor.enabled:
             yield
             return
 
-        self.agent_cls = agent_cls
+        self.agent = agent
         self.execution_start_time = time.time()
 
-        self.monitor.increment_active_tasks(agent_cls.__name__)
+        self.monitor.increment_active_tasks(self.agent_cls.__name__)
 
         try:
             yield
-            self.monitor.increment_completed_tasks(agent_cls.__name__)
+            self.monitor.increment_completed_tasks(self.agent_cls.__name__)
         except Exception:
             self.monitor.increment_failed_tasks()
             raise
         finally:
             if self.execution_start_time is not None:
                 self.execution_finish_time = time.time()
-                self.monitor.record_task_completion(task_type=agent_cls.__name__,
+                self.monitor.record_task_completion(task_type=self.agent_cls.__name__,
                                                     creation_time=self.creation_finish_time - self.creation_start_time,
                                                     waiting_time=self.execution_start_time - self.creation_finish_time,
                                                     execution_time=self.execution_finish_time -
                                                     self.execution_start_time,
                                                     total_time=self.execution_finish_time - self.creation_start_time)
+                self._make_trace_event()
 
     @contextmanager
-    def tool_call(self, tool_class_name: str):
+    def llm_call(self, prompt: DataProto):
         if not self.monitor.enabled:
-            yield
+            yield NullLLMCapturer()
             return
 
+        from alpha_seed.workers.agents.trajectory import make_llm_seg_pair
+
         start = time.time()
+        capturer = LLMResultCapturer()
+        capturer.capture_input(prompt)
+        llm_start, llm_end = make_llm_seg_pair(start, capturer.input_ids)
+        traj = self.agent.trajectory_factory.get()
+        traj.append(llm_start)
         try:
-            yield
+            self.incr_llm_call()
+            yield capturer
+        finally:
+            finish = time.time()
+            llm_end.end_ts = finish
+            llm_end.output_ids = capturer.output_ids
+            traj.append(llm_end)
+
+    @contextmanager
+    def tool_call(self, tool_class_name: str, instance_id: str, parameter: dict):
+        # 这个函数内务必特别小心不要搞出错误来，任何这里的异常都可能作为工具的输入到llm下一轮里
+        if not self.monitor.enabled:
+            yield NullToolCapturer()
+            return
+
+        from alpha_seed.workers.agents.trajectory import make_tool_seg_pair
+
+        start = time.time()
+        capturer = ToolResultCapturer()
+        capturer.capture_input(instance_id, parameter)
+        tool_start, tool_end = make_tool_seg_pair(start, instance_id, tool_class_name, parameter)
+        traj = self.agent.trajectory_factory.get()
+        traj.append(tool_start)
+        try:
+            yield capturer
         finally:
             finish = time.time()
             self.monitor.record_tool_call(task_type=self.agent_cls.__name__,
                                           tool_type=tool_class_name,
                                           call_time=finish - start)
+            self.incr_tool_call_counter(
+                tool_class_name,
+                capturer.result.retries,
+                capturer.result.retries == capturer.result.max_attempts - 1,
+                capturer.result.success,
+            )
+            tool_end.end_ts = finish
+            tool_end.set_result(capturer.result)
+            traj.append(tool_end)
 
     def incr_llm_call(self):
         self.monitor.incr_llm_call(self.agent_cls.__name__)
@@ -317,10 +428,13 @@ class AgentTaskTracker:
         self.monitor.incr_tool_call_counter(self.agent_cls.__name__, tool_class_name, retries, exceeded_max_attempts,
                                             success)
 
+    def _make_trace_event(self):
+        pass
+
 
 class AgentWorkerMonitor:
 
-    def __init__(self, worker_id: str, enabled: bool = True, window_size: int = 1024):
+    def __init__(self, worker_id: str, enabled: bool = True, window_size: int = 2048):
         self.worker_id = worker_id
         self.enabled = enabled
 

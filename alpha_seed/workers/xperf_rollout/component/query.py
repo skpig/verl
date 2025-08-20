@@ -1,8 +1,8 @@
 import copy
 import time
-import logging
+from enum import Enum, auto
 from typing import *
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import uuid
 import torch
 from threading import Lock
@@ -26,6 +26,23 @@ def call_once_method(method):
     return wrapper
 
 
+# 在engine内的生命周期event，在engine外的由RequestManager管理
+# 为了方便json序列化，这里直接用字符串表示enum
+class ProcessEventType:
+    RECEIVED = "RECEIVED"  # (pool) -> waiting
+    PREFILL_START = "PREFILL_START"  # waiting -> prefill
+    PREFILL_DONE = "PREFILL_DONE"  # prefill -> decode
+    FINISHED = "FINISHED"  # decode -> done
+    EVICTED = "EVICTED"  # prefill/decode -> waiting, kv 满了被evict
+
+
+@dataclass
+class QueryProcessEvent:
+    event: str | ProcessEventType
+    ts_ms: float
+    info: Dict[str, Any] = field(default_factory=dict)
+
+
 @dataclass
 class Query:
     id: str
@@ -46,6 +63,9 @@ class Query:
     output_prompt: Union[str, List[str]]
     prefix_already_computed_len: int
     system_ids_len: int
+
+    # trace event相关
+    process_events: List[QueryProcessEvent]  # 记录query在此engine上的事件
     # 下面几个time的单位都是ms
     created_time: float  # 此对象在client侧创建时间
     enqueue_time: float  # 对象放入request pool的时间
@@ -57,6 +77,7 @@ class Query:
     recent_first_token_time: float  # 最近一次重新prefill完的时间
     finished_time: float  # decode完的时间
     release_count: int  # 在decode或者prefill过程中因kv cache满了或者weights变了需要重新prefill的次数
+
     hidden_states: Optional[torch.Tensor]
     logits: Optional[torch.Tensor]
     cur_batch_pad_token: int
@@ -127,6 +148,37 @@ class Query:
         self.images_bytes_ref = images_bytes_ref
         self.action = True
 
+    def add_event(self, event: str | ProcessEventType, info: Optional[Dict] = None):
+        info = info or {}
+        if event in [ProcessEventType.FINISHED, ProcessEventType.EVICTED]:
+            info["length_generated"] = self.new_token_len - (len(self.input_ids) - self.original_input_len)
+            info["total_output_len"] = self.new_token_len
+            info["release_count"] = self.release_count
+        self.process_events.append(QueryProcessEvent(event, ts_ms=time.time() * 1000, info=info))
+
+    def get_event_time(self, event: ProcessEventType) -> Optional[float]:
+        for e in self.process_events:
+            if e.event == event:
+                return e.ts_ms
+        return None
+
+    def init_timestamp(self):
+        """
+        query 生命周期时间戳，初始化时只调用一次，中途不改变
+        """
+        self.dispatch_time = 0  # 最近一次的调度时间戳，即使reset_compute也不改变这个值
+        self.enqueue_time = 0
+        self.created_time = time.time() * 1000
+
+    def reset_timestamp(self):
+        self.process_events = []  #
+        self.received_time = 0
+        self.first_scheduled_time = 0
+        self.first_token_time = 0
+        self.recent_scheduled_time = 0
+        self.recent_first_token_time = 0
+        self.finished_time = 0
+
     # Check whether current query is going to enter the decoding stage
     def is_to_decoding_compute(self):
         # already in decode stage
@@ -154,8 +206,10 @@ class Query:
         self.finished_time = time.time() * 1000
         self._exception = exception
         self.detach()
+        self.add_event(ProcessEventType.FINISHED)
 
-    def reset_compute(self):
+    def reset_compute(self, info: Optional[Dict] = None):
+        self.add_event(ProcessEventType.EVICTED, info)
         self.kv_slot_ids = []
         self.to_context_phase()
         self.input_embedding = None
@@ -165,7 +219,6 @@ class Query:
         self.prefix_already_computed_len = 0
         self.hidden_states = None
         self.release_count += 1
-        return
 
     @call_once_method
     def lazy_init_from_prompt_once(self, tokenizer):
@@ -238,25 +291,6 @@ class Query:
             for key, val in plugin_metrics.items():
                 ret[f"plugin/{key}"] = val
         return ret
-
-    def init_timestamp(self):
-        """
-        query生命周期时间戳，初始化时只调用一次，中途无论发生任何调度都不改变
-        """
-        self.dispatch_time = 0  # 最近一次的调度时间戳，即使reset_compute也不改变这个值
-        self.enqueue_time = 0
-        self.created_time = time.time() * 1000
-
-    def reset_timestamp(self):
-        """
-        重置跟engine相关的时间戳，query生命周期时间戳不改变
-        """
-        self.received_time = 0
-        self.first_scheduled_time = 0
-        self.first_token_time = 0
-        self.recent_scheduled_time = 0
-        self.recent_first_token_time = 0
-        self.finished_time = 0
 
     def clone(self) -> 'Query':
         ret = copy.copy(self)
@@ -386,6 +420,7 @@ class InflightQueue:
 
     def append(self, item: AsyncQuery):
         with self.lock:
+            item.query.add_event(ProcessEventType.RECEIVED)
             item.query.received_time = time.time() * 1000
             self.queue.append(item)
 

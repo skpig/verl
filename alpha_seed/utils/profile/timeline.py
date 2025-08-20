@@ -18,7 +18,7 @@ import threading
 import time
 import csv
 
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from types import FrameType
 from typing import Union, Optional, List, Any, Dict, Tuple
@@ -403,23 +403,28 @@ class DummyEvent(TracingEvent):
 class Tracer(object):
 
     @classmethod
-    def get_instance(cls):
-        tracer = getattr(_local_tracers, 'tracer', None)
+    def get_instance(cls, namespace: str = 'default', max_events: Optional[int] = None) -> 'Tracer':
+        tracer_key = f'tracer_{namespace}'
+        tracer = getattr(_local_tracers, tracer_key, None)
         if tracer is None:
             tid = threading.current_thread().ident
-            _local_tracers.tracer = Tracer()
+            tracer = Tracer(max_events)
+            setattr(_local_tracers, tracer_key, tracer)
             with _tracer_map_mtx:
-                _local_tracer_map[tid] = _local_tracers.tracer
-            return _local_tracers.tracer
-        else:
-            return tracer
+                _local_tracer_map[(f"{tid}", namespace)] = tracer
+        return tracer
 
-    def __init__(self):
+    def __init__(self, max_events: Optional[int] = None):
         # local data store (access from current thread only)
+        self._max_events = max_events  # 最大存多少个events，None表示不限制
         self._buffer_size = 256
+        self._max_num_buffers = None
+        if self._max_events is not None:
+            self._max_num_buffers = max(1, self._max_events // self._buffer_size)  # 至少要1个buffer
         self.current_buf: List[Optional[TracingEvent]] = [None] * self._buffer_size
         self.current_pos: int = 0
-        self.merged_buffers: List[List[TracingEvent]] = []  # [[buf0], [buf1], ...]
+        self.merged_buffers: List[List[TracingEvent]] = deque(
+            maxlen=self._max_num_buffers)  # noqa [[buf0], [buf1], ...]
         self._disabled = False
 
     def trace(self, evt: TracingEvent):
@@ -433,7 +438,7 @@ class Tracer(object):
     @staticmethod
     def disable_all():
         with _tracer_map_mtx:
-            for tid, tracer in _local_tracer_map.items():
+            for _, tracer in _local_tracer_map.items():
                 tracer._disabled = True
 
     @contextmanager
@@ -456,13 +461,16 @@ class Tracer(object):
         self.current_pos = 0
 
     @staticmethod
-    def merge_all() -> List[dict]:
+    def merge_all(namespace: str = 'default') -> List[dict]:
         with _tracer_map_mtx:
             print(f'got {len(_local_tracer_map)} tracers in all threads')
             ret = []
-            for tid, tracer in _local_tracer_map.items():
+            for (tid, t_ns), tracer in _local_tracer_map.items():
+                if t_ns != namespace:
+                    # 只merge属于给定namespace的, 避免数据混在一起
+                    continue
                 total_events_count = len(tracer.merged_buffers) * tracer._buffer_size + tracer.current_pos
-                print(f'thread({tid}) generated {total_events_count} events')
+                print(f'thread({tid}) generated {total_events_count} events in namespace({t_ns})')
                 for buf in tracer.merged_buffers:
                     buf_obj = []
                     for e in buf:
@@ -526,9 +534,11 @@ class WaterfallSlotTracer:
             self.tracer.trace(evt)
         self._buffered_events = []
 
-    def dump(self) -> List[dict]:
+    def dump(self, extra: List[List[CompleteEvent | CoherentCompleteEvent]] = None) -> List[dict]:
         # 返回此tracer中buffered的events的span dump，但又不影响tracer本身继续trace
-        events = copy.copy(self._buffered_events)
+        extra = extra or []
+        extra_flatten = functools.reduce(lambda x, y: x + y, extra, [])
+        events = copy.copy(self._buffered_events) + extra_flatten
         slots = copy.deepcopy(self._thread_slots)
         events.sort(key=lambda e: (e.tid, e.ts_to_sort))
         for evt in events:
@@ -584,7 +594,7 @@ class GCEventTracer(object):
         self.pid: str = ''
         with _tracer_map_mtx:
             self.tracer = Tracer()
-            _local_tracer_map['gc-tracer'] = self.tracer
+            _local_tracer_map[('gc-tracer', 'default')] = self.tracer
 
     def _gc_trace_callback(self, phase: str, info: dict):
         if not self._gc_trace_enabled:
@@ -608,7 +618,7 @@ class GCEventTracer(object):
 
 
 _local_tracers = threading.local()
-_local_tracer_map: Dict[str, Tracer] = {}  # tid -> Tracer
+_local_tracer_map: Dict[Tuple[str, str], Tracer] = {}  # (tid, namespace) -> Tracer
 _tracer_map_mtx = threading.Lock()
 
 # use this to hack the ray, let ray know this object(_tracer_map_mtx) is not going to serialize

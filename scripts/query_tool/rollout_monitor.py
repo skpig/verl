@@ -14,10 +14,10 @@ from scripts.query_tool.utils import _print_list, compact_list_fields, FlowStyle
 yaml.add_representer(FlowStyleList, represent_flow_list)
 
 
-def list_running_queries_str(request_managers: list):
+def list_running_queries_str(request_managers: list, step: Optional[int] = None):
     from alpha_seed.workers.streaming_service.rollout_request_manager_diagnosis import RequestDigest
     all_running_queries: List[List[RequestDigest]] = ray.get(
-        [rm.get_inflight_query_digest.remote() for _, rm in request_managers])
+        [rm.get_inflight_query_digest.remote(step) for _, rm in request_managers])
     running_query_digest_flatten = reduce(lambda a, b: a + b, all_running_queries)
 
     if not running_query_digest_flatten:
@@ -28,6 +28,7 @@ def list_running_queries_str(request_managers: list):
     table.add_column("Pool", style="cyan", no_wrap=True, width=15)
     table.add_column("Query ID", style="cyan", no_wrap=True, width=26)
     table.add_column("Engine Name", style="green", no_wrap=True, width=35)
+    table.add_column("Step", style="green", no_wrap=True, width=10)
     table.add_column("Input", style="blue", justify="right", no_wrap=True)
     table.add_column("Output", style="blue", justify="right", no_wrap=True)
     table.add_column("Aborted", style="red", justify="right", no_wrap=True)
@@ -55,9 +56,18 @@ def list_running_queries_str(request_managers: list):
         updated_time = format_relative_time(digest.updated_at)
 
         # Use original content without truncation - let rich handle overflow
-        table.add_row(digest.pool_name, digest.query_id, digest.assigned_engine_name or '-', str(digest.input_length),
-                      str(digest.output_length), str(digest.aborted_count), str(digest.stale_count), assigned_time,
-                      updated_time)
+        table.add_row(
+            digest.pool_name,
+            digest.query_id,
+            digest.assigned_engine_name or '-',
+            f"{digest.global_step}",
+            str(digest.input_length),
+            str(digest.output_length),
+            str(digest.aborted_count),
+            str(digest.stale_count),
+            assigned_time,
+            updated_time,
+        )
 
     # Render table to string with wide console
     console = Console(width=200)
@@ -77,7 +87,7 @@ def list_finished_queries_str(request_managers: list):
 
 
 def get_query_details_str(request_managers: list, query_id: str) -> Tuple[str, str]:
-    from alpha_seed.workers.streaming_service.rollout_request_manager import Request
+    from alpha_seed.workers.streaming_service.rollout_request import Request
     for name, rm in request_managers:
         req: Optional[Request] = ray.get(rm.get_by_id.remote(query_id))
         if req:
@@ -97,7 +107,7 @@ def get_query_details_str(request_managers: list, query_id: str) -> Tuple[str, s
 
 
 def evict_query(request_managers: list, query_id: str):
-    from alpha_seed.workers.streaming_service.rollout_request_manager import Request
+    from alpha_seed.workers.streaming_service.rollout_request import Request
     for name, rm in request_managers:
         req: Optional[Request] = ray.get(rm.get_by_id.remote(query_id))
         if not req:

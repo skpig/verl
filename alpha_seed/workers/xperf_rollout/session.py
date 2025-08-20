@@ -21,7 +21,8 @@ from alpha_seed.workers.xperf_rollout.component.prefix_cache import get_prefix_c
 from alpha_seed.workers.xperf_rollout.utils.custom_xperf_convert_helper import XCustomInferenceModuleAdapter
 from xperf_gpt.multi_models.visual.inferencer import VITInferencer
 from xperf_gpt.multi_models.visual.eva_vit import EVA_VIT_CONFIGS
-from alpha_seed.workers.xperf_rollout.component.query import Query, AsyncQuery, InflightQueue, batch_sync_tp_queries
+from alpha_seed.workers.xperf_rollout.component.query import Query, AsyncQuery, InflightQueue, batch_sync_tp_queries, \
+    ProcessEventType
 from alpha_seed.utils.observility import get_profiler_context_wrapped
 from xperf_gpt.utils import (logging_rank, logging_rank_only)
 from typing import List, Dict
@@ -1382,7 +1383,7 @@ class InferenceSession:
                 # recompute prefill
                 for query in self.running:
                     self.cache_manager.release_query(query)
-                    query.reset_compute()
+                    query.reset_compute(info={'reason': 'engine_terminated'})
                     self.waiting.append(query)
                 self.running = []
                 if self.prefix_cache is not None:
@@ -1530,6 +1531,7 @@ class InferenceSession:
                         next_token = query_next_tokens[token_idx]
                         if len(query.new_token_ids) == 0:
                             query.recent_first_token_time = time.time() * 1000
+                            query.add_event(ProcessEventType.PREFILL_DONE, {"prefill_len": len(query.input_ids)})
                             if not query.first_token_time:
                                 query.first_token_time = query.recent_first_token_time
                         query.add_token(token_id=next_token,

@@ -526,9 +526,9 @@ rollout_server:
   timeout: 9600
   handler_kwargs: {}
   agent:
-    executor_class: LocalExecutor  # ["RayActorExecutor", "LocalExecutor"]
+    executor_class: RayActorExecutor  # ["RayActorExecutor", "LocalExecutor"]
     # max_workers * worker_max_concurrency 就是同时运行的task的最大并发数
-    max_workers: 4 # 有多少worker
+    max_workers: 8 # 有多少worker
     worker_max_concurrency: 8192  # 每个worker的并发数，对所有executor类型都生效
     llm_request_concurrency: 0  # 每个worker调用llm的并发，默认0表示不限制，如果llm有限制的需要再调这个
     direct_submit_query: True  # 是否直接将query对象发给request manager，跳过http发给openai compatible serve的过程
@@ -560,8 +560,9 @@ streaming_rollout:
     enable: True
     from_step: 0
     to_step: 10
-    store_decoding_output: False
     upload_to_mlx: True
+    renderer:
+      no_waiting_spans: True  # 是否在trace threads上显示waiting，不显示W可以更清晰看出engine填充程度
   proxy:
     # 只对非elastic的server mode起作用，elastic一定是dynamic-balancing
     lb_mode: dynamic-balancing  # ["dynamic-balancing", "even-distribution", "cache-aware-balancing"]

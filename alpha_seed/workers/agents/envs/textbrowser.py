@@ -97,7 +97,8 @@ class TextBrowserEnv(BaseTool):
         action = tool_args["url"] + "\n" + tool_args["description"]
         self._call_count += 1
         if action in self._call_history:
-            return "This URL and description has been called before. Please try again with another URL or description."
+            return ToolResult(
+                "This URL and description has been called before. Please try again with another URL or description.")
         self._call_history.append(action)
 
         content, retries, max_attempts = await TextBrowserAPI(**tool_args,

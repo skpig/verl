@@ -38,7 +38,7 @@ class PytestXdistEnv:
 def ray_fixture():
     import ray
     # stream every worker's stdout/stderr back to the driver
-    ray.init(log_to_driver=os.environ.get('RAY_DEDUP_LOGS', 'false') == 'true')
+    ray.init(log_to_driver=os.environ.get('RAY_DEDUP_LOGS', 'false') == 'true', ignore_reinit_error=True)
     yield
     ray.shutdown()
 

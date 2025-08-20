@@ -12,7 +12,15 @@ def represent_flow_list(dumper, data):
     return dumper.represent_sequence('tag:yaml.org,2002:seq', data, flow_style=True)
 
 
+def represent_multiline_str(dumper, data):
+    """Custom representer for multiline strings to use literal block style (|)"""
+    if '\n' in data and len(data) > 50:  # Only for strings with newlines and longer than 50 chars
+        return dumper.represent_scalar('tag:yaml.org,2002:str', data, style='|')
+    return dumper.represent_scalar('tag:yaml.org,2002:str', data)
+
+
 yaml.add_representer(FlowStyleList, represent_flow_list)
+yaml.add_representer(str, represent_multiline_str)
 
 
 def compact_list_fields(obj: Any) -> Any:

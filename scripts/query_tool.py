@@ -2,6 +2,7 @@ import json
 import os
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -10,7 +11,8 @@ import traceback
 import warnings
 from functools import reduce
 
-from scripts.query_tool.agent_monitor import render_agent_watch_data
+from scripts.query_tool.agent_monitor import render_agent_watch_data, list_agent_tasks_str, get_agent_task_detail_yaml, \
+    get_agent_task_str
 from scripts.query_tool.rollout_monitor import list_running_queries_str, list_finished_queries_str, \
     get_query_details_str, evict_query, list_all_pools_str, get_statistics_str
 from scripts.query_tool.utils import FlowStyleList, represent_flow_list, render_rollout_progress
@@ -55,6 +57,7 @@ def handle_client(conn, server):
             break
 
         cmd = args["command"]
+        console_width = args['console_width']
         response = ""
 
         # 用不到request pool信息的命令放这里
@@ -76,11 +79,31 @@ def handle_client(conn, server):
             assert rms, "no request manager found, please check the actors of your job"
 
             if cmd == "list":
-                response = list_running_queries_str(rms)
+                step = args.get("step")
+                response = list_running_queries_str(rms, step)
             elif cmd == "list-finished":
                 response = list_finished_queries_str(rms)
+            elif cmd == "list-tasks":
+                list_all = args.get('all', False)
+                task_type = args['type']  # filter by agent class name
+                limit = args['limit']
+                no_color = args['no_color']
+                response = list_agent_tasks_str(console_width, list_all, task_type, limit, no_color)
             elif cmd == "get":
                 stdout, stderr = get_query_details_str(rms, args["query_id"])
+                response = json.dumps({"stdout": stdout, "stderr": stderr})
+            elif cmd == "get-task":
+                uid = args['uid']
+                format = args['format']
+                traj_id = args['traj']  # filter by trajectory id
+                no_color = args['no_color']
+                if format == "yaml":
+                    stdout, stderr = get_agent_task_detail_yaml(uid)
+                elif format == "table":
+                    stdout, stderr = get_agent_task_str(console_width, uid, traj_id, no_color)
+                else:
+                    stdout = ""
+                    stderr = f"unsupported format({format}), check `scripts/query_tool.sh --help`"
                 response = json.dumps({"stdout": stdout, "stderr": stderr})
             elif cmd == "evict":
                 response = evict_query(rms, args["query_id"])
@@ -90,6 +113,7 @@ def handle_client(conn, server):
                 for _, rm in rms:
                     response += get_statistics_str(rm) + "\n\n"
             elif cmd == "dump-trace":
+                # dump
                 spans = []
                 task_runner = ray.get_actor("task_runner")
                 task_runner_spans = ray.get(task_runner.dump_trace_spans.remote())
@@ -97,11 +121,41 @@ def handle_client(conn, server):
                 for _, rm in rms:
                     request_spans = ray.get(rm.dump_request_trace.remote())
                     spans.extend(request_spans)
+
+                # export
                 from alpha_seed.utils.profile.timeline import export_chrome_trace
                 save_path = export_chrome_trace('query_trace.json.gz', spans)
                 response = f"trace.json.gz saved to {save_path} with {len(spans)} spans"
-                will_upload = args.get("upload")
-                if will_upload:
+
+                # upload
+                will_not_upload = args.get("no_upload")
+                if not will_not_upload:
+                    time.sleep(1)  # 等flush完成，被subprocess可见
+                    result = subprocess.run(
+                        f"/opt/tiger/mlx_deploy/bin/mlx asset upload {save_path}",
+                        shell=True,
+                        capture_output=True,
+                        text=True,
+                    )
+                    stdout = result.stdout
+                    stderr = result.stderr
+                    response += f"\n{stdout}\n{stderr}"
+                    if result.returncode != 0:
+                        response += "\n[ERROR] upload profiler trace fail. please see the log around"
+            elif cmd == "dump-task-trace":
+                # dump
+                from alpha_seed.workers.agents.trajectory import TrajectoryCollector
+                traj_collector: TrajectoryCollector = ray.get_actor("TrajectoryCollector")  # noqa
+                spans = ray.get(traj_collector.dump_trajectory_trace.remote())
+
+                # export
+                from alpha_seed.utils.profile.timeline import export_chrome_trace
+                save_path = export_chrome_trace('agent_task_trace.json.gz', spans)
+                response = f"agent_task_trace.json.gz saved to {save_path} with {len(spans)} spans"
+
+                # upload
+                will_not_upload = args.get("no_upload")
+                if not will_not_upload:
                     time.sleep(1)  # 等flush完成，被subprocess可见
                     result = subprocess.run(
                         f"/opt/tiger/mlx_deploy/bin/mlx asset upload {save_path}",
@@ -193,6 +247,15 @@ def send_to_daemon(cmd, args_dict):
             print("❌ Daemon is not running. Please check the daemon job by `ray list jobs`")
             sys.exit(1)
 
+        # attach console info
+        console = Console()
+        console_width = console.width
+        args_dict['console_width'] = console_width
+        mode = os.fstat(sys.stdout.fileno()).st_mode
+        if stat.S_ISREG(mode):
+            # 仅当重定向到文件时才no color
+            args_dict['no_color'] = True
+
         # request
         client.sendall(json.dumps(args_dict).encode())
 
@@ -276,7 +339,8 @@ def main():
     subparsers.add_parser('list-pools', help='List all available pools')
 
     # list running queries (requires --pool)
-    subparsers.add_parser('list', help='List running queries')
+    list_parser = subparsers.add_parser('list', help='List running queries')
+    list_parser.add_argument("--step", type=int, default=None, help='filter by global step')
 
     # list finished queries
     subparsers.add_parser('list-finished', help='List finished queries')
@@ -286,7 +350,7 @@ def main():
     watch_all_parser.add_argument('--debug', action='store_true', help='show query tool internal diagnosis info')
 
     # get query details
-    get_parser = subparsers.add_parser('get', help='Get details of a query')
+    get_parser = subparsers.add_parser('get', help='Get details of a query (yaml)')
     get_parser.add_argument('query_id', help='ID of the query')
 
     # evict query
@@ -298,7 +362,32 @@ def main():
 
     # dump query trace
     dump_trace_parser = subparsers.add_parser('dump-trace', help='dump query trace intermediately')
-    dump_trace_parser.add_argument('--upload', action='store_true', help='to upload to merlin or not')
+    dump_trace_parser.add_argument('--no-upload', action='store_true', help='not to upload to merlin automatically')
+
+    # tasks related commands
+    list_tasks_parser = subparsers.add_parser('list-tasks', help='List agent tasks')
+    list_tasks_parser.add_argument('--all', action='store_true', help='including finished tasks(trajectories)')
+    list_tasks_parser.add_argument('--type',
+                                   default=None,
+                                   help='agent task type, same aka agent class name '
+                                   '`class XXAgent(AsyncAgent):` -> XXAgent, default to get all in the same UID')
+    list_tasks_parser.add_argument('--limit', default=500, type=int, help='number of segments to list at one time')
+    list_tasks_parser.add_argument('--no-color', action='store_true', help='output without coloring')
+
+    get_task_parser = subparsers.add_parser('get-task', help='Get details of an agent task (--format)')
+    get_task_parser.add_argument('uid', help='UID of the agent task')
+    get_task_parser.add_argument('--format', default='table', help='dump format, table/yaml')
+    get_task_parser.add_argument('--no-color', action='store_true', help='output without coloring')
+    get_task_parser.add_argument('--traj',
+                                 type=int,
+                                 default=None,
+                                 help='trajectory_id, default to get all in the same UID')
+
+    # dump traj trace
+    dump_task_trace_parser = subparsers.add_parser('dump-task-trace', help='dump agent trace intermediately')
+    dump_task_trace_parser.add_argument('--no-upload',
+                                        action='store_true',
+                                        help='not to upload to merlin automatically')
 
     args = parser.parse_args()
     if args.command == 'daemon':

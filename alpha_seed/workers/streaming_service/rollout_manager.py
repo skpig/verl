@@ -22,6 +22,7 @@ from ray import ObjectRef
 
 from alpha_seed.workers.agents.executor import RayActorExecutor, ExecutorBase, LocalExecutor
 from alpha_seed.workers.agents.metrics_collector import init_agent_metrics_collector
+from alpha_seed.workers.agents.trajectory import init_agent_trajectory_collector
 from alpha_seed.workers.streaming_service.elastic_rollout_manager import ElasticRolloutManager
 from alpha_seed.workers.streaming_service.rollout_proxy import FixedReplicatedRayWorkerGroupAdapter, \
     RolloutWorkerGroupProxy, BalancedRolloutWorkerGroupProxy, CacheAwareBalancedRolloutWorkerGroupProxy, \
@@ -150,6 +151,7 @@ class RolloutManager:
         stable_pool_names = self.config.elastic.resource_pools.stable_pool_names
         stable_pool_name = stable_pool_names[0] if stable_pool_names else ''
         self.agent_metrics_collector = init_agent_metrics_collector(self.config, stable_pool_name)
+        self.agent_trajectory_collector = init_agent_trajectory_collector(self.config, stable_pool_name)
         self.train_client_executor: Optional[ExecutorBase] = None
         self.val_client_executor: Optional[ExecutorBase] = None
 
@@ -831,6 +833,9 @@ class RolloutManager:
     def _train_server_gen(self, gen_batch: DataProto, step: int, metrics: Dict, pending_batch: List[DataProto],
                           is_warmup_step: bool, complete_ratio: float) -> Tuple[List[DataProto], List[DataProto]]:
         """streaming gen with server, only for train"""
+
+        # hybrid train -> hybrid rollout weights update
+        # hybrid rollout -> standalone rollout weights update
         if self.train_standalone_wg is not None:
             with Timer(name="update_rollout_server", logger=None) as timer:
                 xperf_metrics = self.update_standalone_server_weights(is_train=True)
