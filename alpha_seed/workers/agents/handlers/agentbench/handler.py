@@ -45,13 +45,15 @@ class AgentHandler(ThreadedAgent):
             }
         }
 
-    def _preprocess(self, task_id, turn_task, prompt_meta: Dict, row_dict: Dict, meta_info: Dict, max_length: int,
-                    pad_to_max_length: bool, truncation: str, sub_index: int) -> DataProto:
+    def _preprocess(self, task_id, turn_task, prompt_meta: Dict, row_dict: Dict, meta_info: Dict,
+                    rsp_left_truncation: bool, max_new_tokens_per_turn: int, max_length: int, pad_to_max_length: bool,
+                    truncation: str, sub_index: int, rollout_config: DictConfig, tagkv: Dict) -> DataProto:
 
         # just a copy from verl with minor change
         def _tokenize_and_postprocess_data(prompt: str,
                                            tokenizer: PreTrainedTokenizer,
                                            max_length: int,
+                                           pad_to_max_length: bool,
                                            pad_token_id: int,
                                            left_pad=True,
                                            truncation='error'):
@@ -94,15 +96,53 @@ class AgentHandler(ThreadedAgent):
 
             return input_ids, attention_mask, truncated
 
-        prompt_with_chat_template = self.tokenizer.apply_chat_template(turn_task.request.messages,
-                                                                       add_generation_prompt=True,
-                                                                       tokenize=False)
-        input_ids, attention_mask, truncated = _tokenize_and_postprocess_data(prompt=prompt_with_chat_template,
-                                                                              tokenizer=self.tokenizer,
-                                                                              max_length=max_length,
-                                                                              pad_token_id=self._pad_token_id,
-                                                                              left_pad=True,
-                                                                              truncation=truncation)
+        if rsp_left_truncation:
+            prompt_messages = []
+            first_assistant_idx = len(messages)
+            for idx, message in enumerate(messages):
+                if message['role'] == 'assistant':
+                    first_assistant_idx = idx
+                    break
+            prompt_messages = messages[:first_assistant_idx]
+            response_messages = messages[first_assistant_idx:]
+            prompt_with_chat_template = self.tokenizer.apply_chat_template(prompt_messages,
+                                                                           add_generation_prompt=True,
+                                                                           tokenize=False)
+            p_ids, p_attention_mask, p_truncated = _tokenize_and_postprocess_data(prompt=prompt_with_chat_template,
+                                                                                  tokenizer=self.tokenizer,
+                                                                                  max_length=max_length,
+                                                                                  pad_to_max_length=False,
+                                                                                  pad_token_id=0,
+                                                                                  truncation=truncation)
+            if len(response_messages) > 0:
+                response_with_chat_template = self.tokenizer.apply_chat_template(response_messages,
+                                                                                 add_generation_prompt=False,
+                                                                                 tokenize=False)
+                r_ids, r_attention_mask, r_truncated = _tokenize_and_postprocess_data(
+                    prompt=response_with_chat_template,
+                    tokenizer=self.tokenizer,
+                    max_length=max_length - p_ids.shape[-1] - max_new_tokens_per_turn,
+                    pad_to_max_length=False,
+                    pad_token_id=0,
+                    truncation='left')
+                input_ids = torch.cat([p_ids, r_ids], dim=-1)
+                attention_mask = torch.cat([p_attention_mask, r_attention_mask], dim=-1)
+                truncated = p_truncated or r_truncated
+            else:
+                input_ids = p_ids
+                attention_mask = p_attention_mask
+                truncated = p_truncated
+        else:
+            prompt_with_chat_template = self.tokenizer.apply_chat_template(turn_task.request.messages,
+                                                                           add_generation_prompt=True,
+                                                                           tokenize=False)
+            input_ids, attention_mask, truncated = _tokenize_and_postprocess_data(prompt=prompt_with_chat_template,
+                                                                                  tokenizer=self.tokenizer,
+                                                                                  max_length=max_length,
+                                                                                  pad_to_max_length=pad_to_max_length,
+                                                                                  pad_token_id=self._pad_token_id,
+                                                                                  left_pad=True,
+                                                                                  truncation=truncation)
         prompt = {"input_ids": input_ids[0].to(torch.int32), "attention_mask": attention_mask[0].to(torch.int8)}
 
         _row_dict = {
@@ -136,6 +176,7 @@ class AgentHandler(ThreadedAgent):
         }
         _item = DataProto.from_single_dict(collate_fn([_row_dict]))
         _item.meta_info = copy.copy(meta_info)
+        _item.meta_info['generation_kwargs']['max_new_tokens'] = max_new_tokens_per_turn
         return {'item': _item, 'truncated': truncated}
 
     def _postprocess(self, completion, item: DataProto, origin_prompt, rollout_config: DictConfig,
@@ -209,10 +250,17 @@ class AgentHandler(ThreadedAgent):
             'trial_id': os.getenv('ARNOLD_TRIAL_ID', 'unk'),
             'framework': prompt_meta.get('framework', 'unk'),
         }
+        max_new_tokens_per_turn = rollout_config.agent.max_new_tokens_per_turn
         max_length = (config.data.max_prompt_length + config.data.max_response_length) if prompt_meta.get(
             'framework', 'unk') != 'agentless' else config.data.max_prompt_length
         pad_to_max_length = prompt_meta.get('framework', 'unk') == 'agentless'
         truncation = config.data.truncation
+        rsp_left_truncation = rollout_config.get('response_left_truncation', False)
+
+        if rsp_left_truncation:
+            assert rollout_config.agent.max_new_tokens_per_turn < config.data.max_response_length, \
+                f'{rollout_config.agent.max_new_tokens_per_turn=} should be smaller ' \
+                f'than {config.data.max_response_length=} when response_left_truncation is True'
 
         class Status(Enum):
             NON_EXIST = 1
@@ -326,6 +374,8 @@ class AgentHandler(ThreadedAgent):
 
         ts = TS()
 
+        attempt_messages = []
+
         ts.trigger()
         for trial in range(retry):
             if score is not None:
@@ -388,7 +438,9 @@ class AgentHandler(ThreadedAgent):
 
                     turn_task = get_proxy_client().get_turn(turn_task_meta_info.task_id)
                     preprocess_output = self._preprocess(task_id, turn_task, prompt_meta, row_dict, meta_info,
-                                                         max_length, pad_to_max_length, truncation, len(trajectory))
+                                                         rsp_left_truncation, max_new_tokens_per_turn, max_length,
+                                                         pad_to_max_length, truncation, len(trajectory), rollout_config,
+                                                         _tagkv)
                     if preprocess_output.get('truncated') and prompt_meta.get('framework', 'unk') != 'agentless':
                         _item = DataProto.from_dict(non_tensors={
                             'raw_response':
@@ -457,6 +509,9 @@ class AgentHandler(ThreadedAgent):
                     get_metrics_client().emit_counter("agentbench.handler.unkonwn_exception", 1, tags=_tagkv)
                     logging.exception(f"agentbench_handler: task[{task_details}] hit unknown status, break this trial")
                     break
+
+            attempt_messages.append({'task_id': task_id, 'status': status.name, 'turn': len(trajectory) + 1})
+
             get_proxy_client().pop_task(task_id)
 
             get_metrics_client().emit_timer("agentbench.handler.trial_elapsed",
@@ -482,12 +537,12 @@ class AgentHandler(ThreadedAgent):
                                         tags={
                                             **tagkv_common,
                                             **{
-                                                'trial': str(trial + 1),
+                                                'trial': str(trial),
                                                 'status': 'success' if success else 'fail'
                                             }
                                         })
         get_metrics_client().emit_timer("agentbench.handler.trial",
-                                        trial + 1,
+                                        trial,
                                         tags={
                                             **tagkv_common,
                                             **{
@@ -499,7 +554,7 @@ class AgentHandler(ThreadedAgent):
                                         tags={
                                             **tagkv_common,
                                             **{
-                                                'trial': str(trial + 1),
+                                                'trial': str(trial),
                                                 'status': 'success' if success else 'fail'
                                             }
                                         })
@@ -526,7 +581,7 @@ class AgentHandler(ThreadedAgent):
                                             tags={
                                                 **tagkv_common,
                                                 **{
-                                                    'trial': str(trial + 1),
+                                                    'trial': str(trial),
                                                 }
                                             })
 
@@ -544,10 +599,13 @@ class AgentHandler(ThreadedAgent):
                                               tags={
                                                   **tagkv_common,
                                                   **{
-                                                      'trial': str(trial + 1),
+                                                      'trial': str(trial),
                                                       'status': status
                                                   }
                                               })
+        if not success:
+            logging.exception(
+                f"agentbench_handler: task[{prompt_meta=}] is failed, attempt messages are {attempt_messages}")
         return train_samples
 
 
@@ -566,6 +624,7 @@ if __name__ == '__main__':
     import yaml
     import ray
     import alpha_seed
+    import alpha_seed.workers.agents.executor
     import alpha_seed.workers.agents.handlers.agentbench
     import importlib
     from mono_rl import DataProto
@@ -615,6 +674,8 @@ if __name__ == '__main__':
     config = OmegaConf.load(
         f'{os.path.dirname(os.path.abspath(__file__))}/../../../../../tasks/config/ppo_trainer.yaml')
     config.data.truncation = 'left'
+    config.rollout_server.response_left_truncation = True
+    config.rollout_server.agent.enable_monitoring = False
     config.rollout_server.agent.direct_submit_query = False
     config.elastic.resource_pools.stable_pool_names = ''
 
@@ -649,6 +710,8 @@ if __name__ == '__main__':
                         format="%(asctime)s %(levelname)s %(message)s",
                         stream=sys.stdout,
                         force=True)
+
+    alpha_seed.workers.agents.executor.get_agent_metrics_collector = lambda: False
 
     def chat_completions(content, meta_info, config):
         response_ids = tokenizer.encode("Hello World!") + [tokenizer.eos_token_id]

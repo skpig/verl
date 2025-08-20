@@ -574,7 +574,8 @@ class ProxyServer(Storage):
                                 'task_id': task.task_id,
                                 'taskpool_uid': self.proxy_id,
                                 "parameters": task.get_task_args()
-                            }
+                            },
+                            'taskpool_uid': self.proxy_id
                         })
                         get_metrics_client().emit_counter("agentbench.proxy.produce",
                                                           1,
