@@ -559,6 +559,10 @@ class TreeDataset(RLHFDataset):
         # assert self.use_critic, "Currently only support use_critic=True for TreeDataset"
 
         # breakpoint()
+
+        # metrics
+        new_partial_rollout_len_lst = []
+        new_partial_rollout_len_ratio_lst = []
         for i, index in enumerate(inverse_indices):
             item = unique_indices[index].item()
             father_node = self.item2node.get(item, None)
@@ -609,8 +613,20 @@ class TreeDataset(RLHFDataset):
             )
             father_node.add_child(self.item2node[new_item])
             self.next_item += 1
+
+            # metrics
+            new_partial_rollout_len_lst.append(partial_rollout_len)
+            new_partial_rollout_len_ratio_lst.append(partial_rollout_len / all_response_len[i])
             
         # Remove some old rollouts if log_prob of partial rollout is too low under current policy
+        return {
+            "dataset/partial_rollout_len_mean": np.mean(new_partial_rollout_len_lst),
+            "dataset/partial_rollout_len_std": np.std(new_partial_rollout_len_lst),
+            "dataset/partial_rollout_len_max": np.max(new_partial_rollout_len_lst),
+            "dataset/partial_rollout_len_min": np.min(new_partial_rollout_len_lst),
+            "dataset/partial_rollout_len_ratio_mean": np.mean(new_partial_rollout_len_ratio_lst),
+            "dataset/partial_rollout_len_ratio_std": np.std(new_partial_rollout_len_ratio_lst),
+        }
 
 
     def state_dict(self):

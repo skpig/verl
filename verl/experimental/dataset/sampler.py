@@ -14,6 +14,7 @@
 from abc import abstractmethod
 from collections import deque
 from collections.abc import Sized
+from multiprocessing import Process
 import pprint
 from regex import F
 import torch
@@ -24,6 +25,7 @@ import numpy as np
 from typing import Deque, List, Dict
 import traceback
 from torch.utils.data import RandomSampler, SequentialSampler
+from concurrent.futures import ProcessPoolExecutor
 
 from verl import DataProto
 from verl.utils.dataset.rl_dataset import TreeNode
@@ -60,9 +62,31 @@ class AbstractCurriculumBatchSampler(AbstractBatchSampler):
     def update(self, batch: DataProto, step_num: int) -> None:
         pass
 
-class TreeSampler(AbstractCurriculumBatchSampler):
+class AysncUpdater:
+    """
+    AysncUpdater is a base class for async updating samplers.
+    """
+    def __init__(self, *args, **kwargs):
+        self.worker = ProcessPoolExecutor(max_workers=1)
+        self.update_future = None
+
+    # update the sampler in async way
+    def async_update(self, *args, **kwargs) -> None:
+        assert self.update_future is None, "update_future is not None"
+        self.update_future = self.worker.submit(self.update, *args, **kwargs)
+    
+    # collect the update result
+    def update(self, *args, **kwargs) -> None:
+        rtn = self.update_future.result()
+        self.update_future = None
+        return rtn
+
+
+
+class TreeSampler(AbstractCurriculumBatchSampler, AysncUpdater):
     def __init__(self, data_source: Sized, data_config: DictConfig):
-        super().__init__(data_source, data_config)
+        AbstractCurriculumBatchSampler.__init__(self, data_source, data_config)
+        AysncUpdater.__init__(self)
 
         self.data_config = data_config
         self.data_source = data_source
@@ -80,6 +104,7 @@ class TreeSampler(AbstractCurriculumBatchSampler):
     def epsilon_greedy_sampling(self):
         batch = []
         for idx in range(self.original_len):
+            # breakpoint() # DEBUG:
             # 选择当前 idx 或其某个 child
             node = self.item2node[idx]
             use_self = (self.rng.random() < self.epsilon) or (len(node.children) == 0)
@@ -109,9 +134,12 @@ class TreeSampler(AbstractCurriculumBatchSampler):
         elif self.data_config.sampler.tree_sampler.name == 'mcts':
             yield from self.mcts_sampling()
 
-    def update(self, batch: DataProto, step_num: int) -> None:
-        self.data_source.update(batch, step_num=step_num)
-        return
+    def _update(self, batch: DataProto, step_num: int) -> None:
+        dataset_metrics = self.data_source.update(batch, step_num=step_num)
+
+        # TODO: update for mcts or pg
+
+        return dataset_metrics
 
 class MoPPSSampler(AbstractCurriculumBatchSampler):
     """
