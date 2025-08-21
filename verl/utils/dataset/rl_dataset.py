@@ -482,6 +482,7 @@ class TreeDataset(RLHFDataset):
         """
         super().__init__(*args, **kwargs)
         # breakpoint()
+        self.tree_config = self.config.tree_data
         self.original_datalength = len(self.dataframe)
 
         # Initialize an empty dataset for new data
@@ -549,9 +550,9 @@ class TreeDataset(RLHFDataset):
         all_scores = torch.tensor(batch.non_tensor_batch['score']) # raw score
         all_response_mask = batch.batch['response_mask_w_partial_rollouts'].bool()
         all_response_len = all_response_mask.sum(dim=-1).tolist()
-        all_responses = batch.batch["responses"]
-        all_values = batch.batch["values"]
-        all_entropys = batch.batch["entropys"]
+        all_responses = batch.batch["responses"].clone() # (bsz, response_len)
+        all_values = batch.batch["values"].clone() # (bsz, response_len)
+        all_entropys = batch.batch["entropys"].clone() # (bsz, response_len)
 
         # We can select the item with highest score as the new node
         assert len(unique_indices) == len(set(items)), "Currently, items should be unique in the batch."
@@ -568,16 +569,36 @@ class TreeDataset(RLHFDataset):
             if all_scores[i] == 0 or father_node.depth > 0:
                 continue
 
-            valid_position = int(all_response_len[i] * 0.5) # only use the first half of the response as partial rollout
+            # only use the first half of the response as partial rollout
+            valid_position = int(all_response_len[i] * self.tree_config.partial_rollout_ratio)
+            # if the partial rollout is too short, skip
+            if valid_position <= self.tree_config.min_partial_rollout_len:
+                continue
 
             # V1: Use the index with highest value as the new node, should assert critic_lam == 1
-            values = all_values[i, :valid_position]
-            max_value_index = torch.argmax(values).item()
+            if self.tree_config.name == "value":
+                values = all_values[i, :valid_position]
+                max_value_index = torch.argmax(values).item()
 
-            partial_rollout_len = max_value_index # the index with highest value should be excluded, since V[i] is the value of the previous token
+                partial_rollout_len = max_value_index # the index with highest value should be excluded, since V[i] is the value of sequence x[:idx]
+            
+            # V2: Use the index with highest entropy as the new node
+            elif self.tree_config.name == "entropy":
+                entropys = all_entropys[i, :valid_position]
+                max_entropy_index = torch.argmax(entropys).item()
+                partial_rollout_len = max_entropy_index # the index with highest entropy should be excluded, since H[i] is the entropy of sequence x[:idx]
+            
+            # V3: Use the index with highest value over 80-percentile entropy tokens
+            elif self.tree_config.name == "mix":
+                entropys = all_entropys[i, :valid_position]
+                values = all_values[i, :valid_position]
+                percentile_entropy = torch.kthvalue(entropys, int(valid_position * 0.8))[0]  # kthvalue 从1开始计数
+                values = torch.where(entropys > percentile_entropy, values, -float('inf')) # mask low entropy position
+                partial_rollout_len = torch.argmax(values).item()
+            else:
+                raise NotImplementedError(f"Tree config name {self.tree_config.name} not implemented.") 
+
             partial_rollout = all_responses[i, :partial_rollout_len].tolist()
-
-
             # Create new node
             new_item = self.next_item
             self.item2node[new_item] = TreeNode(

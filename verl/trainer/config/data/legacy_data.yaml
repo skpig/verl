@@ -105,6 +105,27 @@ sampler:
   # for MoPPS sampler
   temporal_decay: 0.9
 
+  # for Tree sampler
+  tree_sampler:
+
+    name: epsilon # epsilon, mcts, thompson
+
+    # params for epsilon
+    epsilon: 0.3
+
+tree_data:
+
+  # common settings
+  partial_rollout_ratio: 0.5
+  min_partial_rollout_len: 1000
+
+
+  name: value # value, entropy, mix
+
+  # for value mode
+  range: batch # item
+
+
 # Data generation configuration for augmenting the dataset.
 datagen:
 

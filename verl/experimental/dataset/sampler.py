@@ -60,28 +60,55 @@ class AbstractCurriculumBatchSampler(AbstractBatchSampler):
     def update(self, batch: DataProto, step_num: int) -> None:
         pass
 
-class TreeSampler(AbstractCurriculumSampler):
+class TreeSampler(AbstractCurriculumBatchSampler):
     def __init__(self, data_source: Sized, data_config: DictConfig):
         super().__init__(data_source, data_config)
-    
+
+        self.data_config = data_config
         self.data_source = data_source
+        self.bsz = data_config.train_batch_size
         self.original_len = len(data_source)
         self.root = self.data_source.root
         self.item2node: Dict[int, TreeNode] = self.data_source.item2node
-    
-    def __iter__(self):
-        self.idx = 0
-        while self.idx < self.original_len:
-            # \epsilon greedy sampling
-            if np.random.rand() < 0.5 or len(self.item2node[self.idx].children) == 0:
-                yield self.idx
+        self.rng = np.random.default_rng()
+
+        # for epsilon greedy
+        self.epsilon = data_config.sampler.tree_sampler.epsilon
+
+
+
+    def epsilon_greedy_sampling(self):
+        batch = []
+        for idx in range(self.original_len):
+            # 选择当前 idx 或其某个 child
+            node = self.item2node[idx]
+            use_self = (self.rng.random() < self.epsilon) or (len(node.children) == 0)
+            if use_self:
+                choice = idx
             else:
-                # 从当前节点的children中随机选择一个
-                children = self.item2node[self.idx].children
-                child_node = np.random.choice(children)
-                yield child_node.item
-            self.idx += 1
+                # 注意：np.random.choice 对 Python 对象列表也可用，但更稳妥是从整数里抽
+                child = self.rng.choice(node.children)
+                choice = child.item
+
+            batch.append(choice)
+            if len(batch) == self.bsz:
+                yield batch
+                batch = []
+
+        # # drop last = False
+        # if batch:
+        #     yield batch
     
+    def mcts_sampling(self):
+        pass
+
+
+    def __iter__(self):
+        if self.data_config.sampler.tree_sampler.name == 'epsilon':
+            yield from self.epsilon_greedy_sampling()
+        elif self.data_config.sampler.tree_sampler.name == 'mcts':
+            yield from self.mcts_sampling()
+
     def update(self, batch: DataProto, step_num: int) -> None:
         self.data_source.update(batch, step_num=step_num)
         return
