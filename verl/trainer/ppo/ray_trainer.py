@@ -45,7 +45,7 @@ from traitlets import default
 
 import wandb
 from verl import DataProto
-from verl.experimental.dataset.sampler import AbstractCurriculumBatchSampler, AbstractCurriculumSampler, AbstractBatchSampler
+from verl.experimental.dataset.sampler import AbstractCurriculumBatchSampler, AbstractCurriculumSampler, AbstractBatchSampler, AysncUpdater
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.base import Worker
 from verl.single_controller.ray import (RayClassWithInitArgs, RayResourcePool,
@@ -1605,6 +1605,12 @@ class RayPPOTrainer:
                         metrics.update(actor_output_metrics)
                         actor_output.meta_info.pop("metrics")
                         batch = batch.union(actor_output)
+                    
+                    # Update dataset sampler (Async)
+                    if isinstance(self.train_dataloader.sampler, AysncUpdater):
+                        self.train_dataloader.sampler.async_update(batch=batch, step_num=self.global_steps)
+                    elif isinstance(self.train_dataloader.batch_sampler, AysncUpdater):
+                        self.train_dataloader.batch_sampler.async_update(batch=batch, step_num=self.global_steps)
 
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
@@ -1711,11 +1717,14 @@ class RayPPOTrainer:
                     metrics.update(self.global_metrics)
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
 
-                # this is experimental and may be changed/removed in the future in favor of a general-purpose one
+                # this is experimental and may be changed/removed in the future in favor of a general-purpose ones
+                sampler_metrics = None
                 if isinstance(self.train_dataloader.sampler, AbstractCurriculumSampler):
-                    self.train_dataloader.sampler.update(batch=batch, step_num=self.global_steps)
+                    sampler_metrics = self.train_dataloader.sampler.update(batch=batch, step_num=self.global_steps)
                 elif isinstance(self.train_dataloader.batch_sampler, AbstractCurriculumBatchSampler):
-                    self.train_dataloader.batch_sampler.update(batch=batch, step_num=self.global_steps)
+                    sampler_metrics = self.train_dataloader.batch_sampler.update(batch=batch, step_num=self.global_steps)
+                if sampler_metrics:
+                    metrics.update(sampler_metrics)
 
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
