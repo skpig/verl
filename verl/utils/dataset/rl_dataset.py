@@ -548,7 +548,8 @@ class TreeDataset(RLHFDataset):
         unique_indices, inverse_indices = torch.unique(items, return_inverse=True)
 
         all_scores = torch.tensor(batch.non_tensor_batch['score']) # raw score
-        all_response_mask = batch.batch['response_mask_w_partial_rollouts'].bool()
+        # all_response_mask = batch.batch['response_mask_w_partial_rollouts'].bool()
+        all_response_mask = batch.batch['response_mask'].bool()
         all_response_len = all_response_mask.sum(dim=-1).tolist()
         all_responses = batch.batch["responses"].clone() # (bsz, response_len)
         all_values = batch.batch["values"].clone() # (bsz, response_len)
@@ -568,9 +569,10 @@ class TreeDataset(RLHFDataset):
             father_node = self.item2node.get(item, None)
             assert father_node is not None, f"Item {item} not found in the dataset."
 
-            # Currently only keep the correct response and the original data item
-            # DEBUG:
-            if all_scores[i] == 0 or father_node.depth > 0:
+            if self.tree_config.correct_only and all_scores[i] == 0:
+                continue
+            
+            if self.tree_config.root_only and father_node.depth > 0:
                 continue
 
             # only use the first half of the response as partial rollout
@@ -599,10 +601,19 @@ class TreeDataset(RLHFDataset):
                 percentile_entropy = torch.kthvalue(entropys, int(valid_position * 0.8))[0]  # kthvalue 从1开始计数
                 values = torch.where(entropys > percentile_entropy, values, -float('inf')) # mask low entropy position
                 partial_rollout_len = torch.argmax(values).item()
+            
+            # V4: Use the index with highest entropy over 90-percentile high-value tokens
+            elif self.tree_config.name == "mix2":
+                entropys = all_entropys[i, :valid_position]
+                values = all_values[i, :valid_position]
+                percentile_value = torch.kthvalue(values, int(valid_position * 0.9))[0]  # kthvalue 从1开始计数
+                entropys = torch.where(values > percentile_value, entropys, -float('inf')) # mask low value position
+                partial_rollout_len = torch.argmax(entropys).item()
+            
             else:
                 raise NotImplementedError(f"Tree config name {self.tree_config.name} not implemented.") 
 
-            # partial_rollout_len might be zero here
+            # NOTE: partial_rollout_len might be zero here
             partial_rollout = all_responses[i, :partial_rollout_len].tolist()
             # Create new node
             new_item = self.next_item
@@ -627,6 +638,7 @@ class TreeDataset(RLHFDataset):
             "dataset/partial_rollout_len_min": np.min(new_partial_rollout_len_lst),
             "dataset/partial_rollout_len_ratio_mean": np.mean(new_partial_rollout_len_ratio_lst),
             "dataset/partial_rollout_len_ratio_std": np.std(new_partial_rollout_len_ratio_lst),
+            "dataset/partial_rollout_zero_ratio": np.mean(np.array(new_partial_rollout_len_lst) == 0),
         }
 
 

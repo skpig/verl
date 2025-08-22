@@ -285,11 +285,15 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         return_var = torch.var(valid_returns)
 
     if 'partial_rollout_len' in batch.non_tensor_batch:
-        num_partial_rollouts = (batch.non_tensor_batch['partial_rollout_len'] > 0).sum()
+        partial_rollouts_mask = batch.non_tensor_batch['partial_rollout_len'] > 0
+        num_partial_rollouts = partial_rollouts_mask.sum()
         num_partial_rollouts_tokens = batch.non_tensor_batch['partial_rollout_len'].sum()
         num_partial_rollouts_tokens_ratio = num_partial_rollouts_tokens / response_length.sum().item()
         real_prompt_length = prompt_length + torch.tensor(batch.non_tensor_batch['partial_rollout_len'].astype(int))
         real_response_length = response_length - torch.tensor(batch.non_tensor_batch['partial_rollout_len'].astype(int))
+
+        partial_rollouts_seq_score = sequence_score[partial_rollouts_mask]
+        non_partial_rollouts_seq_score = sequence_score[~partial_rollouts_mask]
     
 
     # clip related
@@ -388,6 +392,7 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         **(
             {
                 "sampler/num_partial_rollouts": num_partial_rollouts,
+                "sampler/num_partial_rollouts_ratio": num_partial_rollouts / batch.batch["responses"].shape[0],
                 "sampler/num_partial_rollouts_tokens_ratio": num_partial_rollouts_tokens_ratio,
                 "response_length/mean_w_partial_rollouts": torch.mean(real_response_length).detach().item(),
                 "response_length/max_w_partial_rollouts": torch.max(real_response_length).detach().item(),
@@ -397,6 +402,10 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
                 "prompt_length/max_w_partial_rollouts": torch.max(real_prompt_length).detach().item(),
                 "prompt_length/min_w_partial_rollouts": torch.min(real_prompt_length).detach().item(),
                 "prompt_length/std_w_partial_rollouts": torch.std(real_prompt_length).detach().item(),
+                "critic/score/mean_w_partial_rollouts": torch.mean(partial_rollouts_seq_score).detach().item(),
+                "critic/score/std_w_partial_rollouts": torch.std(partial_rollouts_seq_score).detach().item(),
+                "critic/score/mean_wo_partial_rollouts": torch.mean(non_partial_rollouts_seq_score).detach().item(),
+                "critic/score/std_wo_partial_rollouts": torch.std(non_partial_rollouts_seq_score).detach().item(),
             }
             if 'partial_rollout_len' in batch.non_tensor_batch
             else {}
