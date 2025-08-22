@@ -548,6 +548,7 @@ class TreeDataset(RLHFDataset):
         unique_indices, inverse_indices = torch.unique(items, return_inverse=True)
 
         all_scores = torch.tensor(batch.non_tensor_batch['score']) # raw score
+        all_partial_rollout_len = torch.tensor(batch.non_tensor_batch['partial_rollout_len'])
         # all_response_mask = batch.batch['response_mask_w_partial_rollouts'].bool()
         all_response_mask = batch.batch['response_mask'].bool()
         all_response_len = all_response_mask.sum(dim=-1).tolist()
@@ -574,47 +575,47 @@ class TreeDataset(RLHFDataset):
             
             if self.tree_config.root_only and father_node.depth > 0:
                 continue
+            elif father_node.depth > 0:
+                father_node = self.item2node[father_node.get_original_ancestor_item()] # get the original ancestor node as father node
 
             # only use the first half of the response as partial rollout
-            valid_position = int(all_response_len[i] * self.tree_config.partial_rollout_ratio)
+            valid_position_start = all_partial_rollout_len[i]
+            valid_position_end = int(all_response_len[i] * self.tree_config.partial_rollout_ratio)
+            valid_length = valid_position_end - valid_position_start
             # if the partial rollout is too short, skip
-            if valid_position <= self.tree_config.min_partial_rollout_len:
+            if valid_length <= self.tree_config.min_partial_rollout_len:
                 continue
 
+            valid_values = all_values[i, valid_position_start:valid_position_end]
+            valid_entropys = all_entropys[i, valid_position_start:valid_position_end]
             # V1: Use the index with highest value as the new node, should assert critic_lam == 1
             if self.tree_config.name == "value":
-                values = all_values[i, :valid_position]
-                max_value_index = torch.argmax(values).item()
+                max_value_index = torch.argmax(valid_values).item()
 
                 partial_rollout_len = max_value_index # the index with highest value should be excluded, since V[i] is the value of sequence x[:idx]
             
             # V2: Use the index with highest entropy as the new node
             elif self.tree_config.name == "entropy":
-                entropys = all_entropys[i, :valid_position]
-                max_entropy_index = torch.argmax(entropys).item()
+                max_entropy_index = torch.argmax(valid_entropys).item()
                 partial_rollout_len = max_entropy_index # the index with highest entropy should be excluded, since H[i] is the entropy of sequence x[:idx]
             
             # V3: Use the index with highest value over 80-percentile entropy tokens
             elif self.tree_config.name == "mix":
-                entropys = all_entropys[i, :valid_position]
-                values = all_values[i, :valid_position]
-                percentile_entropy = torch.kthvalue(entropys, int(valid_position * 0.8))[0]  # kthvalue 从1开始计数
-                values = torch.where(entropys > percentile_entropy, values, -float('inf')) # mask low entropy position
-                partial_rollout_len = torch.argmax(values).item()
+                percentile_entropy = torch.kthvalue(valid_entropys, int(valid_length * 0.8))[0]  # kthvalue 从1开始计数
+                masked_valid_values = torch.where(valid_entropys > percentile_entropy, valid_values, -float('inf')) # mask low entropy position
+                partial_rollout_len = torch.argmax(masked_valid_values).item()
             
             # V4: Use the index with highest entropy over 90-percentile high-value tokens
             elif self.tree_config.name == "mix2":
-                entropys = all_entropys[i, :valid_position]
-                values = all_values[i, :valid_position]
-                percentile_value = torch.kthvalue(values, int(valid_position * 0.9))[0]  # kthvalue 从1开始计数
-                entropys = torch.where(values > percentile_value, entropys, -float('inf')) # mask low value position
-                partial_rollout_len = torch.argmax(entropys).item()
+                percentile_value = torch.kthvalue(valid_values, int(valid_length * 0.9))[0]  # kthvalue 从1开始计数
+                masked_valid_entropys = torch.where(valid_values > percentile_value, valid_entropys, -float('inf')) # mask low value position
+                partial_rollout_len = torch.argmax(masked_valid_entropys).item()
             
             else:
                 raise NotImplementedError(f"Tree config name {self.tree_config.name} not implemented.") 
 
             # NOTE: partial_rollout_len might be zero here
-            partial_rollout = all_responses[i, :partial_rollout_len].tolist()
+            partial_rollout = all_responses[i, :valid_position_start + partial_rollout_len].tolist()
             # Create new node
             new_item = self.next_item
             self.item2node[new_item] = TreeNode(
