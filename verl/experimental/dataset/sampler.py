@@ -111,13 +111,12 @@ class TreeSampler(AysncUpdater, AbstractCurriculumBatchSampler):
             # breakpoint() # DEBUG:
             # 选择当前 idx 或其某个 child
             node = self.item2node[idx]
-            use_self = (self.rng.random() < self.epsilon) or (len(node.children) == 0)
+            use_self = (self.rng.random() < self.epsilon) or (len(node.children_items) == 0)
             if use_self:
                 choice = idx
             else:
                 # 注意：np.random.choice 对 Python 对象列表也可用，但更稳妥是从整数里抽
-                child = self.rng.choice(node.children)
-                choice = child.item
+                choice = self.rng.choice(node.children_items)
 
             batch.append(choice)
             if len(batch) == self.bsz:

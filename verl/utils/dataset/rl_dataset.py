@@ -420,21 +420,21 @@ class TreeNode:
 
     def __init__(self, 
                  item,
-                 father_node: Optional['TreeNode'] = None,
+                 father_item: Optional[int] = None,
                  partial_rollout: Optional[list[int]] = None,
                  step_num=0):
         """
         Initialize the TreeNode with the given data.
         """
         self.item = item # a unique identifier for the node, also the one used to access the node in the dataset
-        self.father_node = father_node  # the parent node of this node, None if it's the root node
-        self.children = []
+        self.father_item = father_item  # the item index of parent node, None if it's the root node
+        self.children_items = []  # list of item indices of child nodes
 
         self.step_num = step_num  # the number of steps in the training process
 
         self.partial_rollout = partial_rollout  # the length of the partial rollout
 
-        assert step_num <= 0 or partial_rollout is not None and father_node is not None
+        assert step_num <= 0 or partial_rollout is not None and father_item is not None
     
     @property
     def partial_rollout_len(self):
@@ -444,29 +444,30 @@ class TreeNode:
         """
         return len(self.partial_rollout)
     
-    @property
-    def depth(self):
+    def depth(self, item2node):
         """
         The depth of the node in the tree.
         """
-        if self.step_num == 0:
+        if self.step_num <= 0:
             return 0
-        return self.father_node.depth + 1
+        father_node = item2node[self.father_item]
+        return father_node.depth(item2node) + 1
     
-    def get_original_ancestor_item(self):
+    def get_original_ancestor_item(self, item2node):
         """
         Get the original ancestor of this node.
         The original ancestor is the root node of the tree.
         """
-        if self.step_num == 0:
+        if self.step_num <= 0:
             return self.item
-        return self.father_node.get_original_ancestor_item()
+        father_node = item2node[self.father_item]
+        return father_node.get_original_ancestor_item(item2node)
 
-    def add_child(self, child_node: 'TreeNode'):
+    def add_child(self, child_item: int):
         """
         Add a child node to this node.
         """
-        self.children.append(child_node)
+        self.children_items.append(child_item)
 
     def __repr__(self):
         return f"TreeNode(item={self.item})"
@@ -486,15 +487,15 @@ class TreeDataset(RLHFDataset):
         self.original_datalength = len(self.dataframe)
 
         # Initialize an empty dataset for new data
-        self.new_dataframe = datasets.Dataset.from_dict({})
+        # self.new_dataframe = datasets.Dataset.from_dict({})
 
-        self.root = TreeNode(item=-1, father_node=None, step_num=-1)
+        self.root = TreeNode(item=-1, father_item=None, step_num=-1)
         self.item2node = {-1: self.root}
         self.next_item = 0
 
         for i in range(self.original_datalength):
-            node = TreeNode(item=i, father_node=self.root, step_num=0)
-            self.root.add_child(node)
+            node = TreeNode(item=i, father_item=-1, step_num=0)
+            self.root.add_child(i)
             self.item2node[i] = node
             self.next_item += 1
     
@@ -510,7 +511,7 @@ class TreeDataset(RLHFDataset):
         
         # If the index is greater than the original data length, it is a newly generated item.
         node = self.item2node.get(item, None)
-        original_item = node.get_original_ancestor_item()
+        original_item = node.get_original_ancestor_item(self.item2node)
 
         # Get the original row dict from the dataframe
         original_row_dict = super().__getitem__(original_item)
@@ -548,7 +549,7 @@ class TreeDataset(RLHFDataset):
         unique_indices, inverse_indices = torch.unique(items, return_inverse=True)
 
         all_scores = torch.tensor(batch.non_tensor_batch['score']) # raw score
-        all_partial_rollout_len = torch.tensor(batch.non_tensor_batch['partial_rollout_len'])
+        all_partial_rollout_len = torch.tensor(batch.non_tensor_batch['partial_rollout_len'].astype(int))
         # all_response_mask = batch.batch['response_mask_w_partial_rollouts'].bool()
         all_response_mask = batch.batch['response_mask'].bool()
         all_response_len = all_response_mask.sum(dim=-1).tolist()
@@ -572,11 +573,12 @@ class TreeDataset(RLHFDataset):
 
             if self.tree_config.correct_only and all_scores[i] == 0:
                 continue
-            
-            if self.tree_config.root_only and father_node.depth > 0:
+
+            father_depth = father_node.depth(self.item2node)
+            if self.tree_config.root_only and father_depth > 0:
                 continue
-            elif father_node.depth > 0:
-                father_node = self.item2node[father_node.get_original_ancestor_item()] # get the original ancestor node as father node
+            elif father_depth > 0:
+                father_node = self.item2node[father_node.get_original_ancestor_item(self.item2node)] # get the original ancestor node as father node
 
             # only use the first half of the response as partial rollout
             valid_position_start = all_partial_rollout_len[i]
@@ -620,11 +622,11 @@ class TreeDataset(RLHFDataset):
             new_item = self.next_item
             self.item2node[new_item] = TreeNode(
                 item=new_item,
-                father_node=father_node,
+                father_item=father_node.item,
                 partial_rollout=partial_rollout,
                 step_num=step_num
             )
-            father_node.add_child(self.item2node[new_item])
+            father_node.add_child(new_item)
             self.next_item += 1
 
             # metrics
@@ -647,13 +649,16 @@ class TreeDataset(RLHFDataset):
         """
         Return the state dict of the dataset.
         """
-        # TODO:
-        pass
+        return {
+            "tree_config": self.tree_config,
+            "item2node": self.item2node,
+            "next_item": self.next_item,
+        }
 
     def load_state_dict(self, state_dict):
         """
         Load the state dict of the dataset.
         """
-        # TODO:
-        pass
-
+        assert self.tree_config == state_dict["tree_config"]
+        self.item2node = state_dict["item2node"]
+        self.next_item = state_dict["next_item"]
