@@ -106,6 +106,7 @@ class TreeSampler(AysncUpdater, AbstractCurriculumBatchSampler):
 
         # initalize queue
         first_batch = ray.get(self.engine.select_batch.remote(self.bsz))
+        # breakpoint()
         self.queue.extend(first_batch)
 
     def __iter__(self):
@@ -113,7 +114,9 @@ class TreeSampler(AysncUpdater, AbstractCurriculumBatchSampler):
             if len(self.queue) < self.bsz:
                 print("[Sampler] Not enough items in queue, drop last, raise an StopIterationError")
                 return
-            batch = [self.queue.popleft() for _ in range(self.bsz)]
+            batch = [int(self.queue.popleft()) for _ in range(self.bsz)]
+            print(batch)
+            print(type(batch[0]))
             yield batch
 
     def async_update(self, batch: DataProto, step_num: int) -> None:
@@ -129,10 +132,11 @@ class TreeSampler(AysncUpdater, AbstractCurriculumBatchSampler):
         self.new_batch_future = self.engine.select_batch.remote(self.bsz)
 
     def update(self, batch: DataProto, step_num: int) -> None:
-        breakpoint()
         # wait for the result
-        new_batch = self.new_batch_future.result()
-        data_metrics = self.update_data_source_future.result()
+        new_batch = ray.get(self.new_batch_future)
+        data_metrics = ray.get(self.update_data_source_future)
+
+        breakpoint()
 
         # fill in queue
         assert len(new_batch) == self.bsz

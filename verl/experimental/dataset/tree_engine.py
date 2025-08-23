@@ -233,8 +233,8 @@ class TreeEngine:
         return {
             "dataset/partial_rollout_len_mean": np.mean(new_partial_rollout_len_lst),
             "dataset/partial_rollout_len_std": np.std(new_partial_rollout_len_lst),
-            "dataset/partial_rollout_len_max": np.max(new_partial_rollout_len_lst),
-            "dataset/partial_rollout_len_min": np.min(new_partial_rollout_len_lst),
+            "dataset/partial_rollout_len_max": np.max(new_partial_rollout_len_lst) if new_partial_rollout_len_lst else 0,
+            "dataset/partial_rollout_len_min": np.min(new_partial_rollout_len_lst) if new_partial_rollout_len_lst else 0,
             "dataset/partial_rollout_len_ratio_mean": np.mean(new_partial_rollout_len_ratio_lst),
             "dataset/partial_rollout_len_ratio_std": np.std(new_partial_rollout_len_ratio_lst),
             "dataset/partial_rollout_zero_ratio": np.mean(np.array(new_partial_rollout_len_lst) == 0),
@@ -255,27 +255,26 @@ class EpsilonRandomTreeEngine(TreeEngine):
     
     def select_batch(self, batch_size: int) -> List[int]:
         batch = []
-        breakpoint()
-        while self.pointer < self.original_datalength:
-            node = self.item2node[self.pointer]
-            use_self = (self.rng.random() < self.epsilon) or (len(node.children_items) == 0)
-            if use_self:
-                choice = self.pointer
-            else:
-                # 注意：np.random.choice 对 Python 对象列表也可用，但更稳妥是从整数里抽
-                choice = self.rng.choice(node.children_items)
+        # breakpoint()
+        while True:
+            while self.pointer < self.original_datalength:
+                node = self.item2node[self.pointer]
+                use_self = (self.rng.random() < self.epsilon) or (len(node.children_items) == 0)
+                if use_self:
+                    choice = self.pointer
+                else:
+                    # 注意：np.random.choice 对 Python 对象列表也可用，但更稳妥是从整数里抽
+                    choice = self.rng.choice(node.children_items)
 
-            batch.append(choice)
-            self.pointer += 1
+                batch.append(choice)
+                self.pointer += 1
 
-            if len(batch) == batch_size:
-                return batch
+                if len(batch) == batch_size:
+                    return batch
+                
+            # reset pointer to 0
+            self.pointer = 0
         
-        # reset pointer to 0
-        self.pointer = 0
-        
-        # drop the last batch
-        return []
 
 @ray.remote
 class EpsilonGreedyTreeEngine(TreeEngine):

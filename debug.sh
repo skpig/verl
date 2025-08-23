@@ -27,13 +27,13 @@ MAX_RESPONSE_LEN=$((1024 * 5 + OVERLONG_BUFFER_LEN))
 CLIP_HIGHER=0.28
 
 # Tree Sampler settings
-TREE_SAMPLER=epsilon # mcts pg
+TREE_SAMPLER=greedy # epsilon greedy mcts pg
 EPSILON=0.2
 
 # Tree Selector
 TREE_SELECTOR=value # entropy mix1
 ROLLOUT_RATIO=0.7
-CORRECT_ONLY=True
+CORRECT_ONLY=False
 ROOT_ONLY=False
 
 
