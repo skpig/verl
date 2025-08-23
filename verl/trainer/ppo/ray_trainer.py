@@ -1705,7 +1705,7 @@ class RayPPOTrainer:
                     print(f"remaining async tracking tasks {len(self.async_tracking_running_tasks)}")
 
                     # DEBUG:
-                    task = self.async_tracking_pool.submit(async_tracking_log_samples, *(batch.select_idxs(list(range(50))), self.tokenizer, self.global_steps))
+                    # task = self.async_tracking_pool.submit(async_tracking_log_samples, *(batch.select_idxs(list(range(50))), self.tokenizer, self.global_steps))
                     self.async_tracking_running_tasks.add(task)
 
 
