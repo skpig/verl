@@ -1,5 +1,6 @@
-from dataclasses import dataclass
-from typing import List, Optional, Sized
+from dataclasses import dataclass, is_dataclass
+import math
+from typing import Dict, List, Optional, Sized, Tuple
 import numpy as np
 import torch
 import ray
@@ -75,7 +76,7 @@ class TreeNode:
 
 class TreeEngine:
     def __init__(self, original_data_len, data_config):
-        self.spec = TreeSpec(num_parents=original_data_len, children_per_parent=[])
+        self.spec = TreeSpec(num_parents=original_data_len, children_per_parent=[0] * original_data_len)
         self.rng = np.random.default_rng()
         self.tree_config = data_config.tree_data
         self.original_datalength = original_data_len
@@ -84,6 +85,9 @@ class TreeEngine:
         self.root = TreeNode(item=-1, father_item=None, step_num=-1)
         self.item2node = {-1: self.root}
         self.next_item = 0
+
+        # 统计相关属性
+        self.parent_selection_counts = [0] * original_data_len  # 每个parent node被选中的次数（包括它的孩子）
 
         for i in range(self.original_datalength):
             node = TreeNode(item=i, father_item=-1, step_num=0)
@@ -108,6 +112,20 @@ class TreeEngine:
         node = self.item2node[item]
         return node.get_original_ancestor_item(self.item2node)
     
+    def get_children_items(self, item: int) -> List[int]:
+        """
+        Get the children items of the given item.
+        """
+        node = self.item2node[item]
+        return node.children_items
+    
+    def get_father_item(self, item: int) -> int:
+        """
+        Get the father item of the given item.
+        """
+        node = self.item2node[item]
+        return node.father_item
+    
     def state_dict(self):
         """
         Return the state dict of the dataset.
@@ -116,6 +134,7 @@ class TreeEngine:
             "tree_config": self.tree_config,
             "item2node": self.item2node,
             "next_item": self.next_item,
+            "parent_selection_counts": self.parent_selection_counts,
         }
 
     def load_state_dict(self, state_dict):
@@ -125,8 +144,14 @@ class TreeEngine:
         assert self.tree_config == state_dict["tree_config"]
         self.item2node = state_dict["item2node"]
         self.next_item = state_dict["next_item"]
+        # 恢复统计信息，如果不存在则使用默认值
+        if "parent_selection_counts" in state_dict:
+            self.parent_selection_counts = state_dict["parent_selection_counts"]
+        else:
+            # 兼容旧版本，如果没有统计信息则初始化为0
+            self.parent_selection_counts = [0] * self.original_datalength
     
-    def create_new_node(self, father_node: TreeNode, partial_rollout: List[int], step_num: int) -> None:
+    def create_new_node(self, father_node: TreeNode, partial_rollout: List[int], step_num: int, score: float) -> None:
         """
         Create a new node with the given father node and partial rollout.
         """
@@ -140,8 +165,9 @@ class TreeEngine:
         father_node.add_child(new_item)
         self.next_item += 1
 
+        self.spec.children_per_parent[father_node.item] += 1
 
-    def update_data_source(self, batch: DataProto, step_num: int) -> None:
+    def update_data_source(self, batch: DataProto, step_num: int) -> Dict[str, float]:
         """
         Update the dataset with the current batch.
         This method is called after each training batch.
@@ -151,6 +177,7 @@ class TreeEngine:
         unique_indices, inverse_indices = torch.unique(items, return_inverse=True)
 
         all_scores = torch.tensor(batch.non_tensor_batch['score']) # raw score
+        assert all([i in [0, 1] for i in all_scores.tolist()]), "Currently only support score in {0, 1}."
         all_partial_rollout_len = torch.tensor(batch.non_tensor_batch['partial_rollout_len'].astype(int))
         # all_response_mask = batch.batch['response_mask_w_partial_rollouts'].bool()
         all_response_mask = batch.batch['response_mask'].bool()
@@ -174,6 +201,8 @@ class TreeEngine:
             assert father_node is not None, f"Item {item} not found in the dataset."
 
             if self.tree_config.correct_only and all_scores[i] == 0:
+                continue
+            elif all_scores[i] == 0 and self.rng.random() > 0.3: # we don't want too much noisy rollouts
                 continue
 
             father_depth = father_node.depth(self.item2node)
@@ -223,7 +252,7 @@ class TreeEngine:
 
 
             """Create new node"""
-            self.create_new_node(father_node, partial_rollout, step_num)
+            self.create_new_node(father_node, partial_rollout, step_num, all_scores[i])
 
             # metrics
             new_partial_rollout_len_lst.append(partial_rollout_len)
@@ -240,11 +269,35 @@ class TreeEngine:
             "dataset/partial_rollout_zero_ratio": np.mean(np.array(new_partial_rollout_len_lst) == 0),
         }
     
-    def update_posterior(self, item_lst: List[int], reward_lst: List[float]):
+    def update_posterior(self, item_lst: List[int], reward_lst: List[float], step_num: int):
         pass
 
-    def select_batch(self, batch_size: int) -> List[int]:
+    def select_batch(self, batch_size: int) -> Tuple[List[int], Dict[str, float]]:
         pass
+
+    
+    def _get_batch_statistics(self, selected_items: List[int]) -> dict:
+        """
+        获取batch的统计信息
+        """
+        # 统计unique的parent node数量
+        unique_parents = set()
+        for item in selected_items:
+            original_ancestor = self.get_original_ancestor_item(item)
+            unique_parents.add(original_ancestor)
+            self.parent_selection_counts[original_ancestor] += 1
+        
+        return {
+            "sampler/unique_parent_nodes_in_batch": len(unique_parents),
+        }
+    
+    def async_wrap_all(self, batch: DataProto, step_num: int, bsz: int):
+        self.update_posterior(batch.non_tensor_batch["item"].tolist(), batch.non_tensor_batch["score"].tolist(), step_num)
+        data_metrics = self.update_data_source(batch, step_num)
+        batch, selection_metrics = self.select_batch(bsz)
+        return batch, selection_metrics, data_metrics
+        
+
 
 @ray.remote
 class EpsilonRandomTreeEngine(TreeEngine):
@@ -270,7 +323,8 @@ class EpsilonRandomTreeEngine(TreeEngine):
                 self.pointer += 1
 
                 if len(batch) == batch_size:
-                    return batch
+                    # 返回batch和统计信息
+                    return batch, self._get_batch_statistics(batch)
                 
             # reset pointer to 0
             self.pointer = 0
@@ -284,22 +338,24 @@ class EpsilonGreedyTreeEngine(TreeEngine):
         self.N = [0.0] * original_data_len
         self.S = [0.0] * original_data_len
     
-    def create_new_node(self, father_node: TreeNode, partial_rollout: List[int], step_num: int) -> None:
-        super().create_new_node(father_node, partial_rollout, step_num)
+    def create_new_node(self, father_node: TreeNode, partial_rollout: List[int], step_num: int, score: float) -> None:
+        super().create_new_node(father_node, partial_rollout, step_num, score)
 
         self.N.append(0.0)
         self.S.append(0.0)
 
         assert len(self.N) == len(self.S) == self.next_item
     
-    def update_posterior(self, item_lst: List[int], reward_lst: List[float]):
+    def update_posterior(self, item_lst: List[int], reward_lst: List[float], step_num: int):
         for item, reward in zip(item_lst, reward_lst):
             self.N[item] += 1
             self.S[item] += reward
     
     def select_batch(self, batch_size: int) -> List[int]:
         if self.rng.random() < self.epsilon:
-            return list(self.rng.choice(self.next_item, size=batch_size, replace=False))
+            batch = list(self.rng.choice(self.next_item, size=batch_size, replace=False))
+            # 返回batch和统计信息
+            return batch, self._get_batch_statistics(batch)
         
         N = np.array(self.N)
         S = np.array(self.S)
@@ -307,10 +363,230 @@ class EpsilonGreedyTreeEngine(TreeEngine):
         error = np.abs(acc - 0.5) # [num_nodes, ]
 
         idx = np.argsort(error)[:batch_size] # [batch_size, ]
-        return list(idx)
+        batch = list(idx)
+
+        # 返回batch和统计信息
+        return batch, self._get_batch_statistics(batch)
 
 
 
 @ray.remote
-class PGTreeEngine:
-    pass
+class PGTreeEngine(TreeEngine):
+    def __init__(self, original_data_len, data_config):
+        super().__init__(original_data_len, data_config)
+
+        # Fixed parameters
+        self.mu0 = float(data_config.sampler.tree_sampler.mu0)
+        self.tau0 = float(data_config.sampler.tree_sampler.tau0)
+        self.sigma0 = float(data_config.sampler.tree_sampler.sigma0) if data_config.sampler.tree_sampler.sigma0 is not None else None
+        self.delta = data_config.sampler.tree_sampler.delta
+        self.gamma = data_config.sampler.tree_sampler.gamma
+        self.gibbs_sweeps = int(max(1, data_config.sampler.tree_sampler.gibbs_sweeps))
+        self.rng = np.random.default_rng()
+
+        self.tau0_2 = self.tau0 ** 2
+
+        # State variables
+        self.psi = self.rng.normal(loc=self.mu0, scale=self.tau0, size=self.original_datalength)
+        # NOTE: for parents, self.variance[i] is the current variance of \psi_i; but for children, it is the **INITIAL** variance of p(\psi_i | \psi_parent)
+        self.variance = np.ones(self.original_datalength) * self.tau0_2
+        self.s = np.zeros(self.original_datalength)
+        self.n = np.zeros(self.original_datalength)
+        self.last_touch = np.zeros(self.original_datalength)
+
+        # ---- Polya-Gamma sampler backends (pypolyagamma -> polyagamma -> truncated series) ----
+        self._pg_engine = None  # (kind, handle)
+        self._init_pg_engine(data_config.train_batch_size)
+
+    def _init_pg_engine(self, batch_size: int, force: Optional[str] = None):
+        """Initialize PG backend once. force in {"pypolyagamma","polyagamma","trunc"}."""
+        from polyagamma import random_polyagamma  # functional API
+        self._pg_engine = ("polyagamma", random_polyagamma)
+        # from pypolyagamma import PyPolyaGamma  # class + pgdraw
+        # self._pg_engine_lst = [PyPolyaGamma(seed=i) for i in range(batch_size)]
+        # if self._pg_engine is not None:
+        #     return
+        # import os
+        # if force is None:
+        #     force = os.environ.get("HIER_TS_PG_BACKEND", None)
+
+        # def set_engine(kind, handle):
+        #     self._pg_engine = (kind, handle)
+
+        # if force in ("pypolyagamma", None):
+        #     try:
+        #         from pypolyagamma import PyPolyaGamma  # class + pgdraw
+        #         set_engine("pypolyagamma", PyPolyaGamma())
+        #         return
+        #     except Exception:
+        #         force = "polyagamma"
+        # if force in ("polyagamma", None):
+        #     from polyagamma import random_polyagamma  # functional API
+        #     set_engine("polyagamma", random_polyagamma)
+        #     return
+
+        # raise NotImplementedError(f"PG backend {force} not implemented.")
+
+    def sample_pg(self, b: float, c: float, rng: Optional[np.random.Generator] = None, trunc: int = 200) -> float:
+        if b <= 0:
+            return 0.0
+        kind, eng = self._pg_engine
+        if kind == "pypolyagamma":
+            pg = eng
+            return float(pg.pgdraw(b, c))
+        elif kind == "polyagamma":
+            fn = eng
+            return float(fn(b, c, random_state=rng)) if rng is not None else float(fn(b, c))
+
+
+
+    def create_new_node(self, father_node: TreeNode, partial_rollout: List[int], step_num: int, score: float) -> None:
+        super().create_new_node(father_node, partial_rollout, step_num, score)
+
+        # based on partial_rollout, prelocate \psi
+        father_item = father_node.item
+        father_psi = self.psi[father_item]
+        father_variance = self.variance[father_item]
+        if self.sigma0 is None:
+            father_p = 1 / (1 + np.exp(-father_psi))
+            p_low = max(0.01, father_p - self.delta)
+            p_high = min(0.99, father_p + self.delta)
+            psi_low = np.log(p_low / (1 - p_low))
+            psi_high = np.log(p_high / (1 - p_high))
+            sigma_low = (father_psi - psi_low) / 1.96
+            sigma_high = (psi_high - father_psi) / 1.96
+            sigma = max(sigma_low, sigma_high)
+
+            final_sigma = max(sigma, 0.02)
+            print("[PG Engine] Create new node: father_item={}, father_psi={}, father_variance={}, final_sigma={}, final_cliped_sigma={}".format(father_item, father_psi, father_variance, sigma, final_sigma))
+        else:
+            final_sigma = self.sigma0
+            print("[PG Engine] Create new node: father_item={}, father_psi={}, father_variance={}, final_sigma={}".format(father_item, father_psi, father_variance, final_sigma))
+        
+
+        # add new node to the tree
+        cur_psi = self.rng.normal(loc=father_psi, scale=final_sigma)
+        self.psi = np.append(self.psi, cur_psi)
+        self.s = np.append(self.s, score)
+        self.n = np.append(self.n, 1.0)
+        self.variance = np.append(self.variance, final_sigma ** 2)
+        self.last_touch = np.append(self.last_touch, step_num)
+        self.spec.children_per_parent[father_item] += 1
+    
+    def update_posterior(self, item_lst: List[int], reward_lst: List[float], step_num: int):
+        items = np.array(item_lst)
+        rewards = np.array(reward_lst)
+
+        # update observations
+        # lazy update
+        # time_step = step_num - self.last_touch[items]
+        # self.last_touch[items] = step_num
+        # self.s[items] *= discount
+        # self.n[items] *= discount
+        # self.s[items] += rewards
+        # self.n[items] += 1
+
+        discount = self.gamma
+        self.s *= discount
+        self.n *= discount
+        self.s[items] += rewards
+        self.n[items] += 1
+        self.last_touch[items] = step_num
+
+        # group all items by parent
+        parent_items = list(range(self.original_datalength))
+        # parent_items = self.get_father_item(items)
+        # parent_items = np.unique(parent_items)
+        for _ in range(self.gibbs_sweeps):
+            self._gibbs_one_sweep_selected(parent_items)
+    
+    def _gibbs_one_sweep_selected(self, p_lst):
+        inv_tau02 = 1.0 / self.tau0_2
+
+        # Leaves
+        b_lst = [] # Sample omega in parallel TODO:
+        c_lst = []
+        sum_inv_sigma2_lst = dict()
+        sum_inv_sigma2_w_psi_lst = dict()
+        for p in p_lst:
+            sum_inv_sigma2 = 0
+            sum_inv_sigma2_w_psi = 0
+            for j in self.get_children_items(p):
+                n_ = float(self.n[j])
+                s_ = float(self.s[j])
+                kappa = s_ - n_ / 2.0
+                psi_cur = float(self.psi[j])
+                omega = self.sample_pg(b=n_, c=psi_cur, rng=self.rng)
+                # b_lst.append(n_)
+                # c_lst.append(psi_cur)
+                inv_sigma2 = 1.0 / self.variance[j]
+                V = 1.0 / (inv_sigma2 + omega)
+                m = V * (inv_sigma2 * self.psi[p] + kappa)
+                self.psi[j] = self.rng.normal(loc=m, scale=math.sqrt(V))
+
+                # self.variance[j] = V # NOTE: should not update variance of children
+                sum_inv_sigma2 += inv_sigma2
+                sum_inv_sigma2_w_psi += inv_sigma2 * self.psi[j]
+            sum_inv_sigma2_lst[p] = sum_inv_sigma2
+            sum_inv_sigma2_w_psi_lst[p] = sum_inv_sigma2_w_psi
+
+        # Roots
+        for p in p_lst:
+            n_ = float(self.n[p])
+            s_ = float(self.s[p])
+            kappa = s_ - n_ / 2.0
+            psi_cur = float(self.psi[p])
+            omega = self.sample_pg(b=n_, c=psi_cur, rng=self.rng) if n_ > 0 else 0.0
+
+            V0 = 1.0 / (inv_tau02 + sum_inv_sigma2_lst[p] + omega)
+            m0 = V0 * (inv_tau02 * self.mu0 + sum_inv_sigma2_w_psi_lst[p] + kappa)
+
+            self.psi[p] = self.rng.normal(loc=m0, scale=math.sqrt(V0)) 
+            self.variance[p] = V0
+
+    def select_batch(self, batch_size: int) -> List[int]:
+        thetas = 1 / (1 + np.exp(-self.psi))
+
+        error = np.abs(thetas - 0.5)
+        ids = np.argsort(error)
+        batch = []
+        parent_set = set()
+        for idx in ids:
+            parent = self.get_father_item(idx)
+            if parent not in parent_set or parent == -1:
+                parent_set.add(parent)
+                batch.append(int(idx))
+                if len(batch) == batch_size:
+                    break
+        else:
+            raise ValueError(f"Only {len(batch)} is collected")
+
+        # 返回batch和统计信息
+        return batch, self._get_batch_statistics(batch)
+    
+    def _get_batch_statistics(self, selected_items: List[int]) -> dict:
+        """
+        获取batch的统计信息
+        """
+        parent_metrics = super()._get_batch_statistics(selected_items)
+
+        time_not_selected = np.max(self.last_touch[selected_items]) - self.last_touch[selected_items] # [num_items, ]
+        time_not_selected_mean = np.mean(time_not_selected)
+        time_not_selected_std = np.std(time_not_selected)
+        time_not_selected_max = np.max(time_not_selected)
+        time_not_selected_min = np.min(time_not_selected)
+
+        parent_metrics.update({
+            "sampler/time_not_selected_mean": time_not_selected_mean,
+            "sampler/time_not_selected_std": time_not_selected_std,
+            "sampler/time_not_selected_max": time_not_selected_max,
+            "sampler/time_not_selected_min": time_not_selected_min,
+        })
+
+        for i, threshold in enumerate([10, 20, 50, 100, 200]):
+            mask = time_not_selected > threshold
+            parent_metrics.update({
+                f"sampler/time_not_selected_gt_{threshold}_num": np.sum(mask),
+                f"sampler/time_not_selected_gt_{threshold}_ratio": np.sum(mask) / len(time_not_selected),
+            })
+        return parent_metrics

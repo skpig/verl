@@ -1594,6 +1594,12 @@ class RayPPOTrainer:
                             critic_output = self.critic_wg.update_critic(batch)
                         critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
                         metrics.update(critic_output_metrics)
+                    
+                    # Update dataset sampler (Async)
+                    if isinstance(self.train_dataloader.sampler, AysncUpdater):
+                        self.train_dataloader.sampler.async_update(batch=batch, step_num=self.global_steps)
+                    elif isinstance(self.train_dataloader.batch_sampler, AysncUpdater):
+                        self.train_dataloader.batch_sampler.async_update(batch=batch, step_num=self.global_steps)
 
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_steps:
@@ -1606,11 +1612,6 @@ class RayPPOTrainer:
                         actor_output.meta_info.pop("metrics")
                         batch = batch.union(actor_output)
                     
-                    # Update dataset sampler (Async)
-                    if isinstance(self.train_dataloader.sampler, AysncUpdater):
-                        self.train_dataloader.sampler.async_update(batch=batch, step_num=self.global_steps)
-                    elif isinstance(self.train_dataloader.batch_sampler, AysncUpdater):
-                        self.train_dataloader.batch_sampler.async_update(batch=batch, step_num=self.global_steps)
 
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
@@ -1705,8 +1706,8 @@ class RayPPOTrainer:
                     print(f"remaining async tracking tasks {len(self.async_tracking_running_tasks)}")
 
                     # DEBUG:
-                    # task = self.async_tracking_pool.submit(async_tracking_log_samples, *(batch.select_idxs(list(range(50))), self.tokenizer, self.global_steps))
-                    # self.async_tracking_running_tasks.add(task)
+                    task = self.async_tracking_pool.submit(async_tracking_log_samples, *(batch.select_idxs(list(range(50))), self.tokenizer, self.global_steps))
+                    self.async_tracking_running_tasks.add(task)
 
 
                     # update global metrics

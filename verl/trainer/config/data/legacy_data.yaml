@@ -111,7 +111,15 @@ sampler:
     name: epsilon # epsilon, mcts, thompson
 
     # params for epsilon
-    epsilon: 0.3
+    epsilon: 0.3  
+
+    # params for pg
+    mu0: -0.5 # \psi_p ~ N(\mu0, \tau0)
+    tau0: 1.5 # \psi_p ~ N(\mu0, \tau0)
+    sigma0: null # \psi ~ N(\psi_p, \sigma0), if set, delta will be ignored
+    delta: 0.1 # variance of p(\psi | \psi_parent)
+    gibbs_sweeps: 5 # number of gibbs sweeps
+    gamma: 0.995 # discount factor for pg
 
 tree_data:
 

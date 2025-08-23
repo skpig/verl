@@ -2,9 +2,13 @@ from ast import Set
 from collections import defaultdict
 from email.policy import default
 import math
+import time
+from matplotlib.pyplot import plot
 import numpy as np
 from dataclasses import dataclass
 from typing import List, Tuple, Dict, Optional
+
+import seaborn
 
 # ===================== Utilities =====================
 
@@ -33,9 +37,6 @@ def _init_pg_engine(force: Optional[str] = None):
         global _pg_engine
         _pg_engine = (kind, handle)
 
-    if force == "trunc":
-        set_engine("trunc", None)
-        return
     if force in ("pypolyagamma", None):
         try:
             from pypolyagamma import PyPolyaGamma  # class + pgdraw
@@ -104,6 +105,7 @@ class TreeBanditEnv:
 
         # Sample truth
         self.psi_root_true = self.rng.normal(loc=self.mu_env, scale=math.sqrt(self.tau_env2), size=spec.num_parents)
+        # self.psi_root_true = self.rng.uniform(-self.tau_env2, self.tau_env2, size=spec.num_parents)
         self.psi_leaf_true: List[np.ndarray] = []
         self.theta_true: List[np.ndarray] = []
         for p in range(spec.num_parents):
@@ -145,8 +147,12 @@ class TreeBanditEnv:
         if len(actions) > k:
             actions = actions[:k]
         rewards = self.pull_arms(actions)
+        expected_rewards = 0
+        for a in actions:
+            p, j = self.arm_of[a]
+            expected_rewards += float(self.theta_true[p][j])
         method.observe(self, actions, rewards)
-        return actions, rewards
+        return actions, rewards, expected_rewards
 
     # -------- Oracle helpers --------
     def topk_true_sum(self, k: int) -> float:
@@ -340,8 +346,12 @@ class HierarchicalPGTS(MABMethod):
                 self.s[p][j] += 1
 
             p2j[p].add(j)
+        
+        # self._gibbs_one_sweep_selected(p2j)
 
-        self._gibbs_one_sweep_selected(p2j)
+        all_p2j = {p: set(range(self.spec.children_per_parent[p])) for p in range(self.spec.num_parents)}
+        for _ in range(self.gibbs_sweeps):
+            self._gibbs_one_sweep_selected(all_p2j)
 
 # ===================== Evaluation / Main Loop =====================
 
@@ -361,9 +371,14 @@ def run_method(env: TreeBanditEnv, method: MABMethod, rounds: int, pulls_per_rou
     cg_traj = np.zeros(T)
     avg_traj = np.zeros(T)
     oracle_k_sum = env.topk_true_sum(K)
+    time_per_round = []
     for t in range(1, T+1):
-        actions, rewards = env.step(method, t, k=K)
+        start_time = time.perf_counter()
+        actions, rewards, expected_rewards = env.step(method, t, k=K)
+        end_time = time.perf_counter()
+        time_per_round.append(end_time - start_time)
         sum_r = float(np.sum(rewards))
+        # cum_reward += expected_rewards
         cum_reward += sum_r
         # regret vs top-K oracle (stationary env): K * sum of best-K thetas per round
         cum_regret += (oracle_k_sum - sum_r)
@@ -371,6 +386,7 @@ def run_method(env: TreeBanditEnv, method: MABMethod, rounds: int, pulls_per_rou
         cr_traj[idx] = cum_reward
         cg_traj[idx] = cum_regret
         avg_traj[idx] = cum_reward / (t * K)
+    print(f"Time per round: {np.mean(time_per_round)}")
     return EvalLog(cum_reward=cr_traj, cum_regret=cg_traj, avg_reward_per_pull=avg_traj)
 
 # ===================== Comparison / Plotting =====================
@@ -380,7 +396,7 @@ def compare_methods(seed: int = 2025,
                     children_minmax: Tuple[int,int] = (2,5),
                     rounds: int = 1000,
                     pulls_per_round: int = 1,
-                    mu_env=0.0, tau_env=1.0, sigma_env=0.75,
+                    mu_env=0., tau_env=1.5, sigma_env=0.4,
                     methods: Optional[List[MABMethod]] = None) -> Dict[str, EvalLog]:
     rng = np.random.default_rng(seed)
     children_per_parent = [int(rng.integers(children_minmax[0], children_minmax[1]+1))
@@ -394,7 +410,7 @@ def compare_methods(seed: int = 2025,
             EpsilonGreedy(0.1),
             UCB1(),
             ThompsonBetaBernoulli(1.0, 1.0),
-            HierarchicalPGTS(mu0=0.0, tau0=3.0, sigma=1.0, gibbs_sweeps=2, pg_trunc=150, seed=seed+3),
+            HierarchicalPGTS(mu0=0.0, tau0=1.5, sigma=1, gibbs_sweeps=5, pg_trunc=150, seed=seed+3),
         ]
 
     results: Dict[str, EvalLog] = {}
@@ -402,10 +418,12 @@ def compare_methods(seed: int = 2025,
         name = getattr(m, 'name', f'method_{i}')
         print(f"Running {name} ...")
         results[name] = run_method(env, m, rounds=rounds, pulls_per_round=pulls_per_round, seed=seed+10+i)
+
+    plot_comparison(results, env)
     return results
 
 
-def plot_comparison(results: Dict[str, EvalLog]):
+def plot_comparison(results: Dict[str, EvalLog], env: TreeBanditEnv):
     import matplotlib.pyplot as plt
     T = None
     # Cumulative Regret
@@ -430,17 +448,24 @@ def plot_comparison(results: Dict[str, EvalLog]):
     plt.legend()
     plt.tight_layout()
 
+    # # Env true theta distribution
+    # plt.figure()
+    # seaborn.barplot(env._true_thetas_flat)
+
+    # plt.figure()
+    # sorted_true_thetas = np.sort(env._true_thetas_flat)
+    # seaborn.displot(sorted_true_thetas, kde=True)
+
     plt.show()
 
 # ===================== Entry =====================
 if __name__ == "__main__":
     results = compare_methods(
         seed=205,
-        parents=1700,
+        parents=17000,
         children_minmax=(10,50),
-        rounds=1000,
-        pulls_per_round=409,  # set K here
-        mu_env=0.0, tau_env=100.0, sigma_env=1,
+        rounds=50,
+        pulls_per_round=4000,  # set K here
+        mu_env=0.0, tau_env=1.5, sigma_env=0.1,
         methods=None,  # use defaults
     )
-    plot_comparison(results)

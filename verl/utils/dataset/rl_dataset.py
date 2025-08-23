@@ -219,7 +219,7 @@ class RLHFDataset(Dataset):
             dataframes.append(dataframe)
         self.dataframe: datasets.Dataset = datasets.concatenate_datasets(dataframes)
         # DEBUG:
-        self.dataframe = self.dataframe.select(range(50))
+        # self.dataframe = self.dataframe.select(range(50))
 
         print(f"dataset len: {len(self.dataframe)}")
 
