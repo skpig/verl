@@ -12,6 +12,9 @@ VAL_TOPP=0.95
 VAL_TOPK=20
 
 # Model settings
+USE_OVERLONG=False
+SAMPLER=tree # null, tree, mopps
+DATA_WORKERS=0
 CLIP_HIGHER=0.28
 CRITIC_WARMUP=40
 PROMPT_ID=4
@@ -19,8 +22,19 @@ ROLLOUT_N=1
 BATCH_SIZE=32 #4096
 MINI_BSZ=16 # 512
 OVERLONG_BUFFER_LEN=$((1024 * 1))
+OVERLONG_COEF=1
 MAX_PROMPT_LEN=$((1024 * 1))
 MAX_RESPONSE_LEN=$((1024 * 5 + OVERLONG_BUFFER_LEN))
+
+# Tree Sampler settings
+TREE_SAMPLER=epsilon # mcts pg
+EPSILON=0.2
+
+# Tree Selector
+TREE_SELECTOR=value # entropy mix1
+ROLLOUT_RATIO=0.7
+
+
 
 # Performance tuning
 N_NODES=${ARNOLD_WORKER_NUM:-1}
@@ -50,11 +64,10 @@ TEST_FILES="${MY_DATA_DIR}merged_math_datasets/merged_test.parquet"
 # train_files="['$gsm8k_train_path']"
 # test_files="['$gsm8k_test_path']"
 
-
 PROJ_NAME="debug_hbz"
 MODEL_NAME=$(basename $BASE_MODEL)
 DATA_NAME=DAPOMATH
-EXPERIMENT_NAME="ID${RUN_ID}_${DATA_NAME}_ppo_${MODEL_NAME}_prompt${PROMPT_ID}_n${ROLLOUT_N}_resplen${MAX_RESPONSE_LEN}_bsz${BATCH_SIZE}-${MINI_BSZ}"
+EXPERIMENT_NAME="ID${RUN_ID}_${DATA_NAME}_ppo_sampler${SAMPLER}_clip${CLIP_HIGHER}_${MODEL_NAME}_prompt${PROMPT_ID}_n${ROLLOUT_N}_resplen${MAX_RESPONSE_LEN}_bsz${BATCH_SIZE}-${MINI_BSZ}"
 
 python3 examples/data_preprocess/custom.py \
     --resume
@@ -68,8 +81,8 @@ export PYTHONPATH="."
 
 # 定义要执行的命令
 CMD="python3 -m verl.trainer.main_ppo \
-    data.sampler.name=tree \
-    data.dataloader_num_workers=0 \
+    data.sampler.name=$SAMPLER \
+    data.dataloader_num_workers=${DATA_WORKERS} \
     actor_rollout_ref.actor.clip_ratio_high=${CLIP_HIGHER} \
     +actor_rollout_ref.model.override_config.attention_dropout=0. \
     +actor_rollout_ref.model.override_config.embd_pdrop=0. \
@@ -88,6 +101,10 @@ CMD="python3 -m verl.trainer.main_ppo \
     data.max_response_length=$MAX_RESPONSE_LEN \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
+    data.sampler.tree_sampler.name=${TREE_SAMPLER} \
+    data.sampler.tree_sampler.epsilon=${EPSILON} \
+    data.tree_data.partial_rollout_ratio=${ROLLOUT_RATIO} \
+    data.tree_data.name=${TREE_SELECTOR} \
     actor_rollout_ref.model.path=$BASE_MODEL \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
@@ -110,7 +127,7 @@ CMD="python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.val_kwargs.temperature=${VAL_TEMP} \
     actor_rollout_ref.rollout.val_kwargs.top_k=${VAL_TOPK} \
     actor_rollout_ref.rollout.val_kwargs.top_p=${VAL_TOPP} \
-    critic.optim.lr=1e-5 \
+    critic.optim.lr=1e-6 \
     critic.model.use_remove_padding=True \
     critic.model.path=$BASE_MODEL \
     critic.model.fsdp_config.param_offload=$OFFLOAD \
@@ -121,8 +138,9 @@ CMD="python3 -m verl.trainer.main_ppo \
     algorithm.use_kl_in_reward=True \
     algorithm.kl_ctrl.kl_coef=0.0 \
     reward_model.launch_reward_fn_async=True \
-    reward_model.overlong_buffer.enable=True \
+    reward_model.overlong_buffer.enable=${USE_OVERLONG} \
     reward_model.overlong_buffer.len=$OVERLONG_BUFFER_LEN \
+    reward_model.overlong_buffer.penalty_factor=${OVERLONG_COEF} \
     trainer.critic_warmup=${CRITIC_WARMUP} \
     trainer.logger=['console'] \
     trainer.val_before_train=False \

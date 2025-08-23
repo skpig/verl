@@ -439,8 +439,9 @@ class DataParallelPPOActor(BasePPOActor):
                     )
 
                     if self.config.dynamic_clip.enable:
-                        clip_ratio_low = clip_ratio_low * (torch.exp(log_prob) ** self.config.dynamic_clip.coefficient)
-                        clip_ratio_high = clip_ratio_high * ((1-torch.exp(log_prob)) ** self.config.dynamic_clip.coefficient)
+                        log_prob_detach = log_prob.detach()
+                        clip_ratio_low = clip_ratio_low * (torch.exp(log_prob_detach) ** self.config.dynamic_clip.coefficient)
+                        clip_ratio_high = clip_ratio_high * ((1-torch.exp(log_prob_detach)) ** self.config.dynamic_clip.coefficient)
 
                     loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
 
