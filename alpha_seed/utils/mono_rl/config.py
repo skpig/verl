@@ -79,6 +79,7 @@ def _set_config_fsdp_engine(mono_config, source_config: DictConfig, model_config
     _set_config_field(mono_config.fsdp, config, "oe_size")
     _set_config_field(mono_config.fsdp, config, "tp_size")
     _set_config_field(mono_config.fsdp, config, "tp_outside")
+    _set_config_field(mono_config.fsdp, config, "balance_tokens")
 
     # set the profile field of the fsdp_engine
     if hasattr(config, "profile"):

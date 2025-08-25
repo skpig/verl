@@ -1,0 +1,60 @@
+actor_rollout_ref:
+  actor:
+    act_offload: true
+    fsdp_config:
+      param_offload: false
+    fsdp_size: -1
+    ppo_max_token_len: 128000
+    profile:
+      enable: false
+      filename: actor
+      profile_on_ranks:
+      - 0
+      - 16
+      - 32
+      - 48
+      upload_to_mlx: true
+    strategy: vescale-fsdp2
+    tp_size: 16
+    ulysses_sequence_parallel_size: 8
+    use_dynamic_bsz: true
+    balance_tokens: true
+  model:
+    enable_gradient_checkpointing: true
+    use_ce_loss_fusion: true
+  ref:
+    fsdp_config:
+      param_offload: true
+    fsdp_size: -1
+    max_token_len: 128000
+    strategy: vescale-fsdp2
+    tp_size: 16
+    ulysses_sequence_parallel_size: 8
+    balance_tokens: true
+    use_dynamic_bsz: true
+  rollout:
+    max_token_len: 24576
+    tensor_model_parallel_size: 32
+critic:
+  act_offload: true
+  fsdp_size: -1
+  model:
+    enable_gradient_checkpointing: true
+    fsdp_config:
+      param_offload: false
+  ppo_max_token_len: 128000
+  profile:
+    enable: false
+    filename: critic
+    profile_on_ranks:
+    - 0
+    - 16
+    - 32
+    - 48
+    upload_to_mlx: true
+  strategy: vescale-fsdp2
+  tp_size: 16
+  ulysses_sequence_parallel_size: 8
+  balance_tokens: true
+trainer:
+  offload_train_memory: true

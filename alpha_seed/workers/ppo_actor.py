@@ -123,9 +123,6 @@ class DataParallelPPOActor(BasePPOActor):
 
             metrics_opt = self.engine.optimizer_step()
             self.engine.optimizer_zero_grad()
-
-            print(f"[debug][actor] {metrics_opt['grad_norm']=}")
-
             data_metric = {
                 'actor/grad_norm': metrics_opt['grad_norm'],  # NOTE: grad_norm is a float from monorl
                 'actor/#micro_batch_update': output_proto.meta_info["metrics"].pop('#micro_batch_update'),
@@ -137,6 +134,7 @@ class DataParallelPPOActor(BasePPOActor):
         # append_to_dict(metrics, {'first_mini_ppo_kl_sum': first_mini_ppo_kl_sum})
 
         self.engine.optimizer_zero_grad()
+        self.engine.clear_memory_cache()
         return metrics
 
 

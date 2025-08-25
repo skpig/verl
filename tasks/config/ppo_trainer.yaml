@@ -84,6 +84,8 @@ actor_rollout_ref:
     act_offload_buff_size: 32
     act_offload_pin_memory: false
     gc_freq: null # null, "micro", "mini"
+    # balance tokens during training
+    balance_tokens: False
     train_memory_offload: ${trainer.offload_train_memory}
     optim:
       type: adam
@@ -126,6 +128,7 @@ actor_rollout_ref:
     tp_size: 1
     tp_outside: false
     oe_size: 1
+    balance_tokens: False
     use_dynamic_bsz: True
     max_token_len: -1
     ema: 1.0
@@ -299,6 +302,7 @@ critic:
   tp_size: 1
   tp_outside: false
   oe_size: 1
+  balance_tokens: False
   NO_DEVICE_MESH: False # handle old critic ckpt stored as ShardedTensor
   ppo_mini_batch_size: ${actor_rollout_ref.actor.ppo_mini_batch_size}
   ppo_micro_batch_size: 64

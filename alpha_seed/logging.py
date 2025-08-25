@@ -59,6 +59,9 @@ def refine_log():
     log_filter.add_pattern("Bumi is running")
     log_filter.add_pattern("byted-triton is not installed properly")
 
+    # vescale
+    warnings.filterwarnings("ignore", "vescale.utils.foreach_utils._foreach_norm", category=UserWarning)
+
     # - set logging level
     try:
         logging.getLogger().setLevel(os.getenv("LOGGING_LEVEL", logging.getLogger().getEffectiveLevel()))

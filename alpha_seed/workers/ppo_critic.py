@@ -123,7 +123,7 @@ class DataParallelPPOCritic(BasePPOCritic):
 
         seq_vf = torch.cat(seq_level_vf_lst)
         self.engine.optimizer_zero_grad()
-
+        self.engine.clear_memory_cache()
         return seq_vf, metrics
 
 

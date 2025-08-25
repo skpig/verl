@@ -285,6 +285,7 @@ class AsyncActorRolloutRefWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def to(self, device: str, model: bool = True, optimizer: bool = True):
+
         assert device in ("cuda", "cpu")
         if device == "cuda":
             device = torch.cuda.current_device()
