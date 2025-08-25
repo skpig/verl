@@ -1,10 +1,10 @@
-RUN_ID=30
+RUN_ID=
 WANDB_VERSION=bwandb
 # one node
 FORWARD_RATIO=10
 BACKWARD_RATIO=3
 
-resume=auto
+resume=disable
 
 # for qwen3
 VAL_TEMP=0.6
@@ -12,16 +12,30 @@ VAL_TOPP=0.95
 VAL_TOPK=20
 
 # Model settings
-SAMPLER=mopps # null, tree
+USE_OVERLONG=True
+SAMPLER=tree # null, tree, mopps
 DATA_WORKERS=0
-CLIP_HIGHER=0.28
+CRITIC_WARMUP=0
 PROMPT_ID=4
 ROLLOUT_N=8
 BATCH_SIZE=512
 MINI_BSZ=64
 OVERLONG_BUFFER_LEN=$((1024 * 1))
+OVERLONG_COEF=1
 MAX_PROMPT_LEN=$((1024 * 1))
 MAX_RESPONSE_LEN=$((1024 * 5 + OVERLONG_BUFFER_LEN))
+CLIP_HIGHER=0.28
+
+# Tree Sampler settings
+TREE_SAMPLER=pg # mcts pg
+EPSILON=0.2
+
+# Tree Selector
+TREE_SELECTOR=value # value entropy mix, mix2
+ROLLOUT_RATIO=0.7
+INCORRECT_PROB=0.3
+ROOT_ONLY=False
+
 
 # Performance tuning
 N_NODES=${ARNOLD_WORKER_NUM:-1}
@@ -31,14 +45,16 @@ OFFLOAD=True
 # SP_SIZE=4 # TODO:
 FORWARD_BSZ=16 # no use
 BACKWARD_BSZ=2 # no use
-TOTAL_EPOCHS=100
+TOTAL_EPOCHS=1000
 FORWARD_MAX_TOKEN_LEN=$((FORWARD_RATIO * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN))) # 12 for 40GB
 BACKWARD_MAX_TOKEN_LEN=$((BACKWARD_RATIO * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN)))  # 4 for 40GB
 
 
 
-MY_CKPT_DIR=/mnt/hdfs/huangbaizhou/tmp/ckpt
+MY_CKPT_DIR=/mnt/hdfs/huangbaizhou/tmp/ckpt/
 BASE_MODEL=${MY_MODEL_DIR}Qwen/Qwen3-8B-Base
+CRITIC_MODEL=${MY_CKPT_DIR}debug_hbz/Qwen3-8B-critic/0821-s8-v1
+
 TEMPLATE_TYPE=chat
 TRAIN_FILE="${MY_DATA_DIR}DAPO-Math-17k/train.parquet"
 TEST_FILES="${MY_DATA_DIR}merged_math_datasets/merged_test.parquet"
@@ -82,6 +98,12 @@ CMD="python3 -m verl.trainer.main_ppo \
     data.max_response_length=$MAX_RESPONSE_LEN \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
+    data.sampler.tree_sampler.name=${TREE_SAMPLER} \
+    data.sampler.tree_sampler.epsilon=${EPSILON} \
+    data.tree_data.partial_rollout_ratio=${ROLLOUT_RATIO} \
+    data.tree_data.keep_incorrect_prob=${INCORRECT_PROB} \
+    data.tree_data.root_only=${ROOT_ONLY} \
+    data.tree_data.name=${TREE_SELECTOR} \
     actor_rollout_ref.model.path=$BASE_MODEL \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
@@ -99,8 +121,8 @@ CMD="python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=$FORWARD_MAX_TOKEN_LEN \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP_SIZE \
-    actor_rollout_ref.rollout.name=vllm \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
+    actor_rollout_ref.rollout.name=sglang \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.65 \
     actor_rollout_ref.rollout.n=$ROLLOUT_N \
     actor_rollout_ref.rollout.val_kwargs.temperature=${VAL_TEMP} \
     actor_rollout_ref.rollout.val_kwargs.top_k=${VAL_TOPK} \
@@ -108,11 +130,11 @@ CMD="python3 -m verl.trainer.main_ppo \
     algorithm.use_kl_in_reward=True \
     algorithm.kl_ctrl.kl_coef=0.0 \
     reward_model.launch_reward_fn_async=True \
-    reward_model.overlong_buffer.enable=True \
+    reward_model.overlong_buffer.enable=${USE_OVERLONG} \
     reward_model.overlong_buffer.len=$OVERLONG_BUFFER_LEN \
-    trainer.critic_warmup=0 \
+    reward_model.overlong_buffer.penalty_factor=${OVERLONG_COEF} \
     trainer.logger=['console','$WANDB_VERSION'] \
-    trainer.val_before_train=True \
+    trainer.val_before_train=False \
     trainer.n_gpus_per_node=$N_GPUS \
     trainer.nnodes=$N_NODES \
     trainer.save_freq=10 \

@@ -261,6 +261,7 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
     prompt_length = response_info["prompt_length"]
     response_length = response_info["response_length"]
 
+    eos_adv = torch.gather(advantages, dim=1, index=response_length.unsqueeze(dim=1).long() - 1).reshape(-1)
     valid_adv = torch.masked_select(advantages, response_mask)
     valid_returns = torch.masked_select(returns, response_mask)
 
@@ -294,6 +295,13 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
 
         partial_rollouts_seq_score = sequence_score[partial_rollouts_mask]
         non_partial_rollouts_seq_score = sequence_score[~partial_rollouts_mask]
+
+        if use_critic:
+            response_mask_w_partial_rollouts = batch.batch['response_mask_w_partial_rollouts'].bool()
+            valid_values_wo_partial_rollouts = torch.masked_select(values, response_mask_w_partial_rollouts)
+            valid_returns_wo_partial_rollouts = torch.masked_select(returns, response_mask_w_partial_rollouts)
+            return_diff_var_wo_partial_rollouts = torch.var(valid_returns_wo_partial_rollouts - valid_values_wo_partial_rollouts)
+            return_var_wo_partial_rollouts = torch.var(valid_returns_wo_partial_rollouts)
     
 
     # clip related
@@ -356,6 +364,7 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         "critic/advantages/max": torch.max(valid_adv).detach().item(),
         "critic/advantages/min": torch.min(valid_adv).detach().item(),
         "critic/advantages/std": torch.std(valid_adv).detach().item(),
+        "critic/advantages/eos_adv": torch.mean(eos_adv).detach().item(),
         # returns
         "critic/returns/mean": torch.mean(valid_returns).detach().item(),
         "critic/returns/max": torch.max(valid_returns).detach().item(),
@@ -410,6 +419,15 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
             if 'partial_rollout_len' in batch.non_tensor_batch
             else {}
         ),
+        **(
+            {
+                "critic/values/mean_wo_partial_rollouts": torch.mean(valid_values_wo_partial_rollouts).detach().item(),
+                "critic/values/std_wo_partial_rollouts": torch.std(valid_values_wo_partial_rollouts).detach().item(),
+                "critic/vf_explained_var_wo_partial_rollouts": (1.0 - return_diff_var_wo_partial_rollouts / (return_var_wo_partial_rollouts + 1e-5)).detach().item(),
+            }
+            if 'partial_rollout_len' in batch.non_tensor_batch and use_critic
+            else {}
+        ),
 
         # rollout metrics
         "rollout/AnsMatch/mean": np.mean(AnsMatch).item(),
@@ -443,6 +461,17 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         ),
 
     }
+
+    # query level acc
+    query2acc = defaultdict(list)
+    for item, score in zip(batch.non_tensor_batch['item'], sequence_score):
+        query2acc[int(item)].append(score)
+    query2acc = {query: np.mean(accs) for query, accs in query2acc.items()}
+    metrics.update({f'critic/query_level_acc/mean': np.mean(list(query2acc.values())).item(), # this should be equal to critic/score/mean
+                    f'critic/query_level_acc/max': np.max(list(query2acc.values())).item(),
+                    f'critic/query_level_acc/min': np.min(list(query2acc.values())).item(),
+                    f'critic/query_level_acc/std': np.std(list(query2acc.values())).item()})
+
 
     # prob-threshold related
     for i, threshold in enumerate([0.75, 0.5, 0.2, 0.1, 0.01, 0.001]):

@@ -1,6 +1,8 @@
+from collections import defaultdict
 from dataclasses import dataclass, is_dataclass
 import math
-from typing import Dict, List, Optional, Sized, Tuple
+import random
+from typing import Any, Dict, List, Optional, Sized, Tuple
 import numpy as np
 import torch
 import ray
@@ -119,12 +121,12 @@ class TreeEngine:
         node = self.item2node[item]
         return node.children_items
     
-    def get_father_item(self, item: int) -> int:
-        """
-        Get the father item of the given item.
-        """
-        node = self.item2node[item]
-        return node.father_item
+    # def get_father_item(self, item: int) -> int:
+    #     """
+    #     Get the father item of the given item.
+    #     """
+    #     node = self.item2node[item]
+    #     return node.father_item
     
     def state_dict(self):
         """
@@ -167,116 +169,205 @@ class TreeEngine:
 
         self.spec.children_per_parent[father_node.item] += 1
 
-    def update_data_source(self, batch: DataProto, step_num: int) -> Dict[str, float]:
+    def update_data_source(self, batch, step_num: int) -> Dict[str, float]:
         """
-        Update the dataset with the current batch.
-        This method is called after each training batch.
+        扩展版：支持 items 在一个 batch 内重复。
+        会按 item 分组，对同一 item 的多个样本作为一个小 batch 一次性处理。
         """
-        items = torch.tensor(batch.non_tensor_batch['item'].astype(int))
+        # ---------- pull batch fields ----------
+        # items
+        items = torch.as_tensor(batch.non_tensor_batch["item"].astype(np.int32)).to(torch.long)
 
-        unique_indices, inverse_indices = torch.unique(items, return_inverse=True)
+        # raw score ∈ {0,1}
+        all_scores = torch.as_tensor(batch.non_tensor_batch["score"]).to(torch.long)
+        assert torch.all((all_scores == 0) | (all_scores == 1)), \
+            "Currently only support score in {0, 1}."
 
-        all_scores = torch.tensor(batch.non_tensor_batch['score']) # raw score
-        assert all([i in [0, 1] for i in all_scores.tolist()]), "Currently only support score in {0, 1}."
-        all_partial_rollout_len = torch.tensor(batch.non_tensor_batch['partial_rollout_len'].astype(int))
-        # all_response_mask = batch.batch['response_mask_w_partial_rollouts'].bool()
-        all_response_mask = batch.batch['response_mask'].bool()
-        all_response_len = all_response_mask.sum(dim=-1).tolist()
-        all_responses = batch.batch["responses"].clone() # (bsz, response_len)
-        all_values = batch.batch["values"].clone() # (bsz, response_len)
-        all_entropys = batch.batch["entropys"].clone() # (bsz, response_len)
+        # 已有的 partial rollout 起点（绝对位置）
+        all_partial_rollout_len = torch.as_tensor(
+            batch.non_tensor_batch["partial_rollout_len"].astype(np.int32)
+        ).to(torch.long)
 
-        # We can select the item with highest score as the new node
-        assert len(unique_indices) == len(set(items)), "Currently, items should be unique in the batch."
-        # assert self.use_critic, "Currently only support use_critic=True for TreeDataset"
+        # masks & lengths
+        all_response_mask = batch.batch["response_mask"].to(torch.bool)
+        all_response_len = all_response_mask.sum(dim=-1).to(torch.long)
 
-        # breakpoint()
+        # sequences & per-token stats
+        all_responses = batch.batch["responses"]          # (bsz, T)
+        all_values    = batch.batch.get("values", None)  # (bsz, T)
+        all_entropys  = batch.batch["entropys"]           # (bsz, T)
+
+        bsz = items.numel()
+        assert all_responses.size(0) == bsz, "batch dims mismatch"
+
+        # ---------- group by item ----------
+        # groups: item_value(int) -> list[int]
+        groups: Dict[int, List[int]] = {}
+        for i in range(bsz):
+            key = int(items[i].item())
+            groups.setdefault(key, []).append(i)
+
+        # ---------- process each group ----------
+        all_partial_lens: List[int] = []     # 相对窗口起点的长度 j
+        all_partial_ratios: List[float] = [] # j / response_len  (保持与旧指标一致)
+
+        for item_val, idx_list in groups.items():
+            idx_tensor = torch.tensor(idx_list, dtype=torch.long, device=items.device)
+            gmetrics = self._batch_create_nodes(
+                item=item_val,
+                idx=idx_tensor,
+                all_scores=all_scores,
+                all_partial_rollout_len=all_partial_rollout_len,
+                all_response_len=all_response_len,
+                all_responses=all_responses,
+                all_values=all_values,
+                all_entropys=all_entropys,
+                step_num=step_num,
+            )
+            all_partial_lens.extend(gmetrics["partial_lens"])
+            all_partial_ratios.extend(gmetrics["partial_ratios"])
+
+        # ---------- aggregate metrics ----------
+        def _safe_mean(xs: List[float]) -> float:
+            return float(np.mean(xs)) if xs else 0.0
+
+        def _safe_std(xs: List[float]) -> float:
+            return float(np.std(xs)) if xs else 0.0
+
+        return {
+            "dataset/partial_rollout_len_mean": np.mean(all_partial_lens),
+            "dataset/partial_rollout_len_std": np.std(all_partial_lens),
+            "dataset/partial_rollout_len_max": np.max(all_partial_lens) if all_partial_lens else 0,
+            "dataset/partial_rollout_len_min": np.min(all_partial_lens) if all_partial_lens else 0,
+            "dataset/partial_rollout_len_ratio_mean": np.mean(all_partial_ratios),
+            "dataset/partial_rollout_len_ratio_std": np.std(all_partial_ratios),
+            "dataset/partial_rollout_zero_ratio": np.mean(np.array(all_partial_lens) == 0),
+        }
+    # ----------------------------------------------------------------------
+
+    def _batch_create_nodes(
+        self,
+        item: int,
+        idx: torch.Tensor,               # 1D, dtype=long
+        all_scores: torch.Tensor,                   # (bsz,)
+        all_partial_rollout_len: torch.Tensor,      # (bsz,)
+        all_response_len: torch.Tensor,             # (bsz,)
+        all_responses: torch.Tensor,                # (bsz, T)
+        all_values: torch.Tensor,                   # (bsz, T)
+        all_entropys: torch.Tensor,                 # (bsz, T)
+        step_num: int,
+    ) -> Dict[str, Any]:
+        """
+        针对同一个 item 的一批样本统一处理，返回该组的指标。
+        """
+        # ----- read config with defaults -----
+        cfg = self.tree_config
+        name: str = cfg.name
+        ratio: float = cfg.partial_rollout_ratio
+        min_len: int = cfg.min_partial_rollout_len
+        root_only: bool = cfg.root_only
+
+
+        # ----- father node -----
+        father_node = self.item2node[item]
+
+        depth = father_node.depth(self.item2node)
+        if root_only and depth > 0:
+            # 仅允许在 root 挂子节点
+            return {"partial_lens": [], "partial_ratios": []}
+        elif depth > 0:
+            # 将父节点提到原始祖先（root）
+            root_item = father_node.get_original_ancestor_item(self.item2node)
+            father_node = self.item2node[root_item]
+        
+        device = all_responses.device
+        T = all_responses.size(1)
+        m = idx.numel()
+
+        # ----- gather group tensors -----
+        responses_g = all_responses.index_select(0, idx)                # (m, T)
+        scores_g   = all_scores.index_select(0, idx)                    # (m,)
+        start_g    = torch.clamp_min(all_partial_rollout_len.index_select(0, idx), min=10)       # (m,) We don't want a too short partial rollout
+        rlen_g     = all_response_len.index_select(0, idx)              # (m,)
+        values_g   = all_values.index_select(0, idx) if all_values is not None else None # (m, T)
+        entropies_g= all_entropys.index_select(0, idx) # (m, T)
+
+        # ----- filter out invalid rows -----
+        # 仅对 score=1 的行抽样
+        valid_row = torch.ones(m, dtype=torch.bool, device=device)
+        keep_incorrect_prob: float = cfg.keep_incorrect_prob
+        with torch.no_grad():
+            rand = torch.rand(m, device=device)
+        valid_row &= torch.where(scores_g == 0, rand <= keep_incorrect_prob, torch.ones_like(rand, dtype=torch.bool))
+
+        # 有效窗口长度
+
+        end_g = torch.floor(rlen_g.to(torch.float32) * ratio).to(torch.long)  # (m,), we need to ensure a sufficient long response space
+        valid_len = end_g - start_g                                           # (m,)
+        valid_row &= (valid_len > min_len)
+
+        # ----- build window mask (m, T) -----
+        # mask[i, t] = (start_i <= t < end_i)
+        arange_T = torch.arange(T, device=device).view(1, T)  # (1, T)
+        start_exp = start_g.view(m, 1)
+        end_exp   = end_g.view(m, 1)
+        mask_win = (arange_T >= start_exp) & (arange_T < end_exp)        # (m, T)
+        mask_win &= valid_row.view(m, 1) # mask out invalid rows
+        num_valid_tokens = mask_win.sum().item()
+
+        if num_valid_tokens == 0:
+            return {"partial_lens": [], "partial_ratios": []}
+
+        # 基础掩码后的张量
+        mv = torch.where(mask_win, values_g, -float('inf')) if values_g is not None else None # masked values of (m, T)
+        me = torch.where(mask_win, entropies_g, -float('inf'))  # masked entropies of (m, T)
+
+        # ----- strategy-wise batched selection -----
+        if name == "value":
+            # sel_score, pos = mv.max(dim=1)   # row-wise argmax over window
+            pos = mv.argmax()
+            row_id, col_id = torch.unravel_index(pos, mv.shape)
+        elif name == "entropy":
+            pos = me.argmax()
+            row_id, col_id = torch.unravel_index(pos, me.shape)
+        elif name == "mix":
+            flattened_entropy = torch.masked_select(me, mask_win)
+            percentile_entropy = torch.kthvalue(flattened_entropy, int(num_valid_tokens * 0.8))[0]  # kthvalue 从1开始计数
+            masked_valid_values = torch.where(me > percentile_entropy, mv, -float('inf')) # mask low entropy position
+            pos = masked_valid_values.argmax()
+            row_id, col_id = torch.unravel_index(pos, masked_valid_values.shape)
+        elif name == "mix2":
+            flattened_value = torch.masked_select(mv, mask_win)
+            percentile_value = torch.kthvalue(flattened_value, int(num_valid_tokens * 0.8))[0]  # kthvalue 从1开始计数
+            masked_valid_values = torch.where(mv > percentile_value, me, -float('inf')) # mask low value position
+            pos = masked_valid_values.argmax()
+            row_id, col_id = torch.unravel_index(pos, masked_valid_values.shape)
+        else:
+            raise ValueError(f"Invalid tree config name: {name}")
+        
+        # ----- select batch -----
+        partial_rollout_len = (start_g[row_id] + col_id).item()
+        partial_rollout_ratio = partial_rollout_len / rlen_g[row_id].item()
+        partial_rollout = responses_g[row_id, :partial_rollout_len].tolist()
+
+
+        # ----- create new node -----
+        self.create_new_node(father_node, partial_rollout, step_num, scores_g[row_id].item())
 
         # metrics
-        new_partial_rollout_len_lst = []
-        new_partial_rollout_len_ratio_lst = []
-        for i, index in enumerate(inverse_indices):
-            item = unique_indices[index].item()
-            father_node = self.item2node.get(item, None)
-            assert father_node is not None, f"Item {item} not found in the dataset."
-
-            if self.tree_config.correct_only and all_scores[i] == 0:
-                continue
-            elif all_scores[i] == 0 and self.rng.random() > 0.3: # we don't want too much noisy rollouts
-                continue
-
-            father_depth = father_node.depth(self.item2node)
-            if self.tree_config.root_only and father_depth > 0:
-                continue
-            elif father_depth > 0:
-                father_node = self.item2node[father_node.get_original_ancestor_item(self.item2node)] # get the original ancestor node as father node
-
-            # only use the first half of the response as partial rollout
-            valid_position_start = all_partial_rollout_len[i]
-            valid_position_end = int(all_response_len[i] * self.tree_config.partial_rollout_ratio)
-            valid_length = valid_position_end - valid_position_start
-            # if the partial rollout is too short, skip
-            if valid_length <= self.tree_config.min_partial_rollout_len:
-                continue
-
-            valid_values = all_values[i, valid_position_start:valid_position_end]
-            valid_entropys = all_entropys[i, valid_position_start:valid_position_end]
-            # V1: Use the index with highest value as the new node, should assert critic_lam == 1
-            if self.tree_config.name == "value":
-                max_value_index = torch.argmax(valid_values).item()
-
-                partial_rollout_len = max_value_index # the index with highest value should be excluded, since V[i] is the value of sequence x[:idx]
-            
-            # V2: Use the index with highest entropy as the new node
-            elif self.tree_config.name == "entropy":
-                max_entropy_index = torch.argmax(valid_entropys).item()
-                partial_rollout_len = max_entropy_index # the index with highest entropy should be excluded, since H[i] is the entropy of sequence x[:idx]
-            
-            # V3: Use the index with highest value over 80-percentile entropy tokens
-            elif self.tree_config.name == "mix":
-                percentile_entropy = torch.kthvalue(valid_entropys, int(valid_length * 0.8))[0]  # kthvalue 从1开始计数
-                masked_valid_values = torch.where(valid_entropys > percentile_entropy, valid_values, -float('inf')) # mask low entropy position
-                partial_rollout_len = torch.argmax(masked_valid_values).item()
-            
-            # V4: Use the index with highest entropy over 90-percentile high-value tokens
-            elif self.tree_config.name == "mix2":
-                percentile_value = torch.kthvalue(valid_values, int(valid_length * 0.9))[0]  # kthvalue 从1开始计数
-                masked_valid_entropys = torch.where(valid_values > percentile_value, valid_entropys, -float('inf')) # mask low value position
-                partial_rollout_len = torch.argmax(masked_valid_entropys).item()
-            
-            else:
-                raise NotImplementedError(f"Tree config name {self.tree_config.name} not implemented.") 
-
-            # NOTE: partial_rollout_len might be zero here
-            partial_rollout = all_responses[i, :valid_position_start + partial_rollout_len].tolist()
+        return {"partial_lens": [partial_rollout_len], "partial_ratios": [partial_rollout_ratio]}
 
 
-            """Create new node"""
-            self.create_new_node(father_node, partial_rollout, step_num, all_scores[i])
+        
 
-            # metrics
-            new_partial_rollout_len_lst.append(partial_rollout_len)
-            new_partial_rollout_len_ratio_lst.append(partial_rollout_len / all_response_len[i])
-            
-        # Remove some old rollouts if log_prob of partial rollout is too low under current policy
-        return {
-            "dataset/partial_rollout_len_mean": np.mean(new_partial_rollout_len_lst),
-            "dataset/partial_rollout_len_std": np.std(new_partial_rollout_len_lst),
-            "dataset/partial_rollout_len_max": np.max(new_partial_rollout_len_lst) if new_partial_rollout_len_lst else 0,
-            "dataset/partial_rollout_len_min": np.min(new_partial_rollout_len_lst) if new_partial_rollout_len_lst else 0,
-            "dataset/partial_rollout_len_ratio_mean": np.mean(new_partial_rollout_len_ratio_lst),
-            "dataset/partial_rollout_len_ratio_std": np.std(new_partial_rollout_len_ratio_lst),
-            "dataset/partial_rollout_zero_ratio": np.mean(np.array(new_partial_rollout_len_lst) == 0),
-        }
-    
     def update_posterior(self, item_lst: List[int], reward_lst: List[float], step_num: int):
         pass
 
-    def select_batch(self, batch_size: int) -> Tuple[List[int], Dict[str, float]]:
+    def select_batch(self, batch_size: int, step_num: int) -> Tuple[List[int], Dict[str, float]]:
         pass
 
     
-    def _get_batch_statistics(self, selected_items: List[int]) -> dict:
+    def _get_batch_statistics(self, selected_items: List[int], step_num: int) -> dict:
         """
         获取batch的统计信息
         """
@@ -294,7 +385,7 @@ class TreeEngine:
     def async_wrap_all(self, batch: DataProto, step_num: int, bsz: int):
         self.update_posterior(batch.non_tensor_batch["item"].tolist(), batch.non_tensor_batch["score"].tolist(), step_num)
         data_metrics = self.update_data_source(batch, step_num)
-        batch, selection_metrics = self.select_batch(bsz)
+        batch, selection_metrics = self.select_batch(bsz, step_num)
         return batch, selection_metrics, data_metrics
         
 
@@ -306,7 +397,7 @@ class EpsilonRandomTreeEngine(TreeEngine):
         self.epsilon = data_config.sampler.tree_sampler.epsilon
         self.pointer = 0
     
-    def select_batch(self, batch_size: int) -> List[int]:
+    def select_batch(self, batch_size: int, step_num: int) -> List[int]:
         batch = []
         # breakpoint()
         while True:
@@ -351,7 +442,7 @@ class EpsilonGreedyTreeEngine(TreeEngine):
             self.N[item] += 1
             self.S[item] += reward
     
-    def select_batch(self, batch_size: int) -> List[int]:
+    def select_batch(self, batch_size: int, step_num: int) -> List[int]:
         if self.rng.random() < self.epsilon:
             batch = list(self.rng.choice(self.next_item, size=batch_size, replace=False))
             # 返回batch和统计信息
@@ -393,6 +484,7 @@ class PGTreeEngine(TreeEngine):
         self.s = np.zeros(self.original_datalength)
         self.n = np.zeros(self.original_datalength)
         self.last_touch = np.zeros(self.original_datalength)
+        self.father_last_touch = np.zeros(self.original_datalength)
 
         # ---- Polya-Gamma sampler backends (pypolyagamma -> polyagamma -> truncated series) ----
         self._pg_engine = None  # (kind, handle)
@@ -471,6 +563,7 @@ class PGTreeEngine(TreeEngine):
         self.n = np.append(self.n, 1.0)
         self.variance = np.append(self.variance, final_sigma ** 2)
         self.last_touch = np.append(self.last_touch, step_num)
+        self.father_last_touch[int(father_item)] = step_num
         self.spec.children_per_parent[father_item] += 1
     
     def update_posterior(self, item_lst: List[int], reward_lst: List[float], step_num: int):
@@ -489,9 +582,16 @@ class PGTreeEngine(TreeEngine):
         discount = self.gamma
         self.s *= discount
         self.n *= discount
-        self.s[items] += rewards
-        self.n[items] += 1
+        # BUGGY: this is not correct, since the items might not be unique
+        # self.s[items] += rewards
+        # self.n[items] += 1
+        for item, reward in zip(items, rewards):
+            self.s[item] += reward
+            self.n[item] += 1
         self.last_touch[items] = step_num
+        for item in items:
+            father_item = self.get_original_ancestor_item(item)
+            self.father_last_touch[int(father_item)] = step_num
 
         # group all items by parent
         parent_items = list(range(self.original_datalength))
@@ -544,16 +644,18 @@ class PGTreeEngine(TreeEngine):
             self.psi[p] = self.rng.normal(loc=m0, scale=math.sqrt(V0)) 
             self.variance[p] = V0
 
-    def select_batch(self, batch_size: int) -> List[int]:
-        thetas = 1 / (1 + np.exp(-self.psi))
+    def select_batch(self, batch_size: int, step_num: int) -> Tuple[List[int], Dict[str, float]]:
+        thetas = 1 / (1 + np.exp(-self.psi)) # [num_nodes, ]
+        
+        # father_only_ratio = self.tree_config.father_only_ratio
 
         error = np.abs(thetas - 0.5)
         ids = np.argsort(error)
         batch = []
         parent_set = set()
         for idx in ids:
-            parent = self.get_father_item(idx)
-            if parent not in parent_set or parent == -1:
+            parent = self.get_original_ancestor_item(idx)
+            if parent not in parent_set:
                 parent_set.add(parent)
                 batch.append(int(idx))
                 if len(batch) == batch_size:
@@ -561,29 +663,63 @@ class PGTreeEngine(TreeEngine):
         else:
             raise ValueError(f"Only {len(batch)} is collected")
 
+        metrics = self._get_batch_statistics(batch, step_num)
+
+        """add psi infomation"""
+
+        # a fixed set for comparison between different methods
+        seed = 42
+        rng = np.random.default_rng(seed)
+        random_parent_ids = rng.choice(list(range(self.original_datalength)), size=20, replace=False)
+        fixed_thetas = []
+        for p in random_parent_ids:
+            children_thetas = []
+            for j in self.get_children_items(p):
+                children_thetas.append(thetas[j].item())
+            fixed_thetas.append(children_thetas)
+        metrics.update({
+            "sampler/fixed_thetas": fixed_thetas,
+        })
+
+        # psi of current batch
+        metrics.update({
+            "sampler/thetas": thetas.tolist(), # [num_nodes, ]
+            "sampler/father_thetas": thetas[:self.original_datalength].tolist(), # [num_fathers, ]
+            "sampler/selected_thetas": thetas[batch].tolist(), # [batch_size, ]
+        })
+
         # 返回batch和统计信息
-        return batch, self._get_batch_statistics(batch)
+        return batch, metrics
     
-    def _get_batch_statistics(self, selected_items: List[int]) -> dict:
+    def _get_batch_statistics(self, selected_items: List[int], step_num: int) -> dict:
         """
         获取batch的统计信息
         """
-        parent_metrics = super()._get_batch_statistics(selected_items)
+        parent_metrics = super()._get_batch_statistics(selected_items, step_num)
 
-        time_not_selected = np.max(self.last_touch[selected_items]) - self.last_touch[selected_items] # [num_items, ]
+        time_not_selected = step_num - self.last_touch[selected_items] # [num_items, ]
         time_not_selected_mean = np.mean(time_not_selected)
         time_not_selected_std = np.std(time_not_selected)
         time_not_selected_max = np.max(time_not_selected)
         time_not_selected_min = np.min(time_not_selected)
+
+        father_items = [self.get_original_ancestor_item(item) for item in selected_items]
+        time_not_selected_father = step_num - self.father_last_touch[father_items] # [num_items, ]
 
         parent_metrics.update({
             "sampler/time_not_selected_mean": time_not_selected_mean,
             "sampler/time_not_selected_std": time_not_selected_std,
             "sampler/time_not_selected_max": time_not_selected_max,
             "sampler/time_not_selected_min": time_not_selected_min,
+            "sampler/continuous_selected_num": np.sum(time_not_selected == 0),
+            "sampler/father/time_not_selected_mean": np.mean(time_not_selected_father),
+            "sampler/father/time_not_selected_std": np.std(time_not_selected_father),
+            "sampler/father/time_not_selected_max": np.max(time_not_selected_father),
+            "sampler/father/time_not_selected_min": np.min(time_not_selected_father),
+            "sampler/father/continuous_selected_num": np.sum(time_not_selected_father == 0)
         })
 
-        for i, threshold in enumerate([10, 20, 50, 100, 200]):
+        for i, threshold in enumerate([10, 20, 50, 100, 150, 200]):
             mask = time_not_selected > threshold
             parent_metrics.update({
                 f"sampler/time_not_selected_gt_{threshold}_num": np.sum(mask),

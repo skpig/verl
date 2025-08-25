@@ -106,7 +106,7 @@ class TreeSampler(AysncUpdater, AbstractCurriculumBatchSampler):
         self.epsilon = data_config.sampler.tree_sampler.epsilon
 
         # initalize queue
-        first_batch, _ = ray.get(self.engine.select_batch.remote(self.bsz))
+        first_batch, _ = ray.get(self.engine.select_batch.remote(self.bsz, 0))
         # breakpoint()
         self.queue.extend(first_batch)
 

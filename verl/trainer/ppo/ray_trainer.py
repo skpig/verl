@@ -71,7 +71,7 @@ from verl.utils.metric import (
 from verl.utils.seqlen_balancing import (get_seqlen_balanced_partitions,
                                          log_seqlen_unbalance)
 from verl.utils.torch_functional import masked_mean
-from verl.utils.tracking import ValidationGenerationsLogger, async_tracking_log_samples
+from verl.utils.tracking import ValidationGenerationsLogger, async_tracking_log_samples, async_tracking_thetas
 
 WorkerType = type[Worker]
 
@@ -1706,8 +1706,12 @@ class RayPPOTrainer:
                     print(f"remaining async tracking tasks {len(self.async_tracking_running_tasks)}")
 
                     # DEBUG:
-                    task = self.async_tracking_pool.submit(async_tracking_log_samples, *(batch.select_idxs(list(range(50))), self.tokenizer, self.global_steps))
+                    max_upload = min(50, len(batch))
+                    task = self.async_tracking_pool.submit(async_tracking_log_samples, *(batch.select_idxs(list(range(max_upload))), self.tokenizer, self.global_steps))
                     self.async_tracking_running_tasks.add(task)
+                    if "sampler/thetas" in metrics:
+                        task = self.async_tracking_pool.submit(async_tracking_thetas, metrics, self.global_steps)
+                        self.async_tracking_running_tasks.add(task)
 
 
                     # update global metrics

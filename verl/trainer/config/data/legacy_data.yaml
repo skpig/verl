@@ -124,7 +124,8 @@ sampler:
 tree_data:
 
   # common settings
-  correct_only: True # only create new node from correct response
+  # correct_only: True # only create new node from correct response
+  keep_incorrect_prob: 0.0 # the probability of creating new node from incorrect response
   root_only: True # only create new node from root node
   partial_rollout_ratio: 0.7 # only create partial rollout from the first partial_rollout_ratio of the response
   min_partial_rollout_len: 1000 # if the partial rollout is too short, skip
