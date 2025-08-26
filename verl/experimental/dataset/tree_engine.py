@@ -467,6 +467,7 @@ class PGTreeEngine(TreeEngine):
         super().__init__(original_data_len, data_config)
 
         # Fixed parameters
+        self.diverse_threshold = int(data_config.sampler.tree_sampler.diverse_threshold)
         self.mu0 = float(data_config.sampler.tree_sampler.mu0)
         self.tau0 = float(data_config.sampler.tree_sampler.tau0)
         self.sigma0 = float(data_config.sampler.tree_sampler.sigma0) if data_config.sampler.tree_sampler.sigma0 is not None else None
@@ -655,11 +656,18 @@ class PGTreeEngine(TreeEngine):
         parent_set = set()
         for idx in ids:
             parent = self.get_original_ancestor_item(idx)
-            if parent not in parent_set:
-                parent_set.add(parent)
-                batch.append(int(idx))
-                if len(batch) == batch_size:
-                    break
+            # one father at a time to ensure diveristy
+            if parent in parent_set:
+                continue
+            # if the father has been selected too recently, skip it
+            # step_num - self.father_last_touch[parent] == 0 indicates the father has just been selected last time
+            if self.father_last_touch[parent] > 5 and step_num - self.father_last_touch[parent] < self.diverse_threshold:
+                continue
+            parent_set.add(parent)
+            batch.append(int(idx))
+            if len(batch) == batch_size:
+                break
+            
         else:
             raise ValueError(f"Only {len(batch)} is collected")
 

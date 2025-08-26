@@ -1707,11 +1707,8 @@ class RayPPOTrainer:
 
                     # DEBUG:
                     max_upload = min(50, len(batch))
-                    task = self.async_tracking_pool.submit(async_tracking_log_samples, *(batch.select_idxs(list(range(max_upload))), self.tokenizer, self.global_steps))
+                    task = self.async_tracking_pool.submit(async_tracking_log_samples, *(batch.select_idxs(list(range(max_upload))), self.tokenizer, metrics, self.global_steps))
                     self.async_tracking_running_tasks.add(task)
-                    if "sampler/thetas" in metrics:
-                        task = self.async_tracking_pool.submit(async_tracking_thetas, metrics, self.global_steps)
-                        self.async_tracking_running_tasks.add(task)
 
 
                     # update global metrics
