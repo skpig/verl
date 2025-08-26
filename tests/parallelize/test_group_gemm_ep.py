@@ -98,7 +98,7 @@ def compare_moe_expert_parallel(ep_size: int):
     fc2_local = fc2.chunk(tp_size, dim=0)[tp_rank]
 
     # the first time maybe slow as triton kernel may need JIT compile
-    output, handle = FusedMoeExpertFunctionEP.apply(
+    output, handle, _ = FusedMoeExpertFunctionEP.apply(
         num_experts,
         gate_weights,
         expert_index,
