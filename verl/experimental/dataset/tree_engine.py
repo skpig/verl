@@ -346,7 +346,7 @@ class TreeEngine:
             raise ValueError(f"Invalid tree config name: {name}")
         
         # ----- select batch -----
-        partial_rollout_len = (start_g[row_id] + col_id).item()
+        partial_rollout_len = (col_id).item()
         partial_rollout_ratio = partial_rollout_len / rlen_g[row_id].item()
         partial_rollout = responses_g[row_id, :partial_rollout_len].tolist()
 

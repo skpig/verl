@@ -706,7 +706,8 @@ class SGLangRollout(BaseRollout):
                 ]
                 #preprocess partial rollouts
                 partial_rollouts = [i['prompt_token_ids'][-i['partial_rollout_len']:] if i['partial_rollout_len'] > 0 else [] for i in sglang_inputs]
-                assert all(len(i) == j['partial_rollout_len'] for i, j in zip(partial_rollouts, sglang_inputs))
+                assert all(len(i) == j['partial_rollout_len'] and j['partial_rollout_len'] < self.config.response_length for i, j in zip(partial_rollouts, sglang_inputs))
+                assert all(j['partial_rollout_len'] >= 0 for j in sglang_inputs)
 
         # Ensure token IDs are lists or numpy arrays
         for input_data in sglang_inputs:
