@@ -706,6 +706,7 @@ class SGLangRollout(BaseRollout):
                 ]
                 #preprocess partial rollouts
                 partial_rollouts = [i['prompt_token_ids'][-i['partial_rollout_len']:] if i['partial_rollout_len'] > 0 else [] for i in sglang_inputs]
+                assert all(len(i) == j['partial_rollout_len'] for i, j in zip(partial_rollouts, sglang_inputs))
 
         # Ensure token IDs are lists or numpy arrays
         for input_data in sglang_inputs:
@@ -787,6 +788,9 @@ class SGLangRollout(BaseRollout):
             src=self._device_mesh_cpu["tp"].mesh[0].item(),
             force_cpu_device=False,
         )
+        assert len(output) == len(idx_list), f"output: {len(output)}, idx_list: {len(idx_list)}"
+        if partial_rollouts:
+            assert len(output) == len(partial_rollouts), f"output: {len(output)}, partial_rollouts: {len(partial_rollouts)}, idx_list: {len(idx_list)}"
         out = _post_process_outputs(self.processing_class, output, partial_rollouts=partial_rollouts)
 
         response = out[0].to(idx.device) # each response is concat of [partial_rollouts, current_rollous]
