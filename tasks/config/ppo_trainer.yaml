@@ -690,3 +690,7 @@ mariana:
 triton_cache:
   type: redis
   hdfs_remote_cache_dir: none
+
+tasks:
+    reward_manager: tasks.main_ppo.RewardManager
+    trainer: alpha_seed.trainer.ppo.RayPPOTrainer

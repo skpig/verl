@@ -103,7 +103,6 @@ python3 tasks/main_ppo.py \
     +actor_rollout_ref.rollout.num_slots=256 \
     +actor_rollout_ref.rollout.slot_block_size=1024 \
     actor_rollout_ref.ref.log_prob_micro_batch_size=${infer_micro_batch_size} \
-    actor_rollout_ref.ref.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.scale_pg_by_kl=False \
     actor_rollout_ref.actor.upgo_loss_weight=${upgo_loss_weight} \
     actor_rollout_ref.actor.upgo_loss_version=${upgo_loss_version} \
@@ -160,5 +159,11 @@ python3 tasks/main_ppo.py \
     rollout_server.agent.executor_class=RayActorExecutor \
     data.dist_image=True \
     algorithm.use_model_output_mask=True \
-    actor_rollout_ref.rollout.plugin.timeout=120
+    actor_rollout_ref.rollout.plugin.timeout=120 \
+    trainer.volc_ark_key=123 \
+    trainer.volc_model_name=123 \
+    tasks.reward_manager=tasks.vlm.reward_manager.VLMRewardManager \
+    +data.think_template=v1 \
+    +ext=vlm_ext
+
 

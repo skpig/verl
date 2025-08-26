@@ -1,10 +1,11 @@
 import psutil
 import datetime
+import importlib
 import logging
 import torch
 from mono_rl import DataProto
 from verl.utils.seqlen_balancing import rearrange_micro_batches
-from typing import Dict
+from typing import Dict, Any
 
 logger = logging.getLogger(__name__)
 
@@ -84,3 +85,12 @@ def append_dict_items_to_dict(data: Dict, new_data: Dict):
             data[key].extend(val)
         else:
             data[key].append(val)
+
+
+def import_from_string(import_str: str) -> Any:
+    if '.' in import_str:
+        module_name, obj_name = import_str.rsplit('.', 1)
+        module = importlib.import_module(module_name)
+        return getattr(module, obj_name)
+    else:
+        return importlib.import_module(import_str)

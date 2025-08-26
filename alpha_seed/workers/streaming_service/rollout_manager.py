@@ -204,6 +204,9 @@ class RolloutManager:
         if self.val_rollout_proxy is not None:
             self.val_rollout_proxy.stop()
 
+        self.val_client_executor.stop()
+        self.train_client_executor.stop()
+
     def _init_standalone_comms(self):
         # 初始化参数更新的方式，其中elastic rollout必须只能用ucx
         # 其他的既可以nccl也可以ucx

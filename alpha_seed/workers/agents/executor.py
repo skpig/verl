@@ -154,6 +154,9 @@ class AgentWorker:
     def get_event_loop(self):
         return self.loop or asyncio.get_running_loop()
 
+    def stop(self):
+        self._metrics_task.cancel()
+
 
 class ExecutorBase:
 
@@ -167,6 +170,12 @@ class ExecutorBase:
     def set_global_step(self, global_step: int):
         """
         设置当前trainer开始的step。需要讲global_step传到每个AgentWorker里
+        """
+        raise NotImplementedError()
+
+    async def stop(self):
+        """
+        executor立即结束当前task和workers
         """
         raise NotImplementedError()
 
@@ -208,6 +217,13 @@ class RayActorExecutor(ExecutorBase):
             refs.append(ref)
         ray.get(refs)
 
+    def stop(self):
+        refs = []
+        for w in self.workers:
+            ref = w.stop.remote()
+            refs.append(ref)
+        ray.get(refs)
+
 
 class LocalExecutor(ExecutorBase):
 
@@ -220,7 +236,6 @@ class LocalExecutor(ExecutorBase):
             AgentWorker(idx, config, tokenizer, processor, host, port, request_manager_name, loop)
             for idx in range(self.max_workers)
         ]
-
         self.worker_pointer = cycle(range(self.max_workers))
 
     async def submit(self, agent_cls: Type[AsyncAgent] | Type[ThreadedAgent], /, item: DataProto, *args, **kwargs):
@@ -234,3 +249,7 @@ class LocalExecutor(ExecutorBase):
     def set_global_step(self, global_step: int):
         for w in self.workers:
             w.set_global_step(global_step)
+
+    def stop(self):
+        for w in self.workers:
+            w.stop()

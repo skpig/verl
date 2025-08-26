@@ -2,7 +2,7 @@ import re
 from collections import Counter
 
 
-def find_single_turn_duplicate(response_text):
+def find_single_turn_duplicate(response_text, enable_resp_para=False):
     # 输入单条 response，返回：是否重复，是否极端重复，标记出重复片段的 response
     resp_para_list = [
         para.strip()
@@ -15,4 +15,24 @@ def find_single_turn_duplicate(response_text):
     if len(resp_para_counter) and resp_para_counter.most_common(1)[0][1] > 10:
         lcs_str = resp_para_counter.most_common(1)[0][0]
         return True, lcs_str
+
+    if enable_resp_para:
+        # 检测句子级重复
+        resp_para_list = [
+            para.strip()
+            for para in re.split(r'[.,。，！!；;？?]', response_text)
+            if para.strip() != "" and 'align' not in para and re.match(r"[\w*\d*]", para) is not None
+        ]
+
+        # TODO: Minimize the impact by only penalizing words in a blacklist.
+        # blacklist = ['wait', '不对', '...']
+        # resp_para_list = [x for x in resp_para_list if x in blacklist]
+
+        # 极端重复情况
+        resp_para_counter = Counter([para for para in resp_para_list])
+
+        # 句子重复出现超过 15 次
+        if len(resp_para_counter) and resp_para_counter.most_common(1)[0][1] > 15:
+            lcs_str = resp_para_counter.most_common(1)[0][0]
+            return True, lcs_str
     return False, response_text

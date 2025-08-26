@@ -67,6 +67,7 @@ from alpha_seed.utils.server_client import validate_client_config, KVStore, Serv
 from alpha_seed.utils.ckpt import download_minimal_required_files
 from alpha_seed.utils.chat_template import CHATML, CHATML_TOOL, CHATML_TOOL_V2, CHATML_TOOL_V3, CHATML_TOOL_V4, CHATML_TOOL_V5
 from alpha_seed.workers.streaming_service.rollout_request_manager import RequestManager, RequestManagerRegisterCenter
+from alpha_seed.utils.functional import import_from_string
 from databus import collect_array
 
 user_email = os.getenv('ARNOLD_LARK_RECEIVER', '')
@@ -790,8 +791,6 @@ from hydra.core.hydra_config import HydraConfig
 import omegaconf
 from omegaconf import DictConfig
 
-from alpha_seed.trainer.ppo import RayPPOTrainer
-
 
 def override(config: DictConfig, overrides: DictConfig, skips: DictConfig, paths=None):
     """
@@ -1167,6 +1166,11 @@ def config_to_trainer_kwargs(config):
         tokenizer.chat_template = CHATML_TOOL_V5
 
     if config.data.image_key:
+        processor_path = os.path.join(local_path, "preprocessor_config.json")
+        if not os.path.exists(processor_path):
+            raise ValueError(
+                f"image_key is set but {processor_path} does not exist. Do not set data.image_key if you train text model"
+            )
         processor = AutoProcessor.from_pretrained(local_path)
         processor.tokenizer.add_special_tokens({"additional_special_tokens": ["<ImageHere>"]})
 
@@ -1268,13 +1272,14 @@ def config_to_trainer_kwargs(config):
             grm_remote_client = GRMService.options(name='grm_remote_client', resources=grm_resources).remote(
                 config=config, tokenizer_path=config.actor_rollout_ref.model.path)
 
-        reward_fn = RewardManager(tokenizer=tokenizer,
-                                  config=config,
-                                  logger=logger,
-                                  grm_remote_client=grm_remote_client,
-                                  rm_name="train")
+        reward_manager_cls = import_from_string(config.tasks.reward_manager)
+        reward_fn = reward_manager_cls(tokenizer=tokenizer,
+                                       config=config,
+                                       logger=logger,
+                                       grm_remote_client=grm_remote_client,
+                                       rm_name="train")
         # Note that we always use function-based RM for validation
-        val_reward_fn = RewardManager(tokenizer=tokenizer, config=config, logger=logger, rm_name="val")
+        val_reward_fn = reward_manager_cls(tokenizer=tokenizer, config=config, logger=logger, rm_name="val")
 
         # we will always start a remote client
         kwargs['remote_client'] = RemoteClient.options(name='remote_client').remote(
@@ -1307,7 +1312,8 @@ def main_task(config):
     with metric_collection_context:
         validate_config(config)
         trainer_kwargs, kv_store = config_to_trainer_kwargs(config)
-        trainer = RayPPOTrainer(**trainer_kwargs)
+        trainer_cls = import_from_string(config.tasks.trainer)
+        trainer = trainer_cls(**trainer_kwargs)
 
     global_step, resume_folder = trainer.get_resume_checkpoint_info()
 

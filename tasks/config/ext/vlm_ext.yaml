@@ -1,0 +1,3 @@
+# @package _global_
+reward_model:
+  enable_resp_para: True
