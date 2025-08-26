@@ -24,7 +24,8 @@ from alpha_seed.workers.agents.executor import RayActorExecutor, ExecutorBase, L
 from alpha_seed.workers.agents.metrics_collector import init_agent_metrics_collector
 from alpha_seed.workers.streaming_service.elastic_rollout_manager import ElasticRolloutManager
 from alpha_seed.workers.streaming_service.rollout_proxy import FixedReplicatedRayWorkerGroupAdapter, \
-    RolloutWorkerGroupProxy, BalancedRolloutWorkerGroupProxy, CombinedRayWorkerGroupAdapter
+    RolloutWorkerGroupProxy, BalancedRolloutWorkerGroupProxy, CacheAwareBalancedRolloutWorkerGroupProxy, \
+    CombinedRayWorkerGroupAdapter
 from alpha_seed.workers.streaming_service.streaming_rollout import RemoteAsyncXPerfGPTRollout
 from alpha_seed.workers.xperf_rollout.utils.base_weights_communicator import WeightsRankInfo
 from mono_rl import DataProto
@@ -1178,9 +1179,11 @@ class RolloutManager:
             ProxyClass = RolloutWorkerGroupProxy
         elif lb_mode == "dynamic-balancing":
             ProxyClass = BalancedRolloutWorkerGroupProxy
+        elif lb_mode == "cache-aware-balancing":
+            ProxyClass = CacheAwareBalancedRolloutWorkerGroupProxy
         else:
             raise ValueError(f"config.streaming_rollout.proxy.lb_mode does not support {lb_mode=}, "
-                             f"please choose from ['even-distribution', 'dynamic-balancing']")
+                             f"please choose from ['even-distribution', 'dynamic-balancing', 'cache-aware-balancing']")
 
         # train
         # create replicated worker group and rollout proxy

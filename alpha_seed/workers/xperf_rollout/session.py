@@ -17,7 +17,7 @@ from xperf_gpt.inference import init_inference
 from alpha_seed.workers.xperf_rollout.component.cache_manager import CacheManager
 from alpha_seed.workers.xperf_rollout.component.infer_scheduler import InferScheduler
 from alpha_seed.workers.xperf_rollout.component.sampling_manager import Sampler
-from alpha_seed.workers.xperf_rollout.component.prefix_cache import PrefixCache
+from alpha_seed.workers.xperf_rollout.component.prefix_cache import get_prefix_cache_impl
 from alpha_seed.workers.xperf_rollout.utils.custom_xperf_convert_helper import XCustomInferenceModuleAdapter
 from xperf_gpt.multi_models.visual.inferencer import VITInferencer
 from xperf_gpt.multi_models.visual.eva_vit import EVA_VIT_CONFIGS
@@ -190,6 +190,7 @@ class InferenceSession:
             schedule_strategy="default",  # ['default','fifo']
             step_profiler: StepProfiler = None,
             enable_mtp_decoding=False,
+            prefix_cache_impl="normal",
             prefix_cache_slot_num=-1,
             prefix_cache_max_length=-1):
         """Initialize inference session with hardware/performance parameters"""
@@ -291,6 +292,7 @@ class InferenceSession:
         self._accepted_queries_mutex = Lock()
         self.tp_group = None
         self.prefix_cache = None
+        self.prefix_cache_impl = prefix_cache_impl
         self.prefix_cache_slot_num = prefix_cache_slot_num
         self.prefix_cache_max_length = prefix_cache_max_length
 
@@ -485,21 +487,21 @@ class InferenceSession:
                                           num_pred_tokens=self.num_pred_tokens,
                                           moving_avg_length=self.max_length,
                                           schedule_strategy=self.schedule_strategy)
-        if self.prefix_cache_slot_num > 0:
-            num_kv_heads = self.engine.module.config.tp_kv_heads
-            if self.engine.module.quant_mode in ["NO_QUANT", "WFP8"]:
-                kv_cache_dtype = torch.bfloat16
-            elif "C8" in self.engine.module.quant_mode or self.engine.module.quant_mode == "W8A8":
-                kv_cache_dtype = torch.int8
-            else:
-                raise RuntimeError(f"Unsupported quant mode {self.engine.module.quant_mode} for prefix cache")
-            kv_mirror_layers = 0
-            if hasattr(self.engine.module.config, "kv_mirror_layers"):
-                kv_mirror_layers = len(getattr(self.engine.module.config, "kv_mirror_layers"))
-            valid_num_layers = self.engine.module.num_layers - kv_mirror_layers
-            self.prefix_cache = PrefixCache(num_kv_heads, self.engine.module.head_dim, valid_num_layers, kv_cache_dtype,
-                                            self.prefix_cache_slot_num, self.prefix_cache_max_length,
-                                            self.enable_paged_attn, self.slot_block_size)
+        # prefix cache
+        num_kv_heads = self.engine.module.config.tp_kv_heads
+        # TODO: FP8 attention kv_cache
+        if "C8" in self.engine.module.quant_mode or self.engine.module.quant_mode == "W8A8":
+            kv_cache_dtype = torch.int8
+        else:
+            kv_cache_dtype = torch.bfloat16
+        kv_mirror_layers = 0
+        if hasattr(self.engine.module.config, "kv_mirror_layers"):
+            kv_mirror_layers = len(getattr(self.engine.module.config, "kv_mirror_layers"))
+        valid_num_layers = self.engine.module.num_layers - kv_mirror_layers
+        self.prefix_cache = get_prefix_cache_impl(num_kv_heads, self.engine.module.head_dim, valid_num_layers,
+                                                  kv_cache_dtype, self.prefix_cache_impl, self.prefix_cache_slot_num,
+                                                  self.prefix_cache_max_length, self.enable_paged_attn,
+                                                  self.slot_block_size)
         self.infer_scheduler = InferScheduler(
             cache_manager=self.cache_manager,
             engine=self.engine,
@@ -722,8 +724,7 @@ class InferenceSession:
     def get_valid_history_ids(self) -> List[str]:
         history_ids = []
         if self.prefix_cache is not None:
-            self.prefix_cache: PrefixCache
-            history_ids.extend(self.prefix_cache.req_id_to_slot_id.keys())
+            history_ids.extend(self.prefix_cache.get_cache_ids())
         return history_ids
 
     def get_all_queries(self, query_type: str, retain_finished: bool = True) -> List[Query]:
@@ -780,8 +781,9 @@ class InferenceSession:
             self.eos_callback_fn(query)
         query.set_finished()
         if self.prefix_cache is not None:
-            self.prefix_cache: PrefixCache
-            full_input_ids = torch.tensor(query.input_ids + query.new_token_ids).cuda()
+            ret_len = query.original_input_len + max(query.new_token_len - 1, 0)
+            input_id_list = (query.input_ids + query.new_token_ids)[:ret_len]
+            full_input_ids = torch.tensor(input_id_list).cuda()
             is_evict = self.prefix_cache.save_to_cache(query.id, full_input_ids,
                                                        torch.tensor(query.kv_slot_ids).cuda(), self.engine.module)
             if is_evict:
@@ -1009,15 +1011,16 @@ class InferenceSession:
                         input_embs = self._get_input_embeddings(input_ids, query, is_oe, start, end)
                     return input_embs, torch.tensor(labels_ids)
 
-                self.infer_scheduler.record("prefill_token_num", [len(query.input_ids)])
-                if self.prefix_cache is not None:
-                    self.prefix_cache: PrefixCache
-                    # note: only query prefix cache once (context_shift == 0)
-                    if query.context_shift == 0:
+                # note: only query prefix cache once (context_shift == 0)
+                if query.context_shift == 0:
+                    self.infer_scheduler.record("prefill_token_num", [len(query.input_ids)])
+                    if self.prefix_cache is not None:
                         input_ids_cuda = torch.tensor(query.input_ids).cuda()
                         prefix_hit_length = self.prefix_cache.calc_prefix_length(query.id, input_ids_cuda)
-                        self.infer_scheduler.record("prefix_cache_hit_length", [prefix_hit_length])
                         if prefix_hit_length > query.prefix_already_computed_len:
+                            if prefix_hit_length == len(query.input_ids):
+                                prefix_hit_length -= 1  # note: to prevent empty input
+                            self.infer_scheduler.record("prefix_cache_hit_length", [prefix_hit_length])
                             self.prefix_cache.load_from_cache(query.id, input_ids_cuda,
                                                               torch.tensor(query.kv_slot_ids).cuda(),
                                                               self.engine.module, prefix_hit_length)

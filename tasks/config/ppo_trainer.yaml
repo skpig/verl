@@ -164,6 +164,7 @@ actor_rollout_ref:
     mode: "batch" # [batch, server]
     weights_communicator: "nccl" # [nccl, ucx], elastic模式下只能用ucx
     weights_communicator_enable_aiomonitor: ${misc.aiomonitor.enable}
+    prefix_cache_impl: "disabled"
     prefix_cache_slot_num: -1
     prefix_cache_max_length: -1
     recommend_standalone_usage:
@@ -563,9 +564,10 @@ streaming_rollout:
     upload_to_mlx: True
   proxy:
     # 只对非elastic的server mode起作用，elastic一定是dynamic-balancing
-    lb_mode: dynamic-balancing  # ["dynamic-balancing", "even-distribution"]
+    lb_mode: dynamic-balancing  # ["dynamic-balancing", "even-distribution", "cache-aware-balancing"]
     poll_internal_seconds: 2.  # 1轮最短间隔
     rebalance_threshold: 2  # 最小溢出x个才重新分发给其他
+    min_load_ratio: 0.2  # cache-aware-balancing下强制忽略cache重分配的load比例
     gmem_abundant_threshold: 0.15  # engine低于这个kv cache%时，不会被abort任何queries
     gmem_high_water_level_threshold: 0.90  # engine超过这个kv cache%时，不会被分发新的query
     gmem_insufficient_threshold: 0.95  # 超过这个kv cache%的query会从waiting列表里abort掉

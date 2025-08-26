@@ -113,6 +113,8 @@ def record_xperf_metrics(batch_info, metrics, logger, global_step, prefix=''):
                                                                                                 len(per_token_latency))
     metrics[f'rollout/{prefix}/tps'] = total_tokens / (sum(per_token_latency) + 1e-6) * 1000
     metrics[f'rollout/{prefix}/bs_avg'] = 0 if len(tokens_num) == 0 else (total_tokens / len(tokens_num))
+    dec_bs = [bs for bs in xperf_metrics.get('dec_bs', []) if bs > 0]
+    metrics[f'rollout/{prefix}/decode_bs_avg'] = 0 if len(dec_bs) == 0 else (sum(dec_bs) / len(dec_bs))
     prefill_latency = sum(xperf_metrics.get('prefill_latency', []))
     metrics[f'rollout/{prefix}/prefill_latency'] = prefill_latency
     decode_latency = sum(xperf_metrics.get('decode_latency', []))

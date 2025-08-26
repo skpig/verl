@@ -237,6 +237,41 @@ class RequestPool:
                     break
             return ret
 
+    def peak_all_pending_requests(self) -> Dict[str, Request]:
+        # pull全部空闲的请求，只是先将assigned设置成True
+        # 后续再进行实际的分发
+        with self._mutex:
+            ret = {}
+            for request_id, request in self.requests.items():
+                # 跳过已分发
+                if request.assigned or request.assigned_engine_id is not None:
+                    continue
+                request.assigned = True
+                ret[request_id] = request
+            return ret
+
+    def set_requests_assigned(self, request_ids: List[str], engine_id: str, wg_name: str):
+        # 真实分发请求
+        for request_id in request_ids:
+            request = self.requests[request_id]
+            now = time.time()
+            request.assigned_engine_id = engine_id
+            request.assigned_engine_name = wg_name
+            request.last_assigned_at = now
+            request.updated_at = now
+            request.query.dispatch_time = now
+
+    def clear_requests_assigned(self, request_ids: List[str]):
+        with self._mutex:
+            for request_id in request_ids:
+                request = self.requests[request_id]
+                request.assigned = False
+                request.assigned_engine_id = None
+                request.assigned_engine_name = None
+                request.last_assigned_at = 0
+                request.updated_at = 0
+                request.query.dispatch_time = 0
+
     def get_pool_size(self) -> Tuple[int, int]:
         return len(self.requests), len(self.finished_requests)
 
@@ -620,6 +655,17 @@ class RequestManager:
                                              cache_ids: Set[str]) -> List[Query]:
         next_reqs = self.req_pool.get_next_pending_requests_with_cache(batch_size, engine_id, wg_name, cache_ids)
         return [r.query for r in next_reqs.values()]
+
+    # 获取全部request
+    def peak_all_pending_requests(self) -> List[Query]:
+        next_reqs = self.req_pool.peak_all_pending_requests()
+        return [r.query for r in next_reqs.values()]
+
+    def set_requests_assigned(self, query_ids: List[str], engine_id: str, wg_name: str):
+        self.req_pool.set_requests_assigned(query_ids, engine_id, wg_name)
+
+    def clear_requests_assigned(self, query_ids: List[str]):
+        self.req_pool.clear_requests_assigned(query_ids)
 
     # 释放掉给定的query_ids，返回确定释放的query_id
     def release_by_ids(self, query_ids: List[str], engine_id: str, reason: str) -> List[str]:

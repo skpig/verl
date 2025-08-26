@@ -843,7 +843,7 @@ class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
                 except (ActorDiedError, RayTaskError) as e:
                     self._finalize(wg, e)
 
-                    # handle dead engines during the loop to avoid request from staling for too long
+            # handle dead engines during the loop to avoid request from staling for too long
             ready_wg_ids1 = self.replicas.ready_worker_group_ids
             dead_wg_ids_during_loop = ready_wg_ids0 - ready_wg_ids1
             dead_wg_ids_between_loop = ready_wg_ids_prev - ready_wg_ids1
@@ -912,3 +912,177 @@ class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
         except KeyError as e:
             pass
         return super_metrics
+
+
+class CacheAwareBalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
+
+    def __init__(self, replicas: Union[ReplicatedRayWorkerGroup, ScalingRayWorkerGroup],
+                 actor_info: List[WeightsRankInfo], request_manager_name: str, config: DictConfig):
+        super().__init__(replicas, actor_info, request_manager_name, config)
+        self.abort_logger = DebounceAccumulatedLogger()
+        self.min_load_ratio = self.config.proxy.min_load_ratio
+
+    def _dispatch_loop(self):
+        print(f'start background dispatch loop with cache_aware balanced mode for {self._request_manager_name}')
+
+        sleep_interval = self.poll_interval
+        ready_wg_ids_prev = set()
+        while True:
+            if self._loop_should_stop.is_set():
+                break
+            self.is_waiting = True
+            self._loop_should_continue.wait()
+            self.is_waiting = False
+            time.sleep(sleep_interval)
+
+            # 先考虑cache命中，再按照总量平分给每个ready replica，均匀分发
+            # 注意一开始可能还没有request进去request pool
+            # 也可能replicas还没ready
+            total, pending_size = ray.get(self.request_manager.get_size.remote())
+            num_ready_replicas = len(self.replicas.ready_worker_group_ids)
+            max_concurrency = total // max(1, num_ready_replicas)  # replicas可能还没ready
+            max_concurrency = min(max(max_concurrency, 1), 512)  # 限制在1-512范围内
+
+            # 纪录负载指标
+            loads = {}  # (engine_id, wg_name) -> LoadMetric
+
+            # 只将请求dispatch给ready worker group，每次循环都是最新的ready状态
+            # 在dispatch过程中，worker group死了也没关系，这个request会之后被标记为stale
+            t0 = time.time()
+            ready_wg_items = list(self.replicas.get_ready_worker_groups().items())
+            ready_wg_ids0 = set(engine_id for engine_id, _ in ready_wg_items)
+            died_wgs = []
+
+            wg_history_map = {}
+            for engine_id, wg in ready_wg_items:
+                wg: Union[RayWorkerGroup, RemoteAsyncXPerfGPTRollout, AsyncActorRolloutRefWorker]  # type anno
+                wg_name = wg.group_name
+                try:
+                    history_ids = wg.get_history_ids()
+                    wg_history_map[engine_id] = set(history_ids) if history_ids else set()
+                    # 1. collect intermediate result
+                    # get result(including partial) from engine, update to centralized request pool
+                    queries: List[Query] = wg.get_all_queries(self._request_manager_name)
+                    if len(queries) > 0:
+                        self.request_manager.update_intermediate_queries.remote(queries, engine_id, wg_name,
+                                                                                time.time())
+
+                    load: LoadMetric = wg.get_load_metrics()[0]  # noqa, dp_size always =1
+                    loads[(engine_id, wg_name)] = load
+
+                except ray.exceptions.ActorDiedError as e:
+                    # ignore actor died error, underlying replicated worker group will handle
+                    # worker group and actors lifecycle
+                    died_wgs.append(engine_id)
+
+            # 过滤死掉的wg
+            ready_wg_items = [(engine_id, wg) for engine_id, wg in ready_wg_items if engine_id not in died_wgs]
+            if len(ready_wg_items) == 0:
+                continue
+
+            # 找出哪些query命中cache，哪些没命中(standalone)
+            all_queries = ray.get(self.request_manager.peak_all_pending_requests.remote())
+            queries_in_wg_history = {engine_id: [] for engine_id, _ in ready_wg_items}
+            standalone_queries = []
+            for query in all_queries:
+                query_in_history = False
+                for engine_id, history_ids in wg_history_map.items():
+                    if query.id in history_ids:
+                        query_in_history = True
+                        queries_in_wg_history[engine_id].append(query)
+                        break
+                if not query_in_history:
+                    standalone_queries.append(query)
+
+            # 按照load水平从低到高分query
+            # 先分没命中cache(standalone)的query，然后看load水平
+            # 如果仍然比较低，就继续分命中的，否则命中的仍然以正常的方式分
+            wg_loads = {}
+            wg_id_load_from_low_to_high = []
+            for engine_id, wg in ready_wg_items:
+                wg: Union[RayWorkerGroup, RemoteAsyncXPerfGPTRollout, AsyncActorRolloutRefWorker]  # type anno
+                wg_name = wg.group_name
+                load = loads[(engine_id, wg_name)]
+                wg_loads[engine_id] = load.num_prefilling + load.num_decoding + load.num_pending + load.num_waiting
+                wg_id_load_from_low_to_high.append(engine_id)
+            pivot = sum(wg_loads.values()) // len(wg_loads)
+            pivot = max(min(pivot, max_concurrency), 1)
+            wg_id_load_from_low_to_high.sort(key=lambda _engine_id: wg_loads[_engine_id])
+
+            queries_assigned: Dict[str, List[Query]] = {}
+
+            for engine_id in wg_id_load_from_low_to_high:
+                # 从低到高，先试图分配到pivot
+                load: int = wg_loads[engine_id]
+                # 有本来就命中cache且属于他的
+                queries_assigned[engine_id] = queries_in_wg_history[engine_id]
+                queries_in_wg_history[engine_id] = []
+                load += len(queries_assigned[engine_id])
+                short = pivot - load
+                # 用没命中cache(standalone)的query往里分配
+                if short > 0:
+                    queries_assigned[engine_id].extend(standalone_queries[:short])
+                    standalone_queries = standalone_queries[short:]
+                # 如果低于pivot的某个比例，即使命中cache的其他query也往里分配
+                threshold = max(pivot * self.min_load_ratio, 1)
+                enough = False
+                for cached_query in queries_in_wg_history.values():
+                    while len(cached_query) > 0:
+                        enough = load + len(queries_assigned[engine_id]) >= threshold
+                        if enough:
+                            break
+                        else:
+                            queries_assigned[engine_id].append(cached_query.pop())
+                    if enough:
+                        break
+
+            # 如果还有没命中cache(standalone)的query，round-robin往里分配
+            standalone_count_per_wg = (len(standalone_queries) + len(ready_wg_items) - 1) // len(ready_wg_items)
+            for engine_id, _ in ready_wg_items:
+                if len(standalone_queries) == 0:
+                    break
+                queries_assigned[engine_id].extend(standalone_queries[:standalone_count_per_wg])
+                standalone_queries = standalone_queries[standalone_count_per_wg:]
+
+            for engine_id, wg in ready_wg_items:
+                wg: Union[RayWorkerGroup, RemoteAsyncXPerfGPTRollout, AsyncActorRolloutRefWorker]  # type anno
+                wg_name = wg.group_name
+                load = loads[(engine_id, wg_name)]
+
+                queries = queries_assigned[engine_id] + queries_in_wg_history[engine_id]
+                if len(queries) > 0:
+                    try:
+                        self.request_manager.set_requests_assigned.remote([query.id for query in queries], engine_id,
+                                                                          wg_name)
+                        for q in queries:
+                            # query的分类，区分一下是hybrid_rollout/standalone_rollout/validation，避免共用engine时不知道怎么update回去对应的来源
+                            q.meta_info['query_type'] = self._request_manager_name
+                        wg.add_inflight_queries(queries)
+                        pending_size -= len(queries)
+                        fmt = (
+                            "dispatch {accumulated_value} "
+                            f"(remain={pending_size}) queries from({self._request_manager_name}) to wg({wg_name}, "
+                            f"pending={load.num_pending}, W={load.num_waiting}/P={load.num_prefilling}/D={load.num_decoding}, "
+                            f"kv={load.kv_cache_util:.2f})")
+                        self._progress_logger.log(wg_name, len(queries), fmt)
+
+                    except ray.exceptions.ActorDiedError as e:
+                        # ignore actor died error, underlying replicated worker group will handle
+                        # worker group and actors lifecycle
+                        # 分发失败的，需要把assigned flag给clear掉，不然会泄漏
+                        self.request_manager.clear_requests_assigned.remote([query.id for query in queries])
+
+            # handle dead engines during the loop to avoid request from staling for too long
+            ready_wg_ids1 = self.replicas.ready_worker_group_ids
+            dead_wg_ids_during_loop = ready_wg_ids0 - ready_wg_ids1
+            dead_wg_ids_between_loop = ready_wg_ids_prev - ready_wg_ids1
+            ready_wg_ids_prev = ready_wg_ids1  # save to previous
+            if dead_wg_ids_during_loop or dead_wg_ids_between_loop:
+                ray.get(self.request_manager.handle_stale_requests.remote(ready_wg_ids1))
+
+            total, pending_size = ray.get(self.request_manager.get_size.remote())
+            prefill_throughput, decode_throughput = ray.get(self.request_manager.get_estimated_throughput.remote())
+            self._trace_load_metrics(loads, prefill_throughput, decode_throughput, total, pending_size)
+
+            loop_cost = time.time() - t0  # noqa: for py-spy
+            sleep_interval = max(0., self.poll_interval - loop_cost)

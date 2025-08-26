@@ -178,7 +178,7 @@ class DirectAsyncClient(AsyncLLMInterface):
             input_ids = prompt
             input_prompt = ""
 
-        request_id = uuid.uuid4().hex
+        request_id = meta_info.get('uid', uuid.uuid4().hex)
         generation_kwargs = meta_info['generation_kwargs']
 
         # 构造sampling参数

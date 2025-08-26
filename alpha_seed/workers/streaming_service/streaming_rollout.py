@@ -282,6 +282,7 @@ class AsyncXPerfGPTRollout(object):
                                           vit_use_xperf_gpt=self.config.vit_use_xperf_gpt,
                                           vit_use_dp=self.config.vit_use_dp,
                                           dp_vit_batching_step=self.config.dp_vit_batching_step,
+                                          prefix_cache_impl=self.config.prefix_cache_impl,
                                           prefix_cache_slot_num=self.config.prefix_cache_slot_num,
                                           prefix_cache_max_length=self.config.prefix_cache_max_length,
                                           enable_mtp_decoding=use_mtp)
