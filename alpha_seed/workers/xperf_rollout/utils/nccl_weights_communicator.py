@@ -3,6 +3,7 @@ import threading
 
 import torch
 from unittest.mock import patch
+from functools import partial
 
 from alpha_seed.workers.xperf_rollout.utils.vit_inferencer import TorchVitInferencer
 from alpha_seed.workers.xperf_rollout.utils.base_weights_communicator import WeightsCommunicator
@@ -109,26 +110,33 @@ class NCCLWeightsCommunicator(WeightsCommunicator):
             layernorm_weight = self.inference_engine.engine.module.layernorm_weight.cuda()
             lm_head_weight = self.inference_engine.engine.module.lm_head_weight.cuda()
             wte_weight = self.inference_engine.engine.module.wte_weight.cuda()
-            comm_fn(layernorm_weight, comm_rank)
-            comm_fn(lm_head_weight, comm_rank)
-            comm_fn(wte_weight, comm_rank)
-            self.inference_engine.engine.module.layernorm_weight = layernorm_weight
-            self.inference_engine.engine.module.lm_head_weight = lm_head_weight
-            self.inference_engine.engine.module.wte_weight = wte_weight
+            self.inference_engine.engine.module.layernorm_weight = comm_fn(layernorm_weight, comm_rank)
+            self.inference_engine.engine.module.lm_head_weight = comm_fn(lm_head_weight, comm_rank)
+            self.inference_engine.engine.module.wte_weight = comm_fn(wte_weight, comm_rank)
+
+            def __comm_weights(weight, comm_rank, layer, idx, lid=None):
+                if isinstance(weight, torch.Tensor):
+                    origin_dtype = weight.dtype
+                    if origin_dtype == torch.float8_e4m3fn or origin_dtype == torch.uint8:
+                        # use int8 to communicate
+                        weight = weight.view(torch.int8)
+                        if (self.inference_engine.engine.module.quant_mode == "WFP8"):
+                            origin_dtype = torch.float8_e4m3fn
+                    weight = comm_fn(weight, comm_rank)
+                    if lid is None:
+                        torch.utils.swap_tensors(self.inference_engine.engine.module.layers_weight[layer][idx],
+                                                 weight.view(origin_dtype))
+                    else:
+                        torch.utils.swap_tensors(self.inference_engine.engine.module.layers_weight[layer][idx][lid],
+                                                 weight.view(origin_dtype))
+                elif isinstance(weight, list):
+                    for lid, w in enumerate(weight):
+                        __comm_weights(w, comm_rank, layer, idx, lid)
+
             layers_weight = self.inference_engine.engine.module.layers_weight
             for layer, layer_weight in enumerate(layers_weight):
                 for i, weight in enumerate(layer_weight):
-                    if isinstance(weight, torch.Tensor):
-                        origin_dtype = weight.dtype
-                        if origin_dtype == torch.float8_e4m3fn or origin_dtype == torch.uint8:
-                            # use int8 to communicate
-                            weight = weight.view(torch.int8)
-                            if (self.inference_engine.engine.module.quant_mode == "WFP8"):
-                                origin_dtype = torch.float8_e4m3fn
-                        weight = weight.cuda()
-                        comm_fn(weight, comm_rank)
-                        self.inference_engine.engine.module.layers_weight[layer][i].data = weight.view(
-                            origin_dtype).data
+                    __comm_weights(weight, comm_rank, layer, i)
             if hasattr(self.inference_engine, 'vit_engine'):
                 _update_xperf_vit_model(comm_fn, comm_rank)
             self.inference_engine.current_steps = 0
@@ -140,12 +148,28 @@ class NCCLWeightsCommunicator(WeightsCommunicator):
         world_size = comm_info["world_size"]
         nccl_layer = comm_info["nccl_layer"]
 
+        def comm_fn(tensor, comm_rank, mode):
+            if mode == "send":
+                ndim = torch.tensor([len(tensor.shape)], dtype=torch.long, device=tensor.device)
+                shape_tensor = torch.tensor(tensor.shape, dtype=torch.long, device=tensor.device)
+                nccl_layer.send(ndim, comm_rank)
+                nccl_layer.send(shape_tensor, comm_rank)
+                nccl_layer.send(tensor, comm_rank)
+            else:
+                ndim = torch.empty(1, dtype=torch.long, device="cuda")
+                nccl_layer.recv(ndim, comm_rank)
+                shape = torch.empty(ndim.item(), dtype=torch.long, device="cuda")
+                nccl_layer.recv(shape, comm_rank)
+                tensor = torch.empty(shape.tolist(), dtype=tensor.dtype, device="cuda")
+                nccl_layer.recv(tensor, comm_rank)
+            return tensor
+
         if self.standalone:
             from_rank = rank % hybrid_world_size
-            _update_xperf_model(nccl_layer.recv, from_rank)
+            _update_xperf_model(partial(comm_fn, mode="recv"), from_rank)
         else:
             for i in range((world_size - 1) // hybrid_world_size):
                 to_rank = rank + hybrid_world_size + i * hybrid_world_size
                 if to_rank < world_size:
-                    _update_xperf_model(nccl_layer.send, to_rank)
+                    _update_xperf_model(partial(comm_fn, mode="send"), to_rank)
         log_gpu_memory_usage(f'After {role} update')

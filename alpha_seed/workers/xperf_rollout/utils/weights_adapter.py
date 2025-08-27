@@ -498,7 +498,7 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
             if "W4A8" in self.quant_mode:
                 if hasattr(xperf_weights.layer_weight, "expert_size"):
                     xperf_weights.layer_weight.expert_size = [
-                        xperf_model.config.moe_ffn_internal_dim // self.tp_size
+                        xperf_model.config.moe_ffn_internal_dim // (self.tp_size if not self.use_ep else 1)
                         for _ in range(len(xperf_weights.layer_weight.expert_size))
                     ]
                 binding_weights = [
@@ -890,15 +890,20 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
                 share_fc1_amax, share_fc2_amax = None, None
 
             if self.device_mesh is not None:
-                fc1_amax = self._redistribute_dtensor(
-                    DTensor.from_local(fc1_amax, self.device_mesh, [Replicate(), Replicate()]),
-                    [Replicate(), Shard(0)])
-                fc2_amax = self._redistribute_dtensor(
-                    DTensor.from_local(fc2_amax, self.device_mesh, [Replicate(), Replicate()]),
-                    [Replicate(), Shard(0)])
-                if self.share_expert_num > 0:
-                    share_fc2_amax = self._redistribute_dtensor(
-                        DTensor.from_local(share_fc2_amax, self.device_mesh, [Replicate(), Replicate()]),
+                if self.moe_num_expert > 0:
+                    fc1_amax = self._redistribute_dtensor(
+                        DTensor.from_local(fc1_amax, self.device_mesh, [Replicate(), Replicate()]),
+                        [Replicate(), Shard(0)])
+                    fc2_amax = self._redistribute_dtensor(
+                        DTensor.from_local(fc2_amax, self.device_mesh, [Replicate(), Replicate()]),
+                        [Replicate(), Shard(0)])
+                    if self.share_expert_num > 0:
+                        share_fc2_amax = self._redistribute_dtensor(
+                            DTensor.from_local(share_fc2_amax, self.device_mesh, [Replicate(), Replicate()]),
+                            [Replicate(), Shard(0)])
+                else:
+                    fc2_amax = self._redistribute_dtensor(
+                        DTensor.from_local(fc2_amax, self.device_mesh, [Replicate(), Replicate()]),
                         [Replicate(), Shard(0)])
 
             return fc1_amax, fc2_amax, share_fc1_amax, share_fc2_amax

@@ -428,6 +428,7 @@ class InferenceSession:
             use_orca=True,
             use_mtp=self.enable_mtp_decoding,
             multi_stream=1,
+            mock_weights=True,
             # Token IDs (placeholders, not actually used)
             eos_token_id=0,  # won't use
             pad_token_id=0,  # won't use
