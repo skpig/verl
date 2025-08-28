@@ -73,6 +73,10 @@ def get_common_config():
                 "rollout_pool": {
                     "warmup_step": 0,
                 },
+                "train_generate_kwargs": {
+                    "do_sample": False,
+                    "top_k": 1,
+                },
                 "gpu_memory_utilization": 0.4
             },
         },
@@ -120,6 +124,7 @@ def _check_score(out_text, batch):
     for text, item in zip(out_text, batch.chunk(len(batch))):
         reward_model = item.non_tensor_batch['reward_model'][0]
         total_score += reward_fn(solution_str=text, ground_truth=reward_model['ground_truth'])
+    print(f"total_score: {total_score}, full score: {len(out_text)}")
     assert total_score >= len(out_text) - 1, \
         f"allow only 1 wrong answer, full score: {len(out_text)}, got: {total_score}"
 
@@ -326,3 +331,8 @@ def test_queued_generate(set_common_envs, gpu_allocator, ray_fixture):
 
 # Note(lixiang):
 #  注意这个文件增加新的testcase时，请手动将对应的case function加入到gen_ci_?.yaml中
+
+# if __name__ == "__main__":
+#     import ray
+#     ray.init()
+#     test_train_generate(set_common_envs, [4], ray_fixture, 0.5, True, "nccl", False)
