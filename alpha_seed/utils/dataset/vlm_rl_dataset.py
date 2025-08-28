@@ -30,8 +30,8 @@ import verl.utils.torch_functional as verl_F
 from PIL import Image
 
 from alpha_seed.utils.dataset.rl_dataset import RLHFDataset
-from alpha_seed.utils.dataset.dist_data_util import DistImageLoader, get_image_manager, get_local_inputs, \
-    save_dataproto_image_data_dist, init_or_get_image_manager
+from mono_rl.utils.dataset.dist_data_util import DistImageLoader, get_dist_data_manager, get_local_inputs, \
+    save_dataproto_image_data_dist, init_or_get_dist_data_manager
 
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.image_utils import ImageInput
@@ -251,7 +251,7 @@ class RLHFDatasetVL(RLHFDataset):
         self.dist_image = kwargs.pop('dist_image', True)
         self.stable_pool_names = kwargs.pop('stable_pool_names', [])
         stable_pool_name = self.stable_pool_names[0] if self.stable_pool_names else ''
-        self.image_manager = init_or_get_image_manager(stable_pool_name)
+        self.dist_data_manager = init_or_get_dist_data_manager(stable_pool_name)
         super().__init__(*args, **kwargs)
 
     def _read_files_and_tokenize_dist(self):
@@ -281,7 +281,7 @@ class RLHFDatasetVL(RLHFDataset):
                     soft=False,
                 )).remote(self.original_parquet_files, self.image_key, self.tokenizer_file, len(nodes), i)
             self.image_loaders.append(image_loader)
-        ray.get(self.image_manager.set_image_loaders.remote(self.image_loaders))
+        ray.get(self.dist_data_manager.set_image_loaders.remote(self.image_loaders))
         offsets = []
         refs = []
         for img_loader in self.image_loaders:
@@ -434,8 +434,8 @@ class RLHFDatasetVL(RLHFDataset):
             state = self.__dict__.copy()
             if 'dataframe' in state:
                 del state['dataframe']
-            if 'image_manager' in state:
-                del state['image_manager']
+            if 'dist_data_manager' in state:
+                del state['dist_data_manager']
             if 'image_loaders' in state:
                 del state['image_loaders']
             return state
@@ -446,7 +446,7 @@ class RLHFDatasetVL(RLHFDataset):
         # resume dataframe if not it's serialized in data.pt
         if self.new_dataset_flag:
             stable_pool_name = self.stable_pool_names[0] if self.stable_pool_names else ''
-            self.image_manager = init_or_get_image_manager(stable_pool_name)
+            self.dist_data_manager = init_or_get_dist_data_manager(stable_pool_name)
             self._download(origin=True)
             self._read_files_and_tokenize()
         else:
@@ -519,11 +519,11 @@ def transform_image(prompt, images_bytes, tokenizer, processor, truncation, max_
 def load_and_transform_save_image(prompts,
                                   tokenizer,
                                   processor,
-                                  image_manager,
+                                  dist_data_manager,
                                   max_prompt_length=None,
                                   truncation="left"):
     if 'input_ids' not in prompts.batch:
-        image_bytes = get_local_inputs(prompts.non_tensor_batch, 'images_bytes_ref', image_manager)
+        image_bytes = get_local_inputs(prompts.non_tensor_batch, 'images_bytes_ref', dist_data_manager)
         processed_list = []
         from alpha_seed.utils.dataset.vlm_rl_dataset import collate_fn
         for i in range(len(image_bytes)):
@@ -540,5 +540,5 @@ def load_and_transform_save_image(prompts,
         prompts.batch['attention_mask'] = processed_dict.pop('attention_mask')
         prompts.non_tensor_batch['image_data'] = processed_dict['image_data']
         prompts.non_tensor_batch['num_image_tokens'] = processed_dict['num_image_tokens']
-        save_dataproto_image_data_dist(prompts, image_manager)
+        save_dataproto_image_data_dist(prompts, dist_data_manager)
     return prompts

@@ -58,7 +58,6 @@ from alpha_seed.utils import ndtimeline
 from alpha_seed.utils.functional import print_dataproto_size, log_cpu_memory_usage
 from alpha_seed.utils.tracking_utils import async_process_batch_samples_to_wandb
 from alpha_seed.utils.multithreads import ThreadPoolManager
-from alpha_seed.utils.dataset.dist_data_util import load_image_data_dist, get_image_manager, init_or_get_image_manager
 from alpha_seed.workers.actors.checkpoint.utils import find_latest_ckpt_path_
 from alpha_seed.trainer.utils.dataloader_mgr import DataLoaderMgr
 from alpha_seed.workers.actors.sample_pool import SamplePool
@@ -68,6 +67,7 @@ from mono_rl.single_controller import Worker
 from mono_rl.single_controller.ray import RayResourcePool, RayWorkerGroup, RayClassWithInitArgs
 from mono_rl.single_controller.ray import create_colocated_worker_cls
 from mono_rl import DataProto
+from mono_rl.utils.dataset.dist_data_util import load_image_data_dist, init_or_get_dist_data_manager
 from verl.utils.fs import copy_local_path_from_hdfs
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from hdfs_io import makedirs, hput, hcopy, hexists
@@ -80,7 +80,7 @@ except ImportError:
     print('Cannot find pad_dataproto_to_divisor. Please use latest verl master')
     raise
 from alpha_seed import core_algos
-from alpha_seed.utils.dataset.dist_data_util import load_and_resume_image_data, load_and_save_image_data
+from mono_rl.utils.dataset.dist_data_util import load_and_resume_image_data, load_and_save_image_data
 import pickle as pkl
 
 try:
@@ -732,10 +732,10 @@ def _deduplicate_shared_tensors(obj, visited_tensors=None):
         return obj
 
 
-def save_dataproto(data: DataProto, path, prefix='', image_manager=None):
+def save_dataproto(data: DataProto, path, prefix='', dist_data_manager=None):
     # Deduplicate shared tensors before saving to avoid RuntimeError
     torch.save(_deduplicate_shared_tensors(data.batch), f"{prefix}.batch.pt")
-    load_and_save_image_data(data, image_manager, path, prefix)
+    load_and_save_image_data(data, dist_data_manager, path, prefix)
     torch.save(data.non_tensor_batch, f"{prefix}.non_tensor_batch.pt")
     torch.save(data.meta_info, f"{prefix}.meta_info.pt")
     hcopy(f"{prefix}.batch.pt", path)
@@ -743,7 +743,7 @@ def save_dataproto(data: DataProto, path, prefix='', image_manager=None):
     hcopy(f"{prefix}.meta_info.pt", path)
 
 
-def load_dataproto(path, prefix='', image_manager=None):
+def load_dataproto(path, prefix='', dist_data_manager=None):
     batch = f"{path}/{prefix}.batch.pt"
     non_tensor_batch = f"{path}/{prefix}.non_tensor_batch.pt"
     meta_info = f"{path}/{prefix}.meta_info.pt"
@@ -755,7 +755,7 @@ def load_dataproto(path, prefix='', image_manager=None):
     load_image_data_dist(non_tensor_batch)
     meta_info = copy_local_path_from_hdfs(meta_info)
     meta_info = torch.load(meta_info)
-    load_and_resume_image_data(image_manager, non_tensor_batch, path, prefix)
+    load_and_resume_image_data(dist_data_manager, non_tensor_batch, path, prefix)
     return DataProto(batch=batch, non_tensor_batch=non_tensor_batch, meta_info=meta_info)
 
 
@@ -849,7 +849,7 @@ class RayPPOTrainer(object):
         self.enable_actor_critic_spatial_mux = self.config.trainer.get("enable_actor_critic_spatial_mux", False)
         stable_pool_names = self.config.elastic.resource_pools.stable_pool_names
         stable_pool_name = stable_pool_names[0] if stable_pool_names else ''
-        self.image_manager = init_or_get_image_manager(stable_pool_name)
+        self.dist_data_manager = init_or_get_dist_data_manager(stable_pool_name)
 
         safely_do(lambda: report_job_config(config), rank=0)()
 
@@ -892,7 +892,7 @@ class RayPPOTrainer(object):
     def _create_validation_manager(self):
         self.validation_manager = ValidateManager(self.config, self.logger, self.val_dataloader, self.tokenizer,
                                                   self.use_rm, self.val_reward_fn, self.rollout_manager,
-                                                  self.image_manager)
+                                                  self.dist_data_manager)
 
     def init_workers(self, kv_store=None, ckpt_global_uploader=None, from_step=0, resume_folder=None):
         """Init resource pool and worker group"""
@@ -1442,7 +1442,7 @@ class RayPPOTrainer(object):
             with open(acc_per_query_local_path, 'rb') as fin:
                 self.acc_per_query = pkl.load(fin)
                 print("acc_per_query RESUMED!!!!!!")
-        load_dataproto_fn = partial(load_dataproto, image_manager=self.image_manager)
+        load_dataproto_fn = partial(load_dataproto, dist_data_manager=self.dist_data_manager)
         self.rollout_manager.resume(remote_global_step_folder, load_dataproto_fn=load_dataproto_fn)
 
     def _balance_batch(self, batch, metrics, logging_prefix='global_seqlen'):
@@ -1783,7 +1783,7 @@ class RayPPOTrainer(object):
                             save_path = f"{self.config.trainer.default_hdfs_dir}/checkpoints/global_step_{self.global_step - 1}/"
                             save_dataproto_fn = partial(save_dataproto,
                                                         path=save_path,
-                                                        image_manager=self.image_manager)
+                                                        dist_data_manager=self.dist_data_manager)
                             batch = self.rollout_manager.train_generate(batch,
                                                                         step=self.global_step,
                                                                         save_dataproto_fn=save_dataproto_fn,
@@ -2238,7 +2238,7 @@ class RayPPOTrainer(object):
 
             # TODO: make a canonical logger that supports various backend
             self.logger.log(data=metrics, step=self.global_step)
-            release_object(self.image_manager)
+            release_object(self.dist_data_manager)
             start_data_time = time.time()
 
             self.global_step += 1

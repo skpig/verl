@@ -8,7 +8,7 @@ import copy
 import torch
 
 from mono_rl import DataProto
-from alpha_seed.utils.dataset.dist_data_util import release_ref_counts, add_ref_counts, init_or_get_image_manager
+from mono_rl.utils.dataset.dist_data_util import release_ref_counts, add_ref_counts, init_or_get_dist_data_manager
 from alpha_seed.utils.reward_score import NON_AGENT_PLACE_HOLDER_SCORE
 
 logger = logging.getLogger(__file__)
@@ -103,7 +103,7 @@ class RolloutPool:
         self.pool_with_grad = queue.Queue()
         stable_pool_names = self.config.elastic.resource_pools.stable_pool_names
         stable_pool_name = stable_pool_names[0] if stable_pool_names else ''
-        self.image_manager = init_or_get_image_manager(stable_pool_name)
+        self.dist_data_manager = init_or_get_dist_data_manager(stable_pool_name)
         # self.pool_with_grad_ready_batch = queue.Queue()
 
     def get_ready_pool_size(self):
@@ -241,7 +241,7 @@ class RolloutPool:
                     self.rollout_id2uid[rollout_id].add(uid)
                     if len(self.rollout_id2uid[rollout_id]) >= num_fillin_th:
                         self.bon_ready_batch.put(rollout_id)
-            add_ref_counts(self.image_manager, batch_lst)
+            add_ref_counts(self.dist_data_manager, batch_lst)
 
         print("[fill_rollout_pool] fill_batch:", len(batch_lst), "bon_ready_batch:",
               self.bon_ready_batch.qsize() * self.num_bon, "pool_size:", self.pool_size)
@@ -347,7 +347,7 @@ class RolloutPool:
             empty_ready_batch = {}
             self.history_pool[index] = empty_ready_batch
             delete_batch = self.pool.delete(index)
-            release_ref_counts(self.image_manager, delete_batch)
+            release_ref_counts(self.dist_data_manager, delete_batch)
             self.pool_size -= self.num_bon
         complete_bon_bsz = len(return_batch)
 

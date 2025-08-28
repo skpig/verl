@@ -63,7 +63,7 @@ from alpha_seed.workers.xperf_rollout.utils.logits_manipulate import logits_mani
 from alpha_seed.utils.observility import get_profiler_context_wrapped, profile_step
 from mono_rl.models.seed_models.modeling_vlm import add_pixel_values_to_inflight_query
 from alpha_seed.workers.xperf_rollout.profiler.visualizer import visualize_metrics
-from alpha_seed.utils.dataset.dist_data_util import get_image_manager, get_local_inputs
+from mono_rl.utils.dataset.dist_data_util import get_dist_data_manager, get_local_inputs
 from functools import partial
 import omegaconf
 import dill
@@ -385,7 +385,7 @@ class AsyncXPerfGPTRollout(object):
         # offload to meta device
         if not self.is_standalone:
             offload_to_device(self.inference_engine.engine.module, "meta")
-        self.image_manager = get_image_manager()
+        self.dist_data_manager = get_dist_data_manager()
         torch.cuda.empty_cache()
 
     def add_inflight_query(self, query: Query) -> str:
@@ -569,7 +569,7 @@ class AsyncXPerfGPTRollout(object):
 
         batch_size = len(prompts)
         if 'image_data_ref' in prompts.non_tensor_batch:
-            image_data = get_local_inputs(prompts.non_tensor_batch, 'image_data_ref', self.image_manager)
+            image_data = get_local_inputs(prompts.non_tensor_batch, 'image_data_ref', self.dist_data_manager)
         for key, value in prompts.non_tensor_batch.items():
             for i in range(batch_size):
                 prompt_meta_info[i][key] = value[i]
@@ -774,7 +774,7 @@ class RemoteAsyncXPerfGPTRollout(Worker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
     def add_inflight_queries(self, queries: List[Query]):
         ret = []
-        queries = add_pixel_values_to_inflight_query(queries, self.rollout_actor.image_manager)
+        queries = add_pixel_values_to_inflight_query(queries, self.rollout_actor.dist_data_manager)
         for q in queries:
             qid = self.rollout_actor.add_inflight_query(q)
             ret.append(qid)

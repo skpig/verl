@@ -6,7 +6,7 @@ import pytest
 from omegaconf import OmegaConf
 from tests.test_utils import ray_fixture, gpu_allocator, get_config, get_tokenizer, create_rollout_manager
 from alpha_seed.utils.dataset.vlm_rl_dataset import load_and_transform_save_image
-from alpha_seed.utils.dataset.dist_data_util import get_image_manager, init_or_get_image_manager
+from mono_rl.utils.dataset.dist_data_util import get_dist_data_manager, init_or_get_dist_data_manager
 from transformers import AutoProcessor
 from verl.utils.fs import copy_local_path_from_hdfs
 from mono_rl import DataProto
@@ -90,13 +90,13 @@ def test_vlm_gen(monkeypatch, gpu_allocator, ray_fixture):
     config = get_config(override_config)
     tokenizer = get_tokenizer(config)
     tokenizer.padding_side = 'left'
-    image_manager = init_or_get_image_manager('')
+    dist_data_manager = init_or_get_dist_data_manager('')
     model_path = copy_local_path_from_hdfs(config.actor_rollout_ref.model.path)
     processor = AutoProcessor.from_pretrained(model_path)
     batch = get_batch(config, tokenizer, processor, model_path)
 
     rollout_manager = create_rollout_manager(config)
-    batch = load_and_transform_save_image(batch, tokenizer, processor, image_manager, max_prompt_length=8192)
+    batch = load_and_transform_save_image(batch, tokenizer, processor, dist_data_manager, max_prompt_length=8192)
     batch = rollout_manager.val_generate(batch)
     prompt0_len = batch.batch['attention_mask'][0].sum()
     input_ids = batch.batch['input_ids'][batch.batch['input_ids'] != tokenizer.pad_token_id]

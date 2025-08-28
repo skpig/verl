@@ -23,14 +23,14 @@ import torch
 from uuid import uuid4
 import numpy as np
 from alpha_seed.workers.agents.envs.visual_cot import create_from_env_str
-from alpha_seed.utils.dataset.dist_data_util import get_image_manager
+from mono_rl.utils.dataset.dist_data_util import get_dist_data_manager
 import ray
 
 logger = logging.getLogger(__name__)
 
 
-def get_local_data(ref_list, image_manager):
-    images_ref = ray.get(image_manager.get_refs.remote(ref_list))
+def get_local_data(ref_list, dist_data_manager):
+    images_ref = ray.get(dist_data_manager.get_refs.remote(ref_list))
     images_bytes = ray.get(images_ref)[0].tolist()
     return images_bytes
 
@@ -47,7 +47,7 @@ class VisualCotAgent(AsyncAgent):
         self.processor = processor
         self.tools = {"visual_cot": self.visual_cot}
         self.tool_parser = VisualCotParser(tokenizer)
-        self.image_manager = get_image_manager()
+        self.dist_data_manager = get_dist_data_manager()
 
     async def __call__(self, item: DataProto, context: TaskContext, **kwargs):
         """Main agent loop with tool calling capability"""
@@ -73,7 +73,7 @@ class VisualCotAgent(AsyncAgent):
         raw_output_ids = []
         last_data = None
 
-        images_bytes = get_local_data([messages[0]['images_bytes_ref']], self.image_manager)
+        images_bytes = get_local_data([messages[0]['images_bytes_ref']], self.dist_data_manager)
         messages[0]['images_bytes'] = images_bytes
         last_completion = None
         first_round_prompt_length = 0
@@ -225,7 +225,7 @@ class VisualCotAgent(AsyncAgent):
             raw_output_ref = None
             if raw_outputs is not None and len(raw_outputs) > 0:
                 raw_output_ref = ray.put(raw_outputs)
-                ray.get(self.image_manager.add_refs.remote([raw_output_ref]))
+                ray.get(self.dist_data_manager.add_refs.remote([raw_output_ref]))
                 raw_output_ref = raw_output_ref.hex()
 
             completion['choices'][0]['message'].update({'raw_output_ref': raw_output_ref})
@@ -307,7 +307,7 @@ class VisualCotAgent(AsyncAgent):
                 }
                 img_token_num = image_data['pixel_values'].shape[0]
                 image_data_ref = ray.put(image_data)
-                ray.get(self.image_manager.add_refs.remote([image_data_ref]))
+                ray.get(self.dist_data_manager.add_refs.remote([image_data_ref]))
                 image_data_ref = image_data_ref.hex()
                 raw_output = msg['content']['raw_output']
                 assert isinstance(raw_output, dict)

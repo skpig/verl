@@ -19,7 +19,7 @@ try:
 except ImportError:
     print('Cannot find pad_dataproto_to_divisor. Please use latest verl master')
     raise
-from alpha_seed.utils.dataset.dist_data_util import release_object, get_image_manager, get_local_inputs
+from mono_rl.utils.dataset.dist_data_util import release_object, get_dist_data_manager, get_local_inputs
 
 
 class ValidateManager(object):
@@ -29,7 +29,7 @@ class ValidateManager(object):
     """
 
     def __init__(self, config, logger, val_dataloader, tokenizer, use_rm, val_reward_fn, rollout_manager,
-                 image_manager) -> None:
+                 dist_data_manager) -> None:
         self.config = config
         self.is_vlm = self.config.data['image_key'] is not None
         self.logger = logger
@@ -45,7 +45,7 @@ class ValidateManager(object):
             print('Using fast result on wandb mode.')
         assert len(self.val_dataloader) == 1, "for bon metrics computation"
         self.rollout_manager = rollout_manager
-        self.image_manager = image_manager
+        self.dist_data_manager = dist_data_manager
 
     def _save_val_data(self, reward_tensor_before_select, prompts, responses, f):
         for reward, prompt, response in zip(reward_tensor_before_select, prompts, responses):
@@ -63,7 +63,7 @@ class ValidateManager(object):
         else:
             ori_prompt_indexs = [None] * prompt_ids.shape[0]
         if self.config.actor_rollout_ref.rollout.vlm.return_raw_output:
-            raw_outputs = get_local_inputs(test_batch.non_tensor_batch, 'raw_output_ref', self.image_manager)
+            raw_outputs = get_local_inputs(test_batch.non_tensor_batch, 'raw_output_ref', self.dist_data_manager)
         else:
             raw_outputs = [''] * prompt_ids.shape[0]
         if "index" in test_batch.non_tensor_batch:
@@ -251,7 +251,8 @@ class ValidateManager(object):
                                                 val_epoch_idx, val_idx, f)
                     else:
                         self._save_val_data(reward_tensor_before_select, prompts, responses, f)
-                release_object(self.image_manager, test_batch.non_tensor_batch, ['image_data_ref', 'images_bytes_ref'])
+                release_object(self.dist_data_manager, test_batch.non_tensor_batch,
+                               ['image_data_ref', 'images_bytes_ref'])
 
         reward_tensor = torch.cat(reward_tensor_lst, dim=0).cpu()  # (valsize*num_prompt_per_data, eval_bon)
         reward_tensor = torch.clamp(reward_tensor, min=0)
