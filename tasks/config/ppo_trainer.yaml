@@ -53,6 +53,8 @@ actor_rollout_ref:
     ulysses_sequence_parallel_size: 1
     fsdp_size: -1
     tp_size: 1
+    gen_tp_size: 1
+    spatial_interleave: false
     tp_outside: false
     oe_size: 1
     ppo_micro_batch_size: 64
@@ -126,6 +128,8 @@ actor_rollout_ref:
     ulysses_sequence_parallel_size: 1
     fsdp_size: -1
     tp_size: 1
+    gen_tp_size: 1
+    spatial_interleave: false
     tp_outside: false
     oe_size: 1
     balance_tokens: False
@@ -301,6 +305,8 @@ critic:
   ulysses_sequence_parallel_size: 1
   fsdp_size: -1
   tp_size: 1
+  gen_tp_size: 1
+  spatial_interleave: false
   tp_outside: false
   oe_size: 1
   balance_tokens: False
@@ -373,6 +379,8 @@ reward_model:
   ulysses_sequence_parallel_size: 1
   fsdp_size: -1
   tp_size: 1
+  gen_tp_size: 1
+  spatial_interleave: false
   tp_outside: false
   oe_size: 1
   micro_batch_size: 64

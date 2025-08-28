@@ -39,7 +39,8 @@ def get_xperf_gpt_weight_bind_fn(model_config: PretrainedConfig,
                                  backend='fsdp',
                                  is_custom_xperf: bool = False,
                                  is_xperf_triton: bool = False,
-                                 enable_actor_critic_spatial_mux: bool = False):
+                                 enable_actor_critic_spatial_mux: bool = False,
+                                 bind_device_mesh=None):
     if is_custom_xperf:
         from alpha_seed.workers.xperf_rollout.utils.custom_xperf_convert_helper import _reshard_state_dict_to_xperf_custom
         return partial(_reshard_state_dict_to_xperf_custom, model_config=model_config, backend=backend)
@@ -52,14 +53,14 @@ def get_xperf_gpt_weight_bind_fn(model_config: PretrainedConfig,
             return partial(_reshard_fsdp_state_dict_to_xperf_triton_seed_vl, model_config=model_config, backend=backend)
         else:
             raise NotImplementedError(f"xperf_triton does not support model_type: {model_config.model_type}")
-    if backend == 'fsdp':
+    if backend in ('fsdp', 'vescale-fsdp2'):
         if model_config.model_type == 'deepseek_v3':
             if quant_mode == "WFP8":
                 return partial(_reshard_fsdp_state_dict_to_xperf_deepseek_v3_fp8, model_config=model_config)
             else:
                 return partial(_reshard_fsdp_state_dict_to_xperf_deepseek_v3, model_config=model_config)
 
-        return WeightsAdapter(model_config, quant_mode, enable_actor_critic_spatial_mux)
+        return WeightsAdapter(model_config, quant_mode, enable_actor_critic_spatial_mux, backend, bind_device_mesh)
 
     elif backend == 'megatron':
         if quant_mode == "WFP8":

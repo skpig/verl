@@ -28,14 +28,24 @@ class WeightsAdapter:
     def __init__(self,
                  model_config: PretrainedConfig,
                  quant_mode: str,
-                 enable_actor_critic_spatial_mux: bool = False) -> None:
+                 enable_actor_critic_spatial_mux: bool = False,
+                 backend: str = 'fsdp',
+                 bind_device_mesh: Optional[Dict[str, torch.distributed.ProcessGroup]] = None) -> None:
         self.adapter: AdapterProtocol = None
         self.vit_adapter: AdapterProtocol = None
 
         if model_config.model_type in FSDPLLMWeightsAdapter._support_model_type:
-            self.adapter = FSDPLLMWeightsAdapter(model_config, quant_mode, enable_actor_critic_spatial_mux)
+            self.adapter = FSDPLLMWeightsAdapter(model_config,
+                                                 quant_mode,
+                                                 enable_actor_critic_spatial_mux,
+                                                 backend=backend,
+                                                 bind_device_mesh=bind_device_mesh)
         elif model_config.model_type in FSDPVLMWeightsAdapter._support_model_type:
-            self.adapter = FSDPLLMWeightsAdapter(model_config.text_config, quant_mode, enable_actor_critic_spatial_mux)
+            self.adapter = FSDPLLMWeightsAdapter(model_config.text_config,
+                                                 quant_mode,
+                                                 enable_actor_critic_spatial_mux,
+                                                 backend=backend,
+                                                 bind_device_mesh=bind_device_mesh)
             self.vit_adapter = FSDPVLMWeightsAdapter(model_config.vision_config, quant_mode,
                                                      enable_actor_critic_spatial_mux)
         assert self.adapter is not None, f"Unsupported model type {model_config.model_type}"
@@ -111,6 +121,39 @@ class WeightsAdapter:
 
         return tensor
 
+    def _get_partial_tensor(self, tensor: DTensor, dim: int, dtype=None) -> torch.Tensor:
+        # used for train tp < gen tp
+        if dtype is not None:
+            tensor = self._cast_to(tensor, dtype)
+        if isinstance(tensor, DTensor) or isinstance(tensor, torch.Tensor):
+            tensor = tensor.cuda()
+        if isinstance(tensor, DTensor) or isinstance(tensor, torch.Tensor):
+            bind_size = self.bind_device_mesh['bind'].size()
+            if 'tp' in self.bind_device_mesh.mesh_dim_names:
+                # gen tp > train tp
+                train_tp_size = self.tp_size // bind_size
+                rank = self.bind_device_mesh.get_rank() % self.tp_size // train_tp_size
+                if dim == 0:
+                    per_rank_dim = tensor.shape[0] // bind_size
+                    tensor_out = tensor[rank * per_rank_dim:(rank + 1) * per_rank_dim]
+                elif dim == 1:
+                    per_rank_dim = tensor.shape[1] // bind_size
+                    tensor_out = tensor[:, rank * per_rank_dim:(rank + 1) * per_rank_dim]
+                else:
+                    assert False, f'{dim=} not support in _get_partial_tensor'
+            elif 'gen_tp' in self.bind_device_mesh.mesh_dim_names:
+                # gen tp < train tp
+                assert dim < 2, f'{dim=} not support in _get_partial_tensor'
+                if dim == 1:
+                    tensor = tensor.transpose(0, 1).contiguous()
+                shape_out = (x if i != 0 else x * bind_size for i, x in enumerate(tensor.shape))
+                tensor_out = torch.zeros(*shape_out, dtype=tensor.dtype, device=tensor.device)
+                bind_group = self.bind_device_mesh.get_group(mesh_dim="bind")
+                dist.all_gather_into_tensor(tensor_out, tensor, group=bind_group)
+                if dim == 1:
+                    tensor_out = tensor_out.transpose(0, 1).contiguous()
+        return tensor_out
+
     def _redistribute_dtensor(self,
                               tensor: DTensor,
                               placements: List[Union[Shard, Replicate]],
@@ -158,14 +201,21 @@ class WeightsAdapter:
 class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
     _support_model_type = ["seed_p6", "seed_p6dense", "seed_p7", "seed_m8", "seed_m10", "seed_m11"]
 
-    def __init__(self, model_config: PretrainedConfig, quant_mode: str, enable_actor_critic_spatial_mux: bool) -> None:
+    def __init__(self,
+                 model_config: PretrainedConfig,
+                 quant_mode: str,
+                 enable_actor_critic_spatial_mux: bool,
+                 backend='fsdp',
+                 bind_device_mesh=None) -> None:
 
         self.model_config = model_config
         self.quant_mode = quant_mode
         self.enable_actor_critic_spatial_mux = enable_actor_critic_spatial_mux
+        self.bind_device_mesh = bind_device_mesh
         self.source_weights: Dict[str, Union[torch.Tensor, DTensor]] = {}
         self.need_amax = "A8" in self.quant_mode
         self.amax_ready = False
+        self.backend = backend
 
     def get_model_info(self, xperf_model: torch.nn.Module) -> None:
 
@@ -661,8 +711,92 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
 
         return ln_1_weight, ln_2_weight, query_norm_weight, key_norm_weight, context_norm_weight, attn_output_norm_weight, ffn_output_norm_weight
 
-    def _process_attention_weights(self, layer_idx: int) -> Tuple[torch.Tensor, ...]:
+    def _process_attention_weights_interleave(self, layer_idx: int) -> Tuple[torch.Tensor, ...]:
+        q_proj = self._cast_to(self.source_weights[layer_idx]['q_proj'], torch.bfloat16)
+        k_proj = self._cast_to(self.source_weights[layer_idx]['k_proj'], torch.bfloat16)
+        v_proj = self._cast_to(self.source_weights[layer_idx]['v_proj'], torch.bfloat16)
+        o_proj = self._cast_to(self.source_weights[layer_idx]['o_proj'], torch.bfloat16)
+        q_proj = DTensor.from_local(local_tensor=q_proj._local_tensor,
+                                    device_mesh=q_proj.device_mesh,
+                                    placements=[q_proj.placements[0]]).full_tensor()
+        k_proj = DTensor.from_local(local_tensor=k_proj._local_tensor,
+                                    device_mesh=k_proj.device_mesh,
+                                    placements=[k_proj.placements[0]]).full_tensor()
+        v_proj = DTensor.from_local(local_tensor=v_proj._local_tensor,
+                                    device_mesh=v_proj.device_mesh,
+                                    placements=[v_proj.placements[0]]).full_tensor()
+        o_proj = DTensor.from_local(local_tensor=o_proj._local_tensor,
+                                    device_mesh=o_proj.device_mesh,
+                                    placements=[o_proj.placements[0]]).full_tensor()
+        kv_replicate = 1
+        bind_size = self.bind_device_mesh['bind'].size()
+        if 'tp' in self.bind_device_mesh.mesh_dim_names:
+            # gen tp > train tp
+            gen_num_kv_heads = max(1, k_proj.shape[0] // self.head_dim // bind_size)
+            kv_replicate = gen_num_kv_heads * bind_size * self.head_dim // k_proj.shape[0]
+            if kv_replicate > 1:
+                k_proj = k_proj.view(-1, self.head_dim, self.hidden_size)
+                v_proj = v_proj.view(-1, self.head_dim, self.hidden_size)
+                k_proj = torch.tile(k_proj.unsqueeze(1), (1, kv_replicate, 1, 1)).reshape(-1, self.hidden_size)
+                v_proj = torch.tile(v_proj.unsqueeze(1), (1, kv_replicate, 1, 1)).reshape(-1, self.hidden_size)
 
+        q_proj = self._get_partial_tensor(q_proj, 0)
+        k_proj = self._get_partial_tensor(k_proj, 0)
+        v_proj = self._get_partial_tensor(v_proj, 0)
+        o_proj = self._get_partial_tensor(o_proj, 1)
+
+        if 'gen_tp' in self.bind_device_mesh.mesh_dim_names:
+            # gen tp < train tp
+            q_proj = q_proj.reshape(bind_size, -1, self.head_dim,
+                                    self.hidden_size).permute(1, 0, 2, 3).reshape(-1, self.hidden_size)
+            k_proj = k_proj.reshape(bind_size, -1, self.head_dim,
+                                    self.hidden_size).permute(1, 0, 2, 3).reshape(-1, self.hidden_size)
+            v_proj = v_proj.reshape(bind_size, -1, self.head_dim,
+                                    self.hidden_size).permute(1, 0, 2, 3).reshape(-1, self.hidden_size)
+            o_proj = o_proj.reshape(self.hidden_size, bind_size, -1,
+                                    self.head_dim).permute(0, 2, 1, 3).reshape(-1, self.hidden_size)
+
+        # torch.cuda.synchronize()
+        if self.attention_bias:
+            q_proj_b = self._cast_to(self.source_weights[layer_idx]['q_proj_b'], torch.bfloat16)
+            k_proj_b = self._cast_to(self.source_weights[layer_idx]['k_proj_b'], torch.bfloat16)
+            v_proj_b = self._cast_to(self.source_weights[layer_idx]['v_proj_b'], torch.bfloat16)
+            o_proj_b = self._cast_to(self.source_weights[layer_idx]['o_proj_b'], torch.bfloat16)
+            q_proj_b = DTensor.from_local(local_tensor=q_proj_b._local_tensor,
+                                          device_mesh=q_proj_b.device_mesh,
+                                          placements=[q_proj_b.placements[0]]).full_tensor()
+            k_proj_b = DTensor.from_local(local_tensor=k_proj_b._local_tensor,
+                                          device_mesh=k_proj_b.device_mesh,
+                                          placements=[k_proj_b.placements[0]]).full_tensor()
+            v_proj_b = DTensor.from_local(local_tensor=v_proj_b._local_tensor,
+                                          device_mesh=v_proj_b.device_mesh,
+                                          placements=[v_proj_b.placements[0]]).full_tensor()
+            o_proj_b = DTensor.from_local(local_tensor=o_proj_b._local_tensor,
+                                          device_mesh=o_proj_b.device_mesh,
+                                          placements=[o_proj_b.placements[0]]).full_tensor()
+            if kv_replicate > 1:
+                k_proj_b = k_proj_b.view(-1, self.head_dim)
+                v_proj_b = v_proj_b.view(-1, self.head_dim)
+                k_proj_b = torch.tile(k_proj_b.unsqueeze(1), (1, kv_replicate, 1)).reshape(-1)
+                v_proj_b = torch.tile(v_proj_b.unsqueeze(1), (1, kv_replicate, 1)).reshape(-1)
+            q_proj_b = self._get_partial_tensor(q_proj_b, 0)
+            k_proj_b = self._get_partial_tensor(k_proj_b, 0)
+            v_proj_b = self._get_partial_tensor(v_proj_b, 0)
+
+        qkv_proj = torch.cat((q_proj, k_proj, v_proj), dim=0).view(-1, self.hidden_size).contiguous()
+        o_proj = o_proj.contiguous().view(self.hidden_size, -1).contiguous()
+        if self.attention_bias:
+            qkv_proj_b = torch.cat((q_proj_b, k_proj_b, v_proj_b), dim=0).view(-1).contiguous()
+            o_proj_b = o_proj_b.contiguous()
+        else:
+            qkv_proj_b = None
+            o_proj_b = None
+        return qkv_proj, qkv_proj_b, o_proj, o_proj_b
+
+    def _process_attention_weights(self, layer_idx: int) -> Tuple[torch.Tensor, ...]:
+        if (self.device_mesh is not None) and (not self.enable_actor_critic_spatial_mux) and (
+                self.bind_device_mesh is not None) and (self.backend == 'fsdp'):
+            return self._process_attention_weights_interleave(layer_idx)
         q_proj = self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['q_proj']), torch.bfloat16)
         k_proj = self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['k_proj']), torch.bfloat16)
         v_proj = self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['v_proj']), torch.bfloat16)
@@ -800,11 +934,46 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
             share_fc2_weight = None
         return fc1_weight, share_fc1_weight, fc2_weight, share_fc2_weight
 
+    def _process_ffn_weights_interleave(self, layer_idx: int) -> Tuple[torch.Tensor, ...]:
+        dt1_1 = self._cast_to(self.source_weights[layer_idx]['fc1_1'], torch.bfloat16)
+        dt1_2 = self._cast_to(self.source_weights[layer_idx]['fc1_2'], torch.bfloat16)
+        dt2 = self._cast_to(self.source_weights[layer_idx]['fc2'], torch.bfloat16)
+        fc1_1 = DTensor.from_local(local_tensor=dt1_1._local_tensor,
+                                   device_mesh=dt1_1.device_mesh,
+                                   placements=[dt1_1.placements[0]]).full_tensor()
+        fc1_2 = DTensor.from_local(local_tensor=dt1_2._local_tensor,
+                                   device_mesh=dt1_2.device_mesh,
+                                   placements=[dt1_2.placements[0]]).full_tensor()
+        fc2 = DTensor.from_local(local_tensor=dt2._local_tensor,
+                                 device_mesh=dt2.device_mesh,
+                                 placements=[dt2.placements[0]]).full_tensor()
+        fc1_1 = self._get_partial_tensor(fc1_1, 0)
+        fc1_2 = self._get_partial_tensor(fc1_2, 0)
+        fc2 = self._get_partial_tensor(fc2, 0)
+        fc1 = torch.cat((fc1_1, fc1_2), dim=1)
+        if self.share_expert_num > 0:
+            if self.backend == 'fsdp':
+                share_fc1, share_fc2 = self._process_share_ffn_weights_fsdp(layer_idx)
+            elif self.backend == 'vescale-fsdp2':
+                share_fc1, share_fc2 = self._process_share_ffn_weights_vescale(layer_idx)
+                share_fc1 = share_fc1.reshape(share_fc1.shape[0], 2, -1, share_fc1.shape[-1]).transpose(0, 1).reshape(
+                    -1, share_fc1.shape[-1]).contiguous()
+                share_fc2 = share_fc2.transpose(0, 1).reshape(share_fc2.shape[1], -1).contiguous()
+        else:
+            share_fc1 = None
+            share_fc2 = None
+        fc1_weight = fc1.contiguous()
+        fc2_weight = fc2.contiguous()
+        return fc1_weight, share_fc1, fc2_weight, share_fc2
+
     def _process_ffn_weights(self, layer_idx: int) -> Tuple[torch.Tensor, ...]:
         if self.device_mesh is not None and self.source_weights[layer_idx]['fc1_1'] is not None and self.source_weights[
                 layer_idx]['fc1_1'].device_mesh.mesh.shape[1] == self.device_mesh.mesh.shape[
                     1] and self.use_ep and not self.enable_actor_critic_spatial_mux:
             return self._process_ffn_weights_local(layer_idx)
+        elif self.device_mesh is not None and self.source_weights[layer_idx]['fc1_1'] is not None and \
+            self.use_ep and not self.enable_actor_critic_spatial_mux and (self.bind_device_mesh is not None):
+            return self._process_ffn_weights_interleave(layer_idx)
         dt1_1 = self.source_weights[layer_idx]['fc1_1']
         dt1_2 = self.source_weights[layer_idx]['fc1_2']
         dt2 = self.source_weights[layer_idx]['fc2']
@@ -876,6 +1045,47 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
 
         return fc1_weight, share_fc1_weight, fc2_weight, share_fc2_weight
 
+    def _process_share_ffn_weights_vescale(self, layer_idx: int) -> Tuple[torch.Tensor, ...]:
+        share_fc1_1 = self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['share_fc1_1']),
+                                    torch.bfloat16)
+        share_fc1_2 = self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['share_fc1_2']),
+                                    torch.bfloat16)
+        share_fc2 = self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['share_fc2']), torch.bfloat16)
+        share_fc1_1 = share_fc1_1.view(2, -1, share_fc1_1.shape[-1])
+        share_fc1_2 = share_fc1_2.view(2, -1, share_fc1_2.shape[-1])
+        share_fc2 = share_fc2.view(share_fc2.shape[-2], 2, -1).transpose(0, 1)
+        if self.device_mesh is not None:
+            share_fc1_1 = self._redistribute_dtensor(
+                DTensor.from_local(share_fc1_1, self.device_mesh, [Replicate(), Replicate()]),
+                [Replicate(), Shard(1)])
+            share_fc1_2 = self._redistribute_dtensor(
+                DTensor.from_local(share_fc1_2, self.device_mesh, [Replicate(), Replicate()]),
+                [Replicate(), Shard(1)])
+            share_fc2 = self._redistribute_dtensor(
+                DTensor.from_local(share_fc2, self.device_mesh, [Replicate(), Replicate()]),
+                [Replicate(), Shard(2)])
+        share_fc1 = torch.cat((share_fc1_1, share_fc1_2), dim=1)
+        return share_fc1, share_fc2
+
+    def _process_share_ffn_weights_fsdp(self, layer_idx: int) -> Tuple[torch.Tensor, ...]:
+        share_fc1_1 = self._cast_to(self.source_weights[layer_idx]['share_fc1_1'], torch.bfloat16)
+        share_fc1_2 = self._cast_to(self.source_weights[layer_idx]['share_fc1_2'], torch.bfloat16)
+        share_fc2 = self._cast_to(self.source_weights[layer_idx]['share_fc2'], torch.bfloat16)
+        share_fc1_1 = DTensor.from_local(local_tensor=share_fc1_1._local_tensor,
+                                         device_mesh=share_fc1_1.device_mesh,
+                                         placements=[share_fc1_1.placements[0]]).full_tensor()
+        share_fc1_2 = DTensor.from_local(local_tensor=share_fc1_2._local_tensor,
+                                         device_mesh=share_fc1_2.device_mesh,
+                                         placements=[share_fc1_2.placements[0]]).full_tensor()
+        share_fc2 = DTensor.from_local(local_tensor=share_fc2._local_tensor,
+                                       device_mesh=share_fc2.device_mesh,
+                                       placements=[share_fc2.placements[0]]).full_tensor()
+        share_fc1_1 = self._get_partial_tensor(share_fc1_1, 0)
+        share_fc1_2 = self._get_partial_tensor(share_fc1_2, 0)
+        share_fc2 = self._get_partial_tensor(share_fc2, 1)
+        share_fc1 = torch.cat((share_fc1_1, share_fc1_2), dim=0)
+        return share_fc1, share_fc2
+
     def _process_ffn_amax(self, layer_idx: int) -> Tuple[torch.Tensor, ...]:
         if self.amax_ready:
             fc1_amax = self._cast_to(self._get_full_tensor(self.source_weights[layer_idx]['fc1_amax']), torch.bfloat16)
@@ -920,7 +1130,23 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
             gate_weight = ((gate_wg + gate_wg_ema) * 0.5).contiguous()
         else:
             gate_weight = None
-
+        if (self.device_mesh is not None) and (not self.enable_actor_critic_spatial_mux) and (self.bind_device_mesh
+                                                                                              is not None):
+            bind_size = self.bind_device_mesh['bind'].size()
+            if 'tp' in self.bind_device_mesh.mesh_dim_names:
+                # gen tp > train tp
+                train_tp_size = self.tp_size // bind_size
+                partion_shape = gate_weight.shape[0] // self.tp_size
+                index = torch.arange(gate_weight.shape[0]).reshape(train_tp_size, bind_size,
+                                                                   partion_shape).permute(1, 0, 2).reshape(-1)
+                gate_weight = gate_weight[index].contiguous()
+            elif 'gen_tp' in self.bind_device_mesh.mesh_dim_names:
+                # gen tp < train tp
+                train_tp_size = self.tp_size * bind_size
+                partion_shape = gate_weight.shape[0] // train_tp_size
+                index = torch.arange(gate_weight.shape[0]).reshape(bind_size, self.tp_size,
+                                                                   partion_shape).permute(1, 0, 2).reshape(-1)
+                gate_weight = gate_weight[index].contiguous()
         return gate_weight
 
     def _process_vwn_weights(self, layer_idx: int) -> Tuple[torch.Tensor, ...]:

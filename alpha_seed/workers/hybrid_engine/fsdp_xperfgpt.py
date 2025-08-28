@@ -60,7 +60,8 @@ class ActorXPerfGPTShardingManager(BaseShardingManager):
                  backend='fsdp',
                  weights_communicator="nccl",
                  weights_communicator_enable_aiomonitor=False,
-                 enable_actor_critic_spatial_mux=False):
+                 enable_actor_critic_spatial_mux=False,
+                 bind_device_mesh=None):
         super().__init__()
         self.module = module
         self.inference_engine = inference_engine
@@ -77,7 +78,8 @@ class ActorXPerfGPTShardingManager(BaseShardingManager):
                                                     backend=backend,
                                                     is_custom_xperf=self.inference_engine.is_xperf_custom,
                                                     is_xperf_triton=self.inference_engine.is_xperf_triton,
-                                                    enable_actor_critic_spatial_mux=enable_actor_critic_spatial_mux)
+                                                    enable_actor_critic_spatial_mux=enable_actor_critic_spatial_mux,
+                                                    bind_device_mesh=bind_device_mesh)
 
         # Note that torch_random_states may be different on each dp rank
         self.torch_random_states = torch.cuda.get_rng_state()

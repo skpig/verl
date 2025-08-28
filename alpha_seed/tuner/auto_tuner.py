@@ -253,7 +253,7 @@ class AutoTuner:
 
     def train_one_step(self, model: FSDP, optimizer, meshes, max_token, accum_steps: int = -1):
 
-        fsdp_mesh, tp_mesh, _, sp_mesh, gather_mesh, _ = meshes
+        fsdp_mesh, tp_mesh, _, sp_mesh, gather_mesh, _, _ = meshes
 
         torch.manual_seed(self.seed)
         # self.seed += 1
@@ -328,7 +328,7 @@ class AutoTuner:
         token_stop = max(self.max_seqlen * 2, token_stop)
         config = self.empirical_config(constraints)
         model, optimizer, meshes = self.init_model_and_optimizer(config)
-        fsdp_mesh, tp_mesh, _, sp_mesh, gather_mesh, _ = meshes
+        fsdp_mesh, tp_mesh, _, sp_mesh, gather_mesh, _, _ = meshes
         fsdp_size = fsdp_mesh.size()
         tp_size = tp_mesh.size()
         sp_size = sp_mesh.size()

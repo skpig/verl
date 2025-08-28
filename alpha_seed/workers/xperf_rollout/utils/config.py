@@ -564,6 +564,8 @@ def _get_m10_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
             config.use_attention_output_norm,
         "ffn_outputnorm":
             True,
+        "over_enc_vocab_stride":
+            max(getattr(config, 'over_enc_vocab_stride', [1])),
     }
 
     return xperf_config

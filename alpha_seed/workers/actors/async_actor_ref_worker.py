@@ -130,6 +130,7 @@ class AsyncActorRolloutRefWorker(Worker):
             self.actor_sp_mesh = self.actor_engine.sp_mesh
             self.actor_gather_mesh = self.actor_engine.gather_mesh
             self.actor_train_mesh = self.actor_engine.train_mesh
+            self.actor_bind_mesh = getattr(self.actor_engine, 'bind_mesh', None)
             if self._is_valid_actor:
                 self.actor_gather_manager = DataGatherManager(self.actor_gather_mesh, self.actor_sp_mesh)
         elif self.actor_strategy == 'megatron':
@@ -263,10 +264,11 @@ class AsyncActorRolloutRefWorker(Worker):
                 device_mesh=rollout.device_mesh,
                 standalone=self._is_standalone_rollout or self._is_standalone_validator,
                 only_bind_once=self.role == "rollout",
-                backend='fsdp',
+                backend=self.actor_strategy,
                 weights_communicator=weights_communicator,
                 weights_communicator_enable_aiomonitor=enable_aiomonitor,
-                enable_actor_critic_spatial_mux=self.enable_actor_critic_spatial_mux)
+                enable_actor_critic_spatial_mux=self.enable_actor_critic_spatial_mux,
+                bind_device_mesh=self.actor_bind_mesh)
         elif self.actor_strategy == 'megatron':
             sharding_manager = MegatronXPerfGPTShardingManager(module=self.actor_module_mariana,
                                                                model_config=self.actor_model_config,

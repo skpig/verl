@@ -69,7 +69,7 @@ critic_ppo_max_token_len=$((ppo_max_token_len_per_gpu * critic_sp_size))
 infer_ppo_max_token_len=$((ppo_infer_max_token_len_per_gpu * ref_sp_size))
 
 fsdp_size=8
-xperf_tp_size=2
+xperf_tp_size=4
 offload_train_memory=True
 
 # strategy='vescale-fsdp2'
@@ -119,6 +119,10 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.actor.optim.weight_decay=${weight_decay} \
     actor_rollout_ref.actor.tp_size=${actor_tp_size} \
     actor_rollout_ref.ref.tp_size=${actor_tp_size} \
+    actor_rollout_ref.actor.gen_tp_size=${xperf_tp_size} \
+    actor_rollout_ref.actor.spatial_interleave=True \
+    actor_rollout_ref.ref.gen_tp_size=${xperf_tp_size} \
+    actor_rollout_ref.ref.spatial_interleave=True \
     actor_rollout_ref.actor.act_offload=${act_offload} \
     critic.use_dynamic_bsz=${use_dynamic_bsz} \
     critic.ppo_max_token_len=${critic_ppo_max_token_len} \
