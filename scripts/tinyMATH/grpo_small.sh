@@ -31,11 +31,13 @@ TREE_SAMPLER=pg # mcts pg
 EPSILON=0.2
 
 # Tree Selector
-TREE_SELECTOR=value # value entropy mix, mix2
+TREE_SELECTOR=entropy # value entropy mix, mix2
 ROLLOUT_RATIO=0.7
 INCORRECT_PROB=0.3
 ROOT_ONLY=False
-
+DIV_THRESHOLD=3 # 0 by default
+NUM_GIBBS=20
+GIBBS_DISCOUNT=0.99
 
 # Performance tuning
 N_NODES=${ARNOLD_WORKER_NUM:-1}
@@ -100,6 +102,9 @@ CMD="python3 -m verl.trainer.main_ppo \
     data.truncation='error' \
     data.sampler.tree_sampler.name=${TREE_SAMPLER} \
     data.sampler.tree_sampler.epsilon=${EPSILON} \
+    data.sampler.tree_sampler.diverse_threshold=${DIV_THRESHOLD} \
+    data.sampler.tree_sampler.gibbs_sweeps=${NUM_GIBBS} \
+    data.sampler.tree_sampler.gamma=${GIBBS_DISCOUNT} \
     data.tree_data.partial_rollout_ratio=${ROLLOUT_RATIO} \
     data.tree_data.keep_incorrect_prob=${INCORRECT_PROB} \
     data.tree_data.root_only=${ROOT_ONLY} \

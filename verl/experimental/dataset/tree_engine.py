@@ -235,6 +235,7 @@ class TreeEngine:
             return float(np.std(xs)) if xs else 0.0
 
         return {
+            "dataset/num_nodes": self.next_item,
             "dataset/partial_rollout_len_mean": np.mean(all_partial_lens),
             "dataset/partial_rollout_len_std": np.std(all_partial_lens),
             "dataset/partial_rollout_len_max": np.max(all_partial_lens) if all_partial_lens else 0,
@@ -486,6 +487,8 @@ class PGTreeEngine(TreeEngine):
         self.n = np.zeros(self.original_datalength)
         self.last_touch = np.zeros(self.original_datalength)
         self.father_last_touch = np.zeros(self.original_datalength)
+        self.select_num = np.zeros(self.original_datalength)
+        self.father_select_num = np.zeros(self.original_datalength)
 
         # ---- Polya-Gamma sampler backends (pypolyagamma -> polyagamma -> truncated series) ----
         self._pg_engine = None  # (kind, handle)
@@ -564,6 +567,7 @@ class PGTreeEngine(TreeEngine):
         self.n = np.append(self.n, 1.0)
         self.variance = np.append(self.variance, final_sigma ** 2)
         self.last_touch = np.append(self.last_touch, step_num)
+        self.select_num = np.append(self.select_num, 0)
         self.father_last_touch[int(father_item)] = step_num
         self.spec.children_per_parent[father_item] += 1
     
@@ -665,6 +669,8 @@ class PGTreeEngine(TreeEngine):
                 continue
             parent_set.add(parent)
             batch.append(int(idx))
+            self.select_num[idx] += 1
+            self.father_select_num[parent] += 1
             if len(batch) == batch_size:
                 break
             
@@ -733,4 +739,13 @@ class PGTreeEngine(TreeEngine):
                 f"sampler/time_not_selected_gt_{threshold}_num": np.sum(mask),
                 f"sampler/time_not_selected_gt_{threshold}_ratio": np.sum(mask) / len(time_not_selected),
             })
+        
+        for i, threshold in enumerate([10, 20, 50, 100, 150, 200]):
+            mask = self.select_num > threshold
+            father_mask = self.father_select_num > threshold
+            parent_metrics.update({
+                f"sampler/select_num/{i}selectnum_gt_{threshold}_num": np.sum(mask),
+                f"sampler/father/select_num/{i}selectnum_gt_{threshold}_num": np.sum(father_mask),
+            })
+        
         return parent_metrics
