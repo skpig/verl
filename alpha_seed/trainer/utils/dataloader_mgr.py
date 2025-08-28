@@ -57,6 +57,7 @@ class DataLoaderMgr:
             'tokenizer_file': self.config.actor_rollout_ref.model.path,
             'dist_image': self.config.data.dist_image,
             'stable_pool_names': self.config.elastic.resource_pools.stable_pool_names,
+            'use_vlm_verifier_router': self.config.reward_model.get('use_vlm_verifier_router', False),
         } if self.is_vlm else {}
         data_auto_repeat = self.config.data.get('data_auto_repeat', False)
 

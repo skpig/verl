@@ -156,4 +156,5 @@ python3 tasks/main_ppo.py \
     trainer.save_cases_to_hdfs=False \
     actor_rollout_ref.rollout.mode=server \
     rollout_server.handler="agent/tool/visual_cot" \
-    data.dist_image=True
+    data.dist_image=True \
+    +ext=vlm_ext

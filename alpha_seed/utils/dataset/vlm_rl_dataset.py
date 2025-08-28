@@ -198,13 +198,18 @@ def process_images(images, image_processor):
         return image_inputs
 
 
-def get_reward_model(row_dict: dict) -> dict:
+def get_reward_model(row_dict: dict, use_vlm_verifier_router: bool) -> dict:
     # Use AlphaSeed LLM's reward system if `reward_model` is specified:
     if row_dict.get('reward_model'):
         reward_model = {
             'style': row_dict['reward_model']['style'],
             'ground_truth': row_dict['reward_model']['ground_truth'],
         }
+        return reward_model
+    elif not use_vlm_verifier_router:
+        reward_model = {}
+        reward_model['style'] = row_dict['ability']
+        reward_model['ground_truth'] = row_dict['verifier_feature']
         return reward_model
 
     # Use VLM's reward system, i.e., row_dict['verifier_feature'], if row_dict['reward_model'] does not exist:
@@ -228,6 +233,7 @@ def get_reward_model(row_dict: dict) -> dict:
         else:
             data_source = row_dict['data_source']
             raise ValueError(f'Please specify verifier_name in verifier_feature! {data_source} {verifier_feature}')
+
         verifier_feature['verifier_name'] = verifier_name
 
     # Use the VLM verifier router to route to the corresponding VLM specialized verifier.
@@ -252,6 +258,7 @@ class RLHFDatasetVL(RLHFDataset):
         self.stable_pool_names = kwargs.pop('stable_pool_names', [])
         stable_pool_name = self.stable_pool_names[0] if self.stable_pool_names else ''
         self.dist_data_manager = init_or_get_dist_data_manager(stable_pool_name)
+        self.use_vlm_verifier_router = kwargs.pop('use_vlm_verifier_router', False)
         super().__init__(*args, **kwargs)
 
     def _read_files_and_tokenize_dist(self):
@@ -391,7 +398,7 @@ class RLHFDatasetVL(RLHFDataset):
         prompt = convert_conversation_to_prompt(conversation)
 
         # reward_model is required
-        row_dict_ret['reward_model'] = get_reward_model(row_dict)
+        row_dict_ret['reward_model'] = get_reward_model(row_dict, self.use_vlm_verifier_router)
 
         if 'prompt_id' in row_dict:
             row_dict_ret['prompt_id'] = row_dict['prompt_id']

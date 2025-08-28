@@ -1,3 +1,4 @@
 # @package _global_
 reward_model:
   enable_resp_para: True
+  use_vlm_verifier_router: True
