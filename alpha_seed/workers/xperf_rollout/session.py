@@ -787,7 +787,8 @@ class InferenceSession:
             input_id_list = (query.input_ids + query.new_token_ids)[:ret_len]
             full_input_ids = torch.tensor(input_id_list).cuda()
             is_evict = self.prefix_cache.save_to_cache(query.id, full_input_ids,
-                                                       torch.tensor(query.kv_slot_ids).cuda(), self.engine.module)
+                                                       torch.tensor(query.kv_slot_ids).cuda(), query.image_shift,
+                                                       self.engine.module)
             if is_evict:
                 self.infer_scheduler.incr("evict_count")
         self.unfinished_off_policy_steps_set.remove_one(query.off_policy_steps)
@@ -845,7 +846,7 @@ class InferenceSession:
         if query.input_embedding is not None:
             return query.input_embedding
 
-        input_ids = input_ids[:, query.context_shift:]
+        input_ids = input_ids[:, query.context_shift + query.prefix_already_computed_len:]
         if query.image_shift < query.image_data['image_grid_hw'].shape[0]:
             # get increasemental image embeddings
             image_grid_hw = query.image_data['image_grid_hw'][query.image_shift:]
@@ -894,7 +895,8 @@ class InferenceSession:
             assert tp_size >= len(image_queries), "context_limit_bs must smaller than tp_size when use dp vit"
             img_token_len = [0] * tp_size
             for i, query in enumerate(image_queries):
-                input_ids = torch.tensor(query.input_ids, device="cuda")[query.context_shift:]
+                input_ids = torch.tensor(query.input_ids,
+                                         device="cuda")[query.context_shift + query.prefix_already_computed_len:]
                 img_token_len[i] = (input_ids == -100).sum().item()
             if tp_rank < len(image_queries):
                 query = image_queries[tp_rank]
@@ -924,7 +926,7 @@ class InferenceSession:
 
             for i, query in enumerate(image_queries):
                 input_ids = torch.tensor(query.input_ids, device="cuda").unsqueeze(0)
-                input_ids = input_ids[:, query.context_shift:]
+                input_ids = input_ids[:, query.context_shift + query.prefix_already_computed_len:]
                 image_token_id = -100
                 image_mask = input_ids == image_token_id
                 input_ids[image_mask] = 1
@@ -988,6 +990,20 @@ class InferenceSession:
         # MTP is PD separate
         prefill_only = self.enable_mtp_decoding and any([query.is_context_computing for query in running])
 
+        if self.prefix_cache is not None:
+            for query in running:
+                if query.context_shift == 0:
+                    self.infer_scheduler.record("prefill_token_num", [len(query.input_ids)])
+                    input_ids_cuda = torch.tensor(query.input_ids).cuda()
+                    prefix_hit_length = self.prefix_cache.calc_prefix_length(query.id, input_ids_cuda)
+                    if prefix_hit_length > query.prefix_already_computed_len:
+                        self.infer_scheduler.record("prefix_cache_hit_length", [prefix_hit_length])
+                        self.prefix_cache.load_from_cache(query.id, input_ids_cuda,
+                                                          torch.tensor(query.kv_slot_ids).cuda(), self.engine.module,
+                                                          prefix_hit_length)
+                        query.prefix_already_computed_len = prefix_hit_length
+                        query.image_shift = self.prefix_cache.get_image_shift(query.id)
+
         if self.vit_use_dp:
             self._prepare_image_embeds_dp(running, self.oe_max_stride > 1)
 
@@ -1012,22 +1028,6 @@ class InferenceSession:
                     else:
                         input_embs = self._get_input_embeddings(input_ids, query, is_oe, start, end)
                     return input_embs, torch.tensor(labels_ids)
-
-                # note: only query prefix cache once (context_shift == 0)
-                if query.context_shift == 0:
-                    self.infer_scheduler.record("prefill_token_num", [len(query.input_ids)])
-                    if self.prefix_cache is not None:
-                        input_ids_cuda = torch.tensor(query.input_ids).cuda()
-                        prefix_hit_length = self.prefix_cache.calc_prefix_length(query.id, input_ids_cuda)
-                        if prefix_hit_length > query.prefix_already_computed_len:
-                            if prefix_hit_length == len(query.input_ids):
-                                prefix_hit_length -= 1  # note: to prevent empty input
-                            self.infer_scheduler.record("prefix_cache_hit_length", [prefix_hit_length])
-                            self.prefix_cache.load_from_cache(query.id, input_ids_cuda,
-                                                              torch.tensor(query.kv_slot_ids).cuda(),
-                                                              self.engine.module, prefix_hit_length)
-                            query.prefix_already_computed_len = prefix_hit_length
-                            context_len = len(query.input_ids) - query.prefix_already_computed_len
 
                 current_context_shift = query.context_shift + query.prefix_already_computed_len
                 # start from context_shift pos
@@ -1411,6 +1411,8 @@ class InferenceSession:
                 if _idle():
                     if len(self.paused) > 0:
                         time.sleep(0.1)
+                    elif len(self.paused_ready) > 0:
+                        self.paused_ready_step = self.paused_batching_step
                     continue
                 self.current_steps += 1
 

@@ -181,6 +181,7 @@ class PrefixCache(object):
         # slot_id -> req_id
         self.lru_cache = collections.OrderedDict()
         self.req_id_to_slot_id = {}
+        self.req_id_to_image_shift = {}
 
         logging_rank_only(
             logging.warning, 0, f"enable prefix cache, cache shape: {self.cache_slots.shape}, "
@@ -209,6 +210,7 @@ class PrefixCache(object):
             slot_evict, request_id_evict = self.lru_cache.popitem(last=False)
             self.lru_cache[slot_evict] = request_id
             del self.req_id_to_slot_id[request_id_evict]
+            del self.req_id_to_image_shift[request_id_evict]
             self.req_id_to_slot_id[request_id] = slot_evict
             self.cached_input_id_length[slot_evict] = 0
             logging_rank_only(
@@ -229,6 +231,9 @@ class PrefixCache(object):
         else:
             prefix_length = non_zero_pos.flatten()[0].item()
         return prefix_length
+
+    def get_image_shift(self, request_id: str):
+        return self.req_id_to_image_shift.get(request_id, 0)
 
     def load_from_cache(self, request_id: str, input_ids: torch.Tensor, kv_cache_table: torch.Tensor, xperf_module,
                         start_pos: Optional[int]):
@@ -278,12 +283,14 @@ class PrefixCache(object):
 
         return prefix_length
 
-    def save_to_cache(self, request_id: str, full_input_ids: torch.Tensor, kv_cache_table: torch.Tensor, xperf_module):
+    def save_to_cache(self, request_id: str, full_input_ids: torch.Tensor, kv_cache_table: torch.Tensor, image_shift,
+                      xperf_module):
         if request_id not in self.req_id_to_slot_id:
             slot_id, is_evict = self._get_free_slot(request_id)
         else:
             slot_id = self.req_id_to_slot_id[request_id]
             is_evict = False
+        self.req_id_to_image_shift[request_id] = image_shift
 
         prefix_length = self.calc_prefix_length(request_id, full_input_ids)
 
@@ -416,6 +423,7 @@ class PagedPrefixCache(object):
         self.max_cache_length = max_cache_length
         self.enable_paged_attn = enable_paged_attn
         self.slot_block_size = slot_block_size
+        self.req_id_to_image_shift = {}
 
         self.free_slots = set(range(max_cache_slot_num))
 
@@ -468,6 +476,7 @@ class PagedPrefixCache(object):
             evicted_cache_item: CacheItem
             for page_id in evicted_cache_item.cache_page_table:
                 self.free_slots.add(page_id)
+            del self.req_id_to_image_shift[evicted_request_id]
 
             real_page_allocated = min(pages_needed, len(self.free_slots))
             pages_to_allocate = []
@@ -494,6 +503,9 @@ class PagedPrefixCache(object):
         else:
             prefix_length = non_zero_pos.flatten()[0].item()
         return prefix_length
+
+    def get_image_shift(self, request_id: str):
+        return self.req_id_to_image_shift.get(request_id, 0)
 
     def load_from_cache(self, request_id: str, input_ids: torch.Tensor, kv_cache_table: torch.Tensor, xperf_module,
                         start_pos: Optional[int]):
@@ -523,7 +535,8 @@ class PagedPrefixCache(object):
             raise RuntimeError("non paged_attention is not supported")
         return prefix_length
 
-    def save_to_cache(self, request_id: str, full_input_ids: torch.Tensor, kv_cache_table: torch.Tensor, xperf_module):
+    def save_to_cache(self, request_id: str, full_input_ids: torch.Tensor, kv_cache_table: torch.Tensor, image_shift,
+                      xperf_module):
         if request_id not in self.lru_cache:
             cache_item = CacheItem(request_id, torch.empty([self.max_cache_length], dtype=torch.long, device="cuda"),
                                    full_input_ids.shape[0])
@@ -533,7 +546,7 @@ class PagedPrefixCache(object):
             cache_item: CacheItem = self.lru_cache.pop(request_id)
             self.lru_cache[request_id] = cache_item
             prefix_length = self.calc_prefix_length(request_id, full_input_ids)
-
+        self.req_id_to_image_shift[request_id] = image_shift
         total_length = full_input_ids.shape[0]
         if prefix_length == total_length:
             return False
@@ -542,6 +555,18 @@ class PagedPrefixCache(object):
         real_total_length = min(total_length, self.max_cache_length)
         pages_needed = self._get_pages_needed(request_id, real_total_length)
         is_evict = self._get_free_slots(request_id, pages_needed)
+
+        image_token_id = -100
+        if self._get_pages_needed(request_id, real_total_length) > 0 and torch.any(full_input_ids == image_token_id):
+            real_total_length = torch.nonzero(full_input_ids == image_token_id)[-1].item() + 1
+            if real_total_length > self.max_cache_length:
+                logging_rank_only(
+                    logging.warning, 0, f"image token found in input_ids, request_id: {request_id}, "
+                    f"real_total_length {real_total_length} exceeds max_cache_length {self.max_cache_length}")
+                return is_evict
+            while (pages_needed := self._get_pages_needed(request_id, real_total_length)) > 0:
+                self._get_free_slots(request_id, pages_needed)
+
         real_allocated_pages = len(cache_item.cache_page_table)
         real_total_length = min(real_total_length, real_allocated_pages * self.slot_block_size)
         cache_item.input_ids[:real_total_length].copy_(full_input_ids[:real_total_length])

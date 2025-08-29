@@ -469,10 +469,47 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
         self._loop_should_continue = threading.Event()
         self._loop_should_continue.set()
         self.is_waiting = False
-        self._loop_thread = threading.Thread(target=self._dispatch_loop,
-                                             name=f'{request_manager_name}-rollout-wg-proxy-dispatch-loop',
-                                             daemon=True)
-        self._loop_thread.start()
+        self._dispatch_loop_thread = threading.Thread(target=self._run_dispatch_loop,
+                                                      name=f'{request_manager_name}-rollout-wg-proxy-dispatch-loop',
+                                                      daemon=True)
+        self._dispatch_loop_thread.start()
+        self._update_loop_thread = threading.Thread(target=self._update_loop,
+                                                    name=f'{request_manager_name}-rollout-wg-proxy-update-loop',
+                                                    daemon=True)
+        self._update_loop_thread.start()
+
+    def _run_dispatch_loop(self):
+        asyncio.run(self._dispatch_loop())
+
+    def _update_loop(self):
+        print(f'start background update loop for {self._request_manager_name}')
+        sleep_interval = self.poll_interval * 2
+
+        while True:
+            if self._loop_should_stop.is_set():
+                break
+            self.update_is_waiting = True
+            self._loop_should_continue.wait()
+            self.update_is_waiting = False
+            time.sleep(sleep_interval)
+
+            t0 = time.time()
+            ready_wg_items = list(self.replicas.get_ready_worker_groups().items())
+
+            for engine_id, wg in ready_wg_items:
+                try:
+                    wg_name = wg.group_name
+                    queries: List[Query] = wg.get_all_queries(self._request_manager_name)
+                    if len(queries) > 0:
+                        self.request_manager.update_intermediate_queries.remote(queries, engine_id, wg_name,
+                                                                                time.time())
+                except ray.exceptions.ActorDiedError:
+                    pass
+                except ray.exceptions.RayTaskError as e:
+                    self._teardown(wg, e)
+
+            loop_cost = time.time() - t0
+            sleep_interval = max(0., self.poll_interval - loop_cost)
 
     @property
     def world_size(self):
@@ -485,7 +522,7 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
         ready_worker_group_ids = self.replicas.ready_worker_group_ids
         ray.get(self.request_manager.handle_stale_requests.remote(ready_worker_group_ids))
 
-    def _dispatch_loop(self):
+    async def _dispatch_loop(self):
         print(f'start background dispatch loop for {self._request_manager_name}')
 
         sleep_interval = self.poll_interval
@@ -495,7 +532,7 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
             self.is_waiting = True
             self._loop_should_continue.wait()
             self.is_waiting = False
-            time.sleep(sleep_interval)
+            await asyncio.sleep(sleep_interval)
 
             # 按照总量平分给每个ready replica，均匀分发
             # 注意一开始可能还没有request进去request pool
@@ -527,14 +564,7 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
                 wg: Union[RayWorkerGroup, RemoteAsyncXPerfGPTRollout, AsyncActorRolloutRefWorker]  # type anno
                 wg_name = wg.group_name
                 try:
-                    # 1. collect intermediate result
-                    # get result(including partial) from engine, update to centralized request pool
-                    queries: List[Query] = wg.get_all_queries(self._request_manager_name)
-                    if len(queries) > 0:
-                        self.request_manager.update_intermediate_queries.remote(queries, engine_id, wg_name,
-                                                                                time.time())
-
-                    # 2. send new request to worker group (engine)
+                    # send new request to worker group (engine)
                     load: LoadMetric = wg.get_load_metrics()[0]  # noqa, dp_size always =1
                     gmem_insufficient = load.kv_cache_util > self.config.proxy.gmem_insufficient_threshold
 
@@ -592,11 +622,12 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
 
     def stop(self):
         self._loop_should_stop.set()
-        self._loop_thread.join()
+        self._dispatch_loop_thread.join()
+        self._update_loop_thread.join()
 
     def pause_loop(self):
         self._loop_should_continue.clear()
-        while not self.is_waiting:
+        while not self.is_waiting or not self.update_is_waiting:
             time.sleep(0.5)
 
     def continue_loop(self):
@@ -692,7 +723,7 @@ class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
         self._rebalance_threshold = self.config.proxy.rebalance_threshold
         self.abort_logger = DebounceAccumulatedLogger()
 
-    def _dispatch_loop(self):
+    async def _dispatch_loop(self):
         """
         每个loop内自动均衡每个worker group正在跑的query，
         如某些worker group跑得比较快，会自动从别的worker group匀过来一些，
@@ -712,7 +743,7 @@ class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
             self.is_waiting = True
             self._loop_should_continue.wait()
             self.is_waiting = False
-            time.sleep(sleep_interval)
+            await asyncio.sleep(sleep_interval)
 
             # 按照总量平分给每个ready replica，均匀分发
             # 注意一开始可能还没有request进去request pool
@@ -746,14 +777,7 @@ class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
                 wg: Union[RayWorkerGroup, RemoteAsyncXPerfGPTRollout, AsyncActorRolloutRefWorker]  # type anno
                 wg_name = wg.group_name
                 try:
-                    # 1. collect intermediate result
-                    # get result(including partial) from engine, update to centralized request pool
-                    queries: List[Query] = wg.get_all_queries(self._request_manager_name)
-                    if len(queries) > 0:
-                        self.request_manager.update_intermediate_queries.remote(queries, engine_id, wg_name,
-                                                                                time.time())
-
-                    # 2. send new request to worker group (engine)
+                    # send new request to worker group (engine)
                     load: LoadMetric = wg.get_load_metrics()[0]  # noqa, dp_size always =1
                     gmem_insufficient = load.kv_cache_util > self.config.proxy.gmem_insufficient_threshold
                     gmem_high_water_level = load.kv_cache_util > self.config.proxy.gmem_high_water_level_threshold
@@ -922,7 +946,7 @@ class CacheAwareBalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
         self.abort_logger = DebounceAccumulatedLogger()
         self.min_load_ratio = self.config.proxy.min_load_ratio
 
-    def _dispatch_loop(self):
+    async def _dispatch_loop(self):
         print(f'start background dispatch loop with cache_aware balanced mode for {self._request_manager_name}')
 
         sleep_interval = self.poll_interval
@@ -933,7 +957,7 @@ class CacheAwareBalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
             self.is_waiting = True
             self._loop_should_continue.wait()
             self.is_waiting = False
-            time.sleep(sleep_interval)
+            await asyncio.sleep(sleep_interval)
 
             # 先考虑cache命中，再按照总量平分给每个ready replica，均匀分发
             # 注意一开始可能还没有request进去request pool
@@ -954,20 +978,13 @@ class CacheAwareBalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
             died_wgs = []
 
             wg_history_map = {}
-            for engine_id, wg in ready_wg_items:
-                wg: Union[RayWorkerGroup, RemoteAsyncXPerfGPTRollout, AsyncActorRolloutRefWorker]  # type anno
-                wg_name = wg.group_name
-                try:
-                    history_ids = wg.get_history_ids()
-                    wg_history_map[engine_id] = set(history_ids) if history_ids else set()
-                    # 1. collect intermediate result
-                    # get result(including partial) from engine, update to centralized request pool
-                    queries: List[Query] = wg.get_all_queries(self._request_manager_name)
-                    if len(queries) > 0:
-                        self.request_manager.update_intermediate_queries.remote(queries, engine_id, wg_name,
-                                                                                time.time())
 
-                    load: LoadMetric = wg.get_load_metrics()[0]  # noqa, dp_size always =1
+            async def get_wg_history(wg, engine_id):
+                try:
+                    wg_name = wg.group_name
+                    history_ids = await asyncio.to_thread(wg.get_history_ids)
+                    wg_history_map[engine_id] = set(history_ids) if history_ids else set()
+                    load: LoadMetric = (await asyncio.to_thread(wg.get_load_metrics))[0]  # noqa, dp_size always =1
                     loads[(engine_id, wg_name)] = load
 
                 except ray.exceptions.ActorDiedError as e:
@@ -975,9 +992,14 @@ class CacheAwareBalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
                     # worker group and actors lifecycle
                     died_wgs.append(engine_id)
 
+            async with asyncio.TaskGroup() as tg:
+                for engine_id, wg in ready_wg_items:
+                    tg.create_task(get_wg_history(wg, engine_id))
+
             # 过滤死掉的wg
             ready_wg_items = [(engine_id, wg) for engine_id, wg in ready_wg_items if engine_id not in died_wgs]
             if len(ready_wg_items) == 0:
+                sleep_interval = max(0., self.poll_interval - time.time() + t0)
                 continue
 
             # 找出哪些query命中cache，哪些没命中(standalone)
@@ -1044,24 +1066,21 @@ class CacheAwareBalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
                 queries_assigned[engine_id].extend(standalone_queries[:standalone_count_per_wg])
                 standalone_queries = standalone_queries[standalone_count_per_wg:]
 
-            for engine_id, wg in ready_wg_items:
-                wg: Union[RayWorkerGroup, RemoteAsyncXPerfGPTRollout, AsyncActorRolloutRefWorker]  # type anno
+            async def dispatch_queries(wg, engine_id):
+                queries = queries_assigned[engine_id] + queries_in_wg_history[engine_id]
                 wg_name = wg.group_name
                 load = loads[(engine_id, wg_name)]
-
-                queries = queries_assigned[engine_id] + queries_in_wg_history[engine_id]
                 if len(queries) > 0:
                     try:
-                        self.request_manager.set_requests_assigned.remote([query.id for query in queries], engine_id,
-                                                                          wg_name)
+                        await self.request_manager.set_requests_assigned.remote([query.id for query in queries],
+                                                                                engine_id, wg_name)
                         for q in queries:
                             # query的分类，区分一下是hybrid_rollout/standalone_rollout/validation，避免共用engine时不知道怎么update回去对应的来源
                             q.meta_info['query_type'] = self._request_manager_name
-                        wg.add_inflight_queries(queries)
-                        pending_size -= len(queries)
+                        await asyncio.to_thread(wg.add_inflight_queries, queries)
                         fmt = (
                             "dispatch {accumulated_value} "
-                            f"(remain={pending_size}) queries from({self._request_manager_name}) to wg({wg_name}, "
+                            f"queries from({self._request_manager_name}) to wg({wg_name}, "
                             f"pending={load.num_pending}, W={load.num_waiting}/P={load.num_prefilling}/D={load.num_decoding}, "
                             f"kv={load.kv_cache_util:.2f})")
                         self._progress_logger.log(wg_name, len(queries), fmt)
@@ -1070,7 +1089,11 @@ class CacheAwareBalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
                         # ignore actor died error, underlying replicated worker group will handle
                         # worker group and actors lifecycle
                         # 分发失败的，需要把assigned flag给clear掉，不然会泄漏
-                        self.request_manager.clear_requests_assigned.remote([query.id for query in queries])
+                        await self.request_manager.clear_requests_assigned.remote([query.id for query in queries])
+
+            async with asyncio.TaskGroup() as tg:
+                for engine_id, wg in ready_wg_items:
+                    tg.create_task(dispatch_queries(wg, engine_id))
 
             # handle dead engines during the loop to avoid request from staling for too long
             ready_wg_ids1 = self.replicas.ready_worker_group_ids
