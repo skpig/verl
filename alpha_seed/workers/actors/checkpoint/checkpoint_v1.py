@@ -89,8 +89,8 @@ class CheckpointManagerV1(BaseCheckpointManager):
             print(f'[rank-{self.rank}]: hdfs_path={hdfs_path} is not a local or fuse dir, '
                   f'try to remove previous_save_local_path={self.previous_save_local_path}')
             self.remove_previous_save_local_path()
-
-        self.local_mkdir(local_path)
+        if self.rank == 0:
+            self.local_mkdir(local_path)
         torch.distributed.barrier(self.group)
 
         state_dict_cfg = ShardedStateDictConfig(offload_to_cpu=True)

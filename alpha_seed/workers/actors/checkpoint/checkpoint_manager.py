@@ -1,7 +1,5 @@
 import os
 import shutil
-from filelock import FileLock
-import tempfile
 
 import ray
 import omegaconf
@@ -76,10 +74,9 @@ class BaseCheckpointManager:
         torch.distributed.barrier(self.group)
 
     @staticmethod
-    def local_mkdir(path):
-        with FileLock(os.path.join(tempfile.gettempdir(), path + '.lock')):
-            # make a new dir
-            os.makedirs(path, exist_ok=True)
+    def local_mkdir(path: str):
+        # make a new dir
+        os.makedirs(path, exist_ok=True)
 
     @staticmethod
     def get_rng_state():
