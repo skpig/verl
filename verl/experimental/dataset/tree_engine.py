@@ -1,4 +1,5 @@
 from collections import defaultdict
+import scipy
 from dataclasses import dataclass, is_dataclass
 import math
 import random
@@ -362,10 +363,10 @@ class TreeEngine:
         
 
     def update_posterior(self, item_lst: List[int], reward_lst: List[float], step_num: int):
-        pass
+        return {}
 
     def select_batch(self, batch_size: int, step_num: int) -> Tuple[List[int], Dict[str, float]]:
-        pass
+        raise NotImplementedError
 
     
     def _get_batch_statistics(self, selected_items: List[int], step_num: int) -> dict:
@@ -384,10 +385,15 @@ class TreeEngine:
         }
     
     def async_wrap_all(self, batch: DataProto, step_num: int, bsz: int):
-        self.update_posterior(batch.non_tensor_batch["item"].tolist(), batch.non_tensor_batch["score"].tolist(), step_num)
+        posterior_merics = self.update_posterior(batch.non_tensor_batch["item"].tolist(), batch.non_tensor_batch["score"].tolist(), step_num)
         data_metrics = self.update_data_source(batch, step_num)
         batch, selection_metrics = self.select_batch(bsz, step_num)
-        return batch, selection_metrics, data_metrics
+        metrics = {
+            **posterior_merics,
+            **data_metrics,
+            **selection_metrics,
+        }
+        return batch, metrics
         
 
 
@@ -442,6 +448,7 @@ class EpsilonGreedyTreeEngine(TreeEngine):
         for item, reward in zip(item_lst, reward_lst):
             self.N[item] += 1
             self.S[item] += reward
+        return {}
     
     def select_batch(self, batch_size: int, step_num: int) -> List[int]:
         if self.rng.random() < self.epsilon:
@@ -469,6 +476,7 @@ class PGTreeEngine(TreeEngine):
 
         # Fixed parameters
         self.diverse_threshold = int(data_config.sampler.tree_sampler.diverse_threshold)
+        self.father_only_ratio = data_config.sampler.tree_sampler.father_only_ratio
         self.mu0 = float(data_config.sampler.tree_sampler.mu0)
         self.tau0 = float(data_config.sampler.tree_sampler.tau0)
         self.sigma0 = float(data_config.sampler.tree_sampler.sigma0) if data_config.sampler.tree_sampler.sigma0 is not None else None
@@ -572,6 +580,7 @@ class PGTreeEngine(TreeEngine):
         self.spec.children_per_parent[father_item] += 1
     
     def update_posterior(self, item_lst: List[int], reward_lst: List[float], step_num: int):
+        metrics = {}
         items = np.array(item_lst)
         rewards = np.array(reward_lst)
 
@@ -590,9 +599,28 @@ class PGTreeEngine(TreeEngine):
         # BUGGY: this is not correct, since the items might not be unique
         # self.s[items] += rewards
         # self.n[items] += 1
+        item2rewardlst = defaultdict(list)
         for item, reward in zip(items, rewards):
             self.s[item] += reward
             self.n[item] += 1
+            item2rewardlst[item].append(reward)
+        item2acc = {item: np.mean(reward_lst).item() for item, reward_lst in item2rewardlst.items()}
+        item2theta = {item: 1 / (1 + np.exp(-self.psi[item])).item() for item in item2rewardlst.keys()}
+        # calculate correlations & error
+        if len(item2acc) > 1:
+            accs = np.array(list(item2acc.values()))
+            thetas = np.array(list(item2theta.values()))
+            r, pvalue = scipy.stats.pearsonr(accs, thetas)
+            error = np.mean(np.abs(accs - thetas))
+            metrics.update({
+                "sampler/pg_correlation": r,
+                "sampler/pg_pvalue": pvalue,
+                "sampler/pg_error": error,
+            })
+            print("[PG Engine] Step {}: correlation={}, error={}".format(step_num, r, error))
+
+
+        # update last touch
         self.last_touch[items] = step_num
         for item in items:
             father_item = self.get_original_ancestor_item(item)
@@ -604,7 +632,9 @@ class PGTreeEngine(TreeEngine):
         # parent_items = np.unique(parent_items)
         for _ in range(self.gibbs_sweeps):
             self._gibbs_one_sweep_selected(parent_items)
-    
+
+        return metrics
+
     def _gibbs_one_sweep_selected(self, p_lst):
         inv_tau02 = 1.0 / self.tau0_2
 
@@ -653,6 +683,11 @@ class PGTreeEngine(TreeEngine):
         thetas = 1 / (1 + np.exp(-self.psi)) # [num_nodes, ]
         
         # father_only_ratio = self.tree_config.father_only_ratio
+        father_only_round = None
+        if self.father_only_ratio is not None and self.rng.random() < self.father_only_ratio:
+            father_only_round = True
+        else:
+            father_only_round = False
 
         error = np.abs(thetas - 0.5)
         ids = np.argsort(error)
@@ -667,6 +702,13 @@ class PGTreeEngine(TreeEngine):
             # step_num - self.father_last_touch[parent] == 0 indicates the father has just been selected last time
             if self.father_last_touch[parent] > 5 and step_num - self.father_last_touch[parent] < self.diverse_threshold:
                 continue
+            
+            if father_only_round is not None:
+                if father_only_round and idx != parent: # skip child nodes
+                    continue
+                if not father_only_round and idx == parent: # skip father nodes
+                    continue
+
             parent_set.add(parent)
             batch.append(int(idx))
             self.select_num[idx] += 1

@@ -115,6 +115,7 @@ sampler:
 
     # params for pg
     diverse_threshold: 0 # the minimum number for reuse one **father**
+    father_only_ratio: null # null indicates no father-children split, 0.3 might be a good value
     mu0: -0.5 # \psi_p ~ N(\mu0, \tau0)
     tau0: 1.5 # \psi_p ~ N(\mu0, \tau0)
     sigma0: null # \psi ~ N(\psi_p, \sigma0), if set, delta will be ignored

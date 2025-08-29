@@ -141,7 +141,7 @@ class TreeSampler(AysncUpdater, AbstractCurriculumBatchSampler):
         start_time = time.time()
         # new_batch, selection_metrics= ray.get(self.new_batch_future)
         # data_metrics = ray.get(self.update_data_source_future)
-        new_batch, selection_metrics, data_metrics = ray.get(self.update_future)
+        new_batch, metrics = ray.get(self.update_future)
         self.update_future = None
         end_time = time.time()
         print(f"[Sampler] Time taken to select batch: {end_time - start_time} seconds")
@@ -153,9 +153,7 @@ class TreeSampler(AysncUpdater, AbstractCurriculumBatchSampler):
         assert len(self.queue) == 0
         self.queue.extend(new_batch)
 
-        data_metrics.update(selection_metrics)
-
-        return data_metrics
+        return metrics
 
 
 class MoPPSSampler(AbstractCurriculumBatchSampler):
