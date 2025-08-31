@@ -683,11 +683,13 @@ class PGTreeEngine(TreeEngine):
         thetas = 1 / (1 + np.exp(-self.psi)) # [num_nodes, ]
         
         # father_only_ratio = self.tree_config.father_only_ratio
-        father_only_round = None
-        if self.father_only_ratio is not None and self.rng.random() < self.father_only_ratio:
-            father_only_round = True
+        if self.father_only_ratio is not None:
+            if (self.rng.random() < self.father_only_ratio or step_num < 30):
+                father_only_round = True
+            else:
+                father_only_round = False
         else:
-            father_only_round = False
+            father_only_round = None
 
         error = np.abs(thetas - 0.5)
         ids = np.argsort(error)
