@@ -747,6 +747,8 @@ class RolloutManager:
             finished_num = 0
             if len(self._save_task_pool) > 0:
                 wait(self._save_task_pool, return_when=ALL_COMPLETED)
+                for fut in self._save_task_pool:
+                    fut.result()  # raise error
                 self._save_task_pool.clear()
             if len(standalone_batch) > 0:
                 if not self.standalone_gen_batch_output_resume:
@@ -758,9 +760,12 @@ class RolloutManager:
                         step != 1):
                     print(f"step {step}, saving... standalone_gen_batch")
                     # save standalone_batch and gen_batch_output
-                    save_future1 = self._save_executor.submit(save_dataproto_fn, gen_batch_output,
-                                                              "standalone_gen_batch_output")
-                    save_future2 = self._save_executor.submit(save_dataproto_fn, standalone_batch, "standalone_batch")
+                    save_future1 = self._save_executor.submit(save_dataproto_fn,
+                                                              data=gen_batch_output,
+                                                              prefix="standalone_gen_batch_output")
+                    save_future2 = self._save_executor.submit(save_dataproto_fn,
+                                                              data=standalone_batch,
+                                                              prefix="standalone_batch")
                     self._save_task_pool.extend([save_future1, save_future2])
                 # only report metrics from one generation replica
                 record_xperf_metrics(
