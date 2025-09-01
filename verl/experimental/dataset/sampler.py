@@ -109,6 +109,20 @@ class TreeSampler(AysncUpdater, AbstractCurriculumBatchSampler):
         first_batch, _ = ray.get(self.engine.select_batch.remote(self.bsz, 0))
         # breakpoint()
         self.queue.extend(first_batch)
+    
+    def state_dict(self):
+        return {
+            "queue": list(self.queue),
+            "bsz": self.bsz,
+            "epsilon": self.epsilon,
+            "engine": ray.get(self.engine.state_dict.remote()),
+        }
+
+    def load_state_dict(self, state_dict):
+        self.queue = deque(state_dict["queue"], maxlen=self.bsz)
+        self.bsz = state_dict["bsz"]
+        self.epsilon = state_dict["epsilon"]
+        ray.get(self.engine.load_state_dict.remote(state_dict["engine"]))
 
     def __iter__(self):
         while True:

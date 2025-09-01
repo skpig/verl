@@ -147,6 +147,7 @@ class TreeEngine:
         assert self.tree_config == state_dict["tree_config"]
         self.item2node = state_dict["item2node"]
         self.next_item = state_dict["next_item"]
+        self.root = self.item2node[-1]
         # 恢复统计信息，如果不存在则使用默认值
         if "parent_selection_counts" in state_dict:
             self.parent_selection_counts = state_dict["parent_selection_counts"]
@@ -394,8 +395,6 @@ class TreeEngine:
             **selection_metrics,
         }
         return batch, metrics
-        
-
 
 @ray.remote
 class EpsilonRandomTreeEngine(TreeEngine):
@@ -793,3 +792,26 @@ class PGTreeEngine(TreeEngine):
             })
         
         return parent_metrics
+
+    def state_dict(self):
+        state_dict = super().state_dict()
+        state_dict["psi"] = self.psi
+        state_dict["variance"] = self.variance
+        state_dict["s"] = self.s
+        state_dict["n"] = self.n
+        state_dict["last_touch"] = self.last_touch
+        state_dict["father_last_touch"] = self.father_last_touch
+        state_dict["select_num"] = self.select_num
+        state_dict["father_select_num"] = self.father_select_num
+        return state_dict
+    
+    def load_state_dict(self, state_dict):
+        super().load_state_dict(state_dict)
+        self.psi = state_dict["psi"]
+        self.variance = state_dict["variance"]
+        self.s = state_dict["s"]
+        self.n = state_dict["n"]
+        self.last_touch = state_dict["last_touch"]
+        self.father_last_touch = state_dict["father_last_touch"]
+        self.select_num = state_dict["select_num"]
+        self.father_select_num = state_dict["father_select_num"]
