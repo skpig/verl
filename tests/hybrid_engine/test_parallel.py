@@ -46,12 +46,12 @@ from torch.distributed._tensor import DTensor, Shard
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import StateDictType
 from transformers import AutoConfig, AutoModelForCausalLM
-from alpha_seed.workers.fsdp.initialize import meta_device_init
+from mono_rl.worker.engine.fsdp.initialize import meta_device_init
 from alpha_seed.workers.hybrid_engine.fsdp_gather import ulysses_pad_and_slice_inputs
 from dist_attn.ulysses.parallel_states import set_ulysses_sequence_parallel_group
 from dist_attn.ulysses.ops import gather_outputs
 from mono_rl.models.seed_models.monkey_patch import apply_monkey_patch, get_parallel_plan
-from alpha_seed.workers.fsdp.offload import offload_fsdp_optimizer, load_fsdp_optimizer
+from mono_rl.worker.engine.fsdp.offload import offload_fsdp_optimizer, load_fsdp_optimizer
 from alpha_seed.trainer.optim import get_optimizer_from_config
 
 from mono_rl.utils.debug import get_profiler_context, MemoryProfiler
@@ -73,9 +73,9 @@ import verl.utils.torch_functional as verl_F
 def init_model(model_path: str, fsdp_size: int, tp_size: int, oe_size: int, sp_size: int, optimizer_type: str):
 
     if args.strategy == 'vescale-fsdp2':
-        from alpha_seed.workers.vescale.initialize import create_mesh
+        from mono_rl.worker.engine.fsdp.vescale.initialize import create_mesh
     else:
-        from alpha_seed.workers.fsdp.initialize import create_mesh
+        from mono_rl.worker.engine.fsdp.initialize import create_mesh
     meshes = create_mesh(fsdp_size, tp_size, oe_size, sp_size)
     fsdp_mesh, tp_mesh, oe_mesh = meshes[:3]
     model_path = copy_local_path_from_hdfs(model_path)
@@ -106,7 +106,7 @@ def init_model(model_path: str, fsdp_size: int, tp_size: int, oe_size: int, sp_s
         from alpha_seed.workers.fsdp import fully_shard
     elif args.strategy == 'vescale-fsdp2':
         from alpha_seed.workers.vescale import fully_shard
-        from alpha_seed.workers.vescale.fully_shard import register_dtensor_hook
+        from mono_rl.worker.engine.fsdp.vescale.fully_shard import register_dtensor_hook
         from vescale.parallel.fsdp2.extension.optimizer_offload import apply_optimizer_offload, OptimizerOffloadPolicy
 
     model, _ = fully_shard(model=model,

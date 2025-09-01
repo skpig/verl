@@ -76,7 +76,7 @@ from mono_rl.models.seed_models.monkey_patch import apply_monkey_patch
 assert apply_monkey_patch(config=actor_model_config,
                           verbose=rank == 0), f'Cannot find rmpad version of {actor_model_config.model_type}'
 
-from alpha_seed.workers.fsdp.initialize import parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init
+from mono_rl.worker.engine.fsdp.initialize import parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init
 
 enable_gradient_checkpointing = True
 

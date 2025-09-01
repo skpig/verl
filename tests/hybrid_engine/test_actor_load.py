@@ -20,7 +20,7 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.api import ShardingStrategy, MixedPrecision
 
 from torch.distributed.device_mesh import init_device_mesh
-from alpha_seed.workers.fsdp.initialize import parallel_load_safetensors, parallel_init_fsdp_fn, meta_device_init
+from mono_rl.worker.engine.fsdp.initialize import parallel_load_safetensors, parallel_init_fsdp_fn, meta_device_init
 
 dist.init_process_group(backend="nccl")
 world_size = dist.get_world_size()

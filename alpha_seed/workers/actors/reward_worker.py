@@ -15,11 +15,8 @@
 The main entry point to run the PPO algorithm
 """
 
-import shutil
-import warnings
 import os
 import logging
-import hdfs_io
 import ray
 import torch
 import torch.distributed
@@ -30,29 +27,18 @@ from mono_rl.single_controller import register, Dispatch
 from mono_rl import DataProto
 from verl.utils.model import compute_position_id_with_mask
 from verl.utils.fs import copy_local_path_from_hdfs
-from verl.utils.fsdp_utils import get_fsdp_wrap_policy
-from verl.utils.import_utils import import_external_libs
 from verl.utils.model import compute_position_id_with_mask
 
 from transformers import AutoTokenizer
-from alpha_seed.workers.hybrid_engine.fsdp_gather import DataGatherManager, ulysses_pad_and_slice_inputs
-from mono_rl.models.seed_models.monkey_patch import apply_monkey_patch, get_parallel_plan
+from alpha_seed.workers.hybrid_engine.fsdp_gather import DataGatherManager
 from verl.utils.seqlen_balancing import rearrange_micro_batches
 from alpha_seed.utils import ndtimeline
 from mono_rl.models.seed_models.parallel.collectives import get_memory
-from alpha_seed.workers.fsdp.initialize import create_mesh, parallel_init_fsdp_fn, parallel_load_safetensors, meta_device_init, cleanup_local_tmp_folder_safetensors_files
-from alpha_seed.workers.fsdp.extensions import register_dtensor_save_hook, parallelize_module
-from dist_attn.ulysses.ops import gather_outputs
-from dist_attn.ulysses.parallel_states import get_ulysses_sequence_parallel_world_size
+from mono_rl.worker.engine.fsdp.initialize import cleanup_local_tmp_folder_safetensors_files
 
 from alpha_seed.utils.mono_rl.config import reward_config_to_mono_config
 from mono_rl.worker.engine.fsdp.models.model import FSDPModel
 from mono_rl.worker import Role
-
-from seed_models.utils.count_flops import FlopsCounter
-
-from codetiming import Timer
-
 from datetime import timedelta
 
 logger = logging.getLogger(__file__)
@@ -133,7 +119,7 @@ class RewardModelWorker(Worker):
 
         prompt_ids = micro_batch['answer_input_ids'].to(torch.int64)
         micro_batch["input_ids"] = torch.cat([prompt_ids, response_ids], dim=-1)
-        prompt_mask = data.batch["answer_attention_mask"].to(torch.int64)
+        prompt_mask = micro_batch["answer_attention_mask"].to(torch.int64)
         micro_batch["attention_mask"] = torch.cat([prompt_mask, response_mask], dim=-1)
 
         output_td, _ = self.engine._forward_micro_batch(micro_batch, response_length, role=Role.Reward)

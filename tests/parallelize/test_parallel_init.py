@@ -1,13 +1,23 @@
 import torch
 from torch.distributed._tensor import Shard
 import torch.distributed as dist
-from alpha_seed.workers.fsdp.extensions import parallelize_module
-from alpha_seed.workers.fsdp.initialize import meta_device_init
+from mono_rl.worker.engine.fsdp.fully_shard import parallelize_module
+from mono_rl.worker.engine.fsdp.initialize import meta_device_init
 from torch.distributed.device_mesh import init_device_mesh
 from mono_rl.models.seed_models.parallel.collectives import identity_allreduce, allreduce_identity
+from transformers import PreTrainedModel, PretrainedConfig
 
 from ..launch import torchrun
 from functools import partial
+
+
+class DummyModelConfig(PretrainedConfig):
+
+    def __init__(self):
+        super().__init__()
+        self.num_layers = 2
+        self.dim = 1024
+        self.model_type = "dummy"
 
 
 class MLP(torch.nn.Module):
@@ -28,10 +38,12 @@ class MLP(torch.nn.Module):
         return x
 
 
-class DummyModel(torch.nn.Module):
+class DummyModel(PreTrainedModel):
+    _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self):
-        super().__init__()
+        config = DummyModelConfig()
+        super().__init__(config=config)
         self.wte = torch.nn.Embedding(1024, 2)
         # linears
         self.mlp1 = MLP()
