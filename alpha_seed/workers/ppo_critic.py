@@ -112,8 +112,6 @@ class DataParallelPPOCritic(BasePPOCritic):
             metrics_opt = self.engine.optimizer_step()
             self.engine.optimizer_zero_grad()
 
-            print(f"[debug][critic] {metrics_opt['grad_norm']=}")
-
             data_metric = {
                 'critic/grad_norm': metrics_opt['grad_norm'],  # NOTE: grad_norm is a float from monorl
                 'critic/#micro_batch_update': output_proto.meta_info["metrics"].pop('#micro_batch_update'),
@@ -136,7 +134,11 @@ def vf_loss_fn(config, output, micro_data):
     returns = micro_data["returns"]
     response_length = config.get("response_length", 512)
     attention_mask = micro_data["attention_mask"]
-    eos_mask = attention_mask[:, -response_length - 1:-1]
+    if config.get("use_model_output_mask", False):
+        loss_mask = micro_data["model_output_mask"]
+        eos_mask = loss_mask[:, -response_length:]
+    else:
+        eos_mask = attention_mask[:, -response_length:]
     overlong_mask = micro_data.get("overlong_mask", None)
     loss_average_method = config.get("critic_loss_average_method", "sample")
 
@@ -170,6 +172,7 @@ def vf_loss_fn(config, output, micro_data):
         "critic/vf_clipfrac": vf_clipfrac.detach().item(),
         "critic/vpred_mean": verl_F.masked_mean(vpreds, eos_mask).detach().item(),
         "critic/tokens_per_micro_batch_update": attention_mask.sum().detach().item(),
+        "critic/valid_tokens_per_micro_batch_update": eos_mask.sum().detach().item(),
         "seq_vf": seq_vf,
     }
     return vf_loss, metrics
