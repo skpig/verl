@@ -1,4 +1,5 @@
 import math
+import json
 
 from alpha_seed.logging import refine_log
 
@@ -11,6 +12,7 @@ from collections import Counter
 # rule-based reward score
 from concurrent.futures import as_completed
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import os
 
@@ -31,6 +33,7 @@ from alpha_seed.utils.reward_score import response_post_proc, _select_rm_score_f
 from alpha_seed.utils.duplicate import para_dup
 from alpha_seed.utils.alarm.lark_util import send_message_to_employee
 from tasks.main_ppo import RewardManager, make_static_omegaconf
+import hdfs_io
 
 try:
     from nltk.util import ngrams
@@ -74,6 +77,48 @@ def is_divisible_by_0_point_1(score):
 
 class VLMRewardManager(RewardManager):
 
+    def __init__(self, tokenizer, config, logger, grm_remote_client=None, rm_name="train", single_batch=False):
+        self.tokenizer = tokenizer
+        self.logger = logger
+        self.log_table = []
+        self.rm_name = rm_name
+        self.config = config
+        self.case_study_dir = config.trainer.default_hdfs_dir + "/cases/"
+        self.rm_req_executor = None
+        if not single_batch:
+            self.rm_req_executor = ThreadPoolExecutor(
+                max_workers=int(self.config.reward_model.get('reward_executor_maxnum', 128)))
+        self.mean = self.config.reward_model.mean
+        self.std = self.config.reward_model.std
+        self.need_punish_duplicate = self.config.reward_model.get('need_punish_duplicate', False)
+        self.score_merger = self.config.reward_model.grm.get('score_merger', 'v1')
+        self.punish_score = self.config.reward_model.get('punish_score', 'rule-lighteval/MATH_v2:-1,code-sandbox:0')
+        self.punish_score = dict(map(lambda x: (x.split(':')[0], float(x.split(':')[1])), self.punish_score.split(',')))
+        self.need_punish_trunc = self.config.reward_model.get('need_punish_trunc', False)
+        self.trunc_punish_score = self.config.reward_model.get('trunc_punish_score', -5)
+        self.log_image = self.config.reward_model.get('log_image', True)
+        self.len_ema_without_overlong = self.config.reward_model.get(
+            'len_ema_without_overlong', False)  # 在计算平均长度时不考虑超长的，这部分反正会被打压（配合trunc_punish_score一起用）
+        self.length_ema_method = self.config.reward_model.get('length_ema_method', 'mean')
+        assert not self.len_ema_without_overlong or self.need_punish_trunc or self.config.algorithm.mask_overlong or self.config.algorithm.overlong_punish != 'v0', "len_ema_without_overlong is True, so self.need_punish_trunc or mask_overlong must be true."
+        self.len_ema_lambda = self.config.reward_model.get('len_ema_lambda', 1)
+        self.len_ema = {}
+        self.len_ema_json = self.config.reward_model.get('len_ema_json', None)
+        if self.len_ema_json is not None and len(self.len_ema) == 0:
+            hdfs_io.hcopy(self.len_ema_json, 'len_ema.json')
+            with open('len_ema.json') as f:
+                self.len_ema = json.load(f)
+            for k, v in self.len_ema.items():
+                self.len_ema[k] = torch.tensor(v, dtype=torch.float32)
+
+        if self.config.reward_model.add_int_verify:
+            warnings.warn(
+                "int_verify is deprecated and needs attention. It selects the last integer and judges its correctness, which could lead to unexpected behaviour. Robust verification like \\boxed{} is recommended."
+            )
+        self.grm_remote_client = grm_remote_client
+        think_template = self.config.data.get('think_template', 'v2')
+        os.environ["THINK_TEMPLATE"] = think_template
+
     def update_len_ema(self, data: DataProto):
         index = data.non_tensor_batch['index']
         lengths = data.batch['attention_mask'][:, self.config.data.max_prompt_length:].sum(-1)
@@ -112,7 +157,7 @@ class VLMRewardManager(RewardManager):
         mean_len_per_prompt = [self.len_ema[idx].item() for idx in index]
         return mean_len_per_prompt
 
-    def __call__(self, data: DataProto, global_step=None, need_norm=True, is_validation=False):
+    def __call__(self, data: DataProto, global_step=None, need_norm=True, is_validation=False, val_only=False):
         """We will expand this function gradually based on the available datasets"""
         response_ids = data.batch['input_ids'][:, self.config.data.max_prompt_length:]
 
@@ -226,15 +271,11 @@ class VLMRewardManager(RewardManager):
 
             is_para_dup = para_dup.find_single_turn_duplicate(
                 solution_str, enable_resp_para=self.config.reward_model.enable_resp_para)[0]
-            think_template = self.config.data.get('think_template', 'v2')
 
             if self.config.reward_model.get('need_punish_lengthy_answer', False):
                 # Maybe it's not a good coding style to reuse `is_para_dup` here. To be refactored if we have the time.
-                is_para_dup = is_para_dup or para_dup.is_final_answer_lengthy(
-                    response_ids=valid_response_ids.tolist(),
-                    tokenizer=self.tokenizer,
-                    version=think_template,
-                )
+                is_para_dup = is_para_dup or para_dup.is_final_answer_lengthy(response_ids=valid_response_ids.tolist(),
+                                                                              tokenizer=self.tokenizer)
             is_trunc = (response_length == valid_response_length) and score == -1
 
             ngram = list(ngrams(valid_response_ids.tolist(), 2)) if ngrams is not None else []
@@ -259,8 +300,12 @@ class VLMRewardManager(RewardManager):
 
             return return_dict
 
-        for i in range(len(data)):
-            rm_res_future_list.append(self.rm_req_executor.submit(get_rm_score, i))
+        if self.rm_req_executor is None:
+            for i in range(len(data)):
+                rm_res_future_list.append(get_rm_score(i))
+        else:
+            for i in range(len(data)):
+                rm_res_future_list.append(self.rm_req_executor.submit(get_rm_score, i))
         oj_fail_cnt = 0
         verifier_fail_cnt = 0
         oj_total_cnt = 0
@@ -290,8 +335,15 @@ class VLMRewardManager(RewardManager):
 
         all_final_scores_to_lens = defaultdict(list)
         static_conf = make_static_omegaconf(self.config)
-        for res in tqdm(as_completed(rm_res_future_list), total=len(data), desc="get_rm_score"):
-            output_dict = res.result()
+        if self.rm_req_executor is not None:
+            generator = tqdm(as_completed(rm_res_future_list), total=len(data), desc="get_rm_score")
+        else:
+            generator = iter(rm_res_future_list)
+        for res in generator:
+            if not isinstance(res, dict):
+                output_dict = res.result()
+            else:
+                output_dict = res
             prompt_str = output_dict["prompt_str"]
             solution_str = output_dict["solution_str"]
             ground_truth = output_dict["ground_truth"]
@@ -389,7 +441,7 @@ class VLMRewardManager(RewardManager):
             if reward_style not in already_print_data_sources:
                 already_print_data_sources[reward_style] = 0
 
-            if already_print_data_sources[reward_style] < self.config.trainer.num_cases_to_wandb:
+            if already_print_data_sources[reward_style] < self.config.trainer.num_cases_to_wandb and not val_only:
                 already_print_data_sources[reward_style] += 1
                 if reward_style == "code-sandbox":
                     ground_truth = ''  # 对于OJ问题，ground_truth会比较大，扛不住
@@ -457,7 +509,8 @@ class VLMRewardManager(RewardManager):
                 sum(all_dup_punish_scores) / max(1, len(all_dup_punish_scores)),
         }
         log_data = {**log_data, **log_counter, **log_score_to_lens, **log_score}
-        self.logger.log(data=log_data, step=global_step)
+        if self.logger is not None:
+            self.logger.log(data=log_data, step=global_step)
 
         if oj_total_cnt > 0 and oj_fail_cnt / oj_total_cnt >= 0.01:
             send_message_to_employee("alpha seed任务oj失败率过高",
@@ -507,5 +560,7 @@ class VLMRewardManager(RewardManager):
 
         if not is_validation:
             return reward_tensor, raw_scores, len_scores, idx_tensor
+        elif val_only:
+            return reward_tensor, prompt_str, solution_str
         else:
             return reward_tensor, log_table

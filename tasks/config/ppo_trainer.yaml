@@ -547,6 +547,9 @@ rollout_server:
   tool_call_start_token_xml: <seed:tool_call>
   tool_call_end_token_xml: </seed:tool_call>
   tool_call_use_xml: False
+  evals:
+    enable: False
+    ckpt_interval_seconds: 60
 
 streaming_rollout:
   n_gpus_per_node: 0

@@ -1,4 +1,3 @@
-import itertools
 from typing import *
 import asyncio
 import copy
@@ -6,11 +5,12 @@ import ray
 import torch
 import numpy as np
 import pandas as pd
-import uuid
 import time
 import threading
 import json
 import random
+import os
+import logging
 
 from concurrent.futures import ThreadPoolExecutor, wait, ALL_COMPLETED
 from alpha_seed.utils.debug.aiomonitor import get_aiomonitor_cls
@@ -18,7 +18,10 @@ from alpha_seed.workers.actors.rollout_pool import RolloutPool
 from contextlib import suppress, contextmanager, nullcontext
 from codetiming import Timer
 from omegaconf import OmegaConf, DictConfig
-from ray import ObjectRef
+try:
+    import aiofiles
+except ImportError:
+    aiofiles = None
 
 from alpha_seed.workers.agents.executor import RayActorExecutor, ExecutorBase, LocalExecutor
 from alpha_seed.workers.agents.metrics_collector import init_agent_metrics_collector
@@ -43,6 +46,8 @@ from alpha_seed.workers.agents.handlers import select_handler_fn
 from alpha_seed.workers.agents.handlers import TaskContext
 from alpha_seed.workers.streaming_service.streaming_utils import pad, process_output, create_response_tensor
 from alpha_seed.utils.reward_score import NON_AGENT_PLACE_HOLDER_SCORE
+
+logger = logging.getLogger(__name__)
 
 
 class SaveDataProtoFunc(Protocol):
@@ -165,6 +170,9 @@ class RolloutManager:
         # off_policy_step counter
         self._task_id_counter = 0
         self._task_id_to_task_and_step: Dict[int, Tuple[asyncio.Task, int]] = {}
+
+        # sync param
+        self._sync_param_once = False
 
     def _init_servers(self):
         # server mode 下 start 各种 server
@@ -612,14 +620,17 @@ class RolloutManager:
             gen_batch.union(batch)
             self.rollout_server_started.wait()
             self.val_client_executor.set_global_step(step)
-            batch = self._val_server_gen(gen_batch, step=step, metrics=metrics, is_standalone=is_async)
+            if self.config.rollout_server.evals.enable:
+                batch = self._val_server_gen_with_ckpt(gen_batch, step=step, metrics=metrics, is_standalone=is_async)
+            else:
+                batch = self._val_server_gen(gen_batch, step=step, metrics=metrics, is_standalone=is_async)
         else:
             gen_out_batch = self._val_batch_gen(gen_batch, step=step, metrics=metrics, is_standalone=is_async)
             same_keys = batch.non_tensor_batch.keys() & gen_out_batch.non_tensor_batch.keys()
             batch.pop(non_tensor_batch_keys=list(same_keys))
             batch.union(gen_out_batch)
 
-        if self._use_server:
+        if self._use_server and not self.config.rollout_server.evals.enable:
             # maintain keys not handled in server mode
             batch.batch["prompts"] = batch.batch["input_ids"][:, :self.config.data.max_prompt_length]
             batch.batch["responses"] = batch.batch["input_ids"][:, self.config.data.max_prompt_length:]
@@ -1016,6 +1027,7 @@ class RolloutManager:
         return gen_out_batch
 
     def _val_server_gen(self, gen_batch: DataProto, step: int, metrics: Dict, is_standalone: bool) -> DataProto:
+        """For val during training"""
         if self.val_standalone_wg is not None:
             with Timer(name="update_rollout_server", logger=None) as timer:
                 self.update_standalone_server_weights(is_train=False)
@@ -1098,6 +1110,135 @@ class RolloutManager:
         gen_out.meta_info['xperf_metrics'] = self._merge_xperf_metrics(ready_batch, xperf_metrics[0])
         record_xperf_metrics(gen_out, metrics, self.logger, step, prefix="standalone" if is_standalone else "hybrid")
         return gen_out
+
+    def _get_filter_key(self, item):
+        if isinstance(item, dict):
+            val_epoch_id = item['val_epoch_id']
+            index_id = item['index_id']
+            bon_id = item['bon_id']
+        else:
+            val_epoch_id = item.meta_info['epoch_id']
+            index_id = item.non_tensor_batch['index'][0]
+            bon_id = item.non_tensor_batch['bon_id'][0]
+        return f"{val_epoch_id}_{index_id}_{bon_id}"
+
+    async def _write_results_to_file(self, ready_batch):
+        assert self.config.trainer.default_hdfs_dir.startswith("/mnt/hdfs/"), \
+            f"default_hdfs_dir must start with /mnt/hdfs/, got {self.config.trainer.default_hdfs_dir}"
+        save_file = os.path.join(self.config.trainer.default_hdfs_dir, f"val_results.jsonl")
+        logger.info(f"[INFO] Writing {len(ready_batch)} items to {save_file}")
+        index_file = os.path.join(self.config.trainer.default_hdfs_dir, f"val_results_index.json")
+        if aiofiles is None:
+            raise RuntimeError("please pip install aiofiles")
+        async with aiofiles.open(save_file, "a") as f:
+            for item in ready_batch:
+                await f.write(json.dumps(item) + "\n")
+        indices = []
+        for item in ready_batch:
+            indices.append(self._get_filter_key(item))
+        async with aiofiles.open(index_file, "a") as f:
+            await f.write(json.dumps(indices) + "\n")
+
+    async def _filter_history_data(self, gen_batch):
+        assert self.config.trainer.default_hdfs_dir.startswith("/mnt/hdfs/"), \
+            f"default_hdfs_dir must start with /mnt/hdfs/, got {self.config.trainer.default_hdfs_dir}"
+        save_file = os.path.join(self.config.trainer.default_hdfs_dir, f"val_results_index.json")
+        indices = []
+        if not os.path.exists(save_file):
+            return gen_batch
+        if aiofiles is None:
+            raise RuntimeError("please pip install aiofiles")
+        async with aiofiles.open(save_file, "r") as f:
+            lines = await f.read()
+            lines = lines.strip().split('\n')
+            for line in lines:
+                indices.extend(json.loads(line))
+        gen_batch = list(filter(lambda x: self._get_filter_key(x) not in indices, gen_batch))
+        return gen_batch
+
+    def _val_server_gen_with_ckpt(self, gen_batch: DataProto, step: int, metrics: Dict,
+                                  is_standalone: bool) -> DataProto:
+        """rollout server gen with ckpt, for val_only, sync param once. 用户可以自定义handler, handler返回的结果会保存到fused hdfs路径中,
+        保存时间间隔为config.rollout_server.evals.ckpt_interval_seconds"""
+        if self.val_standalone_wg is not None and not self._sync_param_once:
+            with Timer(name="update_rollout_server", logger=None) as timer:
+                self.update_standalone_server_weights(is_train=False)
+            print(f"[INFO] {step} val generate server[update weights and restart] {timer.last}")
+            metrics["timing/update_rollout_server"] = timer.last
+            self._sync_param_once = True
+
+        global_handler = select_handler_fn(self.config.rollout_server.handler,
+                                           external_lib=self.config.rollout_server.external_lib)
+        context = TaskContext(
+            config=self.config,
+            global_step=step,
+            server_host=self.val_rollout_server.host,
+            server_port=self.val_rollout_server.port,
+            is_train=False,
+        )
+
+        async def _submit_and_wait():
+            # submit the training batch to the rollout server
+            start = time.time()
+            running_batch = []
+            val_gen_batch = gen_batch.chunk(len(gen_batch))
+            val_gen_batch = await self._filter_history_data(val_gen_batch)
+            if not val_gen_batch:
+                return
+
+            last_completed_num = len(gen_batch) - len(val_gen_batch)
+
+            for item in val_gen_batch:
+                handler = None
+                if 'agent_handler' in item.non_tensor_batch and not pd.isna(
+                        item.non_tensor_batch['agent_handler'][0]) and item.non_tensor_batch['agent_handler'][0].strip(
+                        ):
+                    handler = select_handler_fn(item.non_tensor_batch['agent_handler'][0],
+                                                external_lib=self.config.rollout_server.external_lib)
+                task = asyncio.create_task(self.val_client_executor.submit(handler or global_handler, item, context))
+                running_batch.append(task)
+            logger.info(
+                f"[INFO] {step} val generate streaming[submit], batch size: {len(val_gen_batch)}, {time.time() - start}"
+            )
+            start = time.time()
+
+            start_time = time.time()
+            write_task = None
+            ready_batch_buffer = []
+            completed_num = 0
+
+            while running_batch:
+                done, running_batch = await asyncio.wait(running_batch, return_when=asyncio.FIRST_COMPLETED)
+                ready_batch = await asyncio.gather(*done, return_exceptions=True)
+                ready_batch = [task for task in ready_batch if task is not None]
+                ready_batch_buffer.extend(ready_batch)
+                completed_num += len(ready_batch)
+                time_elaspe = time.time() - start
+                logger.info(
+                    f"[INFO] {step} val generate progress: {completed_num}/{last_completed_num+completed_num}/{len(gen_batch)}, time elaspe: {time_elaspe}s, throughput: {completed_num / time_elaspe}"
+                )
+                if time.time() - start_time > self.config.rollout_server.evals.ckpt_interval_seconds:
+                    start_time = time.time()
+                    if len(done) == 0:
+                        continue
+                    if write_task is not None:
+                        # wait last write task to finish
+                        await write_task
+                    # async write
+                    write_task = asyncio.create_task(self._write_results_to_file(ready_batch_buffer))
+                    ready_batch_buffer = []
+
+            if write_task is not None:
+                await write_task
+            if len(ready_batch_buffer) > 0:
+                await self._write_results_to_file(ready_batch_buffer)
+
+            logger.info(f"[INFO] {step} val gen server[as_completed], batch size: {len(val_gen_batch)}")
+
+        xperf_metrics: List[dict] = [{}]
+        with nullcontext() if is_standalone else self.enable_hybrid_server_gen_ctx(is_train=False,
+                                                                                   xperf_metrics=xperf_metrics):
+            asyncio.run_coroutine_threadsafe(_submit_and_wait(), self.loop).result()
 
     def _prepare_gen_batch(self, batch: DataProto, step, is_train: bool):
         gen_batch_required_keys = ["input_ids", "attention_mask"]

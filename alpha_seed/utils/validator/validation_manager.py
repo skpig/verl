@@ -171,18 +171,25 @@ class ValidateManager(object):
                 eval_bon = self.config.actor_rollout_ref.rollout.get("eval_bon", 1)
                 test_batch.non_tensor_batch['rollout_id'] = np.array(
                     [str(uuid.uuid4()) for _ in range(len(test_batch))], dtype=object)
+                bon_ids = list(range(eval_bon)) * (len(test_batch))
                 if eval_bon != 1:
                     test_batch = test_batch.repeat(eval_bon)
+                    test_batch.non_tensor_batch['bon_id'] = np.array(bon_ids, dtype=object)
+                test_batch.meta_info['epoch_id'] = val_epoch_idx
 
                 # create a uid for each data inside the batch
                 test_batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(test_batch))],
                                                               dtype=object)
-
+                input_batch = test_batch
                 test_batch = self.rollout_manager.val_generate(test_batch, step=global_step, is_async=is_async)
 
                 print(
                     f'{val_epoch_idx + 1}-th/{val_epoch} {val_idx + 1}-th/{len(self.val_dataloader)} validation generation end'
                 )
+                if test_batch is None:
+                    release_object(self.dist_data_manager, input_batch.non_tensor_batch,
+                                   ['image_data_ref', 'images_bytes_ref'])
+                    continue
 
                 if self.use_rm:
                     # we first compute reward model score
@@ -253,6 +260,10 @@ class ValidateManager(object):
                         self._save_val_data(reward_tensor_before_select, prompts, responses, f)
                 release_object(self.dist_data_manager, test_batch.non_tensor_batch,
                                ['image_data_ref', 'images_bytes_ref'])
+
+        if len(reward_tensor_lst) == 0:
+            self.val_result_queue.put(({}, val_log_lst, global_step))
+            return
 
         reward_tensor = torch.cat(reward_tensor_lst, dim=0).cpu()  # (valsize*num_prompt_per_data, eval_bon)
         reward_tensor = torch.clamp(reward_tensor, min=0)
