@@ -14,21 +14,23 @@
 from abc import abstractmethod
 from collections import deque
 from collections.abc import Sized
+from dataclasses import dataclass
 from multiprocessing import Process
 import pprint
+import time
+import ray
 from regex import F
 import torch
 from omegaconf import DictConfig
 from torch.utils.data import Sampler
 from traitlets import default
 import numpy as np
-from typing import Deque, List, Dict
+from typing import Deque, List, Dict, Optional
 import traceback
 from torch.utils.data import RandomSampler, SequentialSampler
 from concurrent.futures import ProcessPoolExecutor
 
 from verl import DataProto
-from verl.utils.dataset.rl_dataset import TreeNode
 
 
 class AbstractSampler(Sampler[int]):
@@ -92,63 +94,81 @@ class TreeSampler(AysncUpdater, AbstractCurriculumBatchSampler):
         AbstractCurriculumBatchSampler.__init__(self, data_source, data_config)
         AysncUpdater.__init__(self)
 
-        self.data_config = data_config
-        self.data_source = data_source
         self.bsz = data_config.train_batch_size
-        self.original_len = len(data_source)
-        self.root = self.data_source.root
-        self.item2node: Dict[int, TreeNode] = self.data_source.item2node
         self.rng = np.random.default_rng()
+
+        self.engine = data_source.engine
+        self.queue: Deque[int] = deque(maxlen=self.bsz)
+
+        # self.gamma = 0.9
 
         # for epsilon greedy
         self.epsilon = data_config.sampler.tree_sampler.epsilon
 
-
-
-    def epsilon_greedy_sampling(self):
-        batch = []
-        for idx in range(self.original_len):
-            # breakpoint() # DEBUG:
-            # 选择当前 idx 或其某个 child
-            node = self.item2node[idx]
-            use_self = (self.rng.random() < self.epsilon) or (len(node.children_items) == 0)
-            if use_self:
-                choice = idx
-            else:
-                # 注意：np.random.choice 对 Python 对象列表也可用，但更稳妥是从整数里抽
-                choice = self.rng.choice(node.children_items)
-
-            batch.append(choice)
-            if len(batch) == self.bsz:
-                yield batch
-                batch = []
-
-        # # drop last = False
-        # if batch:
-        #     yield batch
+        # initalize queue
+        first_batch, _ = ray.get(self.engine.select_batch.remote(self.bsz, 0))
+        # breakpoint()
+        self.queue.extend(first_batch)
     
-    def mcts_sampling(self):
-        pass
+    def state_dict(self):
+        return {
+            "queue": list(self.queue),
+            "bsz": self.bsz,
+            "epsilon": self.epsilon,
+            "engine": ray.get(self.engine.state_dict.remote()),
+        }
 
+    def load_state_dict(self, state_dict):
+        self.queue = deque(state_dict["queue"], maxlen=self.bsz)
+        self.bsz = state_dict["bsz"]
+        self.epsilon = state_dict["epsilon"]
+        ray.get(self.engine.load_state_dict.remote(state_dict["engine"]))
 
     def __iter__(self):
-        if self.data_config.sampler.tree_sampler.name == 'epsilon':
-            yield from self.epsilon_greedy_sampling()
-        elif self.data_config.sampler.tree_sampler.name == 'mcts':
-            yield from self.mcts_sampling()
+        while True:
+            if len(self.queue) < self.bsz:
+                print("[Sampler] Not enough items in queue, drop last, raise an StopIterationError")
+                return
+            batch = [int(self.queue.popleft()) for _ in range(self.bsz)]
+            print(batch)
+            print(type(batch[0]))
+            yield batch
 
-    @staticmethod
-    def _update(self, data_source, batch: DataProto, step_num: int) -> None:
-        pass
+    def async_update(self, batch: DataProto, step_num: int) -> None:
+        """ Some heavy operations are done in async way """
 
+        # # update posteriro, NOTE: must before create new node
+        # self.update_posterior_future = self.engine.update_posterior.remote(batch.non_tensor_batch["item"].tolist(), batch.non_tensor_batch["score"].tolist(), step_num)
 
-    def async_update(self, *args, **kwargs) -> None:
-        pass
+        # # update tree structure, mainly create new nodes
+        # self.update_data_source_future = self.engine.update_data_source.remote(batch, step_num)
+    
 
+        # # select batch
+        # self.new_batch_future = self.engine.select_batch.remote(self.bsz)
+
+        assert self.update_future is None, "future is not None"
+        self.update_future = self.engine.async_wrap_all.remote(batch, step_num, self.bsz)
 
     def update(self, batch: DataProto, step_num: int) -> None:
-        dataset_metrics = self.data_source.update(batch, step_num=step_num)
-        return dataset_metrics
+        # wait for the result
+        start_time = time.time()
+        # new_batch, selection_metrics= ray.get(self.new_batch_future)
+        # data_metrics = ray.get(self.update_data_source_future)
+        new_batch, metrics = ray.get(self.update_future)
+        self.update_future = None
+        end_time = time.time()
+        print(f"[Sampler] Time taken to select batch: {end_time - start_time} seconds")
+
+        # breakpoint()
+
+        # fill in queue
+        assert len(new_batch) == self.bsz
+        assert len(self.queue) == 0
+        self.queue.extend(new_batch)
+
+        return metrics
+
 
 class MoPPSSampler(AbstractCurriculumBatchSampler):
     """

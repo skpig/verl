@@ -16,6 +16,7 @@ A unified tracking interface that supports logging data to different backend
 """
 
 from concurrent.futures import ProcessPoolExecutor
+import token
 from transformers import AutoTokenizer
 import dataclasses
 import multiprocessing
@@ -80,7 +81,34 @@ def decode_response(prompt, response):
     decoded_response_clean = clean_up_special_token(child_tokenizer, response)
     return decoded_prompt, decoded_response, decoded_response_clean
 
-def async_tracking_log_samples(train_batch, tokenizer, global_step):
+
+def async_tracking_thetas(metrics, global_step):
+    # fixed thetas
+    fixed_thetas = metrics["sampler/fixed_thetas"]
+    for i, theta in enumerate(fixed_thetas):
+        table = wandb.Table(columns=[f"fixed_{i}_parent"], data=[[i] for i in theta])
+        box = wandb.plot.box(table, title=f"fixed_{i}_parent", columns=[f"fixed_{i}_parent"])
+        wandb.log({f"thetas/fixed_{i}_parent_step{global_step}": box}, step=global_step)
+    # father thetas
+    father_thetas = metrics["sampler/father_thetas"]
+    table = wandb.Table(columns=["father_thetas"], data=[[i] for i in father_thetas])
+    box = wandb.plot.box(table, title="father_thetas", columns=["father_thetas"])
+    wandb.log({f"thetas/father_thetas_step{global_step}": box}, step=global_step)
+    
+    # thetas
+    thetas = metrics["sampler/thetas"]
+    table = wandb.Table(columns=["all_thetas"], data=[[i] for i in thetas])
+    box = wandb.plot.box(table, title="all_thetas", columns=["all_thetas"])
+    wandb.log({f"thetas/all_thetas_step{global_step}": box}, step=global_step)
+
+    # selected thetas
+    selected_thetas = metrics["sampler/selected_thetas"]
+    table = wandb.Table(columns=["selected_thetas"], data=[[i] for i in selected_thetas])
+    box = wandb.plot.box(table, title="selected_thetas", columns=["selected_thetas"])
+    wandb.log({f"thetas/selected_thetas_step{global_step}": box}, step=global_step)
+
+
+def async_tracking_log_samples(train_batch, tokenizer, metrics, global_step):
     responses = train_batch.batch["responses"]
     batch_size, response_length = responses.shape
     print(time.ctime(), "sample shape", responses.shape)
@@ -122,6 +150,27 @@ def async_tracking_log_samples(train_batch, tokenizer, global_step):
     print(time.ctime(), "sample to RlSample done")
     wandb.log({"train_samples": rl_samples}, step=global_step)
     print(time.ctime(), "sample wandb.log done")
+
+    if train_batch.non_tensor_batch.get('partial_rollout_len', None) is not None and global_step % 20 == 0:
+        # log partial rollouts
+        responses = train_batch.batch['responses']
+        # partial_responses = train_batch.batch['responses'][:,:train_batch.non_tensor_batch['partial_rollout_len'].astype(np.int32)]
+        partial_responses = []
+        for i in range(len(train_batch.batch['responses'])):
+            partial_responses.append(train_batch.batch['responses'][i][:int(train_batch.non_tensor_batch['partial_rollout_len'][i])])
+        prompts = tokenizer.batch_decode(train_batch.batch['prompts'], skip_special_tokens=True)
+        decoded_responses = tokenizer.batch_decode(responses, skip_special_tokens=True)
+        decoded_partial_responses = tokenizer.batch_decode(partial_responses, skip_special_tokens=True)
+        columns = ['prompt', 'partial_response', 'response']
+        data = []
+        for i in range(len(prompts)):
+            data.append([prompts[i], decoded_partial_responses[i], decoded_responses[i]])
+        table = wandb.Table(columns=columns, data=data)
+        wandb.log({f"train_partial_samples_{global_step}": table}, step=global_step)
+
+    # log psi distribution
+    if "sampler/thetas" in metrics and global_step % 20 == 0:
+        async_tracking_thetas(metrics, global_step)
 
 
 class Tracking:

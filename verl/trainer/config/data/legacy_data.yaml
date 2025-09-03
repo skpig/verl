@@ -111,12 +111,23 @@ sampler:
     name: epsilon # epsilon, mcts, thompson
 
     # params for epsilon
-    epsilon: 0.3
+    epsilon: 0.3  
+
+    # params for pg
+    diverse_threshold: 0 # the minimum number for reuse one **father**
+    father_only_ratio: null # null indicates no father-children split, 0.3 might be a good value
+    mu0: -0.5 # \psi_p ~ N(\mu0, \tau0)
+    tau0: 1.5 # \psi_p ~ N(\mu0, \tau0)
+    sigma0: null # \psi ~ N(\psi_p, \sigma0), if set, delta will be ignored
+    delta: 0.1 # variance of p(\psi | \psi_parent)
+    gibbs_sweeps: 5 # number of gibbs sweeps
+    gamma: 0.995 # discount factor for pg
 
 tree_data:
 
   # common settings
-  correct_only: True # only create new node from correct response
+  # correct_only: True # only create new node from correct response
+  keep_incorrect_prob: 0.0 # the probability of creating new node from incorrect response
   root_only: True # only create new node from root node
   partial_rollout_ratio: 0.7 # only create partial rollout from the first partial_rollout_ratio of the response
   min_partial_rollout_len: 1000 # if the partial rollout is too short, skip
