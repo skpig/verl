@@ -495,6 +495,7 @@ class RayPPOTrainer:
             "perf/global_cumsum_total_dedup_num_prompt_tokens": 0,
             "perf/global_cumsum_total_dedup_num_response_tokens": 0,
             "perf/global_cumsum_total_dedup_num_tokens": 0,
+            "perf/global_time": 0,
         }
         # self.artifact = 
 
@@ -1715,6 +1716,7 @@ class RayPPOTrainer:
                     self.global_metrics['perf/global_cumsum_total_dedup_num_prompt_tokens'] += metrics['perf/total_dedup_num_prompt_tokens']
                     self.global_metrics['perf/global_cumsum_total_dedup_num_response_tokens'] += metrics['perf/total_dedup_num_response_tokens']
                     self.global_metrics['perf/global_cumsum_total_dedup_num_tokens'] += metrics['perf/total_dedup_num_tokens']
+                    self.global_metrics['perf/global_time'] += timing_raw['step']
 
                     metrics.update(self.global_metrics)
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
