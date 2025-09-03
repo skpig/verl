@@ -32,6 +32,7 @@ import os
 import copy
 import json
 import queue
+import ray
 from functools import partial
 from alpha_seed.trainer.utils.lineage import (report_job_config, report_data_loaded, report_trial_ckpts_load,
                                               report_rl_ckpts_load, safely_do)
@@ -45,6 +46,7 @@ from collections import defaultdict
 import pandas as pd
 import numpy as np
 from codetiming import Timer
+import wandb
 
 from alpha_seed.utils.select_strategy.bon_strategy import *
 from alpha_seed.utils.select_strategy.league_training_strategy import *
@@ -67,7 +69,7 @@ from mono_rl.single_controller import Worker
 from mono_rl.single_controller.ray import RayResourcePool, RayWorkerGroup, RayClassWithInitArgs
 from mono_rl.single_controller.ray import create_colocated_worker_cls
 from mono_rl import DataProto
-from mono_rl.utils.dataset.dist_data_util import load_image_data_dist, init_or_get_dist_data_manager
+from mono_rl.utils.dataset.dist_data_util import load_image_data_dist, init_or_get_dist_data_manager, release_object
 from verl.utils.fs import copy_local_path_from_hdfs
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from hdfs_io import makedirs, hput, hcopy, hexists
@@ -852,6 +854,8 @@ class RayPPOTrainer(object):
         self.dist_data_manager = init_or_get_dist_data_manager(stable_pool_name)
 
         safely_do(lambda: report_job_config(config), rank=0)()
+        self.rollout_counter = 0
+        self.rollout_pool_metrics = {}
 
     def _create_dataloader(self):
         self.dataloader_mgr = DataLoaderMgr(self.config, self.tokenizer, self.is_vlm, self.processor)
@@ -1686,46 +1690,7 @@ class RayPPOTrainer(object):
             torch.sqrt(torch.clamp(
                 (x_square_mean - x_mean * x_mean) * (y_square_mean - y_mean * y_mean), min=0.0)) + epsilon)
 
-    def fit(self):
-        self._create_kl_control()
-        self._create_dataloader()
-        self._create_rollout_manager()
-        self._create_validation_manager()
-
-        if self.save_batch_dir:
-            makedirs(self.save_batch_dir, exist_ok=True)
-
-        metric_collection_context = self.megavision_metrics_collector.collect_resume_from_checkpoint_duration() \
-            if MegavisionMetricsCtx else contextlib.nullcontext()
-        with metric_collection_context:
-            if self.global_step != 0:
-                # load checkpoint before doing anything
-                log_cpu_memory_usage('before load checkpoint')
-                self.load_checkpoint()
-                log_cpu_memory_usage('after load checkpoint')
-
-        # perform validation before training
-        if self.val_reward_fn is not None and (self.config.trainer.eval_before_training or
-                                               self.config.trainer.val_only):
-            self.validation_manager.validate(val_epoch=self.config.trainer.val_epoch,
-                                             need_log=self.config.trainer.need_log,
-                                             log_file=self.config.trainer.log_file,
-                                             is_async=self.use_standalone_validator,
-                                             global_step=self.global_step)
-        if self.config.trainer.val_only:
-            if self.config.trainer.save_train_batch_dir is not None and self.config.trainer.need_log:
-                hput(self.config.trainer.log_file, self.config.trainer.save_train_batch_dir)
-                print(
-                    f'Saving validation log_file from {self.config.trainer.log_file} to {self.config.trainer.save_train_batch_dir}',
-                    flush=True)
-            wandb.finish()
-            return
-
-        # Note that we start from step 1. After resume, we increment step by 1 to start next step
-        self.global_step += 1
-        start_step = self.global_step
-        rollout_counter = 0
-        rollout_pool_metrics = {}
+    def _train_generate(self, metrics, start_step):
 
         def train_batch_generator_fn():
             while True:
@@ -1741,232 +1706,185 @@ class RayPPOTrainer(object):
             return batch
 
         train_batch_generator = train_batch_generator_fn()
+        # hybrid generate (on policy)
+        if self.config.trainer.load_train_batch_path is None:
+            if self.config.trainer.queued_rollout_config.enable:
+
+                def train_batch_generator_with_preprocess_fn():
+                    for batch in train_batch_generator:
+                        batch = self._preprocess_batch_before_gen(batch, metrics, start_step)
+                        batch = image_preprocess(batch, metrics)
+                        yield batch
+
+                train_batch_generator_with_preprocess = train_batch_generator_with_preprocess_fn()
+                with Timer(name='generate', logger=None) as timer:
+                    batch = self.rollout_manager.train_generate_queued(train_batch_generator_with_preprocess,
+                                                                       step=self.global_step,
+                                                                       metrics=metrics)
+                metrics['timing/generate'] = timer.last
+            else:
+                batch: DataProto = next(train_batch_generator)
+                batch = image_preprocess(batch, metrics)
+
+                if self.config.algorithm.priority_sample:
+                    self.sample_pool.fill_sample_pool(batch)
+                    self.sample_pool.rearrange_sample_pool()
+                    if self.config.algorithm.TD_priority_ratio > 0:
+                        self.sample_pool.rearrange_TD_sample_pool(
+                            int(self.config.data.train_batch_size * self.config.algorithm.TD_priority_ratio))
+                    batch = self.sample_pool.get_gen_batch(self.config.data.train_batch_size)
+                self.get_mean_max_len_per_query(batch, metrics)
+
+                batch = self._preprocess_batch_before_gen(batch, metrics, start_step)
+                # generate
+                is_warmup_step = self.global_step < self.rollout_pool_warmup_step + start_step
+                with Timer(name='generate', logger=None) as timer:
+                    save_path = f"{self.config.trainer.default_hdfs_dir}/checkpoints/global_step_{self.global_step - 1}/"
+                    save_dataproto_fn = partial(save_dataproto,
+                                                path=save_path,
+                                                dist_data_manager=self.dist_data_manager)
+                    batch = self.rollout_manager.train_generate(batch,
+                                                                step=self.global_step,
+                                                                save_dataproto_fn=save_dataproto_fn,
+                                                                is_warmup_step=is_warmup_step,
+                                                                metrics=metrics)
+                metrics['timing/generate'] = timer.last
+                if batch is None or len(batch) == 0 or is_warmup_step:
+                    if not self.config.data.get("enable_swalm_agent", False):
+                        self.logger.log(data=metrics, step=self.global_step)
+                        self.global_step += 1
+                    return batch, 'continue'
+                if self.config.trainer.save_train_batch_dir is not None:
+                    makedirs(self.config.trainer.save_train_batch_dir, exist_ok=True)
+                    local_path = f'train_batch_{self.global_step}.pt'
+                    batch.save_to_disk(local_path)
+                    hput(local_path, self.config.trainer.save_train_batch_dir)
+                    print(f'Saving train batch from {local_path} to {self.config.trainer.save_train_batch_dir}')
+        else:
+            print(f'Using loaded train batch {self.config.trainer.load_train_batch_path} for training')
+            batch_local_filepath = copy_local_path_from_hdfs(self.config.trainer.load_train_batch_path)
+            batch = DataProto.load_from_disk(batch_local_filepath)
+        return batch, None
+
+    def _dynamic_sampling(self, batch, metrics):
+        with Timer(name='dynamic_sampling', logger=None) as timer:
+            if self.config.algorithm.dynamic_sampling.enable:
+                batch_metrics_before_fill = calculate_batch_bon_metrics(batch, "rollout_pool")
+                merge_metrics(self.rollout_pool_metrics, batch_metrics_before_fill)
+
+                # fill rollout out pool with grad
+                fill_size, pool_size = RolloutPool.dynamic_call(self.rollout_pool, "fill_rollout_pool_dynamic_sampling",
+                                                                batch)
+                return_batch_size = self.config.data.actor_training_batch_size * self.num_bon
+                self.rollout_counter += 1
+                if RolloutPool.dynamic_call(self.rollout_pool, "get_dynamic_sampling_pool_size") < return_batch_size:
+                    print(
+                        f'[RolloutPool] pool_with_grad_size: {RolloutPool.dynamic_call(self.rollout_pool, "get_dynamic_sampling_pool_size")}'
+                    )
+                    metrics[f'rollout_pool/fill_size_{self.rollout_counter}'] = fill_size
+                    metrics[f'rollout_pool/pool_size_{self.rollout_counter}'] = pool_size
+                    if self.rollout_counter > 10:
+                        assert False, 'Do not make sense. Check Your DATA!!!'
+                    return batch, 'continue'
+                else:
+                    train_batch = RolloutPool.dynamic_call(self.rollout_pool, "get_train_batch_grad", return_batch_size)
+                    batch = DataProto.concat(train_batch)
+                    batch.meta_info['generation_kwargs'] = self.config.actor_rollout_ref.rollout.train_generate_kwargs
+                    batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask'], dim=-1).tolist()
+                    if 'pixel_values' in batch.non_tensor_batch:
+                        batch.meta_info['global_img_token_num'] = [
+                            t.shape[0] if t is not None else 0 for t in batch.non_tensor_batch['pixel_values']
+                        ]
+                    metrics['rollout/training_batch'] = len(batch)
+                    for key in self.rollout_pool_metrics:  # fix: mean acc for each rollout batch
+                        if '/acc_' in key and type(self.rollout_pool_metrics[key]) in [float, int]:
+                            self.rollout_pool_metrics[key] /= self.rollout_counter
+                    print(
+                        f'[RolloutPool] BeginTraining pool_with_grad_size: {RolloutPool.dynamic_call(self.rollout_pool, "get_dynamic_sampling_pool_size")}'
+                    )
+                if self.config.algorithm.dynamic_sampling.sync:
+                    pool_with_grad_size = RolloutPool.dynamic_call(self.rollout_pool, "pool_with_grad_clear")
+                    print(f'[RolloutPool] AfterClear pool_with_grad_size: {pool_with_grad_size}')
+                self.rollout_pool_metrics['rollout_pool/fill_counter'] = self.rollout_counter
+                metrics.update(self.rollout_pool_metrics)
+                self.rollout_pool_metrics = {}
+                self.rollout_counter = 0
+        metrics['timing/dynamic_sampling'] = timer.last
+        return batch, None
+
+    def validate_before_training(self):
+        # perform validation before training
+        if self.val_reward_fn is not None and (self.config.trainer.eval_before_training or
+                                               self.config.trainer.val_only):
+            self.validation_manager.validate(val_epoch=self.config.trainer.val_epoch,
+                                             need_log=self.config.trainer.need_log,
+                                             log_file=self.config.trainer.log_file,
+                                             is_async=self.use_standalone_validator,
+                                             global_step=self.global_step)
+        if self.config.trainer.val_only:
+            if self.config.trainer.save_train_batch_dir is not None and self.config.trainer.need_log:
+                hput(self.config.trainer.log_file, self.config.trainer.save_train_batch_dir)
+                print(
+                    f'Saving validation log_file from {self.config.trainer.log_file} to {self.config.trainer.save_train_batch_dir}',
+                    flush=True)
+            wandb.finish()
+
+    def _shuffle_sample_batch(self, batch):
+        if self.config.algorithm.shuffle_sample_batch:
+            idx_lst = list(range(batch.batch.batch_size[0]))
+            random.shuffle(idx_lst)
+            batch.reorder(torch.tensor(idx_lst))
+        return batch
+
+    def _save_checkpoint(self, metrics):
+        metric_collection_context = self.megavision_metrics_collector.collect_save_checkpoint_duration() \
+                        if MegavisionMetricsCtx else contextlib.nullcontext()
+
+        with Timer(name='save_checkpoint', logger=None) as timer:
+            if self.config.trainer.save_freq > 0 and self.global_step % self.config.trainer.save_freq == 0:
+                with metric_collection_context:
+                    self.save_checkpoint()
+        metrics['timing/save_checkpoint'] = timer.last
+
+    def fit(self):
+        self.setup()
+
+        self.validate_before_training()
+        if self.config.trainer.val_only:
+            return
+
+        # Note that we start from step 1. After resume, we increment step by 1 to start next step
+        self.global_step += 1
+        start_step = self.global_step
 
         while True:
-            start_data_time = time.time()
             metrics = {}
             with Timer(name='step', logger=None) as step_timer:
-                # hybrid generate (on policy)
-                if self.config.trainer.load_train_batch_path is None:
-                    if self.config.trainer.queued_rollout_config.enable:
-
-                        def train_batch_generator_with_preprocess_fn():
-                            for batch in train_batch_generator:
-                                batch = self._preprocess_batch_before_gen(batch, metrics, start_step)
-                                batch = image_preprocess(batch, metrics)
-                                yield batch
-
-                        train_batch_generator_with_preprocess = train_batch_generator_with_preprocess_fn()
-                        with Timer(name='generate', logger=None) as timer:
-                            batch = self.rollout_manager.train_generate_queued(train_batch_generator_with_preprocess,
-                                                                               step=self.global_step,
-                                                                               metrics=metrics)
-                        metrics['timing/generate'] = timer.last
-                    else:
-                        batch: DataProto = next(train_batch_generator)
-                        batch = image_preprocess(batch, metrics)
-                        metrics['timing/dataloader'] = time.time() - start_data_time
-
-                        if self.config.algorithm.priority_sample:
-                            self.sample_pool.fill_sample_pool(batch)
-                            self.sample_pool.rearrange_sample_pool()
-                            if self.config.algorithm.TD_priority_ratio > 0:
-                                self.sample_pool.rearrange_TD_sample_pool(
-                                    int(self.config.data.train_batch_size * self.config.algorithm.TD_priority_ratio))
-                            batch = self.sample_pool.get_gen_batch(self.config.data.train_batch_size)
-                        self.get_mean_max_len_per_query(batch, metrics)
-
-                        batch = self._preprocess_batch_before_gen(batch, metrics, start_step)
-                        # generate
-                        is_warmup_step = self.global_step < self.rollout_pool_warmup_step + start_step
-                        with Timer(name='generate', logger=None) as timer:
-                            save_path = f"{self.config.trainer.default_hdfs_dir}/checkpoints/global_step_{self.global_step - 1}/"
-                            save_dataproto_fn = partial(save_dataproto,
-                                                        path=save_path,
-                                                        dist_data_manager=self.dist_data_manager)
-                            batch = self.rollout_manager.train_generate(batch,
-                                                                        step=self.global_step,
-                                                                        save_dataproto_fn=save_dataproto_fn,
-                                                                        is_warmup_step=is_warmup_step,
-                                                                        metrics=metrics)
-                        metrics['timing/generate'] = timer.last
-                        if batch is None or len(batch) == 0 or is_warmup_step:
-                            if not self.config.data.get("enable_swalm_agent", False):
-                                self.logger.log(data=metrics, step=self.global_step)
-                                self.global_step += 1
-                            start_data_time = time.time()
-                            continue
-                        if self.config.trainer.save_train_batch_dir is not None:
-                            makedirs(self.config.trainer.save_train_batch_dir, exist_ok=True)
-                            local_path = f'train_batch_{self.global_step}.pt'
-                            batch.save_to_disk(local_path)
-                            hput(local_path, self.config.trainer.save_train_batch_dir)
-                            print(f'Saving train batch from {local_path} to {self.config.trainer.save_train_batch_dir}')
-                else:
-                    print(f'Using loaded train batch {self.config.trainer.load_train_batch_path} for training')
-                    batch_local_filepath = copy_local_path_from_hdfs(self.config.trainer.load_train_batch_path)
-                    batch = DataProto.load_from_disk(batch_local_filepath)
+                batch, status = self._train_generate(metrics, start_step)
+                if status == 'continue':
+                    continue
 
                 with Timer(name='train', logger=None) as train_timer:
                     batch.meta_info['global_step'] = self.global_step
                     self.update_len_per_query(batch, metrics)
-                    # xperf rollout engine: use current policy to compute log probs
-                    if self.config.algorithm.enable_rollout_log_probs:
-                        with Timer(name='rollout_log_probs', logger=None) as timer:
-                            batch = self.actor_rollout_wg.compute_rollout_log_probs(batch)
-                        metrics['timing/rollout_log_probs'] = timer.last
-                    print("after rollout log probs computation!!!")
-                    # training
-                    with Timer(name='rm_score', logger=None) as timer:
-                        # compute scores. Support both model and function-based.
-                        # We first compute the scores using reward model. Then, we call reward_fn to combine
-                        # the results from reward model and rule-based results.
-                        if self.use_rm:
-                            # we first compute reward model score
-                            reward_tensor = self.rm_wg.compute_rm_score(batch)
-                            batch = batch.union(reward_tensor)
-                            metrics['memory/rm_max_allocated'] = reward_tensor.meta_info['memory/rm_max_allocated']
-                            metrics['memory/rm_max_reserved'] = reward_tensor.meta_info['memory/rm_max_reserved']
-                    metrics['timing/rm_score'] = timer.last
-                    print_dataproto_size(batch, head='After Reward Model')
-
-                    with Timer(name='reward_fn', logger=None) as timer:
-                        # we combine with rule-based rm
-                        reward_tensor, raw_scores, length_scores, eos_ids = self.reward_fn(batch,
-                                                                                           global_step=self.global_step)
-                        batch.batch['token_level_scores'] = reward_tensor
-                        batch.batch['raw_scores'] = raw_scores
-                        batch.batch['eos_ids'] = eos_ids
-                        response_length = batch.batch['attention_mask'][:, -batch.batch['responses'].shape[1]:].sum(-1)
-                        raw_scores_log = raw_scores.sum(-1)
-                        length_ranges = [(None, 512), (512, 1024), (1024, 2048), (2048, 4096), (4096, 8192),
-                                         (8192, 16384), (16384, 32768), (32768, 65536)]
-                        scores = calculate_score_in_length_ranges(raw_scores_log, response_length, length_ranges)
-                        metrics.update(scores)
-                        self.logger.log(data={"score/raw_score": wandb.Histogram(raw_scores_log)},
-                                        step=self.global_step)
-                        if self.config.algorithm.inference_scaling != 'v0':
-                            length_scores = length_scores.sum(-1)
-                            self.logger.log(data={"score/length_score": wandb.Histogram(length_scores)},
-                                            step=self.global_step)
-                    metrics['timing/reward_fn'] = timer.last
+                    batch = self._rollout_log_probs(batch, metrics)
+                    batch = self._rm_score(batch, metrics)
+                    raw_scores_log = self._reward_fn(batch, metrics)
 
                     if self.config.algorithm.priority_sample:
                         self.sample_pool.update_priority_dict(batch)
 
-                    with Timer(name='dynamic_sampling', logger=None) as timer:
-                        if self.config.algorithm.dynamic_sampling.enable:
-                            batch_metrics_before_fill = calculate_batch_bon_metrics(batch, "rollout_pool")
-                            merge_metrics(rollout_pool_metrics, batch_metrics_before_fill)
+                    batch, status = self._dynamic_sampling(batch, metrics)
+                    if status == 'continue':
+                        continue
 
-                            # fill rollout out pool with grad
-                            fill_size, pool_size = RolloutPool.dynamic_call(self.rollout_pool,
-                                                                            "fill_rollout_pool_dynamic_sampling", batch)
-                            return_batch_size = self.config.data.actor_training_batch_size * self.num_bon
-                            rollout_counter += 1
-                            if RolloutPool.dynamic_call(self.rollout_pool,
-                                                        "get_dynamic_sampling_pool_size") < return_batch_size:
-                                print(
-                                    f'[RolloutPool] pool_with_grad_size: {RolloutPool.dynamic_call(self.rollout_pool, "get_dynamic_sampling_pool_size")}'
-                                )
-                                metrics[f'rollout_pool/fill_size_{rollout_counter}'] = fill_size
-                                metrics[f'rollout_pool/pool_size_{rollout_counter}'] = pool_size
-                                if rollout_counter > 10:
-                                    assert False, 'Do not make sense. Check Your DATA!!!'
-                                continue
-                            else:
-                                train_batch = RolloutPool.dynamic_call(self.rollout_pool, "get_train_batch_grad",
-                                                                       return_batch_size)
-                                batch = DataProto.concat(train_batch)
-                                batch.meta_info[
-                                    'generation_kwargs'] = self.config.actor_rollout_ref.rollout.train_generate_kwargs
-                                batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask'],
-                                                                                dim=-1).tolist()
-                                if 'pixel_values' in batch.non_tensor_batch:
-                                    batch.meta_info['global_img_token_num'] = [
-                                        t.shape[0] if t is not None else 0
-                                        for t in batch.non_tensor_batch['pixel_values']
-                                    ]
-                                metrics['rollout/training_batch'] = len(batch)
-                                for key in rollout_pool_metrics:  # fix: mean acc for each rollout batch
-                                    if '/acc_' in key and type(rollout_pool_metrics[key]) in [float, int]:
-                                        rollout_pool_metrics[key] /= rollout_counter
-                                print(
-                                    f'[RolloutPool] BeginTraining pool_with_grad_size: {RolloutPool.dynamic_call(self.rollout_pool, "get_dynamic_sampling_pool_size")}'
-                                )
-                            if self.config.algorithm.dynamic_sampling.sync:
-                                pool_with_grad_size = RolloutPool.dynamic_call(self.rollout_pool,
-                                                                               "pool_with_grad_clear")
-                                print(f'[RolloutPool] AfterClear pool_with_grad_size: {pool_with_grad_size}')
-                            rollout_pool_metrics['rollout_pool/fill_counter'] = rollout_counter
-                            metrics.update(rollout_pool_metrics)
-                            rollout_pool_metrics = {}
-                            rollout_counter = 0
-                    metrics['timing/dynamic_sampling'] = timer.last
+                    batch = self._mask_overlong(batch, metrics, raw_scores_log)
 
-                    if self.config.algorithm.mask_overlong:
-                        prompt_length = self.config.data.max_prompt_length
-                        if 'max_new_tokens' in batch.non_tensor_batch:
-                            response_length = batch.non_tensor_batch['max_new_tokens']
-                        else:
-                            response_length = self.config.data.max_response_length
-                        valid_response_length = batch.batch['attention_mask'][:, prompt_length:].sum(-1)
-                        is_vlm = self.config.data['image_key'] is not None
-                        if is_vlm:
-                            is_overlong = (response_length == valid_response_length) & (raw_scores_log == 0)
-                        else:
-                            is_overlong = (response_length
-                                           == valid_response_length) & (batch.batch['raw_scores'].sum(-1) < 0)
-                        # batch.batch['attention_mask'][is_overlong] = 0
-                        # batch.batch['answer_attention_mask'][is_overlong] = 0
-                        batch.batch['overlong_mask'] = (~is_overlong).int()
-                        metrics.update({'max_len_per_query/overlong_masked': is_overlong.to(torch.int64).sum().item()})
+                    batch, use_async_gen = self._league_training(batch, metrics)
 
-                    print_dataproto_size(batch, head='After Reward function')
+                    batch = self._select_bon_samples(batch, metrics, use_async_gen)
 
-                    # league training，筛选平均通过率低的prompt
-                    use_async_gen = self.config.streaming_rollout.nnodes > 0
-                    if self.config.trainer.league_training_config.enable:
-                        with Timer(name='select_league_training_prompts', logger=None) as timer:
-                            if use_async_gen:
-                                batch, league_training_metrics = league_training_filter_prompt_v2(
-                                    batch=batch,
-                                    strategy=self.config.trainer.league_training_config.strategy,
-                                    config=self.config)
-                                metrics.update(league_training_metrics)
-                            else:
-                                batch = league_training_filter_prompt(
-                                    batch=batch,
-                                    strategy=self.config.trainer.league_training_config.strategy,
-                                    config=self.config)
-                        metrics['timing/select_league_training_prompts'] = timer.last
-
-                    id2acc = defaultdict(list)
-                    # bon策略，筛选prompt内部的response，有不同策略，all、best、best_mix_random、best_worst
-                    if self.num_bon > 1:
-                        with Timer(name='select_bon_samples', logger=None) as timer:
-                            batch, bon_metrics, id2acc = select_training_samples_v2(
-                                batch=batch,
-                                strategy=self.config.actor_rollout_ref.rollout.bon_strategy,
-                                config=self.config)
-                            if use_async_gen:
-                                metrics.update(bon_metrics)
-                        metrics['timing/select_bon_samples'] = timer.last
-
-                    # update acc_per_query
-                    if len(id2acc) == 0:
-                        for idx, score in zip(batch.non_tensor_batch['index'],
-                                              batch.batch['token_level_scores'].sum(-1)):
-                            score = score.item()
-                            id2acc[idx].append(score)
-                        for k, v in id2acc.items():
-                            id2acc[k] = sum([1 for i in v if i == 1]) / len(v)
-                    self.update_acc_per_query(id2acc)
-
-                    if self.config.algorithm.shuffle_sample_batch:
-                        idx_lst = list(range(batch.batch.batch_size[0]))
-                        random.shuffle(idx_lst)
-                        batch.reorder(torch.tensor(idx_lst))
+                    batch = self._shuffle_sample_batch(batch)
 
                     # perform sequence balancing.
                     # Very important: Note that this reorders data globally.
@@ -1975,23 +1893,7 @@ class RayPPOTrainer(object):
 
                     metrics.setdefault('timing/train_mem_offload', 0)
 
-                    # compute reference
-                    if self.use_reference_policy:
-                        if not (self.config.actor_rollout_ref.actor.kl_loss_weight == 0 and
-                                self.config.algorithm.kl_ctrl.kl_coef == 0):
-                            # skip ref log prob if no kl loss
-                            # compute reference log_prob
-                            with Timer(name='ref', logger=None) as timer:
-                                ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
-                                for k in ref_log_prob.meta_info:
-                                    if k in batch.meta_info:
-                                        del batch.meta_info[k]
-                                batch = batch.union(ref_log_prob)
-                            metrics['timing/ref'] = timer.last
-                            metrics['memory/ref_max_allocated'] = batch.meta_info.pop('memory/ref_max_allocated')
-                            metrics['memory/ref_max_reserved'] = batch.meta_info.pop('memory/ref_max_reserved')
-
-                    print_dataproto_size(batch, head='After reference policy')
+                    batch = self.compute_reference(batch, metrics)
 
                     input_batch = batch
                     if self.enable_actor_critic_spatial_mux:
@@ -2000,73 +1902,16 @@ class RayPPOTrainer(object):
                     # compute actor
                     actor_future = self.actor_rollout_wg.old_log_probs(input_batch)
 
+                    critic_future = None
                     # compute values
                     if self.use_critic and self.enable_actor_critic_spatial_mux:
                         critic_future = self.critic_wg.compute_values(input_batch)
 
-                    # get old_log_probs
-                    with Timer(name='old_log_probs', logger=None) as timer:
-                        output_batch = actor_future.get()
-                        batch = output_batch.chunk(2)[0] if self.enable_actor_critic_spatial_mux else output_batch
-                        mtp_keys = [k for k in output_batch.batch.keys() if 'acceptance_matrix' in k]
-                        response_length = output_batch.batch['responses'].size(1)
-                        if self.config.algorithm.use_model_output_mask:
-                            acceptance_mask = output_batch.batch['model_output_mask']
-                        else:
-                            acceptance_mask = output_batch.batch['attention_mask']
-                        acceptance_mask = acceptance_mask[:, -response_length:]
-                        for i, k in enumerate(sorted(mtp_keys)):
-                            acceptance_mask_mtp = torch.roll(acceptance_mask, shifts=-i - 1, dims=1) * acceptance_mask
-                            metrics[f'mtp/{k}'] = (output_batch.batch[k].float() *
-                                                   acceptance_mask_mtp).sum().item() / max(
-                                                       acceptance_mask_mtp.sum().item(), 1)
-                    metrics['timing/old_log_probs'] = timer.last
-
-                    print_dataproto_size(batch, head='After old log probs')
-
-                    # get values
+                    batch = self._compute_old_log_probs(actor_future, batch, metrics)
                     if self.use_critic:
-                        if not self.enable_actor_critic_spatial_mux:
-                            critic_future = self.critic_wg.compute_values(input_batch)
-                        with Timer(name='values', logger=None) as timer:
-                            values = critic_future.get()
-                            values = values.chunk(2)[1] if self.enable_actor_critic_spatial_mux else values
-                            batch = batch.union(values)
-                        metrics['timing/values'] = timer.last
+                        batch, critic_future = self._compute_values(batch, critic_future, input_batch, metrics)
 
-                    print_dataproto_size(batch, head='After compute values')
-
-                    with Timer(name='adv', logger=None) as timer:
-                        # compute rewards. apply_kl_penalty if available
-                        batch, kl_metrics = apply_kl_penalty(
-                            batch,
-                            kl_ctrl=self.kl_ctrl,
-                            kl_penalty=self.config.algorithm.kl_penalty,
-                            use_model_output_mask=self.config.algorithm.use_model_output_mask)
-                        metrics.update(kl_metrics)
-
-                        # compute advantages
-                        batch, adv_metrics = compute_advantage(
-                            batch,
-                            self.config.algorithm.gamma,
-                            self.config.algorithm.lam,
-                            self.config.algorithm.use_variable_lambda,
-                            self.config.algorithm.variable_lambda_scalar,
-                            adv_estimator=self.config.algorithm.adv_estimator,
-                            upgo_loss_version=self.config.actor_rollout_ref.actor.upgo_loss_version,
-                            num_bon=self.config.actor_rollout_ref.rollout.num_bon,
-                            adv_whiten=self.config.algorithm.adv_whiten,
-                            use_async_gen=use_async_gen,
-                            group_mode=self.config.algorithm.group_mode,
-                            use_separate_critic_lam=self.config.algorithm.use_separate_critic_lam,
-                            critic_lam=self.config.algorithm.critic_lam,
-                            use_model_output_mask=self.config.algorithm.use_model_output_mask,
-                            fix_bad_positive_adv=self.config.algorithm.fix_bad_positive_adv,
-                        )
-                        metrics.update(adv_metrics)
-                    metrics['timing/adv'] = timer.last
-
-                    print_dataproto_size(batch, head='After compute adv')
+                    batch = self._compute_adv(batch, metrics, use_async_gen)
 
                     if self.global_step == 1:
                         print('Debugging', batch.batch)
@@ -2088,68 +1933,9 @@ class RayPPOTrainer(object):
                     if self.use_critic:
                         critic_future = self.critic_wg.update_critic(input_batch)
 
-                    if self.config.trainer.critic_warmup <= self.global_step and self.global_step % self.config.trainer.actor_update_freq == 0:
-                        with Timer(name='update_actor', logger=None) as timer:
-                            if os.environ.get("MINISTEPS_ON_DRIVER", "0") == "1":
-                                dataloader = make_mini_step_dataloader(
-                                    batch, self.config.actor_rollout_ref.actor.ppo_mini_batch_size, True)
-                                ministeps_metrics = []
-                                for batch_idx, mini_batch in enumerate(dataloader):
-                                    if batch_idx == (len(dataloader) - 1):
-                                        mini_batch.meta_info["lr_scheduler_step"] = True
-                                    actor_output_mini = self.actor_rollout_wg.train_actor(mini_batch)
-                                    ministeps_metrics.append(actor_output_mini.meta_info['metrics'])
+                    self._update_actor(actor_future, batch, metrics)
 
-                                actor_output = actor_output_mini
-                                actor_output_metrics = merge_ministeps_metrics(ministeps_metrics)
-                            else:
-                                actor_output = actor_future.get()
-                                actor_output = actor_output.chunk(
-                                    2)[0] if self.enable_actor_critic_spatial_mux else actor_output
-                                actor_output_metrics = reduce_metrics(actor_output.meta_info['metrics'])
-
-                        metrics.update(actor_output_metrics)
-                        metrics['memory/actor_max_allocated'] = actor_output.meta_info['memory/actor_max_allocated']
-                        metrics['memory/actor_max_reserved'] = actor_output.meta_info['memory/actor_max_reserved']
-                        metrics['timing/update_actor'] = timer.last
-                        print(f"After update_actor")
-
-                    # update critic
-                    if self.use_critic:
-                        with Timer(name='update_critic', logger=None) as timer:
-                            critic_output = critic_future.get()
-                            critic_output = critic_output.chunk(
-                                2)[1] if self.enable_actor_critic_spatial_mux else critic_output
-                        batch.batch['seq_vf'] = critic_output.batch['seq_vf']
-                        metrics['timing/update_critic'] = timer.last
-                        metrics['memory/critic_max_allocated'] = critic_output.meta_info['memory/critic_max_allocated']
-                        metrics['memory/critic_max_reserved'] = critic_output.meta_info['memory/critic_max_reserved']
-                        critic_output_metrics = reduce_metrics(critic_output.meta_info['metrics'])
-                        metrics.update(critic_output_metrics)
-                        print(f"After update_critic")
-                    if self.config.algorithm.phasic_critic_interval > 0:
-                        select_keys = ['input_ids', 'responses', 'attention_mask', 'values', 'returns']
-                        buffer_batch = batch.select(batch_keys=select_keys)
-                        if self.phasic_critic_buffer is None:
-                            self.phasic_critic_buffer = buffer_batch
-                        else:
-                            self.phasic_critic_buffer = DataProto.concat([self.phasic_critic_buffer, buffer_batch])
-
-                    # priority use TD-error
-                    if self.config.algorithm.priority_sample and self.config.algorithm.TD_priority_ratio > 0:
-                        self.sample_pool.update_TD_priority_dict(batch)
-
-                    # phasic critic update
-                    phasic_critic_update = self.config.algorithm.phasic_critic_interval > 0 and self.global_step % self.config.algorithm.phasic_critic_interval == 0
-                    if phasic_critic_update:
-                        self.phasic_critic_buffer.meta_info['phasic_update'] = True
-                        with Timer(name='phasic_critic_update', logger=None) as timer:
-                            critic_output = self.critic_wg.update_critic(self.phasic_critic_buffer)
-                        metrics['timing/phasic_critic_update'] = timer.last
-                        critic_output_metrics = reduce_metrics(critic_output.meta_info['metrics'])
-                        metrics.update(critic_output_metrics)
-
-                        self.phasic_critic_buffer = None
+                    self._update_critic(batch, critic_future, metrics)
 
                     # update ref ema
                     with Timer(name='update_ref_ema', logger=None) as timer:
@@ -2163,67 +1949,9 @@ class RayPPOTrainer(object):
                                                              global_step=self.global_step)
                         metrics['timing/testing'] = timer.last
 
-                    metric_collection_context = self.megavision_metrics_collector.collect_compute_metrics_duration() \
-                        if MegavisionMetricsCtx else contextlib.nullcontext()
-                    # collect metrics
-                    with metric_collection_context:
-                        with Timer(name='compute_metrics', logger=None) as timer:
-                            # Note that we can use any worker groups here
-                            batch.meta_info['use_critic'] = self.use_critic
-                            batch.meta_info['mean'] = self.config.reward_model.mean
-                            batch.meta_info['std'] = self.config.reward_model.std
-                            batch.meta_info['use_model_output_mask'] = self.config.algorithm.use_model_output_mask
-                            data_metrics: DataProto = self.actor_rollout_wg.execute_with_func_generator(
-                                compute_data_metrics, batch)
-                            data_metrics = data_metrics.meta_info['metrics']
-                            metrics.update(data_metrics)
+                    self.compute_metrics(batch, metrics)
 
-                            # Compute driver-side metrics (agent and data source metrics)
-                            driver_metrics = compute_metrics_on_driver(batch)
-                            metrics.update(driver_metrics)
-
-                            # save batch to hdfs
-                            if self.save_batch_dir:
-                                # show diagnose info for background tracking
-                                finished = set()
-                                for t in self.async_tracking_running_tasks:
-                                    if t.done():
-                                        t.result()  # call this to collect the result(including error traceback)
-                                        finished.add(t)
-                                for t in finished:
-                                    self.async_tracking_running_tasks.remove(t)
-                                print(f"remaining async tracking tasks {len(self.async_tracking_running_tasks)}")
-
-                                batch_fname = f"global_step_{self.global_step}_batch.pickle"
-                                batch.save_to_disk(batch_fname)
-
-                                async_tracking_args = (batch_fname, self.save_batch_dir, self.tokenizer,
-                                                       self.global_step)
-                                task = self.async_tracking_pool.submit(async_process_batch_samples_to_wandb,
-                                                                       *async_tracking_args)
-                                self.async_tracking_running_tasks.add(task)
-
-                            advantages = batch.batch['advantages']
-                            response_length = batch.batch['responses'].shape[-1]
-                            if self.config.algorithm.use_model_output_mask:
-                                loss_mask = batch.batch['model_output_mask']
-                                response_mask = loss_mask[:, -response_length:]
-                            else:
-                                attention_mask = batch.batch['attention_mask']
-                                response_mask = attention_mask[:, -response_length:]
-                            idx = torch.arange(advantages.shape[1]).unsqueeze(dim=0).tile(advantages.shape[0], 1)
-                            adv_idx_corr = self.cal_corr(advantages, idx, response_mask)
-                            metrics['critic/advantages/adv_idx_corr'] = adv_idx_corr.mean()
-                        metrics['timing/compute_metrics'] = timer.last
-
-                    metric_collection_context = self.megavision_metrics_collector.collect_save_checkpoint_duration() \
-                        if MegavisionMetricsCtx else contextlib.nullcontext()
-
-                    with Timer(name='save_checkpoint', logger=None) as timer:
-                        if self.config.trainer.save_freq > 0 and self.global_step % self.config.trainer.save_freq == 0:
-                            with metric_collection_context:
-                                self.save_checkpoint()
-                    metrics['timing/save_checkpoint'] = timer.last
+                    self._save_checkpoint(metrics)
 
                     # collect sandbox client remaining results
                     if self.config.trainer.use_remote_sandbox:
@@ -2232,14 +1960,13 @@ class RayPPOTrainer(object):
                         metrics['remote_client/remaining_results'] = num_remaining_results
                 metrics['timing/train'] = train_timer.last
 
-            metrics['timing/step'] = step_timer.last + metrics['timing/dataloader']
+            metrics['timing/step'] = step_timer.last
 
             visualize_standalone_usage(self.config, metrics)
 
             # TODO: make a canonical logger that supports various backend
             self.logger.log(data=metrics, step=self.global_step)
             release_object(self.dist_data_manager)
-            start_data_time = time.time()
 
             self.global_step += 1
             if self.global_step >= self.total_training_steps:
@@ -2257,6 +1984,317 @@ class RayPPOTrainer(object):
                     t.result()  # call this to collect the result(including error traceback)
                 wandb.finish()
                 return
+
+    def setup(self):
+        self._create_kl_control()
+        self._create_dataloader()
+        self._create_rollout_manager()
+        self._create_validation_manager()
+        if self.save_batch_dir:
+            makedirs(self.save_batch_dir, exist_ok=True)
+        metric_collection_context = self.megavision_metrics_collector.collect_resume_from_checkpoint_duration() \
+            if MegavisionMetricsCtx else contextlib.nullcontext()
+        with metric_collection_context:
+            if self.global_step != 0:
+                # load checkpoint before doing anything
+                log_cpu_memory_usage('before load checkpoint')
+                self.load_checkpoint()
+                log_cpu_memory_usage('after load checkpoint')
+
+    def _update_actor(self, actor_future, batch, metrics):
+        if self.config.trainer.critic_warmup <= self.global_step and self.global_step % self.config.trainer.actor_update_freq == 0:
+            with Timer(name='update_actor', logger=None) as timer:
+                if os.environ.get("MINISTEPS_ON_DRIVER", "0") == "1":
+                    dataloader = make_mini_step_dataloader(batch,
+                                                           self.config.actor_rollout_ref.actor.ppo_mini_batch_size,
+                                                           True)
+                    ministeps_metrics = []
+                    for batch_idx, mini_batch in enumerate(dataloader):
+                        if batch_idx == (len(dataloader) - 1):
+                            mini_batch.meta_info["lr_scheduler_step"] = True
+                        actor_output_mini = self.actor_rollout_wg.train_actor(mini_batch)
+                        ministeps_metrics.append(actor_output_mini.meta_info['metrics'])
+
+                    actor_output = actor_output_mini
+                    actor_output_metrics = merge_ministeps_metrics(ministeps_metrics)
+                else:
+                    actor_output = actor_future.get()
+                    actor_output = actor_output.chunk(2)[0] if self.enable_actor_critic_spatial_mux else actor_output
+                    actor_output_metrics = reduce_metrics(actor_output.meta_info['metrics'])
+
+            metrics.update(actor_output_metrics)
+            metrics['memory/actor_max_allocated'] = actor_output.meta_info['memory/actor_max_allocated']
+            metrics['memory/actor_max_reserved'] = actor_output.meta_info['memory/actor_max_reserved']
+            metrics['timing/update_actor'] = timer.last
+            print(f"After update_actor")
+
+    def compute_metrics(self, batch, metrics):
+        metric_collection_context = self.megavision_metrics_collector.collect_compute_metrics_duration() \
+            if MegavisionMetricsCtx else contextlib.nullcontext()
+        # collect metrics
+        with metric_collection_context:
+            with Timer(name='compute_metrics', logger=None) as timer:
+                # Note that we can use any worker groups here
+                batch.meta_info['use_critic'] = self.use_critic
+                batch.meta_info['mean'] = self.config.reward_model.mean
+                batch.meta_info['std'] = self.config.reward_model.std
+                batch.meta_info['use_model_output_mask'] = self.config.algorithm.use_model_output_mask
+                data_metrics: DataProto = self.actor_rollout_wg.execute_with_func_generator(compute_data_metrics, batch)
+                data_metrics = data_metrics.meta_info['metrics']
+                metrics.update(data_metrics)
+
+                # Compute driver-side metrics (agent and data source metrics)
+                driver_metrics = compute_metrics_on_driver(batch)
+                metrics.update(driver_metrics)
+
+                # save batch to hdfs
+                if self.save_batch_dir:
+                    # show diagnose info for background tracking
+                    finished = set()
+                    for t in self.async_tracking_running_tasks:
+                        if t.done():
+                            t.result()  # call this to collect the result(including error traceback)
+                            finished.add(t)
+                    for t in finished:
+                        self.async_tracking_running_tasks.remove(t)
+                    print(f"remaining async tracking tasks {len(self.async_tracking_running_tasks)}")
+
+                    batch_fname = f"global_step_{self.global_step}_batch.pickle"
+                    batch.save_to_disk(batch_fname)
+
+                    async_tracking_args = (batch_fname, self.save_batch_dir, self.tokenizer, self.global_step)
+                    task = self.async_tracking_pool.submit(async_process_batch_samples_to_wandb, *async_tracking_args)
+                    self.async_tracking_running_tasks.add(task)
+
+                advantages = batch.batch['advantages']
+                response_length = batch.batch['responses'].shape[-1]
+                if self.config.algorithm.use_model_output_mask:
+                    loss_mask = batch.batch['model_output_mask']
+                    response_mask = loss_mask[:, -response_length:]
+                else:
+                    attention_mask = batch.batch['attention_mask']
+                    response_mask = attention_mask[:, -response_length:]
+                idx = torch.arange(advantages.shape[1]).unsqueeze(dim=0).tile(advantages.shape[0], 1)
+                adv_idx_corr = self.cal_corr(advantages, idx, response_mask)
+                metrics['critic/advantages/adv_idx_corr'] = adv_idx_corr.mean()
+            metrics['timing/compute_metrics'] = timer.last
+
+    def _compute_values(self, batch, critic_future, input_batch, metrics):
+        # get values
+        if not self.enable_actor_critic_spatial_mux:
+            critic_future = self.critic_wg.compute_values(input_batch)
+        with Timer(name='values', logger=None) as timer:
+            values = critic_future.get()
+            values = values.chunk(2)[1] if self.enable_actor_critic_spatial_mux else values
+            batch = batch.union(values)
+        metrics['timing/values'] = timer.last
+        print_dataproto_size(batch, head='After compute values')
+        return batch, critic_future
+
+    def _select_bon_samples(self, batch, metrics, use_async_gen):
+        id2acc = defaultdict(list)
+        # bon策略，筛选prompt内部的response，有不同策略，all、best、best_mix_random、best_worst
+        if self.num_bon > 1:
+            with Timer(name='select_bon_samples', logger=None) as timer:
+                batch, bon_metrics, id2acc = select_training_samples_v2(
+                    batch=batch, strategy=self.config.actor_rollout_ref.rollout.bon_strategy, config=self.config)
+                if use_async_gen:
+                    metrics.update(bon_metrics)
+            metrics['timing/select_bon_samples'] = timer.last
+        # update acc_per_query
+        if len(id2acc) == 0:
+            for idx, score in zip(batch.non_tensor_batch['index'], batch.batch['token_level_scores'].sum(-1)):
+                score = score.item()
+                id2acc[idx].append(score)
+            for k, v in id2acc.items():
+                id2acc[k] = sum([1 for i in v if i == 1]) / len(v)
+        self.update_acc_per_query(id2acc)
+        return batch
+
+    def _rollout_log_probs(self, batch, metrics):
+        # xperf rollout engine: use current policy to compute log probs
+        if self.config.algorithm.enable_rollout_log_probs:
+            with Timer(name='rollout_log_probs', logger=None) as timer:
+                batch = self.actor_rollout_wg.compute_rollout_log_probs(batch)
+            metrics['timing/rollout_log_probs'] = timer.last
+        print("after rollout log probs computation!!!")
+        return batch
+
+    def _reward_fn(self, batch, metrics):
+        with Timer(name='reward_fn', logger=None) as timer:
+            # we combine with rule-based rm
+            reward_tensor, raw_scores, length_scores, eos_ids = self.reward_fn(batch, global_step=self.global_step)
+            batch.batch['token_level_scores'] = reward_tensor
+            batch.batch['raw_scores'] = raw_scores
+            batch.batch['eos_ids'] = eos_ids
+            response_length = batch.batch['attention_mask'][:, -batch.batch['responses'].shape[1]:].sum(-1)
+            raw_scores_log = raw_scores.sum(-1)
+            length_ranges = [(None, 512), (512, 1024), (1024, 2048), (2048, 4096), (4096, 8192), (8192, 16384),
+                             (16384, 32768), (32768, 65536)]
+            scores = calculate_score_in_length_ranges(raw_scores_log, response_length, length_ranges)
+            metrics.update(scores)
+            self.logger.log(data={"score/raw_score": wandb.Histogram(raw_scores_log)}, step=self.global_step)
+            if self.config.algorithm.inference_scaling != 'v0':
+                length_scores = length_scores.sum(-1)
+                self.logger.log(data={"score/length_score": wandb.Histogram(length_scores)}, step=self.global_step)
+        metrics['timing/reward_fn'] = timer.last
+        return raw_scores_log
+
+    def _rm_score(self, batch, metrics):
+        with Timer(name='rm_score', logger=None) as timer:
+            # compute scores. Support both model and function-based.
+            # We first compute the scores using reward model. Then, we call reward_fn to combine
+            # the results from reward model and rule-based results.
+            if self.use_rm:
+                # we first compute reward model score
+                reward_tensor = self.rm_wg.compute_rm_score(batch)
+                batch = batch.union(reward_tensor)
+                metrics['memory/rm_max_allocated'] = reward_tensor.meta_info['memory/rm_max_allocated']
+                metrics['memory/rm_max_reserved'] = reward_tensor.meta_info['memory/rm_max_reserved']
+        metrics['timing/rm_score'] = timer.last
+        print_dataproto_size(batch, head='After Reward Model')
+        return batch
+
+    def _update_critic(self, batch, critic_future, metrics):
+        # update critic
+        if self.use_critic:
+            with Timer(name='update_critic', logger=None) as timer:
+                critic_output = critic_future.get()
+                critic_output = critic_output.chunk(2)[1] if self.enable_actor_critic_spatial_mux else critic_output
+            batch.batch['seq_vf'] = critic_output.batch['seq_vf']
+            metrics['timing/update_critic'] = timer.last
+            metrics['memory/critic_max_allocated'] = critic_output.meta_info['memory/critic_max_allocated']
+            metrics['memory/critic_max_reserved'] = critic_output.meta_info['memory/critic_max_reserved']
+            critic_output_metrics = reduce_metrics(critic_output.meta_info['metrics'])
+            metrics.update(critic_output_metrics)
+            print(f"After update_critic")
+        if self.config.algorithm.phasic_critic_interval > 0:
+            select_keys = ['input_ids', 'responses', 'attention_mask', 'values', 'returns']
+            buffer_batch = batch.select(batch_keys=select_keys)
+            if self.phasic_critic_buffer is None:
+                self.phasic_critic_buffer = buffer_batch
+            else:
+                self.phasic_critic_buffer = DataProto.concat([self.phasic_critic_buffer, buffer_batch])
+        # priority use TD-error
+        if self.config.algorithm.priority_sample and self.config.algorithm.TD_priority_ratio > 0:
+            self.sample_pool.update_TD_priority_dict(batch)
+        # phasic critic update
+        phasic_critic_update = self.config.algorithm.phasic_critic_interval > 0 and self.global_step % self.config.algorithm.phasic_critic_interval == 0
+        if phasic_critic_update:
+            self.phasic_critic_buffer.meta_info['phasic_update'] = True
+            with Timer(name='phasic_critic_update', logger=None) as timer:
+                critic_output = self.critic_wg.update_critic(self.phasic_critic_buffer)
+            metrics['timing/phasic_critic_update'] = timer.last
+            critic_output_metrics = reduce_metrics(critic_output.meta_info['metrics'])
+            metrics.update(critic_output_metrics)
+
+            self.phasic_critic_buffer = None
+
+    def _compute_adv(self, batch, metrics, use_async_gen):
+        with Timer(name='adv', logger=None) as timer:
+            # compute rewards. apply_kl_penalty if available
+            batch, kl_metrics = apply_kl_penalty(batch,
+                                                 kl_ctrl=self.kl_ctrl,
+                                                 kl_penalty=self.config.algorithm.kl_penalty,
+                                                 use_model_output_mask=self.config.algorithm.use_model_output_mask)
+            metrics.update(kl_metrics)
+
+            # compute advantages
+            batch, adv_metrics = compute_advantage(
+                batch,
+                self.config.algorithm.gamma,
+                self.config.algorithm.lam,
+                self.config.algorithm.use_variable_lambda,
+                self.config.algorithm.variable_lambda_scalar,
+                adv_estimator=self.config.algorithm.adv_estimator,
+                upgo_loss_version=self.config.actor_rollout_ref.actor.upgo_loss_version,
+                num_bon=self.config.actor_rollout_ref.rollout.num_bon,
+                adv_whiten=self.config.algorithm.adv_whiten,
+                use_async_gen=use_async_gen,
+                group_mode=self.config.algorithm.group_mode,
+                use_separate_critic_lam=self.config.algorithm.use_separate_critic_lam,
+                critic_lam=self.config.algorithm.critic_lam,
+                use_model_output_mask=self.config.algorithm.use_model_output_mask,
+                fix_bad_positive_adv=self.config.algorithm.fix_bad_positive_adv,
+            )
+            metrics.update(adv_metrics)
+        metrics['timing/adv'] = timer.last
+        print_dataproto_size(batch, head='After compute adv')
+        return batch
+
+    def _compute_old_log_probs(self, actor_future, batch, metrics):
+        # get old_log_probs
+        with Timer(name='old_log_probs', logger=None) as timer:
+            output_batch = actor_future.get()
+            batch = output_batch.chunk(2)[0] if self.enable_actor_critic_spatial_mux else output_batch
+            mtp_keys = [k for k in output_batch.batch.keys() if 'acceptance_matrix' in k]
+            response_length = output_batch.batch['responses'].size(1)
+            if self.config.algorithm.use_model_output_mask:
+                acceptance_mask = output_batch.batch['model_output_mask']
+            else:
+                acceptance_mask = output_batch.batch['attention_mask']
+            acceptance_mask = acceptance_mask[:, -response_length:]
+            for i, k in enumerate(sorted(mtp_keys)):
+                acceptance_mask_mtp = torch.roll(acceptance_mask, shifts=-i - 1, dims=1) * acceptance_mask
+                metrics[f'mtp/{k}'] = (output_batch.batch[k].float() * acceptance_mask_mtp).sum().item() / max(
+                    acceptance_mask_mtp.sum().item(), 1)
+        metrics['timing/old_log_probs'] = timer.last
+        print_dataproto_size(batch, head='After old log probs')
+        return batch
+
+    def compute_reference(self, batch, metrics):
+        # compute reference
+        if self.use_reference_policy:
+            if not (self.config.actor_rollout_ref.actor.kl_loss_weight == 0 and
+                    self.config.algorithm.kl_ctrl.kl_coef == 0):
+                # skip ref log prob if no kl loss
+                # compute reference log_prob
+                with Timer(name='ref', logger=None) as timer:
+                    ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
+                    for k in ref_log_prob.meta_info:
+                        if k in batch.meta_info:
+                            del batch.meta_info[k]
+                    batch = batch.union(ref_log_prob)
+                metrics['timing/ref'] = timer.last
+                metrics['memory/ref_max_allocated'] = batch.meta_info.pop('memory/ref_max_allocated')
+                metrics['memory/ref_max_reserved'] = batch.meta_info.pop('memory/ref_max_reserved')
+        print_dataproto_size(batch, head='After reference policy')
+        return batch
+
+    def _league_training(self, batch, metrics):
+        # league training，筛选平均通过率低的prompt
+        use_async_gen = self.config.streaming_rollout.nnodes > 0
+        if self.config.trainer.league_training_config.enable:
+            with Timer(name='select_league_training_prompts', logger=None) as timer:
+                if use_async_gen:
+                    batch, league_training_metrics = league_training_filter_prompt_v2(
+                        batch=batch, strategy=self.config.trainer.league_training_config.strategy, config=self.config)
+                    metrics.update(league_training_metrics)
+                else:
+                    batch = league_training_filter_prompt(batch=batch,
+                                                          strategy=self.config.trainer.league_training_config.strategy,
+                                                          config=self.config)
+            metrics['timing/select_league_training_prompts'] = timer.last
+        return batch, use_async_gen
+
+    def _mask_overlong(self, batch, metrics, raw_scores_log):
+        if self.config.algorithm.mask_overlong:
+            prompt_length = self.config.data.max_prompt_length
+            if 'max_new_tokens' in batch.non_tensor_batch:
+                response_length = batch.non_tensor_batch['max_new_tokens']
+            else:
+                response_length = self.config.data.max_response_length
+            valid_response_length = batch.batch['attention_mask'][:, prompt_length:].sum(-1)
+            is_vlm = self.config.data['image_key'] is not None
+            if is_vlm:
+                is_overlong = (response_length == valid_response_length) & (raw_scores_log == 0)
+            else:
+                is_overlong = (response_length == valid_response_length) & (batch.batch['raw_scores'].sum(-1) < 0)
+            # batch.batch['attention_mask'][is_overlong] = 0
+            # batch.batch['answer_attention_mask'][is_overlong] = 0
+            batch.batch['overlong_mask'] = (~is_overlong).int()
+            metrics.update({'max_len_per_query/overlong_masked': is_overlong.to(torch.int64).sum().item()})
+        return batch
 
     def do_ndtimeline_action(self, *args, **kwargs):
         """Call a function on each actor.
