@@ -42,9 +42,9 @@ def compute_score_client(solution_str, ground_truth, code_sandbox_psm, data_uid,
 
 
 def parse_sandbox_error_msg(req_res):
-    ret_code, error_msg, stdout, stderr = "Accepted", None, "", ""
+    ret_code, error_msg, stdout, stderr = "Unknown", None, "", ""
     if req_res.accepted == True:
-        return ret_code, error_msg
+        return "Accepted", error_msg
     for test in req_res.tests:
         # ignore AC testcase
         if test.passed:
@@ -52,28 +52,28 @@ def parse_sandbox_error_msg(req_res):
         # CE
         if test.exec_info.compile_result:  # For Non-Compile Language is None
             if test.exec_info.compile_result.stderr:
-                error_msg = test.exec_info.compile_result.stderr[:2048]
-                ret_code = "Compile Error"
-                return ret_code, error_msg
+                return "Compile Error", test.exec_info.compile_result.stderr[:2048]
         # TLE + WA ret code
+        d = {}
         if test.exec_info.run_result:
             if test.exec_info.run_result.status == "TimeLimitExceeded":
                 ret_code = "Time Limit Exceeded"
             elif test.exec_info.run_result.status == "Finished":
-                ret_code = "Wrong Answer"
+                ret_code = "Wrong Answer (Finished)"
                 stdout = test.exec_info.run_result.stdout
             elif test.exec_info.run_result.status == "Failed":
-                ret_code = "Wrong Answer"
+                ret_code = "Wrong Answer (Failed)"
                 stdout = test.exec_info.run_result.stdout
             # extra info maybe in test.exec_info.run_result.stdout
             if test.exec_info.run_result.stderr:
                 stderr = test.exec_info.run_result.stderr
+            d.update({"stdout": stdout, "stderr": stderr})  # simple message; will be overridden if test_info given
         # WA extra info
         if test.test_info:  # test.test_info is dict
-            d = {
+            d.update({
                 "input": test.test_info["input"]["stdin"],
                 "correct output": test.test_info["output"]["stdout"],
-            }
+            })
             if len(stdout) > 0:
                 d["your code output"] = stdout
             else:
@@ -81,17 +81,19 @@ def parse_sandbox_error_msg(req_res):
                     d["your code output"] = "Time ran out; no result output"
                 else:
                     d["your code output"] = "Your code output was not same as correct output"
-            if len(stderr) > 0:
-                d["runtime time error"] = stderr
+
             for k, v in d.items():
                 if len(v) > 1024:
                     d[k] = v[:500] + "...(truncated)..." + v[-500:]
+
+        if ret_code != "Unknown":
             error_msg = f"Not Passed TestCase Display as followed:\n" + json.dumps(d)
-            if ret_code == "Accepted":
-                ret_code = "Unknown Error"
+            # already got reason, return.
             return ret_code, error_msg
+        else:
+            return "Unknown status", test.exec_info.run_result.status
     # print("Unknown Error", "No TestCase Ran", req_res)
-    return "Unknown Error", error_msg
+    return "Unknown (No Tests)", error_msg
 
 
 def compute_score(solution_str, ground_truth, code_sandbox_psm, **argv) -> float:

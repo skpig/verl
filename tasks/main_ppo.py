@@ -627,7 +627,10 @@ class RewardManager():
             if self.config.data.image_key is not None:
                 solution_str_save = solution_str_post_proc.split("boxed{")[-1][-80:]
             else:
-                solution_str_save = solution_str_post_proc[-32:]
+                if len(solution_str_post_proc) > 128:
+                    solution_str_save = solution_str_post_proc[:64] + '...' + solution_str_post_proc[-64:]
+                else:
+                    solution_str_save = solution_str_post_proc
 
             if i % log_table_interval == 0 and already_print_data_sources[
                     reward_style] < static_conf.trainer.num_cases_to_wandb:
@@ -644,9 +647,9 @@ class RewardManager():
 
                 self.log_table.append([
                     global_index, data[idx].non_tensor_batch.get("uid", ""), global_step, prompt_str, solution_str,
-                    ground_truth, raw_score, score, grm_score, grm_response, score_msg, solution_str_post_proc[-32:],
-                    is_para_dup, is_trunc, valid_response_length,
-                    data[idx].non_tensor_batch.get('extra_info', {}).get("all_turns_sum", -1)
+                    ground_truth, raw_score, score, grm_score, grm_response, score_msg, solution_str_save, is_para_dup,
+                    is_trunc, valid_response_length, data[idx].non_tensor_batch.get('extra_info',
+                                                                                    {}).get("all_turns_sum", -1)
                 ])
             send_to_kafka({
                 "global_index": global_index,
