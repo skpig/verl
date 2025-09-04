@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict
 
 from alpha_seed.workers.streaming_service.rollout_request import Request
+from alpha_seed.workers.xperf_rollout.component.query import ProcessEventType
 
 
 @dataclass
@@ -23,6 +24,7 @@ class FinishedEventStats:
 class RequestDigest:
     query_id: str
     pool_name: str  # 属于哪个request manager
+    assigned: bool  # 是否被挑选出来staging阶段但还没指定具体某个engine
     assigned_engine_id: str
     assigned_engine_name: str
     global_step: int  # 从第几个global step提交的
@@ -140,8 +142,12 @@ class StepStat:
     step: int  # 第几个global step
     pool_name: str  # 那个request manager
 
-    # 记录所有query创建到末次从proxy dispatch的时间差
+    # 记录所有query创建到末次从proxy dispatch的时间差(用来衡量proxy分发能力)
     shed_delay: ReservoirSamples = field(default_factory=lambda: ReservoirSamples())
+    # 记录query进入engine后在waiting队列的等待时间(用来衡量engine内部调度和负载状况)
+    wait_delay: ReservoirSamples = field(default_factory=lambda: ReservoirSamples())
+    # 记录query创建来到开始prefill的时间差(用来表示query实际调度状况)
+    run_delay: ReservoirSamples = field(default_factory=lambda: ReservoirSamples())
 
 
 class RequestStatCollector:
@@ -151,6 +157,7 @@ class RequestStatCollector:
         self.mutex = threading.Lock()
 
     def finish(self, pool_name: str, req: Request):
+        # shed delay
         shed_delays = []
         en_pool = req.last_pending_reschedule_ts
         last_recv = req.query.received_time
@@ -158,10 +165,41 @@ class RequestStatCollector:
         for his in req.stale_histories:
             delay = (his.received_time - his.last_pending_reschedule_ts) / 1e3
             shed_delays.append(delay)
+
+        # wait delay
+        wait_delays = []
+        for his in req.stale_histories:
+            wait_delays.extend(self._accumulate_wait_delay_from_events_list(his.process_events))
+        wait_delays.extend(self._accumulate_wait_delay_from_events_list(req.query.process_events))
+
+        # run delay(unit: s)
+        run_delays = []
+        for his in req.stale_histories:
+            # 按request pool到开始prefill的时差算
+            delay = (his.first_scheduled_time - his.last_pending_reschedule_ts) / 1e3
+            if delay > 2e-6:
+                # delay 太短认为是没有实际开始prefill，忽略
+                run_delays.append(delay)
+        delay = (req.query.first_scheduled_time - req.last_pending_reschedule_ts) / 1e3
+        run_delays.append(delay)
+
         with self.mutex:
             if req.global_step not in self.steps:
                 self.steps[req.global_step] = StepStat(req.global_step, pool_name)
             self.steps[req.global_step].shed_delay.add(shed_delays)
+            self.steps[req.global_step].wait_delay.add(wait_delays)
+            self.steps[req.global_step].run_delay.add(run_delays)
+
+    def _accumulate_wait_delay_from_events_list(self, events) -> list:
+        wait_delays = []
+        for i in range(1, len(events)):
+            prev_event = events[i - 1]
+            this_event = events[i]
+            dur = (this_event.ts_ms - prev_event.ts_ms) / 1e3
+            if this_event.event == ProcessEventType.PREFILL_START:
+                # prefill start 之前在waiting queue里等了多久
+                wait_delays.append(dur)
+        return wait_delays
 
     def get_step_metrics(self, step: int) -> Dict[str, float]:
         if step not in self.steps:
@@ -173,4 +211,14 @@ class RequestStatCollector:
             "rollout/query/shed_delay_p95": stat.shed_delay.percentile(0.95),
             "rollout/query/shed_delay_p99": stat.shed_delay.percentile(0.99),
             "rollout/query/shed_delay_max": stat.shed_delay.max(),
+            "rollout/query/wait_delay_min": stat.wait_delay.min(),
+            "rollout/query/wait_delay_mean": stat.wait_delay.mean(),
+            "rollout/query/wait_delay_p95": stat.wait_delay.percentile(0.95),
+            "rollout/query/wait_delay_p99": stat.wait_delay.percentile(0.99),
+            "rollout/query/wait_delay_max": stat.wait_delay.max(),
+            "rollout/query/run_delay_min": stat.run_delay.min(),
+            "rollout/query/run_delay_mean": stat.run_delay.mean(),
+            "rollout/query/run_delay_p95": stat.run_delay.percentile(0.95),
+            "rollout/query/run_delay_p99": stat.run_delay.percentile(0.99),
+            "rollout/query/run_delay_max": stat.run_delay.max(),
         }

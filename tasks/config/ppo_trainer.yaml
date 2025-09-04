@@ -168,7 +168,7 @@ actor_rollout_ref:
     mode: "batch" # [batch, server]
     weights_communicator: "nccl" # [nccl, ucx], elastic模式下只能用ucx
     weights_communicator_enable_aiomonitor: ${misc.aiomonitor.enable}
-    prefix_cache_impl: "disabled"
+    prefix_cache_impl: "disabled"  # [disabled, paged, normal]
     prefix_cache_slot_num: -1
     prefix_cache_max_length: -1
     recommend_standalone_usage:
@@ -570,17 +570,21 @@ streaming_rollout:
   query_trace:
     enable: True
     from_step: 0
-    to_step: 10
+    to_step: 5
     upload_to_mlx: True
     renderer:
       no_waiting_spans: True  # 是否在trace threads上显示waiting，不显示W可以更清晰看出engine填充程度
   proxy:
-    # 只对非elastic的server mode起作用，elastic一定是dynamic-balancing
+    # elastic打开时不能选even-distribution
     lb_mode: dynamic-balancing  # ["dynamic-balancing", "even-distribution", "cache-aware-balancing"]
     poll_internal_seconds: 2.  # 1轮最短间隔
     rebalance_threshold: 2  # 最小溢出x个才重新分发给其他
-    min_load_ratio: 0.2  # cache-aware-balancing下强制忽略cache重分配的load比例
-    gmem_abundant_threshold: 0.15  # engine低于这个kv cache%时，不会被abort任何queries
+    # 负载平衡度阈值，cov=std(kv)/mean(kv) 超过阈值才触发rebalance，仅cache-aware-balancing下生效
+    # cache-aware-balancing下，轮数越多越rebalance收益越小
+    # 根据query trace的情况对这个进行调整，默认值1比较苛刻，几乎不会rebalance
+    # 如果调整太频繁，可以吧这个值调大，调到很大(比如100)表示不rebalance
+    rebalance_skewness_coef: 1.0
+    gmem_abundant_threshold: 0.30  # engine低于这个kv cache%时，不会被abort任何queries
     gmem_high_water_level_threshold: 0.90  # engine超过这个kv cache%时，不会被分发新的query
     gmem_insufficient_threshold: 0.95  # 超过这个kv cache%的query会从waiting列表里abort掉
 

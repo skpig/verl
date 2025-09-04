@@ -56,6 +56,10 @@ class CacheManager:
         self.moving_avg_len = moving_avg_length
         self.schedule_strategy = schedule_strategy.lower()
         assert self.schedule_strategy in ['default', 'fifo'], f"invalid schedule_strategy: {self.schedule_strategy}"
+        self.prefix_cache_save_callback = lambda query: None
+
+    def set_prefix_cache_save_callback(self, fn: Callable):
+        self.prefix_cache_save_callback = fn
 
     def empty_cache(self):
         self.slot_table_status: List[SlotStatus] = [SlotStatus(id=i) for i in range(self.slot_num)]
@@ -86,6 +90,7 @@ class CacheManager:
         assert query.is_kv_cache_slot_allocated()
         self.page_swap_out_bs += 1
         self.page_swap_out_token += len(query.input_ids) + len(query.new_token_ids)
+        self.prefix_cache_save_callback(query)
         self.release_query(query)
         query.reset_compute(info={'reason': 'paused'})
         return True
@@ -119,11 +124,14 @@ class CacheManager:
             else:
                 self.page_swap_out_bs += 1
                 self.page_swap_out_token += len(query.input_ids) + len(query.new_token_ids)
+                self.prefix_cache_save_callback(query)
                 self.release_query(query)
                 query.reset_compute(info={'reason': 'insufficient_slots'})
                 waiting.append(query)
 
         # See if any query from the waiting-list can be activated
+        # 从waiting最早step开始选，优先结束更早的query以释放prefix cache
+        waiting_queries.sort(key=lambda q: (q.meta_info.get('step', 0), q.created_time))
         for query in waiting_queries:
             threshold = self.moving_avg_len // self.slot_block_size
             status = self._update_query(query, threshold=threshold)
@@ -150,7 +158,7 @@ class CacheManager:
                              paused_queries: List[Query]):
 
         def sort_queue(lis: List[Query], reverse=False):
-            return sorted(lis, key=lambda x: x.idx, reverse=reverse)
+            return sorted(lis, key=lambda q: (q.meta_info.get('step', 0), q.created_time), reverse=reverse)
 
         phase1_running = sort_queue(running_queries)
         waiting = sort_queue(waiting_queries)
@@ -182,6 +190,7 @@ class CacheManager:
                 waiting.append(to_swap_query)
                 self.page_swap_out_bs += 1
                 self.page_swap_out_token += len(to_swap_query.input_ids) + len(to_swap_query.new_token_ids)
+                self.prefix_cache_save_callback(query)
                 self.release_query(to_swap_query)
                 to_swap_query.reset_compute(info={'reason': 'insufficient_slots_fifo'})
                 status = self._update_query(query)
@@ -196,6 +205,7 @@ class CacheManager:
                     waiting.append(query)
                     self.page_swap_out_bs += 1
                     self.page_swap_out_token += len(query.input_ids) + len(query.new_token_ids)
+                    self.prefix_cache_save_callback(query)
                     self.release_query(query)
                     query.reset_compute(info={'reason': 'insufficient_slots_fifo'})
 

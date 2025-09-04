@@ -66,7 +66,7 @@ class OpenAIProxy(ABC):
         else:
             input_ids = prompt
             input_prompt = ""
-        request_id = request.meta_info.get('uid', uuid.uuid4().hex)
+        request_id = uuid.uuid4().hex  # 已经有uid做trajectory跟踪了，这里用随机串，不会把request pool里的key顶掉
         kwargs = {}
         if 'image_data_ref' in request.messages:
             kwargs['image_kwargs'] = {'image_data_ref': request.messages['image_data_ref']}

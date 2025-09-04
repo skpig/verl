@@ -47,6 +47,7 @@ class FIFOList:
         self.mutex = threading.Lock()
 
     def append(self, item):
+        assert item is not None, "FIFOList item cannot be None"
         with self.mutex:
             idx = len(self.lst)
             self.lst.append(item)
@@ -63,7 +64,7 @@ class FIFOList:
                     while self.head_idx < len(self.lst) and self.lst[self.head_idx] is None:
                         self.head_idx += 1
 
-                    # 头部空到一定程度再截断
+                    # 头部空到一定程度再截断(超过1000个element或前1/4已经空了)
                     if self.head_idx > 1000 or self.head_idx > len(self.lst) // 4:
                         # 更新index_map中的索引：直接减去偏移量
                         for item in self.index_map:
@@ -71,17 +72,43 @@ class FIFOList:
                         self.lst = self.lst[self.head_idx:]
                         self.head_idx = 0
 
+    def empty(self):
+        return self.head_idx >= len(self.lst)
+
     def __iter__(self):
+        # 只作view返回
         # 只读： iter里不能修改内容
         # 脏读： iter过程中不保证lst内容不变，可能还没iter到某个item时，这个item被删掉了
         return FIFOListIter(self.lst, self.head_idx)
+
+
+class StepPriorityList:
+    """
+    按step排序的类FIFO，iterate时优先返回step更小的
+    """
+
+    def __init__(self):
+        self.steps = defaultdict(FIFOList)  # step -> FIFOList
+
+    def append(self, step: int, item):
+        self.steps[step].append(item)
+
+    def remove(self, step: int, item):
+        self.steps[step].remove(item)
+
+    def __iter__(self):
+        for step in sorted(self.steps.keys()):
+            fifo = self.steps[step]
+            if not fifo.empty():
+                yield from fifo
 
 
 class RequestPool:
 
     def __init__(self):
         self.requests: Dict[str, Request] = {}  # {query_id -> } 中间结果会被update进来
-        self.fifo = FIFOList()  # 按顺序记录每个request id，分发的时候优先从取更早的，锁跟着self.requests的一起就好
+        # 按顺序记录每个(step, query id)，分发的时候优先从取更早的step，锁跟着self.requests的一起就好
+        self.fifo = StepPriorityList()
         self.finished_requests: Dict[str, Request] = {}  # finished部分会被移到这里
         self.historical_finished_requests = FiniteDict(204800)  # 记录所有完成的query，FIFO，便于query_tool查询诊断
         self.finished_counter = defaultdict(int)  # {step -> count} 统计每个step完成的数量(因为多轮每个step数量是会变化的)
@@ -103,7 +130,7 @@ class RequestPool:
             for r in reqs:
                 self.requests[r.request_id] = r
                 self._finished_events[r.request_id] = asyncio.Event()
-                self.fifo.append(r.request_id)
+                self.fifo.append(r.global_step, r.request_id)
 
     def get_pending_size(self):
         # 返回还未分发出去的请求的数量
@@ -138,7 +165,7 @@ class RequestPool:
                 if request.is_recent_aborted_from(engine_id, cool_down_seconds):
                     continue
                 # 如果有cache_ids，且当前request不在cache_ids中，则跳过
-                if cache_ids is not None and request.query.id not in cache_ids:
+                if cache_ids is not None and request.query.cache_id not in cache_ids:
                     continue
                 # 标记请求已被认领了再分发出去
                 now = time.time()
@@ -153,40 +180,46 @@ class RequestPool:
                     break
             return ret
 
-    def peak_all_pending_requests(self) -> Dict[str, Request]:
+    def peak_all_pending_requests(self) -> List[Request]:
         # pull全部空闲的请求，只是先将assigned设置成True
         # 后续再进行实际的分发
+        ret = []
         with self._mutex:
-            ret = {}
-            for request_id, request in self.requests.items():
+            for request_id in self.fifo:
+                request = self.requests.get(request_id)
+                # 可能在迭代中已经完成了，忽略
+                if request is None:
+                    continue
                 # 跳过已分发
                 if request.assigned or request.assigned_engine_id is not None:
                     continue
                 request.assigned = True
-                ret[request_id] = request
-            return ret
+                ret.append(request)
+        return ret
 
-    def set_requests_assigned(self, request_ids: List[str], engine_id: str, wg_name: str):
+    def set_requests_assigned(self, request_ids: List[str], engine_id: str, wg_name: str, ts: float):
         # 真实分发请求
+        # 注意，这里更新的字段不会发到给engine，
+        # 为了让engine侧收到的query也跟这里的值保持一致，发给engine前记得手动补充这些字段
         for request_id in request_ids:
-            request = self.requests[request_id]
-            now = time.time()
+            request = self.requests.get(request_id)
+            if request is None:
+                continue
             request.assigned_engine_id = engine_id
             request.assigned_engine_name = wg_name
-            request.last_assigned_at = now
-            request.updated_at = now
-            request.query.dispatch_time = now
+            request.last_assigned_at = ts
+            request.updated_at = ts
+            request.query.dispatch_time = ts
 
     def clear_requests_assigned(self, request_ids: List[str]):
         with self._mutex:
             for request_id in request_ids:
-                request = self.requests[request_id]
+                request = self.requests.get(request_id)
+                if request is None:
+                    continue
                 request.assigned = False
                 request.assigned_engine_id = None
                 request.assigned_engine_name = None
-                request.last_assigned_at = 0
-                request.updated_at = 0
-                request.query.dispatch_time = 0
 
     def get_pool_size(self) -> Tuple[int, int]:
         return len(self.requests), len(self.finished_requests)
@@ -239,7 +272,7 @@ class RequestPool:
                 self.historical_finished_requests.add(r.request_id, r)
                 self.finished_counter[r.global_step] += 1
                 self.requests.pop(r.request_id)
-                self.fifo.remove(r.request_id)
+                self.fifo.remove(r.global_step, r.request_id)
                 # 注意event不要pop，可能调用方还没开始wait
                 evt = self._finished_events.get(r.request_id)
                 if evt is not None:
@@ -527,7 +560,7 @@ class RequestManager:
                 query=query,
                 global_step=step,
                 last_pending_reschedule_ts=now * 1e3,
-                updated_at=time.time(),
+                updated_at=now,
             )
         ])
         self._query_id_log[step].add(query.id)
@@ -577,14 +610,17 @@ class RequestManager:
         return [r.query for r in next_reqs.values()]
 
     # 获取全部request
-    def peak_all_pending_requests(self) -> List[Query]:
-        next_reqs = self.req_pool.peak_all_pending_requests()
-        return [r.query for r in next_reqs.values()]
+    # 二阶段分发请求，先获取所有pending，再去跟所有engine匹配，
+    # 匹配完了之后再提交匹配结果，未匹配到的则会滚到分配前的状态
+    def peak_all_pending_requests(self) -> List[Request]:
+        return self.req_pool.peak_all_pending_requests()
 
-    def set_requests_assigned(self, query_ids: List[str], engine_id: str, wg_name: str):
-        self.req_pool.set_requests_assigned(query_ids, engine_id, wg_name)
+    def set_requests_assigned(self, query_ids: List[str], engine_id: str, wg_name: str, ts: float):
+        # commit
+        self.req_pool.set_requests_assigned(query_ids, engine_id, wg_name, ts)
 
     def clear_requests_assigned(self, query_ids: List[str]):
+        # rollback
         self.req_pool.clear_requests_assigned(query_ids)
 
     # 释放掉给定的query_ids，返回确定释放的query_id
@@ -647,6 +683,7 @@ class RequestManager:
             reg_digest = RequestDigest(
                 query_id=query_id,
                 pool_name=self._rm_name,
+                assigned=req.assigned,
                 assigned_engine_id=req.assigned_engine_id,
                 assigned_engine_name=req.assigned_engine_name,
                 global_step=req.global_step,
@@ -719,7 +756,7 @@ class RequestManager:
                 req = self.req_pool.requests.get(query_id)
                 if req is None:
                     continue
-                if req.assigned:
+                if req.assigned and req.assigned_engine_id is not None:
                     step_running += 1
                     step_active_engines.add(req.assigned_engine_id)
                     if req.updated_at:

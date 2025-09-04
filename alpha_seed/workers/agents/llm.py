@@ -206,7 +206,7 @@ class DirectAsyncClient(AsyncLLMInterface):
             input_ids = prompt
             input_prompt = ""
 
-        request_id = meta_info.get('uid', uuid.uuid4().hex)
+        request_id = uuid.uuid4().hex  # 已经有uid做trajectory跟踪了，这里用随机串，不会把request pool里的key顶掉
         generation_kwargs = meta_info['generation_kwargs']
 
         # 构造sampling参数

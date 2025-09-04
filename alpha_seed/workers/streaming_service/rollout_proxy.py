@@ -7,10 +7,11 @@ import threading
 import time
 import traceback
 import uuid
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass
-from typing import List, Optional, Dict, Union, Tuple, Set
+from typing import List, Optional, Dict, Union, Tuple, Set, Deque
 
+import numpy as np
 import ray
 import torch
 from omegaconf import DictConfig
@@ -19,6 +20,7 @@ from ray.exceptions import ActorDiedError, GetTimeoutError, RayActorError, RayTa
 
 from alpha_seed.utils.profile.timeline import Tracer, CompleteEvent, CounterEvent
 from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRefWorker
+from alpha_seed.workers.streaming_service.rollout_request import Request
 from alpha_seed.workers.streaming_service.rollout_request_manager import RequestManager, RequestManagerRegisterCenter
 from alpha_seed.workers.streaming_service.streaming_rollout import RemoteAsyncXPerfGPTRollout
 from alpha_seed.workers.xperf_rollout.component.query import Query
@@ -37,8 +39,50 @@ class NoAvailableWorker(RuntimeError):
 
 
 @dataclass
-class InternalDiagnosisMetrics:
-    loop_cost: float
+class LoadSkewness:
+    mean: float  # kv mean
+    p90: float  # kv p90
+    p25: float  # kv p25
+    cov: float  # kv Coefficient of Variation
+    running_avg: float  # 平均每个engine运行数
+
+
+class TraceMetrics:
+
+    def get_title(self) -> str:
+        raise NotImplementedError()
+
+    def to_dict(self) -> Dict[str, int | float]:
+        raise NotImplementedError()
+
+
+class EngineTraceMetrics(TraceMetrics):
+
+    def get_wg_name(self) -> str:
+        raise NotImplementedError()
+
+
+@dataclass
+class ProxyLoopCost(TraceMetrics):
+    total: float = 0.  # 每个loop的耗时
+    get_engine_info: float = 0.  # 读取一轮全部engine的load信息等 (从最开始)
+    matching: float = 0.  # 读取所有pending queries并做engine matching (从最开始)
+    staging: float = 0.  # 将matching结果拟分发到engine，但没有执行真的commit (从最开始)
+
+    def get_title(self) -> str:
+        return 'loop cost'
+
+    def to_dict(self) -> Dict[str, int | float]:
+        return {
+            'total': self.total,
+            'engine_info': self.get_engine_info,
+            'matching': self.matching,
+            'staging': self.staging,
+        }
+
+
+@dataclass
+class InternalDiagnosisMetrics(TraceMetrics):
     num_target_replicas: int
     num_ready_replicas: int
     num_initialized_replicas: int
@@ -53,11 +97,13 @@ class InternalDiagnosisMetrics:
     dispatch_delay_acc: float  # query在request pool里到分发出去那一刻总共等待的时间，时间越长表示proxy分发能力越弱
     enqueue_delay_acc: float  # query从创建到进入pool里产生的delay的累积
 
+    def get_title(self) -> str:
+        return "internal"
+
     def to_dict(self):
         # $前缀表示requests/query数量
         # #前缀表示replica数量
         return {
-            'loop_cost': self.loop_cost,
             '#target': self.num_target_replicas,
             '#ready': self.num_ready_replicas,
             '#initialized': self.num_initialized_replicas,
@@ -71,6 +117,51 @@ class InternalDiagnosisMetrics:
             '$max_concurrency': self.max_concurrency,
             'dispatch_delay': self.dispatch_delay_acc,
             'enqueue_delay': self.enqueue_delay_acc,
+        }
+
+
+@dataclass
+class InternalShedMetrics(TraceMetrics):
+    cache_match: int = 0  # 分配kv匹配的
+    steal: int = 0  # 分配kv不匹配的(从别的engine偷过来的)
+    standalone: int = 0  # 分配无任何kv cache的 (全新query或kv cache太久已被evict)
+    history_count: int = 0  # pending中有多少个匹配了engine cache的
+    standalone_count: int = 0  # pending中有多少个是不匹配任何cache的
+
+    def get_title(self) -> str:
+        return "shed"
+
+    def to_dict(self):
+        return {
+            '$cache_match': self.cache_match,
+            '$steal': self.steal,
+            '$no_cache': self.standalone,
+            '$history_pending': self.history_count,
+            '$standalone_pending': self.standalone_count,
+        }
+
+
+@dataclass
+class EngineDispatchMetrics(EngineTraceMetrics):
+    # 本轮分发给某个engine的状况
+    history_remain_pending: int = 0  # 属于这个engine但没有分过来的数量
+    steal: int = 0  # 不属于这个engine但属于别的engine拿出来的数量
+
+    def __init__(self, wg_name: str, history_remain_pending: int = 0, steal: int = 0):
+        self.wg_name = wg_name
+        self.history_remain_pending = history_remain_pending
+        self.steal = steal
+
+    def get_title(self) -> str:
+        return "dispatch"
+
+    def get_wg_name(self) -> str:
+        return self.wg_name
+
+    def to_dict(self):
+        return {
+            '$history_remain_pending': self.history_remain_pending,
+            '$steal': self.steal,
         }
 
 
@@ -413,6 +504,9 @@ class StatisticalMetric:
     sum: float
 
 
+zero_stats = StatisticalMetric(0, 0, 0, 0)
+
+
 class ProxyMetricsLogger:
 
     def __init__(self):
@@ -455,7 +549,7 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
         super().__init__(self.request_manager)
         self.replicas = replicas
         self.actor_info = actor_info  # hybrid rollout actor info
-        self.config = config  # .streaming_rollout.proxy
+        self.config = config  # .streaming_rollout
         self._tracer = Tracer.get_instance()
         self._stop_server_ts = 0
         self._update_worker_start_ts = 0
@@ -497,19 +591,17 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
             ready_wg_items = list(self.replicas.get_ready_worker_groups().items())
 
             for engine_id, wg in ready_wg_items:
+                wg: RayWorkerGroup | RemoteAsyncXPerfGPTRollout | AsyncActorRolloutRefWorker
                 try:
                     wg_name = wg.group_name
                     queries: List[Query] = wg.get_all_queries(self._request_manager_name)
                     if len(queries) > 0:
                         self.request_manager.update_intermediate_queries.remote(queries, engine_id, wg_name,
                                                                                 time.time())
-                except ray.exceptions.ActorDiedError:
-                    pass
-                except ray.exceptions.RayTaskError as e:
-                    self._teardown(wg, e)
+                except (ActorDiedError, RayTaskError) as e:
+                    self._finalize(wg, e)
 
-            loop_cost = time.time() - t0
-            sleep_interval = max(0., self.poll_interval - loop_cost)
+            loop_cost = time.time() - t0  # noqa: py-spy
 
     @property
     def world_size(self):
@@ -550,7 +642,7 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
             t0 = time.time()
             ready_wg_items = list(self.replicas.get_ready_worker_groups().items())
 
-            wg_history_map: Dict[str, Set[str]] = {}
+            wg_history_map: Dict[str, Set[str]] = {}  # engine_id -> cache_ids
             wg_queries: Dict[str, List[Query]] = {}  # engine_id -> 记录分给engine的queries
             for engine_id, wg in ready_wg_items:
                 try:
@@ -565,7 +657,7 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
                 wg_name = wg.group_name
                 try:
                     # send new request to worker group (engine)
-                    load: LoadMetric = wg.get_load_metrics()[0]  # noqa, dp_size always =1
+                    load: LoadMetric = wg.get_load_metrics()
                     gmem_insufficient = load.kv_cache_util > self.config.proxy.gmem_insufficient_threshold
 
                     short = max_concurrency - load.num_prefilling - load.num_decoding - load.num_pending - load.num_waiting
@@ -614,8 +706,9 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
                     self._finalize(wg, e)
 
             total, pending_size = ray.get(self.request_manager.get_size.remote())
+            load_skewness = self._calc_load_skewness(loads)
             prefill_throughput, decode_throughput = ray.get(self.request_manager.get_estimated_throughput.remote())
-            self._trace_load_metrics(loads, prefill_throughput, decode_throughput, total, pending_size)
+            self._trace_load_metrics(loads, load_skewness, prefill_throughput, decode_throughput, total, pending_size)
 
             loop_cost = time.time() - t0  # noqa: for py-spy
             sleep_interval = max(0., self.poll_interval - loop_cost)
@@ -661,27 +754,34 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
                   'will teardown to process to propagate errors in time')
             os._exit(11)  # noqa
 
-    def _trace_load_metrics(self, loads: Dict[Tuple[str, str], LoadMetric], prefill_throughput: Dict[str, float],
-                            decode_throughput: Dict[str, float], total: int, global_pending: int):
+    def _trace_load_metrics(self, loads: Dict[Tuple[str, str], LoadMetric], load_skewness: LoadSkewness,
+                            prefill_throughput: Dict[str, float], decode_throughput: Dict[str, float], total: int,
+                            global_pending: int):
         total_waiting_num = 0
         total_prefilling_num = 0
         total_decoding_num = 0
+        kv_cache_util_min = 1
+        kv_cache_util_max = 0
         for (wg_id, wg_name), metric in loads.items():
             total_waiting_num += metric.num_waiting
             total_prefilling_num += metric.num_prefilling
             total_decoding_num += metric.num_decoding
             prefill_tps = prefill_throughput.get(wg_id) or 0
             decode_tps = decode_throughput.get(wg_id) or 0
+            kv_cache_util_min = min(kv_cache_util_min, metric.kv_cache_util)
+            kv_cache_util_max = max(kv_cache_util_max, metric.kv_cache_util)
             evt = CounterEvent(
-                name='load metrics:',
+                name='load:',
                 pid=f'{self._request_manager_name} {wg_name}',
                 ts=metric.ts * 1e6,
                 data={
                     'kv cache%': metric.kv_cache_util,
+                    'kv swap%': metric.kv_prefix_cache_swap_util,
                     'prefilling': metric.num_prefilling,
                     'decoding': metric.num_decoding,
                     'pending': metric.num_pending,
                     'waiting': metric.num_waiting,
+                    'deviate': metric.num_running - load_skewness.running_avg,
                     'prefill TPS': prefill_tps,
                     'decode TPS': decode_tps,
                 },
@@ -697,22 +797,49 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
                 '$waiting': total_waiting_num,
                 '$prefilling': total_prefilling_num,
                 '$decoding': total_decoding_num,
+                '$running(avg)': load_skewness.running_avg,
                 '$processing': total,
                 '$pending dispatch': global_pending,
                 '$prefill TPS': sum(prefill_throughput.values()),
                 '$decode TPS': sum(decode_throughput.values()),
+                'kv cache%(avg)': load_skewness.mean,
+                'kv cache%(min)': kv_cache_util_min,
+                'kv cache%(p90)': load_skewness.p90,
+                'kv cache%(p25)': load_skewness.p25,
+                'kv cache%(CoV)': load_skewness.cov,
             },
         )
         self._tracer.trace(evt)
 
-    def _trace_internal_diagnosis(self, internal_metrics: InternalDiagnosisMetrics):
+    def _trace_metrics(self, metrics: TraceMetrics):
         evt = CounterEvent(
-            name='internal:',
+            name=f'{metrics.get_title()}:',
             pid=f'RequestManager/{self._request_manager_name}',  # 不区分hybrid/standalone
             ts=time.time() * 1e6,
-            data=internal_metrics.to_dict(),
+            data=metrics.to_dict(),
         )
         self._tracer.trace(evt)
+
+    def _trace_engine_metrics(self, metrics: EngineTraceMetrics):
+        evt = CounterEvent(
+            name=f'{metrics.get_title()}:',
+            pid=f'{self._request_manager_name} {metrics.get_wg_name()}',
+            ts=time.time() * 1e6,
+            data=metrics.to_dict(),
+        )
+        self._tracer.trace(evt)
+
+    def _calc_load_skewness(self, loads: Dict[Tuple[str, str], LoadMetric]) -> LoadSkewness:
+        kv_cache_util_lst = [v.kv_cache_util for _, v in loads.items()] or [0]
+        mean = float(np.mean(kv_cache_util_lst))
+        cov = float(np.std(kv_cache_util_lst)) / mean if mean > 0 else 0
+        p90 = float(np.percentile(kv_cache_util_lst, 90))
+        p25 = float(np.percentile(kv_cache_util_lst, 25))
+        running_total = sum(m.num_running for m in loads.values())
+        running_avg = 0
+        if loads:
+            running_avg = running_total / len(loads)
+        return LoadSkewness(mean, p90, p25, cov, running_avg)
 
 
 class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
@@ -778,7 +905,7 @@ class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
                 wg_name = wg.group_name
                 try:
                     # send new request to worker group (engine)
-                    load: LoadMetric = wg.get_load_metrics()[0]  # noqa, dp_size always =1
+                    load: LoadMetric = wg.get_load_metrics()
                     gmem_insufficient = load.kv_cache_util > self.config.proxy.gmem_insufficient_threshold
                     gmem_high_water_level = load.kv_cache_util > self.config.proxy.gmem_high_water_level_threshold
                     gmem_abundant = load.kv_cache_util < self.config.proxy.gmem_abundant_threshold
@@ -878,17 +1005,20 @@ class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
             # observability
             total, pending_size = ray.get(self.request_manager.get_size.remote())
             num_ready_replicas = len(self.replicas.ready_worker_group_ids)
+            load_skewness = self._calc_load_skewness(loads)
             prefill_throughput, decode_throughput = ray.get(self.request_manager.get_estimated_throughput.remote())
             finished_stats = ray.get(self.request_manager.get_finished_stats.remote(self._metrics_logger.global_step))
-            self._trace_load_metrics(loads, prefill_throughput, decode_throughput, total, pending_size)
+            self._trace_load_metrics(loads, load_skewness, prefill_throughput, decode_throughput, total, pending_size)
 
             loop_cost = time.time() - t0
             sleep_interval = max(0., self.poll_interval - loop_cost)
             num_target_replicas = self.replicas.target_num_replicas
             num_alive_replicas = len(self.replicas.alive_worker_group_ids)
             num_initialized_replicas = len(self.replicas.initialized_worker_group_ids)
+            loop_cost_metrics = ProxyLoopCost(
+                total=loop_cost,
+            )
             internal_metrics = InternalDiagnosisMetrics(
-                loop_cost=loop_cost,
                 num_target_replicas=num_target_replicas,
                 num_ready_replicas=num_ready_replicas,
                 num_initialized_replicas=num_initialized_replicas,
@@ -903,7 +1033,8 @@ class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
                 dispatch_delay_acc=dispatch_delay,
                 enqueue_delay_acc=enqueue_delay,
             )
-            self._trace_internal_diagnosis(internal_metrics)
+            self._trace_metrics(loop_cost_metrics)
+            self._trace_metrics(internal_metrics)
 
             self._metrics_logger.log({
                 'num_ready_replicas': num_ready_replicas,
@@ -918,10 +1049,12 @@ class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
         super_metrics = super().get_step_metrics()
         metrics = self._metrics_logger.get_last_step_metrics()
         try:
-            num_ready_replicas = metrics['num_ready_replicas']
-            loop_cost = metrics['loop_cost']
-            gmem_insufficient_rebalanced_count = metrics['gmem_insufficient_rebalanced_count']
-            load_rebalanced_count = metrics['load_rebalanced_count']
+            num_ready_replicas = metrics.get('num_ready_replicas', zero_stats)
+            loop_cost = metrics.get('loop_cost', zero_stats)
+            gmem_insufficient_rebalanced_count = metrics.get('gmem_insufficient_rebalanced_count', zero_stats)
+            load_rebalanced_count = metrics.get('load_rebalanced_count', zero_stats)
+            decode_tps = metrics.get('total_token_TPS', zero_stats)
+            total_processes_queries = metrics.get('total_processes_queries', zero_stats)
             this_metrics = {
                 'rollout/elastic/num_ready_replicas_mean': num_ready_replicas.mean,
                 'rollout/elastic/num_ready_replicas_min': num_ready_replicas.minimum,
@@ -929,12 +1062,13 @@ class BalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
                 'rollout/proxy/loop_cost': loop_cost.mean,
                 'rollout/proxy/gmem_insufficient_rebalanced_count_total': gmem_insufficient_rebalanced_count.sum,
                 'rollout/proxy/load_rebalanced_count_total': load_rebalanced_count.sum,
-                'rollout/proxy/total_token_TPS': metrics['total_token_TPS'].mean,
-                'rollout/proxy/total_processes_queries': metrics['total_processes_queries'].maximum,
+                'rollout/proxy/total_token_TPS': decode_tps.mean,
+                'rollout/proxy/total_processes_queries': total_processes_queries.maximum,
             }
             super_metrics.update(this_metrics)
         except KeyError as e:
-            pass
+            traceback.print_exc()
+            print("got error on get_step_metrics, will be ignored")
         return super_metrics
 
 
@@ -944,13 +1078,13 @@ class CacheAwareBalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
                  actor_info: List[WeightsRankInfo], request_manager_name: str, config: DictConfig):
         super().__init__(replicas, actor_info, request_manager_name, config)
         self.abort_logger = DebounceAccumulatedLogger()
-        self.min_load_ratio = self.config.proxy.min_load_ratio
 
     async def _dispatch_loop(self):
         print(f'start background dispatch loop with cache_aware balanced mode for {self._request_manager_name}')
 
         sleep_interval = self.poll_interval
         ready_wg_ids_prev = set()
+        engine_concurrency_cap = defaultdict(int)  # engine_id -> 最大可并发数
         while True:
             if self._loop_should_stop.is_set():
                 break
@@ -959,37 +1093,65 @@ class CacheAwareBalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
             self.is_waiting = False
             await asyncio.sleep(sleep_interval)
 
+            # handle dead engines during the loop to prevent request from staling(dangling)
+            ready_wg_ids1 = self.replicas.ready_worker_group_ids
+            dead_wg_ids_between_loop = ready_wg_ids_prev - ready_wg_ids1
+            ready_wg_ids_prev = ready_wg_ids1  # save to previous
+            if dead_wg_ids_between_loop:
+                await self.request_manager.handle_stale_requests.remote(ready_wg_ids1)
+
             # 先考虑cache命中，再按照总量平分给每个ready replica，均匀分发
             # 注意一开始可能还没有request进去request pool
             # 也可能replicas还没ready
-            total, pending_size = ray.get(self.request_manager.get_size.remote())
-            num_ready_replicas = len(self.replicas.ready_worker_group_ids)
-            max_concurrency = total // max(1, num_ready_replicas)  # replicas可能还没ready
-            max_concurrency = min(max(max_concurrency, 1), 512)  # 限制在1-512范围内
+            total, pending_size = await self.request_manager.get_size.remote()
 
             # 纪录负载指标
-            loads = {}  # (engine_id, wg_name) -> LoadMetric
+            loads: Dict[Tuple[str, str], LoadMetric] = {}  # (engine_id, wg_name) -> LoadMetric
+            gmem_high_water_level_count = 0
+            gmem_insufficient_count = 0
+            total_available_num_slots = 0
+            total_overload_num_slots = 0
+            load_rebalanced_count = 0
+            enqueue_delay, dispatch_delay = 0.0, 0.0
+            loop_cost_metrics = ProxyLoopCost()
+            shed_metrics = InternalShedMetrics()
+            dispatch_metrics: Dict[str, EngineDispatchMetrics] = {}  # engine_id -> EngineDispatchMetrics
 
             # 只将请求dispatch给ready worker group，每次循环都是最新的ready状态
             # 在dispatch过程中，worker group死了也没关系，这个request会之后被标记为stale
             t0 = time.time()
             ready_wg_items = list(self.replicas.get_ready_worker_groups().items())
-            ready_wg_ids0 = set(engine_id for engine_id, _ in ready_wg_items)
             died_wgs = []
 
-            wg_history_map = {}
+            query_history_map: Dict[str, Tuple[str, float]] = {}  # cache_id -> (engine_id, save_ts)
 
             async def get_wg_history(wg, engine_id):
+                nonlocal gmem_high_water_level_count, gmem_insufficient_count
                 try:
                     wg_name = wg.group_name
-                    history_ids = await asyncio.to_thread(wg.get_history_ids)
-                    wg_history_map[engine_id] = set(history_ids) if history_ids else set()
-                    load: LoadMetric = (await asyncio.to_thread(wg.get_load_metrics))[0]  # noqa, dp_size always =1
+                    history_ids = await wg.get_history_ids_async()
+                    for cache_id, save_ts in history_ids:
+                        # Note(lixiang):
+                        # 这里可能会出现一个cache_id有多个matched engine，优先选后跑过的那个，因为prefix length可能会更长
+                        if cache_id not in query_history_map:
+                            query_history_map[cache_id] = (engine_id, save_ts)
+                        else:
+                            # 存更新的
+                            if save_ts > query_history_map[cache_id][1]:
+                                query_history_map[cache_id] = (engine_id, save_ts)
+                    load: LoadMetric = await wg.get_load_metrics_async()
                     loads[(engine_id, wg_name)] = load
+                    running_concurrency = load.num_prefilling + load.num_decoding
+                    if load.kv_cache_util > self.config.proxy.gmem_high_water_level_threshold:
+                        engine_concurrency_cap[engine_id] = max(engine_concurrency_cap[engine_id], running_concurrency)
+                        gmem_high_water_level_count += 1
+                    if load.kv_cache_util > self.config.proxy.gmem_insufficient_threshold:
+                        gmem_insufficient_count += 1
 
-                except ray.exceptions.ActorDiedError as e:
+                except (ActorDiedError, RayTaskError) as e:
                     # ignore actor died error, underlying replicated worker group will handle
                     # worker group and actors lifecycle
+                    self._finalize(wg, e)
                     died_wgs.append(engine_id)
 
             async with asyncio.TaskGroup() as tg:
@@ -998,114 +1160,390 @@ class CacheAwareBalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
 
             # 过滤死掉的wg
             ready_wg_items = [(engine_id, wg) for engine_id, wg in ready_wg_items if engine_id not in died_wgs]
-            if len(ready_wg_items) == 0:
-                sleep_interval = max(0., self.poll_interval - time.time() + t0)
-                continue
 
-            # 找出哪些query命中cache，哪些没命中(standalone)
-            all_queries = ray.get(self.request_manager.peak_all_pending_requests.remote())
-            queries_in_wg_history = {engine_id: [] for engine_id, _ in ready_wg_items}
+            # collect perf metrics
+            load_skewness = self._calc_load_skewness(loads)
+            prefill_throughput, decode_throughput = await self.request_manager.get_estimated_throughput.remote()
+            self._trace_load_metrics(loads, load_skewness, prefill_throughput, decode_throughput, total, pending_size)
+            loop_cost_metrics.get_engine_info = time.time() - t0
+
+            abort_cool_down_seconds = 10
+            # 一次rebalance不要太多，调节要平缓
+            # 这里从别的engine rebalance过来太多会导致目标engine因为跑了别人的query而把prefix cache evict掉了，最终造成命中率下降
+            max_rebalance_count_per_wg = 1
+            recent_aborted_ids: Dict[str, Set[str]] = {}  # engine_id -> [query_id]
+            # rebalance1
+            # 在engine waiting中一段时间但没有命中cache
+            # (可能是刚step更新完，大家都没cache，重新abort掉平衡一下)
+            if load_skewness.p25 < self.config.proxy.gmem_high_water_level_threshold:
+                no_cache_query_ids: Dict[str, Set[str]] = {}  # engine_id -> {query_id}
+                for (engine_id, wg_name), load in loads.items():
+                    gmem_insufficient = load.kv_cache_util > self.config.proxy.gmem_insufficient_threshold
+                    if gmem_insufficient:
+                        no_cache_query_ids[engine_id] = set(load.no_caching_query_ids[-max_rebalance_count_per_wg:])
+                if len(no_cache_query_ids) > 0:
+                    aborted_ids = await self._rebalance_by_ids(loads, no_cache_query_ids)
+                    aborted_count = sum([len(v) for v in aborted_ids.values()])
+                    pending_size += aborted_count
+                    load_rebalanced_count += aborted_count
+                    recent_aborted_ids.update(aborted_ids)
+
+            # rebalance2
+            # 负载倾斜，平衡的收益更大
+            # 触发条件(需要苛刻一点，当另一个engine重新prefill的好处大于继续等cache的好处才rebalance)
+            # 1. 有超过25%的engine kv低于高水位
+            # 2. 负载倾斜达到阈值
+            if (load_skewness.p25 < self.config.proxy.gmem_high_water_level_threshold and
+                    load_skewness.cov > self.config.proxy.rebalance_skewness_coef):
+                # 当有空闲engine才会触发rebalance
+                aborted_ids = await self._rebalance(loads, load_skewness, max_rebalance_count_per_wg)
+                aborted_count = sum([len(v) for v in aborted_ids.values()])
+                pending_size += aborted_count
+                load_rebalanced_count += aborted_count
+                for engine_id, aborted in aborted_ids.items():
+                    if engine_id not in recent_aborted_ids:
+                        recent_aborted_ids[engine_id] = aborted
+                    else:
+                        recent_aborted_ids[engine_id].update(aborted)
+
+            # matching
+            # 找出哪些query命中cache，哪些没命中(standalone)，跳过刚从某个engine abort出来的
+            # Note: all_requests 是有序的，queries_in_wg_history和standalone_queries也要满足偏序关系
+            all_requests = await self.request_manager.peak_all_pending_requests.remote()
+            queries_in_wg_history: Dict[str, List[Query]] = defaultdict(list)  # engine_id ->
             standalone_queries = []
-            for query in all_queries:
-                query_in_history = False
-                for engine_id, history_ids in wg_history_map.items():
-                    if query.id in history_ids:
-                        query_in_history = True
-                        queries_in_wg_history[engine_id].append(query)
-                        break
-                if not query_in_history:
+            # engine_id -> {query_id}，记录是否最近从某个engine abort，在实际dispatching时要跳过这个
+            engine_black_list: Dict[str, Set[str]] = defaultdict(set)
+            engine_black_list.update(recent_aborted_ids)
+            # 只去取cache_id->engine_id，忽略save ts
+            query_cache_id_map = {cache_id: engine_id for cache_id, (engine_id, _) in query_history_map.items()}
+            for req in all_requests:
+                req: Request
+                query = req.query
+                history_engine_id = query_cache_id_map.get(query.cache_id)
+                # 刚abort出来的query不要放回同一个engine里
+                aborted_ids = recent_aborted_ids.get(history_engine_id) or set()
+                if history_engine_id is not None and query.id not in aborted_ids:
+                    # 暂时没有考虑rebalance，之后再算
+                    queries_in_wg_history[history_engine_id].append(query)
+                else:
                     standalone_queries.append(query)
+
+            shed_metrics.history_count = len(all_requests) - len(standalone_queries)
+            shed_metrics.standalone_count = len(standalone_queries)
 
             # 按照load水平从低到高分query
             # 先分没命中cache(standalone)的query，然后看load水平
             # 如果仍然比较低，就继续分命中的，否则命中的仍然以正常的方式分
-            wg_loads = {}
+            wg_loads: Dict[str, int] = {}  # engine_id -> 已经分的数量
             wg_id_load_from_low_to_high = []
             for engine_id, wg in ready_wg_items:
                 wg: Union[RayWorkerGroup, RemoteAsyncXPerfGPTRollout, AsyncActorRolloutRefWorker]  # type anno
                 wg_name = wg.group_name
                 load = loads[(engine_id, wg_name)]
                 wg_loads[engine_id] = load.num_prefilling + load.num_decoding + load.num_pending + load.num_waiting
-                wg_id_load_from_low_to_high.append(engine_id)
-            pivot = sum(wg_loads.values()) // len(wg_loads)
-            pivot = max(min(pivot, max_concurrency), 1)
-            wg_id_load_from_low_to_high.sort(key=lambda _engine_id: wg_loads[_engine_id])
+                wg_id_load_from_low_to_high.append((engine_id, wg_name))
+            wg_id_load_from_low_to_high.sort(key=lambda v: wg_loads[v[0]])
 
-            queries_assigned: Dict[str, List[Query]] = {}
+            loop_cost_metrics.matching = time.time() - t0
 
-            for engine_id in wg_id_load_from_low_to_high:
-                # 从低到高，先试图分配到pivot
-                load: int = wg_loads[engine_id]
+            # dispatching(staging)
+            queries_assigned: Dict[str, List[Query]] = defaultdict(list)  # engine_id ->
+
+            # 重新计算一次当前最新的总量，staging的数量 + 已经分出去的
+            current_total = len(all_requests) + sum(wg_loads.values())
+            num_ready_replicas = len(self.replicas.ready_worker_group_ids)
+            max_concurrency = current_total // max(1, num_ready_replicas)  # replicas可能还没ready
+            max_concurrency = min(max(max_concurrency, 1), 512)  # 限制在1-512范围内
+
+            # 第一轮先匹配kv
+            for engine_id, wg_name in wg_id_load_from_low_to_high:
+                dispatch_metrics[engine_id] = EngineDispatchMetrics(wg_name)
+
+                # 从低到高，先试图分配到max_concurrency
                 # 有本来就命中cache且属于他的
-                queries_assigned[engine_id] = queries_in_wg_history[engine_id]
-                queries_in_wg_history[engine_id] = []
-                load += len(queries_assigned[engine_id])
-                short = pivot - load
-                # 用没命中cache(standalone)的query往里分配
-                if short > 0:
-                    queries_assigned[engine_id].extend(standalone_queries[:short])
-                    standalone_queries = standalone_queries[short:]
-                # 如果低于pivot的某个比例，即使命中cache的其他query也往里分配
-                threshold = max(pivot * self.min_load_ratio, 1)
-                enough = False
-                for cached_query in queries_in_wg_history.values():
-                    while len(cached_query) > 0:
-                        enough = load + len(queries_assigned[engine_id]) >= threshold
-                        if enough:
-                            break
+                # pending量前x%必发，或不超过历史记录的concurrency+bleeding
+                short = max_concurrency - wg_loads[engine_id]
+                load = loads[(engine_id, wg_name)]
+                gmem_high = load.kv_cache_util > self.config.proxy.gmem_high_water_level_threshold
+                has_waiting = load.num_waiting + load.num_pending > 4
+
+                # 如果engine本身还有waiting，则先跳过这一轮，engine内可能会kv满了然后evict掉一轮
+                # 可能会出现从decoding swap到waiting的过程中，因为保存了新的kv，导致老的kv被LRU，
+                # 然后原本可能match的query进来时kv没了，来回prefill降低了命中率
+                if has_waiting and load.kv_prefix_cache_swap_util > 0.4:
+                    continue
+
+                if gmem_high:
+                    short = min(short, engine_concurrency_cap[engine_id] + 1)
+                    short_for_history = short
+                else:
+                    # 充分时可以多分一些history cache匹配的(提高命中率)
+                    # 尽量优先分配cache，即使在waiting中排队也没关系，避免过多的P打断D
+                    short_for_history = short + 6
+
+                if short < 0:
+                    # 已经跑满了就跳过分给这个engine
+                    total_overload_num_slots += (-short)
+                    continue
+                total_available_num_slots += short
+
+                staging = queries_in_wg_history[engine_id][:short_for_history]
+                queries_in_wg_history[engine_id] = queries_in_wg_history[engine_id][short_for_history:]
+                dispatch_metrics[engine_id].history_remain_pending += len(queries_in_wg_history[engine_id])
+                queries_assigned[engine_id].extend(staging)
+                short -= len(staging)
+                shed_metrics.cache_match += len(staging)
+
+                # 仍没有达到cap
+                # 用没命中cache(standalone)的query往里分配，并跳过刚abort出来的
+                if short > 0 and standalone_queries:
+                    blacklist = engine_black_list[engine_id]
+                    skipped: List[Query] = []
+                    staging: List[Query] = []
+                    for q in standalone_queries:
+                        if q.id in blacklist:
+                            skipped.append(q)
                         else:
-                            queries_assigned[engine_id].append(cached_query.pop())
-                    if enough:
-                        break
+                            staging.append(q)
+                            if len(staging) == short:
+                                break
+                    total_iterated = len(skipped) + len(staging)
+                    standalone_queries = skipped + standalone_queries[total_iterated:]  # skipped要还回去
+                    queries_assigned[engine_id].extend(staging)
+                    short -= len(staging)
+                    shed_metrics.standalone += len(staging)
 
-            # 如果还有没命中cache(standalone)的query，round-robin往里分配
-            standalone_count_per_wg = (len(standalone_queries) + len(ready_wg_items) - 1) // len(ready_wg_items)
-            for engine_id, _ in ready_wg_items:
-                if len(standalone_queries) == 0:
-                    break
-                queries_assigned[engine_id].extend(standalone_queries[:standalone_count_per_wg])
-                standalone_queries = standalone_queries[standalone_count_per_wg:]
+            # 第二轮当自己kv不满且别人还有分剩的才拿过来
+            for engine_id, wg_name in wg_id_load_from_low_to_high:
+                num_staging = len(queries_assigned[engine_id])
+                num_assigned = wg_loads[engine_id]
+                short = max_concurrency - num_assigned - num_staging
+                gmem_abundant = loads[(engine_id, wg_name)].kv_cache_util < self.config.proxy.gmem_abundant_threshold
 
-            async def dispatch_queries(wg, engine_id):
-                queries = queries_assigned[engine_id] + queries_in_wg_history[engine_id]
+                # 发完standalone仍可分
+                # 则从属于其他engine有cache的里面偷一点过来，要求如下
+                # 1. gmem充足
+                # 2. 这个engine负载只有另外的engine的一半，否则拿过来降低cache命中率不划算
+                # 3. 当不是刚起来的新engine时，不超过engine自身cap
+                if num_assigned > 0:
+                    short = min(short, engine_concurrency_cap[engine_id])
+                if gmem_abundant and short > 0:
+                    # FIXME(lixiang): 这里为了满足fifo，需要merge sort，暂时简化成依次顺序访问，观察调度指标，延迟过大了再考虑优化
+                    this_engine_total = num_assigned + num_staging
+                    for another_engine_id, queries in queries_in_wg_history.items():
+                        another_engine_total = wg_loads[another_engine_id] + len(queries_assigned[another_engine_id])
+                        if this_engine_total * 2 > another_engine_total:
+                            # 另一个engine负载大于此engine两倍才偷
+                            continue
+                        from_another_engine = queries[:short]
+                        queries_in_wg_history[another_engine_id] = queries[short:]
+                        queries_assigned[engine_id].extend(from_another_engine)
+                        short -= len(from_another_engine)
+                        shed_metrics.steal += len(from_another_engine)
+                        dispatch_metrics[engine_id].steal += len(from_another_engine)
+                        if short < 0:
+                            break
+
+            loop_cost_metrics.staging = time.time() - t0
+
+            # dispatching(commit/rollback)
+            async def dispatching(wg, engine_id):
+                nonlocal dispatch_delay, enqueue_delay, pending_size
+                wg: Union[RayWorkerGroup, RemoteAsyncXPerfGPTRollout, AsyncActorRolloutRefWorker]  # type anno
                 wg_name = wg.group_name
                 load = loads[(engine_id, wg_name)]
-                if len(queries) > 0:
-                    try:
-                        await self.request_manager.set_requests_assigned.remote([query.id for query in queries],
-                                                                                engine_id, wg_name)
-                        for q in queries:
-                            # query的分类，区分一下是hybrid_rollout/standalone_rollout/validation，避免共用engine时不知道怎么update回去对应的来源
-                            q.meta_info['query_type'] = self._request_manager_name
-                        await asyncio.to_thread(wg.add_inflight_queries, queries)
-                        fmt = (
-                            "dispatch {accumulated_value} "
-                            f"queries from({self._request_manager_name}) to wg({wg_name}, "
-                            f"pending={load.num_pending}, W={load.num_waiting}/P={load.num_prefilling}/D={load.num_decoding}, "
-                            f"kv={load.kv_cache_util:.2f})")
-                        self._progress_logger.log(wg_name, len(queries), fmt)
 
-                    except ray.exceptions.ActorDiedError as e:
-                        # ignore actor died error, underlying replicated worker group will handle
-                        # worker group and actors lifecycle
-                        # 分发失败的，需要把assigned flag给clear掉，不然会泄漏
-                        await self.request_manager.clear_requests_assigned.remote([query.id for query in queries])
+                commit_queries = queries_assigned.get(engine_id)
+                if not commit_queries:
+                    return
+
+                now = time.time()
+                commit_query_ids = [q.id for q in commit_queries]
+                await self.request_manager.set_requests_assigned.remote(commit_query_ids, engine_id, wg_name, now)
+                for q in commit_queries:
+                    # 补充这个字段到query，保证一致性
+                    q.dispatch_time = now
+
+                    dispatch_delay += now - q.enqueue_time / 1e3
+                    if q.new_token_len == 0:
+                        # 还没开始生成过的才考虑算上enqueue delay
+                        enqueue_delay += (q.enqueue_time - q.created_time) / 1e3
+
+                    # query的分类，区分一下是hybrid_rollout/standalone_rollout/validation，避免共用engine时不知道怎么update回去对应的来源
+                    q.meta_info['query_type'] = self._request_manager_name
+
+                try:
+                    await asyncio.gather(*wg.add_inflight_queries_non_blocking(commit_queries))
+                    pending_size -= len(commit_queries)
+                    fmt = (
+                        "dispatch {accumulated_value} "
+                        f"(remain={pending_size}) queries from({self._request_manager_name}) to wg({wg_name}, "
+                        f"pending={load.num_pending}, W={load.num_waiting}/P={load.num_prefilling}/D={load.num_decoding}, "
+                        f"kv={load.kv_cache_util:.2f})")
+                    self._progress_logger.log(wg_name, len(commit_queries), fmt)
+                except (ActorDiedError, RayTaskError) as e:
+                    # ignore actor died error, underlying replicated worker group will handle
+                    # worker group and actors lifecycle
+                    # 分发失败的，需要把assigned flag给clear掉，不然会泄漏
+                    await self.request_manager.clear_requests_assigned.remote(commit_query_ids)
+                    self._finalize(wg, e)
 
             async with asyncio.TaskGroup() as tg:
                 for engine_id, wg in ready_wg_items:
-                    tg.create_task(dispatch_queries(wg, engine_id))
+                    tg.create_task(dispatching(wg, engine_id))
 
-            # handle dead engines during the loop to avoid request from staling for too long
-            ready_wg_ids1 = self.replicas.ready_worker_group_ids
-            dead_wg_ids_during_loop = ready_wg_ids0 - ready_wg_ids1
-            dead_wg_ids_between_loop = ready_wg_ids_prev - ready_wg_ids1
-            ready_wg_ids_prev = ready_wg_ids1  # save to previous
-            if dead_wg_ids_during_loop or dead_wg_ids_between_loop:
-                ray.get(self.request_manager.handle_stale_requests.remote(ready_wg_ids1))
+            # 没有分出去的要rollback掉 (history+standalone)
+            rollback_query_ids = []
+            for queries in queries_in_wg_history.values():
+                rollback_query_ids.extend([q.id for q in queries])
+            rollback_query_ids.extend([q.id for q in standalone_queries])
+            if len(rollback_query_ids) > 0:
+                await self.request_manager.clear_requests_assigned.remote(rollback_query_ids)
 
-            total, pending_size = ray.get(self.request_manager.get_size.remote())
-            prefill_throughput, decode_throughput = ray.get(self.request_manager.get_estimated_throughput.remote())
-            self._trace_load_metrics(loads, prefill_throughput, decode_throughput, total, pending_size)
+            # metrics collect
+            finished_stats = await self.request_manager.get_finished_stats.remote(self._metrics_logger.global_step)
 
-            loop_cost = time.time() - t0  # noqa: for py-spy
-            sleep_interval = max(0., self.poll_interval - loop_cost)
+            loop_cost_metrics.total = time.time() - t0
+            sleep_interval = max(0., self.poll_interval - loop_cost_metrics.total)
+
+            num_target_replicas = self.replicas.target_num_replicas
+            num_alive_replicas = len(self.replicas.alive_worker_group_ids)
+            num_initialized_replicas = len(self.replicas.initialized_worker_group_ids)
+            internal_metrics = InternalDiagnosisMetrics(
+                num_target_replicas=num_target_replicas,
+                num_ready_replicas=num_ready_replicas,
+                num_initialized_replicas=num_initialized_replicas,
+                num_alive_replicas=num_alive_replicas,
+                gmem_insufficient_count=gmem_insufficient_count,
+                gmem_high_water_level_count=gmem_high_water_level_count,
+                total_standby_wgs=0,
+                total_overload_num_slots=total_overload_num_slots,
+                total_available_num_slots=total_available_num_slots,
+                total_rebalanced=load_rebalanced_count,
+                max_concurrency=max_concurrency,
+                dispatch_delay_acc=dispatch_delay,
+                enqueue_delay_acc=enqueue_delay,
+            )
+            self._trace_metrics(internal_metrics)
+            self._trace_metrics(shed_metrics)
+            self._trace_metrics(loop_cost_metrics)
+            [self._trace_engine_metrics(m) for m in dispatch_metrics.values()]
+
+            self._metrics_logger.log({
+                'num_ready_replicas': num_ready_replicas,
+                'loop_cost': loop_cost_metrics.total,
+                'loop_cost_get_engine_info': loop_cost_metrics.get_engine_info,
+                'loop_cost_matching': loop_cost_metrics.matching,
+                'total_token_TPS': sum(decode_throughput.values()),
+                'total_processes_queries': finished_stats.finished_size,
+            })
+
+    async def _rebalance(self, loads: Dict[Tuple[str, str], LoadMetric], load_skewness: LoadSkewness,
+                         max_rebalance_count: int) -> Dict[str, Set[str]]:
+        aborted_ids = {}
+        for engine_id, wg in self.replicas.get_ready_worker_groups().items():
+            wg: Union[RayWorkerGroup, RemoteAsyncXPerfGPTRollout, AsyncActorRolloutRefWorker]
+            load = loads.get((engine_id, wg.group_name))
+            if load is None:
+                # skip new joined
+                continue
+            if load.is_weights_updating:
+                continue
+            if load.kv_cache_util < self.config.proxy.gmem_abundant_threshold:
+                # skip abundant engines
+                continue
+
+            # 计算要abort的量
+            num_deviated = int(round(load.num_running - load_skewness.running_avg, 0))
+
+            # 把gmem较满的切溢出到waiting中的query给abort了
+            gmem_insufficient = load.kv_cache_util > self.config.proxy.gmem_insufficient_threshold
+            to_abort = []
+            if gmem_insufficient:
+                waiting_query_ids = load.waiting_ids + load.pending_ids  # 在pending里的也释放掉
+                waiting_query_ids = waiting_query_ids[-max_rebalance_count:]  # 从后面开始取
+                if len(waiting_query_ids) > 0:
+                    released_ids = await self.request_manager.release_by_ids.remote(waiting_query_ids, engine_id,
+                                                                                    "memory insufficient")
+                    to_abort.extend(released_ids)
+            max_rebalance_count -= len(to_abort)
+
+            # abort running中不平衡的部分
+            if max_rebalance_count > 0 and num_deviated > self.config.proxy.rebalance_threshold:
+                num_release = num_deviated - self.config.proxy.rebalance_threshold
+                num_release = min(num_release, max_rebalance_count)
+                released_ids = await self.request_manager.release_shortest_n.remote(num_release, engine_id, "rebalance")
+                to_abort.extend(released_ids)
+
+            # do abort
+            if len(to_abort) > 0:
+                try:
+                    await asyncio.gather(*wg.abort_queries_non_blocking(to_abort, time.time()))
+                    fmt = (
+                        'aborting {accumulated_value}x queries from ' +
+                        f'engine({wg.group_name}) W={load.num_waiting}/P={load.num_prefilling}/D={load.num_decoding}')
+                    self.abort_logger.log(wg.group_name, len(to_abort), fmt)
+                    aborted_ids[engine_id] = set(to_abort)
+                except (ActorDiedError, RayTaskError) as e:
+                    self._finalize(wg, e)
+
+                # update load metrics (roughly)
+                load.subtract_released(len(to_abort))
+
+        return aborted_ids
+
+    async def _rebalance_by_ids(self, loads: Dict[Tuple[str, str], LoadMetric],
+                                release_ids: Dict[str, Set[str]]) -> Dict[str, Set[str]]:
+        refs: List[Tuple[str, ObjectRef]] = []  # [engine_id, ref]
+        wg_refs = []
+        for engine_id, wg in self.replicas.get_ready_worker_groups().items():
+            wg: Union[RayWorkerGroup, RemoteAsyncXPerfGPTRollout, AsyncActorRolloutRefWorker]
+            to_release = release_ids.get(engine_id, set())
+            if len(to_release) > 0:
+                ref = self.request_manager.release_by_ids.remote(to_release, engine_id, "rebalance")
+                refs.append((engine_id, ref))
+                wg_ref = wg.abort_queries_non_blocking(list(to_release), time.time())
+                wg_refs.extend(wg_ref)
+
+                # update load counts
+                load = loads.get((engine_id, wg.group_name))
+                if load is not None:
+                    fmt = (
+                        'aborting {accumulated_value}x queries from ' +
+                        f'engine({wg.group_name}) W={load.num_waiting}/P={load.num_prefilling}/D={load.num_decoding}')
+                    self.abort_logger.log(wg.group_name, len(to_release), fmt)
+                    load.subtract_released(len(to_release))
+
+        aborted_ids: Dict[str, Set[str]] = {}
+        for engine_id, ref in refs:
+            aborted_ids[engine_id] = set(await ref)
+        await asyncio.gather(*wg_refs)
+
+        return aborted_ids
+
+    def get_step_metrics(self) -> dict:
+        super_metrics = super().get_step_metrics()
+        metrics = self._metrics_logger.get_last_step_metrics()
+        try:
+            num_ready_replicas = metrics.get('num_ready_replicas', zero_stats)
+            loop_cost = metrics.get('loop_cost', zero_stats)
+            gmem_insufficient_rebalanced_count = metrics.get('gmem_insufficient_rebalanced_count', zero_stats)
+            load_rebalanced_count = metrics.get('load_rebalanced_count', zero_stats)
+            decode_tps = metrics.get('total_token_TPS', zero_stats)
+            total_processes_queries = metrics.get('total_processes_queries', zero_stats)
+            this_metrics = {
+                'rollout/elastic/num_ready_replicas_mean': num_ready_replicas.mean,
+                'rollout/elastic/num_ready_replicas_min': num_ready_replicas.minimum,
+                'rollout/elastic/num_ready_replicas_max': num_ready_replicas.maximum,
+                'rollout/proxy/loop_cost': loop_cost.mean,
+                'rollout/proxy/gmem_insufficient_rebalanced_count_total': gmem_insufficient_rebalanced_count.sum,
+                'rollout/proxy/load_rebalanced_count_total': load_rebalanced_count.sum,
+                'rollout/proxy/total_token_TPS': decode_tps.mean,
+                'rollout/proxy/total_processes_queries': total_processes_queries.maximum,
+            }
+            super_metrics.update(this_metrics)
+        except KeyError as e:
+            traceback.print_exc()
+            print("got error on get_step_metrics, will be ignored")
+        return super_metrics

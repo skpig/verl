@@ -148,6 +148,11 @@ class Query:
         self.images_bytes_ref = images_bytes_ref
         self.action = True
 
+    @property
+    def cache_id(self) -> str:
+        # 用语匹配prefix cache的id，如果一个trajectory不分裂，可能没设定cache_id，直接用uid即可
+        return self.meta_info.get('cache_id') or self.meta_info.get('uid')
+
     def add_event(self, event: str | ProcessEventType, info: Optional[Dict] = None):
         info = info or {}
         if event in [ProcessEventType.FINISHED, ProcessEventType.EVICTED]:

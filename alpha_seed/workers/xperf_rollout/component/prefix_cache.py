@@ -1,11 +1,15 @@
 import collections
 import logging
 import math
+import re
+import subprocess
+import time
+
 import torch
 import triton
 import triton.language as tl
 from dataclasses import dataclass, field
-from typing import Optional, List
+from typing import Optional, List, Tuple, Dict
 
 from xperf_gpt.utils import logging_rank_only
 
@@ -24,7 +28,7 @@ def allocate_pinned_memory(shape, dtype):
 
     struct HostPtr {
       void* p{nullptr};
-      size_t nbytes{0};
+      int64_t nbytes{0};
       ~HostPtr() {
         if (p) cudaFreeHost(p);  // 与 cudaHostAlloc 配套释放
       }
@@ -90,7 +94,14 @@ def normalize_slot_num(slot_num: int, single_slot_size: int):
         return slot_num
 
     MAX_MEMORY_USE = 700 * 1024 * 1024 * 1024  # 700GB
-    GPU_PER_MACHINE = 8
+    try:
+        output = subprocess.check_output(['nvidia-smi', '-L']).decode('utf-8')
+        GPU_PER_MACHINE = len(re.findall(r'^GPU', output, re.MULTILINE))
+        logging_rank_only(logging.warning, 0, f"detect num GPUs on machine: {GPU_PER_MACHINE}")
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        logging_rank_only(logging.error, 0, f"can not detect num GPUs on machine, set to 8")
+        GPU_PER_MACHINE = 8
+
     num_slots_calculated = math.floor(MAX_MEMORY_USE / GPU_PER_MACHINE / single_slot_size)
     convert_bytes_to_gb = lambda n_bytes: round(n_bytes / 1024 / 1024 / 1024, 2)
     logging_rank_only(
@@ -154,7 +165,36 @@ def load_or_store_prefix_cache(kv_cache_per_layer: List[torch.Tensor], prefix_ca
                                             copy_block_dim_padded, is_load)
 
 
-class PrefixCache(object):
+class PrefixCacheInterface:
+
+    def get_cache_ids(self) -> List[Tuple[str, float]]:
+        """
+        返回(cache_id, 最近存储的时间戳(unit: s))
+        """
+        raise NotImplementedError()
+
+    def clear_cache(self):
+        raise NotImplementedError()
+
+    def calc_prefix_length(self, request_id: str, full_input_ids: torch.Tensor) -> int:
+        raise NotImplementedError()
+
+    def load_from_cache(self, request_id: str, input_ids: torch.Tensor, kv_cache_table: torch.Tensor, xperf_module,
+                        start_pos: Optional[int]) -> int:
+        raise NotImplementedError()
+
+    def save_to_cache(self, request_id: str, full_input_ids: torch.Tensor, kv_cache_table: torch.Tensor,
+                      xperf_module) -> Optional[bool]:
+        raise NotImplementedError()
+
+    def get_max_cache_slot_num(self) -> int:
+        raise NotImplementedError()
+
+    def get_used_slot_num_of(self, request_id: str) -> int:
+        raise NotImplementedError()
+
+
+class PrefixCache(PrefixCacheInterface):
 
     def __init__(self, kv_head_num, head_dim, layer_num, kv_cache_dtype, max_cache_slot_num, max_cache_length,
                  enable_paged_attn, slot_block_size):
@@ -189,7 +229,8 @@ class PrefixCache(object):
             f"max cached length: {max_cache_length}")
 
     def get_cache_ids(self):
-        return self.req_id_to_slot_id.keys()
+        # 非paged暂不支持update时间戳
+        return [(k, 0) for k in list(self.req_id_to_slot_id.keys())]
 
     def clear_cache(self):
         self.free_slots = set(range(self.max_cache_slot_num))
@@ -333,13 +374,26 @@ class PrefixCache(object):
 
         return is_evict
 
+    def get_max_cache_slot_num(self) -> int:
+        return self.max_cache_slot_num
+
+    def get_used_slot_num_of(self, request_id: str) -> int:
+        if request_id in self.req_id_to_slot_id:
+            return 1
+        else:
+            return 0
+
 
 @dataclass
 class CacheItem(object):
-    query_id: str
+    cache_id: str
     input_ids: torch.Tensor = None
     input_length: int = 0
     cache_page_table: List = field(default_factory=list)
+    save_ts: float = field(default_factory=time.time)  # 这次cache保存的时间
+
+    def save(self):
+        self.save_ts = time.time()
 
 
 @triton.jit
@@ -410,7 +464,7 @@ def load_or_store_paged_prefix_cache(kv_cache_per_layer: List[torch.Tensor], pre
                                                   is_load)
 
 
-class PagedPrefixCache(object):
+class PagedPrefixCache(PrefixCacheInterface):
 
     def __init__(self, kv_head_num, head_dim, layer_num, kv_cache_dtype, max_cache_slot_num, max_cache_length,
                  enable_paged_attn, slot_block_size):
@@ -425,13 +479,13 @@ class PagedPrefixCache(object):
         self.slot_block_size = slot_block_size
         self.req_id_to_image_shift = {}
 
-        self.free_slots = set(range(max_cache_slot_num))
+        self.free_slots = set(range(self.max_cache_slot_num))
 
-        self.cache = allocate_pinned_memory([layer_num, max_cache_slot_num, slot_block_size, kv_head_num, 2, head_dim],
-                                            kv_cache_dtype)
+        self.cache = allocate_pinned_memory(
+            [layer_num, self.max_cache_slot_num, slot_block_size, kv_head_num, 2, head_dim], kv_cache_dtype)
 
         # request_id -> CacheItem
-        self.lru_cache = collections.OrderedDict()
+        self.lru_cache: Dict[str, CacheItem] = collections.OrderedDict()
 
         logging_rank_only(
             logging.warning, 0, f"enable paged prefix cache, cache shape: {self.cache.shape}, "
@@ -439,7 +493,7 @@ class PagedPrefixCache(object):
             f"max cached length: {max_cache_length}")
 
     def get_cache_ids(self):
-        return self.lru_cache.keys()
+        return [(k, v.save_ts) for k, v in self.lru_cache.copy().items()]
 
     def clear_cache(self):
         self.free_slots = set(range(self.max_cache_slot_num))
@@ -544,6 +598,7 @@ class PagedPrefixCache(object):
             prefix_length = 0
         else:
             cache_item: CacheItem = self.lru_cache.pop(request_id)
+            cache_item.save()
             self.lru_cache[request_id] = cache_item
             prefix_length = self.calc_prefix_length(request_id, full_input_ids)
         self.req_id_to_image_shift[request_id] = image_shift
@@ -586,6 +641,15 @@ class PagedPrefixCache(object):
         else:
             raise RuntimeError("non paged_attention is not supported")
         return is_evict
+
+    def get_max_cache_slot_num(self) -> int:
+        return self.max_cache_slot_num
+
+    def get_used_slot_num_of(self, request_id: str) -> int:
+        cache_item = self.lru_cache.get(request_id)
+        if cache_item is None:
+            return 0
+        return len(cache_item.cache_page_table)
 
 
 def get_prefix_cache_impl(num_kv_heads, head_dim, num_layers, kv_cache_dtype, prefix_cache_impl, prefix_cache_slot_num,

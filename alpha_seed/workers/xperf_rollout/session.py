@@ -10,14 +10,14 @@ Handles end-to-end inference process including:
 """
 from dataclasses import dataclass
 from queue import Queue
-from typing import Optional
+from typing import Optional, Set, Tuple
 
 from torch.distributed import get_rank
 from xperf_gpt.inference import init_inference
 from alpha_seed.workers.xperf_rollout.component.cache_manager import CacheManager
 from alpha_seed.workers.xperf_rollout.component.infer_scheduler import InferScheduler
 from alpha_seed.workers.xperf_rollout.component.sampling_manager import Sampler
-from alpha_seed.workers.xperf_rollout.component.prefix_cache import get_prefix_cache_impl
+from alpha_seed.workers.xperf_rollout.component.prefix_cache import get_prefix_cache_impl, PrefixCacheInterface
 from alpha_seed.workers.xperf_rollout.utils.custom_xperf_convert_helper import XCustomInferenceModuleAdapter
 from xperf_gpt.multi_models.visual.inferencer import VITInferencer
 from xperf_gpt.multi_models.visual.eva_vit import EVA_VIT_CONFIGS
@@ -55,10 +55,28 @@ class LoadMetric:
     num_waiting: int  # 跑过但因为内存不够被换出
     num_prefilling: int  # 正在跑prefill
     num_decoding: int  # 正在跑decode
-    kv_cache_util: float  # kv cache util range 0~1
+    kv_cache_util: float  # gmem kv cache util (P+D only) range 0~1
+    kv_prefix_cache_swap_util: float  # waiting中，swap到host上的kv的占比 range 0~1
     pending_ids: List[str]  # 放在pending列表里的query ids
     waiting_ids: List[str]  # 放在waiting列表里的query ids
-    is_weights_updating: bool  # 是否正在更新weights期间
+    no_caching_query_ids: List[str]  # 在waiting/pending列表里，没有命中cache的query_id
+    is_weights_updating: bool  # 是否正在更新weights期间(or doing sth else)
+
+    @property
+    def num_running(self) -> int:
+        return self.num_prefilling + self.num_decoding
+
+    def subtract_released(self, n):
+        self.num_pending -= n
+        if self.num_pending < 0:
+            self.num_waiting += self.num_pending
+            self.num_pending = 0
+        if self.num_waiting < 0:
+            self.num_decoding += self.num_waiting
+            self.num_waiting = 0
+        if self.num_decoding < 0:
+            self.num_decoding += self.num_prefilling
+            self.num_decoding = 0
 
 
 class StepProfiler:
@@ -292,7 +310,7 @@ class InferenceSession:
         self.update_weights_lock = Lock()
         self._accepted_queries_mutex = Lock()
         self.tp_group = None
-        self.prefix_cache = None
+        self.prefix_cache: Optional[PrefixCacheInterface] = None
         self.prefix_cache_impl = prefix_cache_impl
         self.prefix_cache_slot_num = prefix_cache_slot_num
         self.prefix_cache_max_length = prefix_cache_max_length
@@ -504,6 +522,7 @@ class InferenceSession:
                                                   kv_cache_dtype, self.prefix_cache_impl, self.prefix_cache_slot_num,
                                                   self.prefix_cache_max_length, self.enable_paged_attn,
                                                   self.slot_block_size)
+        self.cache_manager.set_prefix_cache_save_callback(lambda query: self._save_to_prefix_cache(query))
         self.infer_scheduler = InferScheduler(
             cache_manager=self.cache_manager,
             engine=self.engine,
@@ -723,7 +742,7 @@ class InferenceSession:
         }.values())
         return ordered_query
 
-    def get_valid_history_ids(self) -> List[str]:
+    def get_valid_history_ids(self) -> List[Tuple[str, float]]:
         history_ids = []
         if self.prefix_cache is not None:
             history_ids.extend(self.prefix_cache.get_cache_ids())
@@ -766,6 +785,28 @@ class InferenceSession:
                 num_prefill += 1
             else:
                 num_decode += 1
+
+        # 计算prefix cache占用情况
+        swap_util = 0.
+        cache_ids = set()
+        if self.prefix_cache is not None:
+            waiting_cache_ids = set(q.cache_id for q in self.waiting)
+            pending_cache_ids = set(aq.query.cache_id for aq in self.pending.queue)
+            cache_ids = set(self.prefix_cache.get_cache_ids())
+            in_cache = (waiting_cache_ids | pending_cache_ids) & cache_ids
+            used_slots = sum(self.prefix_cache.get_used_slot_num_of(cid) for cid in in_cache)
+            swap_util = used_slots * 1.0 / self.prefix_cache.get_max_cache_slot_num()
+
+        now = time.time()
+        dispatch_protect_interval = 10  # 刚调度10s内不认为没有cache，目前写这里避免被频繁abort
+        no_caching_query_ids = []
+        for q in sorted(self.waiting, key=lambda q: (q.meta_info.get('step', 0), q.created_time)):
+            if q.cache_id not in cache_ids and now - q.dispatch_time > dispatch_protect_interval:
+                no_caching_query_ids.append(q.id)
+        for aq in sorted(self.pending.queue, key=lambda aq: (aq.query.meta_info.get('step', 0), aq.query.created_time)):
+            if aq.query.cache_id not in cache_ids and now - aq.query.dispatch_time > dispatch_protect_interval:
+                no_caching_query_ids.append(aq.id)
+
         return LoadMetric(
             ts=time.time(),
             num_pending=len(self.pending),
@@ -773,24 +814,29 @@ class InferenceSession:
             num_prefilling=num_prefill,
             num_decoding=num_decode,
             kv_cache_util=self.cache_manager.get_kv_cache_utils(),
+            kv_prefix_cache_swap_util=swap_util,
             pending_ids=[q.id for q in self.pending.queue],
             waiting_ids=[q.id for q in self.waiting],
+            no_caching_query_ids=no_caching_query_ids,
             is_weights_updating=self.status != "running",
         )
+
+    def _save_to_prefix_cache(self, query: Query):
+        if self.prefix_cache is not None:
+            ret_len = query.original_input_len + max(query.new_token_len - 1, 0)
+            input_id_list = (query.input_ids + query.new_token_ids)[:ret_len]
+            full_input_ids = torch.tensor(input_id_list).cuda()
+            is_evict = self.prefix_cache.save_to_cache(query.cache_id, full_input_ids,
+                                                       torch.tensor(query.kv_slot_ids).cuda(), query.image_shift,
+                                                       self.engine.module)
+            if is_evict:
+                self.infer_scheduler.incr("evict_count")
 
     def _finish_query(self, query):
         if self.eos_callback_fn:
             self.eos_callback_fn(query)
         query.set_finished()
-        if self.prefix_cache is not None:
-            ret_len = query.original_input_len + max(query.new_token_len - 1, 0)
-            input_id_list = (query.input_ids + query.new_token_ids)[:ret_len]
-            full_input_ids = torch.tensor(input_id_list).cuda()
-            is_evict = self.prefix_cache.save_to_cache(query.id, full_input_ids,
-                                                       torch.tensor(query.kv_slot_ids).cuda(), query.image_shift,
-                                                       self.engine.module)
-            if is_evict:
-                self.infer_scheduler.incr("evict_count")
+        self._save_to_prefix_cache(query)
         self.unfinished_off_policy_steps_set.remove_one(query.off_policy_steps)
         self.finished_num += 1
         self.cache_manager.release_query(query)
@@ -992,17 +1038,20 @@ class InferenceSession:
 
         if self.prefix_cache is not None:
             for query in running:
-                if query.context_shift == 0:
+                # note: only query prefix cache once (context_shift == 0)
+                if query.is_context_computing and query.context_shift == 0:
                     self.infer_scheduler.record("prefill_token_num", [len(query.input_ids)])
                     input_ids_cuda = torch.tensor(query.input_ids).cuda()
-                    prefix_hit_length = self.prefix_cache.calc_prefix_length(query.id, input_ids_cuda)
+                    prefix_hit_length = self.prefix_cache.calc_prefix_length(query.cache_id, input_ids_cuda)
                     if prefix_hit_length > query.prefix_already_computed_len:
+                        if prefix_hit_length == len(query.input_ids):
+                            prefix_hit_length -= 1  # note: to prevent empty input
                         self.infer_scheduler.record("prefix_cache_hit_length", [prefix_hit_length])
-                        self.prefix_cache.load_from_cache(query.id, input_ids_cuda,
+                        self.prefix_cache.load_from_cache(query.cache_id, input_ids_cuda,
                                                           torch.tensor(query.kv_slot_ids).cuda(), self.engine.module,
                                                           prefix_hit_length)
                         query.prefix_already_computed_len = prefix_hit_length
-                        query.image_shift = self.prefix_cache.get_image_shift(query.id)
+                        query.image_shift = self.prefix_cache.get_image_shift(query.cache_id)
 
         if self.vit_use_dp:
             self._prepare_image_embeds_dp(running, self.oe_max_stride > 1)
@@ -1534,7 +1583,12 @@ class InferenceSession:
                         next_token = query_next_tokens[token_idx]
                         if len(query.new_token_ids) == 0:
                             query.recent_first_token_time = time.time() * 1000
-                            query.add_event(ProcessEventType.PREFILL_DONE, {"prefill_len": len(query.input_ids)})
+                            info = {
+                                "previous_generated_len": len(query.input_ids) - query.original_input_len,
+                                "prefill_len": len(query.input_ids),
+                                "cache_hit_len": query.prefix_already_computed_len,
+                            }
+                            query.add_event(ProcessEventType.PREFILL_DONE, info)
                             if not query.first_token_time:
                                 query.first_token_time = query.recent_first_token_time
                         query.add_token(token_id=next_token,

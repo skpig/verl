@@ -7,7 +7,8 @@ from ray import ObjectRef
 
 from alpha_seed.utils.server_client import is_local_ray_instance
 from alpha_seed.workers.streaming_service.auto_scaling import ScalePolicyConfig, HorizontalAutoScaling
-from alpha_seed.workers.streaming_service.rollout_proxy import BalancedRolloutWorkerGroupProxy, CombinedRayWorkerGroupAdapter, StandaloneRolloutWGAdapter
+from alpha_seed.workers.streaming_service.rollout_proxy import BalancedRolloutWorkerGroupProxy, \
+    CombinedRayWorkerGroupAdapter, StandaloneRolloutWGAdapter, CacheAwareBalancedRolloutWorkerGroupProxy
 from alpha_seed.workers.streaming_service.streaming_rollout import ElasticAsyncXPerfGPTRollout
 from alpha_seed.workers.xperf_rollout.utils.base_weights_communicator import WeightsRankInfo
 from mono_rl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, RayResourcePool
@@ -112,9 +113,17 @@ class ElasticRolloutManager:
             intermittent={'hybrid': hybrid_replica},
             persistent={'elastic': elastic_replicas},
         )
+        lb_mode = rollout_config.proxy.lb_mode
+        if lb_mode == "dynamic-balancing":
+            ProxyClass = BalancedRolloutWorkerGroupProxy
+        elif lb_mode == "cache-aware-balancing":
+            ProxyClass = CacheAwareBalancedRolloutWorkerGroupProxy
+        else:
+            raise ValueError(f"config.streaming_rollout.proxy.lb_mode does not support {lb_mode=} in elastic rollout, "
+                             f"please choose from ['dynamic-balancing', 'cache-aware-balancing']")
+
         # 封装给worker group的接口代理
-        rollout_proxy = BalancedRolloutWorkerGroupProxy(replicas, hybrid_rollout_rank_info, 'train_rollout',
-                                                        rollout_config)
+        rollout_proxy = ProxyClass(replicas, hybrid_rollout_rank_info, 'train_rollout', rollout_config)
 
         # initialize rollout horizontal auto scaling control handle
         elastic_pool_name = self.config.streaming_rollout.elastic.elastic_pool_name

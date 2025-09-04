@@ -1003,13 +1003,25 @@ class AsyncActorRolloutRefWorker(Worker):
             ret.append(qid)
         return ret
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def add_inflight_queries_non_blocking(self, queries: List[Query]):
+        return self.add_inflight_queries(queries)
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
     def abort_queries(self, query_ids: List[str], not_after: float):
         self.rollout.abort_queries(query_ids, not_after)
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def abort_queries_non_blocking(self, query_ids: List[str], not_after: float):
+        return self.abort_queries(query_ids, not_after)
+
     # 只在dp_size=1的情况下调用，所以这里rank0执行即可
     @register(execute_mode=Execute.RANK_ZERO, blocking=True)
     def get_history_ids(self):
+        return self.rollout.get_valid_history_ids()
+
+    @register(execute_mode=Execute.RANK_ZERO, blocking=False)
+    def get_history_ids_async(self):
         return self.rollout.get_valid_history_ids()
 
     # 只在dp_size=1的情况下调用，所以这里rank0执行即可，DP_COMPUTE与此参数暂不兼容
@@ -1030,8 +1042,12 @@ class AsyncActorRolloutRefWorker(Worker):
         self.rollout.inference_engine.empty_cache()
         return metrics
 
-    @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=True)
+    @register(execute_mode=Execute.RANK_ZERO, blocking=True)
     def get_load_metrics(self) -> LoadMetric:
+        return self.rollout.get_load_metrics()
+
+    @register(execute_mode=Execute.RANK_ZERO, blocking=False)
+    def get_load_metrics_async(self) -> LoadMetric:
         return self.rollout.get_load_metrics()
 
     @register(execute_mode=Execute.RANK_ZERO)

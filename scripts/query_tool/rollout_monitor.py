@@ -59,7 +59,7 @@ def list_running_queries_str(request_managers: list, step: Optional[int] = None)
         table.add_row(
             digest.pool_name,
             digest.query_id,
-            digest.assigned_engine_name or '-',
+            digest.assigned_engine_name or ('(staging)' if digest.assigned else '-'),
             f"{digest.global_step}",
             str(digest.input_length),
             str(digest.output_length),

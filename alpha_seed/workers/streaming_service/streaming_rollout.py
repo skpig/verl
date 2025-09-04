@@ -621,8 +621,13 @@ class AsyncXPerfGPTRollout(object):
                     self._dump_context()
                     self._process_thread_last_error = e
                     self._process_thread_last_tb = traceback.format_exc()
-                    breakpoint()
-                    raise
+                    raise (e)
+
+    def heartbeat(self):
+        if self._process_thread_last_tb:
+            raise RuntimeError("async_generate crashed") from self._process_thread_last_error
+        if not self.process_thread.is_alive():
+            raise RuntimeError("async_generate thread is not alive")
 
     def generate(self):
         torch.cuda.set_device(int(os.getenv('LOCAL_RANK', '0')))
@@ -649,8 +654,7 @@ class AsyncXPerfGPTRollout(object):
                     self._dump_context()
                     self._process_thread_last_error = e
                     self._process_thread_last_tb = traceback.format_exc()
-                    breakpoint()
-                    raise
+                    raise (e)
 
             response_outputs = []
             response_log_probs = []
@@ -780,14 +784,26 @@ class RemoteAsyncXPerfGPTRollout(Worker):
             ret.append(qid)
         return ret
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def add_inflight_queries_non_blocking(self, queries: List[Query]):
+        return self.add_inflight_queries(queries)
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
     def abort_queries(self, query_ids: List[str], not_after: float):
         # 只abort那些在abort_before之前分到engine的
         self.rollout_actor.abort_queries(query_ids, not_after)
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def abort_queries_non_blocking(self, query_ids: List[str], not_after: float):
+        return self.abort_queries(query_ids, not_after)
+
     # 只在dp_size=1的情况下调用，所以这里rank0执行即可
     @register(execute_mode=Execute.RANK_ZERO, blocking=True)
     def get_history_ids(self):
+        return self.rollout_actor.get_valid_history_ids()
+
+    @register(execute_mode=Execute.RANK_ZERO, blocking=False)
+    def get_history_ids_async(self):
         return self.rollout_actor.get_valid_history_ids()
 
     # 只在dp_size=1的情况下调用，所以这里rank0执行即可
@@ -795,8 +811,12 @@ class RemoteAsyncXPerfGPTRollout(Worker):
     def get_all_queries(self, query_type: str):
         return self.rollout_actor.get_all_queries(query_type)
 
-    @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=True)
+    @register(execute_mode=Execute.RANK_ZERO, blocking=True)
     def get_load_metrics(self) -> LoadMetric:
+        return self.rollout_actor.get_load_metrics()
+
+    @register(execute_mode=Execute.RANK_ZERO, blocking=False)
+    def get_load_metrics_async(self) -> LoadMetric:
         return self.rollout_actor.get_load_metrics()
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)

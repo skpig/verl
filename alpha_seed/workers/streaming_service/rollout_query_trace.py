@@ -3,7 +3,6 @@ import time
 from dataclasses import asdict
 from typing import List
 
-from numba.cuda import event_elapsed_time
 from omegaconf import DictConfig
 
 from alpha_seed.utils.profile.timeline import Tracer, WaterfallSlotTracer, CompleteEvent, CoherentCompleteEvent, \
@@ -168,7 +167,7 @@ class QueryTracer:
                 'abort_count': len(req.abort_histories),
                 'age': (received_time - query.created_time) / 1e3,  # 相对于query生命周期的延迟
                 'shed_delay': (received_time - req.last_pending_reschedule_ts) / 1e3,  # 相对于上次进入request pool的延迟
-                'enqueue_delay': query.enqueue_time - query.created_time,
+                'enqueue_delay': (query.enqueue_time - query.created_time) / 1e3,
             },
         )
         prefill = CompleteEvent(
@@ -283,15 +282,13 @@ class QueryTracer:
                     'query_id': req.query.id,
                     'uid': uid,  # 用这个来跟踪整个trajectory
                     'original_input_len': req.query.original_input_len,
-                    # 如果engine更新过参数，这个值也会显示为更新参数前已经decode的长度
-                    'previous_generated_len': len(req.query.input_ids) - req.query.original_input_len,
                     'step': req.global_step,
                     'stale_count': len(req.stale_histories),
                     'abort_count': len(req.abort_histories),
                     'age': (start_ts / 1e3 - req.query.created_time) / 1e3,  # 相对于query生命周期的延迟，此event-创建时间
                     'shed_delay':
                         (req.query.received_time - req.last_pending_reschedule_ts) / 1e3,  # 相对于上次进入request pool的延迟
-                    'enqueue_delay': req.query.enqueue_time - req.query.created_time,
+                    'enqueue_delay': (req.query.enqueue_time - req.query.created_time) / 1e3,
                     **extra_args,
                 },
             )
@@ -303,6 +300,7 @@ class QueryTracer:
                 if coherent_sort_idx == -1:
                     coherent_sort_idx = 0
                 coherent_list[-1].args['processing_events'] = events_obj
+                coherent_list[-1].args['abort_histories'] = [asdict(his) for his in req.abort_histories]
                 ret.append(CoherentCompleteEvent(coherent_list, coherent_sort_idx))
                 coherent_sort_idx = -1
                 coherent_list = []
@@ -339,12 +337,12 @@ class QueryTracer:
                         len(req.stale_histories),
                     'abort_count':
                         len(req.abort_histories),
+                    'abort_histories': [asdict(his) for his in req.abort_histories],
                     # 相对于query生命周期的延迟，此event-创建时间
                     'age': (start_ts / 1e3 - req.query.created_time) / 1e3,
                     # 相对于上次进入request pool的延迟
                     'shed_delay': (req.query.received_time - req.last_pending_reschedule_ts) / 1e3,
-                    'enqueue_delay':
-                        req.query.enqueue_time - req.query.created_time,
+                    'enqueue_delay': (req.query.enqueue_time - req.query.created_time) / 1e3,
                     'processing_events': [asdict(e) for e in events],
                 }
                 ce = CompleteEvent(
@@ -448,6 +446,8 @@ class QueryTracer:
             # 最后一个事件如果是evicted的话，说明最后的状态是waiting
             if not self.query_trace_config.renderer.no_waiting_spans:
                 name = f"W -> {history.stale_reason}"
+        elif last_event.event == ProcessEventType.PREFILL_START:
+            name = f"P -> {history.stale_reason}"
         else:
             name = f"unknown -> {history.stale_reason}"
 
@@ -469,7 +469,7 @@ class QueryTracer:
                     'stale_reason': history.stale_reason,
                     'update_count': history.update_count,
                     'release_count': history.release_count,
-                    'total_length_generated_in_engine': history.length_generated,
+                    'length_generated': history.length_generated,
                     'processing_events': events_obj,
                 },
             )
@@ -512,3 +512,4 @@ class QueryTracer:
         meta_info.get("extra_data", {}).pop("config", None)
         meta_info.get("extra_data", {}).pop("agent_env_initial_files", None)
         meta_info.get("generation_kwargs", {}).pop("plugin_config", None)
+        meta_info.get("reward_model", {}).pop("ground_truth", None)
