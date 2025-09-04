@@ -76,6 +76,7 @@ class Task:
         model_connection: str = None
         task_category: str = None
         proxy_id: str = None
+        extra_config: dict = None
 
         def __init__(self, **kwargs):
             for field in self.__dataclass_fields__:
@@ -470,6 +471,7 @@ class ProxyClient(Storage):
                 'model_connection_type': 'url',
                 'model_name': task_id,
                 'task_category': kwargs.pop('category', 'normal'),
+                'extra_config': kwargs.pop('agent_config', {}),
             },
             **kwargs
         }

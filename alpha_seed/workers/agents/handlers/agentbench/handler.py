@@ -32,7 +32,10 @@ class AgentHandler(ThreadedAgent):
 
     def _extract_prompt_meta(self, item: DataProto) -> Dict:
         framework, dataset, index = item.non_tensor_batch['raw_prompt'][0][0].get('meta').split(":")
-        return {"framework": framework, "dataset": dataset, "index": index}
+        agent_config = item.non_tensor_batch['extra_info'][0].get('agent_config', {})
+        if isinstance(agent_config, str):
+            agent_config = json.loads(agent_config)
+        return {"framework": framework, "dataset": dataset, "index": index, "agent_config": agent_config}
 
     def _extract_row_dict(self, item: DataProto) -> Dict:
         return {
@@ -235,11 +238,11 @@ class AgentHandler(ThreadedAgent):
         retry = int(config.rollout_server.get('retry', 3))
         rollout_retry = int(config.rollout_server.get('rollout_retry', 3))
         backoff_interval = float(config.rollout_server.get('backoff_interval', 0.5))
-        wait_for_task_timeout = float(config.rollout_server.get('wait_for_request_timeout', 600))
+        wait_for_task_timeout = float(config.rollout_server.get('wait_for_task_timeout', 1200))
         wait_for_request_timeout = float(config.rollout_server.get('wait_for_request_timeout', 3600))
 
         origin_prompt = {
-            'prompt_names': copy.deepcopy(item.non_tensor_batch['raw_prompt']),
+            'prompt_names': copy.deepcopy(item.non_tensor_batch['prompt_names']),
             'raw_prompt': copy.deepcopy(item.non_tensor_batch['raw_prompt'])
         }
         prompt_meta = self._extract_prompt_meta(item)
@@ -657,7 +660,7 @@ if __name__ == '__main__':
             ray.init(namespace="alphaseed", runtime_env=runtime_env, address='auto')
 
     def fill_required_fields(batch, config):
-        for key in ["rollout_behavior_log_probs", "off_policy_steps"]:
+        for key in ["rollout_behavior_log_probs", "off_policy_steps", "model_output_mask"]:
             if key not in batch:
                 batch.batch[key] = torch.zeros(
                     batch.batch["input_ids"].shape[0],
@@ -674,6 +677,8 @@ if __name__ == '__main__':
     config = OmegaConf.load(
         f'{os.path.dirname(os.path.abspath(__file__))}/../../../../../tasks/config/ppo_trainer.yaml')
     config.data.truncation = 'left'
+    config.data.max_prompt_length = 16384
+    config.data.max_response_length = 49152
     config.rollout_server.response_left_truncation = True
     config.rollout_server.agent.enable_monitoring = False
     config.rollout_server.agent.direct_submit_query = False
@@ -684,8 +689,7 @@ if __name__ == '__main__':
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
 
     data_path = copy_local_path_from_hdfs(
-        "hdfs://haruna/home/byte_data_seed/hdd_wlcb/user/jiangyun.jy/datasets/rl_data/swe_gym_agentless_full_valid_filterPass_1024.parquet"
-    )
+        "hdfs://harunawl/home/byte_data_seed_wl/user/jiangyun.jy/datasets/rl_data/F0808_openhands_rebench4968.parquet")
 
     dataset = RLHFDataset(
         parquet_files=data_path,
@@ -716,16 +720,12 @@ if __name__ == '__main__':
     def chat_completions(content, meta_info, config):
         response_ids = tokenizer.encode("Hello World!") + [tokenizer.eos_token_id]
         response_log_probs = [0.] * len(response_ids)
-        response_probs_gt_threshold_num = [0] * len(response_ids)
-        response_probs_lt_threshold_sum = [0] * len(response_ids)
         response_model_output_mask = [1] * len(response_ids)
         return {
             'choices': [{
                 'message': {
                     'raw_output_ids': response_ids,
                     'response_log_probs': response_log_probs,
-                    'response_probs_gt_threshold_num': response_probs_gt_threshold_num,
-                    'response_probs_lt_threshold_sum': response_probs_lt_threshold_sum,
                     'model_output_mask': response_model_output_mask,
                     'is_finished': True,
                     'extra_data': {},
