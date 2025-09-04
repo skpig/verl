@@ -12,10 +12,11 @@ from collections import Counter
 # rule-based reward score
 from concurrent.futures import as_completed
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+import gc
 import os
-
+import time
+import traceback
 from verl import DataProto
 import torch
 import wandb
@@ -32,9 +33,10 @@ from alpha_seed.utils.reward_score.extra_reward import add_length_reward, punish
 from alpha_seed.utils.reward_score import response_post_proc, _select_rm_score_fn
 from alpha_seed.utils.duplicate import para_dup
 from alpha_seed.utils.alarm.lark_util import send_message_to_employee
+from alpha_seed.utils.tracking_utils import async_save_cases_to_hdfs
 from tasks.main_ppo import RewardManager, make_static_omegaconf
 import hdfs_io
-
+from hdfs_io import makedirs
 try:
     from nltk.util import ngrams
 except ImportError:
@@ -84,6 +86,12 @@ class VLMRewardManager(RewardManager):
         self.rm_name = rm_name
         self.config = config
         self.case_study_dir = config.trainer.default_hdfs_dir + "/cases/"
+        # === save_cases_to_hdfs optmization ===
+        if self.config.trainer.save_cases_to_hdfs:
+            makedirs(self.case_study_dir, exist_ok=True)
+        self.async_case_pool = ProcessPoolExecutor(max_workers=8)
+        self.async_case_running_tasks = set()
+        # === save_cases_to_hdfs optmization ===
         self.rm_req_executor = None
         if not single_batch:
             self.rm_req_executor = ThreadPoolExecutor(
@@ -542,21 +550,47 @@ class VLMRewardManager(RewardManager):
                 self.logger.log(log_table, step=global_step, backend='tracking')
 
         if self.config.trainer.save_cases_to_hdfs:
-            print(f"reward_fn begin hput: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            dir_name = self.case_study_dir
+            print(f"[{time.ctime()}][save cases] reward_fn begin")
+            # Clean up finished tasks
+            finished = set()
+            for task in self.async_case_running_tasks:
+                if task.done():
+                    try:
+                        task.result()  # Collect result and any exceptions
+                    except Exception as e:
+                        print(f"[save cases] Error in async task: {e}")
+                        traceback.print_exc()
+                    finished.add(task)
+            for task in finished:
+                self.async_case_running_tasks.remove(task)
+            print(f"[{time.ctime()}][save cases] Remaining async case tasks: {len(self.async_case_running_tasks)}")
+
+            # Prepare data and submit new task
             file_name = f"{self.rm_name}.{str(global_step)}.parquet"
+            print(f"[{time.ctime()}][save cases] Creating DataFrame and saving to local file: {file_name}")
+            # Create DataFrame
+            df = pd.DataFrame(columns=[
+                "global_index", "idx", "step", "prompt", "gen", "groundtruth", "raw_score", "score", "grm_score",
+                "grm_response", "score_msg", "gen_postproc", "is_dup", "is_trunc", 'len'
+            ],
+                              data=save_to_hdfs)
+            # Save to local file first
+            df.to_parquet(file_name)
 
-            def async_hput(save_to_hdfs, dir_name, file_name):
-                df = pd.DataFrame(columns=[
-                    "global_index", "idx", "step", "prompt", "gen", "groundtruth", "score", "gen_postproc", "is_dup",
-                    "is_trunc", 'len'
-                ],
-                                  data=save_to_hdfs)
-                df.to_parquet(f"{dir_name}{file_name}")
+            # clear df and save_to_hdfs
+            save_to_hdfs = []
+            del df
+            del save_to_hdfs
+            gc.collect()
 
-            p = Process(target=async_hput, args=(save_to_hdfs, dir_name, file_name))
-            p.start()
-            print(f"reward_fn end hput: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            # Submit async task
+            task = self.async_case_pool.submit(
+                async_save_cases_to_hdfs,
+                file_name,
+                self.case_study_dir,
+            )
+            self.async_case_running_tasks.add(task)
+            print(f"[{time.ctime()}][save cases] reward_fn end")
 
         if not is_validation:
             return reward_tensor, raw_scores, len_scores, idx_tensor

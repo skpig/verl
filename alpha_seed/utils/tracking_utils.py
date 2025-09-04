@@ -122,6 +122,34 @@ def async_process_batch_samples_to_wandb(fname, hdfs_dir_name, tokenizer, step):
     os.remove(fname)
 
 
+def async_save_cases_to_hdfs(file_name, hdfs_dir):
+    """
+    Async function to save DataFrame to HDFS
+    
+    Args:
+        file_name: Local filename to save
+        hdfs_dir: HDFS directory path
+    """
+    try:
+        # Copy to HDFS (assuming you have an hcopy function like in Code 1)
+        print(f"[{time.ctime()}][save cases] Copying {file_name} to {hdfs_dir}")
+        hcopy(file_name, hdfs_dir)
+        # Clean up local file
+        print(f"[{time.ctime()}][save cases] Removing local file: {file_name}")
+        os.remove(file_name)
+        print(f"[{time.ctime()}][save cases] Successfully saved cases to HDFS: {hdfs_dir}")
+    except Exception as e:
+        print(f"[{time.ctime()}][save cases] Error in async_save_cases_to_hdfs: {e}")
+        traceback.print_exc()
+        # Try to clean up local file even if upload failed
+        if os.path.exists(file_name):
+            try:
+                os.remove(file_name)
+            except:
+                pass
+        raise  # Re-raise the exception so the main thread knows about the failure
+
+
 BYTE_TRANSLATE_MAP = make_bytes_char()
 
 if __name__ == "__main__":

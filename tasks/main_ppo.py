@@ -26,6 +26,7 @@ from types import MappingProxyType, SimpleNamespace
 import warnings
 import random
 import contextlib
+import gc
 import json
 import numpy as np
 from datetime import datetime
@@ -33,11 +34,10 @@ from transformers import AutoTokenizer
 from multiprocessing import Process
 from collections import Counter
 # rule-based reward score
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from collections import defaultdict
-
 import os
-
+import traceback
 import ray
 from mono_rl import DataProto
 from verl.utils.tracking import Tracking
@@ -46,6 +46,7 @@ import torch
 import wandb
 import pandas as pd
 import hdfs_io
+from hdfs_io import makedirs
 try:
     from bytedance.trainingmetrics.rl_metrics_client_context_manager import \
         RLMetricsClientContextManager as MegavisionMetricsCtx
@@ -68,6 +69,7 @@ from alpha_seed.utils.ckpt import download_minimal_required_files
 from alpha_seed.utils.chat_template import CHATML, CHATML_TOOL, CHATML_TOOL_V2, CHATML_TOOL_V3, CHATML_TOOL_V4, CHATML_TOOL_V5
 from alpha_seed.workers.streaming_service.rollout_request_manager import RequestManager, RequestManagerRegisterCenter
 from alpha_seed.utils.functional import import_from_string
+from alpha_seed.utils.tracking_utils import async_save_cases_to_hdfs
 from databus import collect_array
 
 user_email = os.getenv('ARNOLD_LARK_RECEIVER', '')
@@ -209,6 +211,12 @@ class RewardManager():
         self.rm_name = rm_name
         self.config = config
         self.case_study_dir = config.trainer.default_hdfs_dir + "/cases/"
+        # === save_cases_to_hdfs optmization ===
+        if self.config.trainer.save_cases_to_hdfs:
+            makedirs(self.case_study_dir, exist_ok=True)
+        self.async_case_pool = ProcessPoolExecutor(max_workers=8)
+        self.async_case_running_tasks = set()
+        # === save_cases_to_hdfs optmization ===
         self.rm_req_executor = ThreadPoolExecutor(
             max_workers=int(self.config.reward_model.get('reward_executor_maxnum', 128)))
         self.mean = self.config.reward_model.mean
@@ -763,21 +771,47 @@ class RewardManager():
                 self.logger.log(log_table, step=global_step, backend='wandb')
 
         if self.config.trainer.save_cases_to_hdfs:
-            print(f"reward_fn begin hput: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            dir_name = self.case_study_dir
+            print(f"[{time.ctime()}][save cases] reward_fn begin")
+            # Clean up finished tasks
+            finished = set()
+            for task in self.async_case_running_tasks:
+                if task.done():
+                    try:
+                        task.result()  # Collect result and any exceptions
+                    except Exception as e:
+                        print(f"[save cases] Error in async task: {e}")
+                        traceback.print_exc()
+                    finished.add(task)
+            for task in finished:
+                self.async_case_running_tasks.remove(task)
+            print(f"[{time.ctime()}][save cases] Remaining async case tasks: {len(self.async_case_running_tasks)}")
+
+            # Prepare data and submit new task
             file_name = f"{self.rm_name}.{str(global_step)}.parquet"
+            print(f"[{time.ctime()}][save cases] Creating DataFrame and saving to local file: {file_name}")
+            # Create DataFrame
+            df = pd.DataFrame(columns=[
+                "global_index", "idx", "step", "prompt", "gen", "groundtruth", "raw_score", "score", "grm_score",
+                "grm_response", "score_msg", "gen_postproc", "is_dup", "is_trunc", 'len'
+            ],
+                              data=save_to_hdfs)
+            # Save to local file first
+            df.to_parquet(file_name)
 
-            def async_hput(save_to_hdfs, dir_name, file_name):
-                df = pd.DataFrame(columns=[
-                    "global_index", "idx", "step", "prompt", "gen", "groundtruth", "raw_score", "score", "grm_score",
-                    "grm_response", "score_msg", "gen_postproc", "is_dup", "is_trunc", 'len'
-                ],
-                                  data=save_to_hdfs)
-                df.to_parquet(f"{dir_name}{file_name}")
+            # clear df and save_to_hdfs
+            save_to_hdfs = []
+            del df
+            del save_to_hdfs
+            gc.collect()
 
-            p = Process(target=async_hput, args=(save_to_hdfs, dir_name, file_name))
-            p.start()
-            print(f"reward_fn end hput: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            # Submit async task
+            task = self.async_case_pool.submit(
+                async_save_cases_to_hdfs,
+                file_name,
+                self.case_study_dir,
+            )
+            self.async_case_running_tasks.add(task)
+            print(f"[{time.ctime()}][save cases] reward_fn end")
 
         if not is_validation:
             return reward_tensor, raw_scores, len_scores, idx_tensor

@@ -320,6 +320,7 @@ trainer:
   code_sandbox_psm: ""
   use_remote_sandbox: False
   save_cases_to_hdfs: True # save all cases to hdfs each step
+  save_tracking_to_hdfs: True # save rl samples tracking
   # auto: find the last ckpt to resume. If can't find, start from scratch
   resume_steps: auto
   ckpt_version: v1

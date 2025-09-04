@@ -840,7 +840,7 @@ class RayPPOTrainer(object):
         self.async_tracking_pool = ProcessPoolExecutor(max_workers=8)
         # use this to track how many running tasks in the background processes
         self.async_tracking_running_tasks = set()
-        if config.trainer.default_hdfs_dir and config.trainer.save_cases_to_hdfs:
+        if config.trainer.default_hdfs_dir and config.trainer.save_tracking_to_hdfs:
             self.save_batch_dir = os.path.join(config.trainer.default_hdfs_dir, "batch_data")
 
         self._rollout_query_tl = RolloutQueryTimeline(self.config.streaming_rollout.query_trace)
