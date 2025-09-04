@@ -683,7 +683,7 @@ class PGTreeEngine(TreeEngine):
         
         # father_only_ratio = self.tree_config.father_only_ratio
         if self.father_only_ratio is not None:
-            if (self.rng.random() < self.father_only_ratio or step_num < 30):
+            if (self.rng.random() < self.father_only_ratio or step_num < self.original_datalength / batch_size):
                 father_only_round = True
             else:
                 father_only_round = False
