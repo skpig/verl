@@ -80,6 +80,9 @@ ARNOLD_REGION = os.getenv("ARNOLD_REGION", "CN")
 ENABLE_REDIS_TRITON_CACHE = int(os.getenv("ENABLE_REDIS_TRITON_CACHE", '1'))
 CHANNEL = "llm_channel"
 
+if os.getenv("RUNTIME_IDC_NAME", "") == "wlby":
+    CHANNEL = "llm_channel_wl"
+
 
 def post_process_solution_str(config, solution_str, reward_style, eos_token):
     if solution_str.endswith(eos_token):
