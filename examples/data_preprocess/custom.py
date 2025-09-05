@@ -468,4 +468,4 @@ if __name__ == "__main__":
     # process_numinamath_dataset()
     # process_dapomath_dataset()
     # process_math_dataset()
-    # process_limr_dataset()
+    process_limr_dataset()

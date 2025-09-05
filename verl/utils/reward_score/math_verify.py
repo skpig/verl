@@ -96,14 +96,17 @@ def verify_format(model_output: str, prompt_id: int):
     
 #     return result, num_steps
 
-def extract_answer(model_output: str, prompt_id: int) -> str:
+def extract_answer(model_output: str, prompt_id: int, keep_box=False) -> str:
     # if prompt_id in [0, 1, 2, 3]:
     #     extraction = re.findall(r'<answer>(.*?)</answer>', model_output, re.DOTALL)
     # else:
     #     raise NotImplementedError(f"Prompt ID {prompt_id} is not supported for answer extraction in math verify.")
     extraction = re.findall(r'<answer>(.*?)</answer>', model_output, re.DOTALL)
     if len(extraction) == 0:
-        extraction = re.findall(r'\\boxed{(.*?)}', model_output, re.DOTALL)
+        if keep_box:
+            extraction = re.findall(r'(\\boxed{.*})', model_output, re.DOTALL)
+        else:
+            extraction = re.findall(r'\\boxed{(.*)}', model_output, re.DOTALL)
         if len(extraction) == 0:
             if random.random() < 0.01:
                 pprint(f"Warning: No answer extracted from the model output.\n\n======{model_output}")
@@ -302,6 +305,10 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None, is_v
             if data_source == "dapomath":
                 extracted_predictions = extract_answer(solution_str, prompt_id) # only verify the answer part wrapped in <answer>...</answer>
                 gold_extraction_target=(ExprExtractionConfig(),) # reduce computation time for training, since DAPOmath only requires ExprExtractionConfig
+            elif data_source == "limr":
+                extracted_predictions = extract_answer(solution_str, prompt_id)
+                ground_truth = "\\boxed{" + ground_truth + "}"
+                gold_extraction_target=(LatexExtractionConfig(),)
             else:
                 raise NotImplementedError(f"Data source {data_source} is not supported for answer extraction during training in math verify.")
         # during validation
