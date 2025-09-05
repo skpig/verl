@@ -2,7 +2,8 @@ import os
 import random
 import time
 
-from alpha_seed.utils.reward_score.extra_reward import VLM_ARC_CLIENT
+from alpha_seed.prompts.think_template_utils import get_special_tokens_dict_or_name
+from alpha_seed.utils.reward_score.vlm_verifiers.extra_reward import VLM_ARC_CLIENT
 from alpha_seed.utils.reward_score.vlm_verifiers.base_verifier import ExtractAnswerFailed
 from alpha_seed.utils.reward_score.vlm_verifiers.base_verifier import VerifierFailed
 
@@ -100,16 +101,18 @@ def check_language_correctness(query: str, response: str, verifier_feature: dict
     response_language: str = verifier_feature.get('response_language')
     if response_language:
         # Check the answer:
-        final_answer: str = response.split("</think>")[-1].strip()
+        sot_token = get_special_tokens_dict_or_name("think_start_token")
+        eot_token = get_special_tokens_dict_or_name("think_end_token")
+        final_answer: str = response.split(eot_token)[-1].strip()
         if final_answer:
             if not is_language_consistent(
                     answer=final_answer, expected_response_lang=response_language, client=client, endpoint=endpoint):
                 print(f'[VLM VERIFIER LANG SWITCH DETECTED (ANS)] {repr(query)} {repr(final_answer)}')
                 raise ExtractAnswerFailed
         # Check the first CoT:
-        first_cot = response.find('</think>')
+        first_cot = response.find(eot_token)
         if first_cot > 0:
-            first_cot = response[:first_cot].split('<think>')[-1].strip()
+            first_cot = response[:first_cot].split(sot_token)[-1].strip()
             if first_cot:
                 if not is_language_consistent(
                         answer=first_cot, expected_response_lang=response_language, client=client, endpoint=endpoint):

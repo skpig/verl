@@ -4,7 +4,7 @@ import os
 
 import ray
 
-from alpha_seed.utils.reward_score.extra_reward import filter_thinking_part, match_visual_cot_format
+from alpha_seed.utils.reward_score.vlm_verifiers.extra_reward import filter_thinking_part, match_visual_cot_format
 from alpha_seed.utils.reward_score.vlm_verifiers.base_verifier import ExtractAnswerFailed, VerifierFailed
 
 logger = logging.getLogger(__file__)
@@ -52,6 +52,7 @@ def compute_score_client(solution_str, ground_truth, code_sandbox_psm: str, volc
 @ray.remote(num_cpus=1)
 def submit_verifier(response: str, verifier_feature: str, code_sandbox_psm: str, volc_ark_key: str,
                     volc_model_name: str, think_template: str):
+    os.environ['THINK_TEMPLATE'] = think_template
     full_rollout = response
 
     if not response:
@@ -92,15 +93,18 @@ def submit_verifier(response: str, verifier_feature: str, code_sandbox_psm: str,
         if not match_visual_cot_format(response, verifier_feature=feature, allow_last_turn_fc=True):
             response = ''  # Let it fail.
 
-    verify_full_rollout = feature.get('verify_full_rollout',
-                                      False) or (verifier_name in ('visual_cot_verifier', 'auxline_rule_verifier'))
+    verify_full_rollout = feature.get('verify_full_rollout', False) or (verifier_name in (
+        'visual_cot_verifier',
+        'auxline_rule_verifier',
+        'rotate_tool_verifier',
+    ))
     if not verify_full_rollout:
         # Discard turns related with function calling and keep only the last assistant response:
         k = response.rfind(bos_assistant_nl)
         if k >= 0:
             response = response[k + len(bos_assistant_nl):]
         # Discard the CoT part:
-        response, _ = filter_thinking_part(response, think_template=think_template)
+        response, _ = filter_thinking_part(response)
 
     try:
         if response == '':
@@ -130,6 +134,11 @@ def submit_verifier(response: str, verifier_feature: str, code_sandbox_psm: str,
             result = ModelBasedPuzzleVerifierVolc(volc_ark_key=volc_ark_key,
                                                   volc_model_name=volc_model_name).verify(response=response,
                                                                                           verifier_feature_dict=feature)
+        elif verifier_name == 'basic_perception_verifier_service':
+            from alpha_seed.utils.reward_score.vlm_verifiers.basic_perception_verifier import ModelBasedPerceptionVerifierVolc
+            result = ModelBasedPerceptionVerifierVolc(
+                volc_ark_key=volc_ark_key, volc_model_name=volc_model_name).verify(response=response,
+                                                                                   verifier_feature_dict=feature)
         elif verifier_name == 'code_sandbox':
             from alpha_seed.utils.reward_score.vlm_verifiers.code_sandbox_verifier import CodeSandboxVerifier
             result = CodeSandboxVerifier(code_sandbox_service_psm=code_sandbox_psm).verify(
@@ -211,6 +220,16 @@ def submit_verifier(response: str, verifier_feature: str, code_sandbox_psm: str,
         elif verifier_name == 'video_shuffle_strict':
             from alpha_seed.utils.reward_score.vlm_verifiers.video_shuffle_verifier import VideoShuffleVerifierStrict
             result = VideoShuffleVerifierStrict().verify(response=response, verifier_feature_dict=feature)
+        elif verifier_name == 'collie_supply':
+            from alpha_seed.utils.reward_score.vlm_verifiers.collie_verifier import CollieSupplyVerifier
+            result = CollieSupplyVerifier().verify(response=response, verifier_feature_dict=feature)
+        elif verifier_name == 'general_sandbox_code':
+            from alpha_seed.utils.reward_score.vlm_verifiers.general_sandbox_code_verifier import GeneralSandboxVerifier
+            result = GeneralSandboxVerifier(code_sandbox_service_psm=code_sandbox_psm).verify(
+                response=response, verifier_feature_dict=feature)
+        elif verifier_name == 'rotate_tool_verifier':
+            from alpha_seed.utils.reward_score.vlm_verifiers.rotate_tool_verifier import RotateToolVerifier
+            result = RotateToolVerifier().verify(response=response, verifier_feature_dict=feature)
         else:
             raise NotImplementedError(f'No verifier named "{verifier_name}".')
 
@@ -232,8 +251,7 @@ def submit_verifier(response: str, verifier_feature: str, code_sandbox_psm: str,
             {
                 'tag': 'parsing_fail',
                 'pred': full_rollout,
-                'answer': answer,
-                'verifier_name': verifier_name,
+                'verifier_feature': feature,
                 # Assign lower scores to ill-formatted answers compared to incorrect but well-formatted answers.
                 'score': -1.2
             },
@@ -246,8 +264,7 @@ def submit_verifier(response: str, verifier_feature: str, code_sandbox_psm: str,
             {
                 'tag': f'verifier service failed: {e}',
                 'pred': full_rollout,
-                'answer': answer,
-                'verifier_name': verifier_name,
+                'verifier_feature': feature,
                 'score': -2.0
             },
             ensure_ascii=False)
@@ -257,13 +274,12 @@ def submit_verifier(response: str, verifier_feature: str, code_sandbox_psm: str,
     except Exception:
         import sys
         import traceback
-        tb = ''.join(traceback.format_exception(*sys.exc_info()))
+        tb = ''.join(traceback.format_exception(*sys.exc_info()))  # noqa
         status = json.dumps(
             {
                 'tag': f'verification error: {tb}',
                 'pred': full_rollout,
-                'answer': answer,
-                'verifier_name': verifier_name,
+                'verifier_feature': feature,
                 'score': -2.0
             },
             ensure_ascii=False)

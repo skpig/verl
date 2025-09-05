@@ -3,9 +3,11 @@ import datetime
 import importlib
 import logging
 import torch
+import json
 from mono_rl import DataProto
 from verl.utils.seqlen_balancing import rearrange_micro_batches
 from typing import Dict, Any
+from hdfs_io import makedirs, hput, hcopy, hexists
 import contextlib
 
 logger = logging.getLogger(__name__)
@@ -119,3 +121,54 @@ def import_from_string(import_str: str) -> Any:
         return getattr(module, obj_name)
     else:
         return importlib.import_module(import_str)
+
+
+def save_simple_train_data_to_hdfs(batch, tokenizer, step, file_base_path, max_prompt_length):
+    file_path = f"{file_base_path}/simple_train_data"
+    local_file_path = f'train_simple_{step}.jsonl'
+    makedirs(file_path, exist_ok=True)
+    # open file
+    with open(local_file_path, "w") as f:
+
+        if "index" in batch.non_tensor_batch:
+            dataset_indexs = batch.non_tensor_batch['index']
+        else:
+            dataset_indexs = [None] * batch.batch.batch_size[0]
+
+        if 'prompt' in batch.non_tensor_batch:
+            prompts = batch.non_tensor_batch['prompt']
+        else:
+            prompts = [""] * batch.batch.batch_size[0]
+
+        raw_scores = batch.batch['raw_scores'].sum(dim=-1)
+        token_level_rewards = batch.batch['token_level_rewards'].sum(dim=-1)
+
+        decode_batch_response = []
+        for i in range(batch.batch['responses'].shape[0]):
+            valid_response_length = batch.batch['attention_mask'][i, max_prompt_length:].sum().item()
+            valid_response_idx = batch.batch['responses'][i, :valid_response_length]
+            # remove potential special tokens(-100)
+            valid_response_idx = valid_response_idx[valid_response_idx != -100]
+            decode_batch_response.append(valid_response_idx)
+        responses = tokenizer.batch_decode(decode_batch_response, skip_special_tokens=False)
+
+        for score, token_level_reward, prompt, response, dataset_index in zip(raw_scores, token_level_rewards, prompts,
+                                                                              responses, dataset_indexs):
+            data = {
+                "index_id": dataset_index,
+                "raw_score": score.item(),
+                "token_level_reward": token_level_reward.item(),
+                "prompt": prompt,
+                "response": response.replace("[SOI][EOI]", "[SOI]<ImageHere>[EOI]"),
+            }
+            f.write(json.dumps(data, ensure_ascii=False) + "\n")
+            f.flush()
+
+    hput(local_file_path, file_path)
+    # try:
+    #     os.remove(local_file_path)
+    # except Exception as e:
+    #     print(f'failed to remove {local_file_path}, exception {e} will be ignored')
+    # print(
+    #     f'Saving train output batch from {local_file_path} to {file_path}'
+    # )

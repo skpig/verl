@@ -2032,7 +2032,7 @@ class RayPPOTrainer(object):
             metrics['memory/actor_max_allocated'] = actor_output.meta_info['memory/actor_max_allocated']
             metrics['memory/actor_max_reserved'] = actor_output.meta_info['memory/actor_max_reserved']
             metrics['timing/update_actor'] = timer.last
-            print(f"After update_actor")
+            print_dataproto_size(batch, head='After update_actor')
 
     @stage_logger.log_duration('compute_metrics')
     def compute_metrics(self, batch, metrics):
@@ -2175,7 +2175,6 @@ class RayPPOTrainer(object):
             metrics['memory/critic_max_reserved'] = critic_output.meta_info['memory/critic_max_reserved']
             critic_output_metrics = reduce_metrics(critic_output.meta_info['metrics'])
             metrics.update(critic_output_metrics)
-            print(f"After update_critic")
         if self.config.algorithm.phasic_critic_interval > 0:
             select_keys = ['input_ids', 'responses', 'attention_mask', 'values', 'returns']
             buffer_batch = batch.select(batch_keys=select_keys)
@@ -2197,6 +2196,7 @@ class RayPPOTrainer(object):
             metrics.update(critic_output_metrics)
 
             self.phasic_critic_buffer = None
+        print_dataproto_size(batch, head='After update_critic')
 
     @stage_logger.log_duration('compute_advantage')
     def _compute_adv(self, batch, metrics, use_async_gen):

@@ -7,7 +7,8 @@ import time
 
 import haversine
 
-from alpha_seed.utils.reward_score.extra_reward import match_visual_cot_format, VLM_ARC_CLIENT
+from alpha_seed.prompts.think_template_utils import get_special_tokens_dict_or_name
+from alpha_seed.utils.reward_score.vlm_verifiers.extra_reward import match_visual_cot_format, VLM_ARC_CLIENT
 from alpha_seed.utils.reward_score.vlm_verifiers.base_verifier import BaseVerifier, VerifyResult, ExtractAnswerFailed
 from alpha_seed.utils.reward_score.vlm_verifiers.base_verifier import VerifierFailed
 
@@ -548,8 +549,9 @@ class VisualCoTVerifier_Geo_Combine(BaseVerifier):
         endpoint = os.environ.get("VLM_ARC_ENDPOINT", None)
 
         try:
-            final_answer: str = response.split("</think>")[-1].split(
-                "<[EOS_never_used_51bce0c785ca2f68081bfa7d91973934]>")[0]
+            eot_token = get_special_tokens_dict_or_name("think_end_token")
+            eos_token = get_special_tokens_dict_or_name("eos")
+            final_answer: str = response.split(eot_token)[-1].split(eos_token)[0]
         except Exception:
             return VerifyResult(score=0, extracted_answer=response)
 

@@ -29,7 +29,7 @@ except ImportError:
     MegavisionMetricsCtx = None
 
 # rule-based reward score
-from alpha_seed.utils.reward_score.extra_reward import add_length_reward, punish_format_return_positions
+from alpha_seed.utils.reward_score.vlm_verifiers.extra_reward import add_length_reward, punish_format_return_positions
 from alpha_seed.utils.reward_score import response_post_proc, _select_rm_score_fn
 from alpha_seed.utils.duplicate import para_dup
 from alpha_seed.utils.alarm.lark_util import send_message_to_employee

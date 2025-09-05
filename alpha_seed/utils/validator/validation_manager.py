@@ -174,7 +174,7 @@ class ValidateManager(object):
                 bon_ids = list(range(eval_bon)) * (len(test_batch))
                 if eval_bon != 1:
                     test_batch = test_batch.repeat(eval_bon)
-                    test_batch.non_tensor_batch['bon_id'] = np.array(bon_ids, dtype=object)
+                test_batch.non_tensor_batch['bon_id'] = np.array(bon_ids, dtype=object)
                 test_batch.meta_info['epoch_id'] = val_epoch_idx
 
                 # create a uid for each data inside the batch

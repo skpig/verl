@@ -234,6 +234,7 @@ class VisualCotAgent(AsyncAgent):
         from alpha_seed.workers.streaming_service.streaming_utils import DataPack, pack_to_dataproto
         # 使用internal_call后，应该有完整的alpha-seed格式
         data_pack = DataPack.create_from_completion_dict(completion['choices'][0]['message'])
+        data_pack.extra_data[0]['metrics'] = self.visual_cot.metrics
         # FIXME(lixiang): off policy steps在多轮里还不准
         out = pack_to_dataproto(item, self.tokenizer, data_pack, context.config.actor_rollout_ref.rollout)
         out.non_tensor_batch['agent_num_turns'] = np.array([num_turns])

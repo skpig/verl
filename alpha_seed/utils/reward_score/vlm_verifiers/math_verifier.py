@@ -1,3 +1,4 @@
+from alpha_seed.prompts.think_template_utils import get_special_tokens_dict_or_name
 from alpha_seed.utils.reward_score.verifier_service_volc import compute_score
 from alpha_seed.utils.reward_score.vlm_verifiers.base_verifier import BaseVerifier, ExtractAnswerFailed, VerifyResult, \
     VerifierFailed
@@ -35,8 +36,10 @@ class ModelBasedMathVerifierVolc(BaseVerifier):
         }
         solution_str = response
         if ground_truth["verify_type"] == 4:
-            if '</think>' not in response:
-                solution_str = "<think>dummy</think>" + solution_str  # required by verifier_type=4
+            sot_token = get_special_tokens_dict_or_name("think_start_token")
+            eot_token = get_special_tokens_dict_or_name("think_end_token")
+            if eot_token not in response:
+                solution_str = f"{sot_token}dummy{eot_token}" + solution_str  # required by verifier_type=4
         else:
             raise NotImplementedError
         score = compute_score(solution_str=solution_str,

@@ -18,6 +18,8 @@ class CodeSandboxVerifier(BaseVerifier):
         score = compute_score(solution_str=solution_str,
                               ground_truth=ground_truth,
                               code_sandbox_psm=self.code_sandbox_service_psm)
+        if isinstance(score, dict):
+            score = score['score']
         if score == 1:
             return VerifyResult(score=1.0, extracted_answer=solution_str)
         elif score == -1:

@@ -15,7 +15,7 @@
 VLM dataset
 """
 
-from typing import Dict, List, Optional, Union
+from typing import List
 import io
 import re
 import json
@@ -30,43 +30,11 @@ import verl.utils.torch_functional as verl_F
 from PIL import Image
 
 from alpha_seed.utils.dataset.rl_dataset import RLHFDataset
-from mono_rl.utils.dataset.dist_data_util import DistImageLoader, get_dist_data_manager, get_local_inputs, \
+from mono_rl.utils.dataset.dist_data_util import DistImageLoader, get_local_inputs, \
     save_dataproto_image_data_dist, init_or_get_dist_data_manager
-
-from transformers.feature_extraction_utils import BatchFeature
-from transformers.image_utils import ImageInput
-from transformers.utils import TensorType
 
 from alpha_seed.utils.server_client import is_local_ray_instance
 import pyarrow as pa
-
-
-def convert_prompts_into_input_ids(prompts,
-                                   tokenizer,
-                                   image_processor,
-                                   max_prompt_length,
-                                   num_image_tokens,
-                                   truncation='error'):
-    input_ids_list = []
-    attention_mask_list = []
-    for i in range(prompts.batch.batch_size[0]):
-        prompt = prompts.non_tensor_batch['prompt'][i]
-        input_ids, attention_mask = convert_single_prompt_to_input_ids(prompt,
-                                                                       tokenizer=tokenizer,
-                                                                       image_processor=image_processor,
-                                                                       num_image_tokens=num_image_tokens[i])
-        input_ids, attention_mask = postprocess_data(input_ids,
-                                                     attention_mask,
-                                                     max_length=max_prompt_length,
-                                                     pad_token_id=tokenizer.pad_token_id,
-                                                     left_pad=True,
-                                                     truncation=truncation)
-        input_ids_list.append(input_ids[0])
-        attention_mask_list.append(attention_mask[0])
-    input_ids = torch.stack(input_ids_list, dim=0)
-    attention_mask = torch.stack(attention_mask_list, dim=0)
-    prompts.batch['input_ids'] = input_ids
-    prompts.batch['attention_mask'] = attention_mask
 
 
 def decode_bytes_to_rgb_image(image_bytes):
@@ -312,7 +280,8 @@ class RLHFDatasetVL(RLHFDataset):
             dataframe = pd.read_parquet(parquet_file)
             if 'session' in dataframe:
                 dataframe = pd.DataFrame(list(dataframe['session']))
-            # dataframe.drop(columns=image_keys, inplace=True)
+            if self.dist_image:
+                dataframe.drop(columns=image_keys, inplace=True)
             dataframes.append(dataframe)
         self.dataframe = pd.concat(dataframes)
         self.dataframe['images_bytes_ref'] = images_bytes_refs_list
@@ -458,31 +427,6 @@ class RLHFDatasetVL(RLHFDataset):
             self._read_files_and_tokenize()
         else:
             print(r'old dataloader ckpt file is used, please train from scratch for better ckpt performance')
-
-
-def convert_input_ids_to_chat(prompt_ids, tokenizer):
-    first_non_one_indices = (prompt_ids != tokenizer.pad_token_id).int().argmax(dim=1)
-    rmv_padding_prompt_ids = [row[index:].tolist() for row, index in zip(prompt_ids, first_non_one_indices)]
-    chat = []
-    for input_ids in rmv_padding_prompt_ids:
-        processed_ids = []
-        i = 0
-        n = len(input_ids)
-        while i < n:
-            if input_ids[i] == -100:
-                # 检查连续的-100
-                start = i
-                while i < n and input_ids[i] == -100:
-                    i += 1
-                # 替换为一个<image>标记
-                processed_ids.append(tokenizer.convert_tokens_to_ids("<image>"))
-            else:
-                processed_ids.append(input_ids[i])
-                i += 1
-        # 将处理后的ids转换为字符串
-        text = tokenizer.decode(processed_ids, skip_special_tokens=True)
-        chat.append([text])
-    return chat
 
 
 def transform_image(prompt, images_bytes, tokenizer, processor, truncation, max_prompt_length=None):

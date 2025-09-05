@@ -1,6 +1,6 @@
-from alpha_seed.utils.reward_score.vlm_verifiers.base_verifier import BaseVerifier, ExtractAnswerFailed, VerifyResult
-from alpha_seed.utils.reward_score.vlm_verifiers.tools import extract_boxed_number
 import re
+
+from alpha_seed.utils.reward_score.vlm_verifiers.base_verifier import BaseVerifier, ExtractAnswerFailed, VerifyResult
 
 
 def extract_order(response: str) -> str | None:

@@ -16,6 +16,31 @@ class GUIVerifier(BaseVerifier):
             return VerifyResult(score=0.0, extracted_answer=response)
 
 
+# 正则表达式预编译可加速
+re_zh = re.compile(r'[\u4e00-\u9fff]')
+re_en = re.compile(r'[A-Za-z]')
+
+
+def detect_lang(text: str, thresh: float = 0.7) -> str:
+    """
+    根据字符占比判断文本主要语言（中文 zh、英文 en、混合 mixed、未知 unknown）
+    thresh: 判定“主要语言”的比例阈值；0.7 表示 ≥70% 即视为主导语言
+    """
+    zh_cnt = len(re_zh.findall(text))
+    en_cnt = len(re_en.findall(text))
+    total = zh_cnt + en_cnt
+    if total == 0:
+        return 'unknown'
+
+    zh_ratio = zh_cnt / total
+    en_ratio = en_cnt / total
+
+    if en_ratio >= thresh:
+        return 'en'
+    else:
+        return 'zh'
+
+
 def get_pure_text(text):
     # 去除加粗 **text** 或 __text__
     text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
@@ -167,7 +192,7 @@ def get_truth_action_type_value(content):
 
 def get_pred_action_type_value(content):
     content = get_pure_text(content)
-    pattern = r"^\s*Thought:.*\s*\nAction:\s*(\w+)\((.*)\)\s*$"
+    pattern = r"Action: (\w+)\((.*)\)"
     match = re.search(pattern, content, re.DOTALL)
     if match:
         action_type = match.group(1)  # 提取 action type (click)
@@ -291,6 +316,11 @@ def rule_for_action(gt_content, pred_content):
     item_dis = None
     item_type_correct = False
     item_value_correct = False
+    if 'Thought: ' in gt_content and 'Thought: ' not in pred_content or 'Thought: ' in gt_content and 'Action:' in pred_content and detect_lang(
+            pred_content.split('Action:')[0]) != "zh":
+        print('thought lang error')
+        item_value_correct = False
+        return item_value_correct
 
     gt_result = get_truth_action_type_value(gt_content)
     if gt_result is not None:
@@ -366,32 +396,32 @@ def rule_for_action(gt_content, pred_content):
 
 
 if __name__ == "__main__":
-    import pandas as pd
-    import json
+    # import pandas as pd
+    # import json
+    print('##################Starting##################')
 
-    input_file = "hdfs://haruna/home/byte_data_seed/hl_lq/iccv/user/wangjiawei.424/datasets/gui_o1/data/gui_rl_small_image_upsample4_shuff/copy_3.parquet"
-    data = pd.read_parquet(input_file).to_dict("records")
+    # input_file = "/mnt/bn/fangjunjiedev/m8_20b_trainingData/datasets/sft_interactive_Agent_Instruction_Follow_human_ch_RLFormatSample2k_MaxLen7k_history1_nothink_v3_0607.parquet"
+    # input_file = "/mnt/bn/fangjunjiedev/m8_20b_trainingData/datasets/processed_parquet_chunks_0620_RLFormatSample50_MaxLen7k_history1_longcot_v3_2025-06-23_fixedAnswerType.parquet"
+    # thought_gt = "Thought: 首先，我需要确定当前处于PDF阅读器界面，而任务是找论文作者的个人网页。但是我还不知道作者是谁，因此我第一步需要做的是向上滚动PDF直至出现作者名字。\nAction: scroll(direction='up', point='<point>824 513</point>')"
+    # think_gt = '<think>Looking at this document, I can see that I\'ve successfully created a line break after the first sentence "The tutorial will constitute 30% of your total grade." But now I notice there\'s something problematic - there appears to be a bullet point or formatting element that\'s been carried over to the new line. I can see there\'s a small square or bullet point symbol at the beginning of the empty line I just created.\n\nThis isn\'t what I want. The user asked me to create clean separations between sentences to improve readability, not to introduce additional formatting elements that could make the document look messy or inconsistent. I need to remove this unwanted bullet point or formatting symbol.\n\nLet me think about what happened here. When I pressed Enter after the first sentence, the word processor probably automatically continued the bullet point formatting from the previous line, which is a common behavior in document editors like LibreOffice Writer. This created an empty bullet point on the new line.\n\nTo fix this, I should use the backspace key to remove this unwanted formatting element. This will give me a clean empty line between the sentences, which is exactly what the user requested for better readability.\n\nAfter I remove this formatting issue, I can continue with the rest of the assessment section, making sure to place the cursor at the end of each sentence and create proper line breaks without introducing unwanted formatting elements.</think>Action: hotkey(key=\'backspace\')'
+    # data = pd.read_parquet(input_file).to_dict("records")
 
-    gui_verifier = GUIVerifier()
-    for i, d in enumerate(data):
-        verifier_feature = json.loads(d['session']['verifier_feature'])
-        gt = verifier_feature['answer']
-        # 用老数据时的过渡使用
-        gt = gt.replace("<bbox>", "<point>").replace("</bbox>", "</point>")
-        if "drag" in gt:
-            gt = gt.replace("start_box", "start_point").replace("end_box", "end_point")
-        else:
-            gt = gt.replace("start_box", "point")
-        pred = gt
-        verifier_feature['answer'] = gt
-        res = gui_verifier.verify(pred, verifier_feature_dict=verifier_feature)
-        status = json.dumps({
-            'tag': 'verified',
-            'pred': res.extracted_answer,
-            'answer': gt,
-            'score': res.score
-        },
-                            ensure_ascii=False)
-        if res.score == 0:
-            print(f"----{i}----")
-            print(f'[VERIFIER INFO] {status}', flush=True)
+    # gui_verifier = GUIVerifier()
+    # for i, d in enumerate(data):
+    #     verifier_feature = json.loads(d['session']['verifier_feature'])
+    #     gt = verifier_feature['answer']
+    #     #用老数据时的过渡使用
+    #     gt = gt.replace("<bbox>","<point>").replace("</bbox>","</point>")
+    #     if "drag" in gt:
+    #         gt = gt.replace("start_box", "start_point").replace("end_box", "end_point")
+    #     else:
+    #         gt = gt.replace("start_box", "point")
+    #     pred = thought_gt
+    #     verifier_feature['answer'] = gt
+    #     res = gui_verifier.verify(pred, verifier_feature_dict=verifier_feature)
+    #     print(i, ' - ', res.score)
+    #     status = json.dumps({'tag': 'verified', 'pred': res.extracted_answer, 'answer': gt, 'score': res.score},
+    #                         ensure_ascii=False)
+    # if res.score == 0:
+    #     print(f"----{i}----")
+    # print(f'[VERIFIER INFO] {status}', flush=True)

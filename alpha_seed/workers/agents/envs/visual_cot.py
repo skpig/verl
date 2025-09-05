@@ -8,9 +8,11 @@ import torch
 from transformers import AutoImageProcessor, AutoTokenizer
 import asyncio
 
-from alpha_seed.workers.agents.envs import BaseEnv
+from alpha_seed.workers.agents.handlers.base_tool import BaseTool
 from alpha_seed.utils.dataset.vlm_rl_dataset import decode_bytes_to_rgb_image
 from alpha_seed.utils.ckpt.hdfs import download_config_and_tokenizer
+import numpy as np
+from collections import defaultdict
 
 
 def convert_image_to_rgb(image: Image) -> Image:
@@ -85,7 +87,7 @@ def POINT(image_bytes: bytes, points: str, draw_line: bool = False) -> dict:
             continue
         # Validate the line structure.
         if not re.match(pattern_line, line_str):
-            raise ValueError('Invalid points format.')
+            raise ValueError('Invalid points format or invalid point coordinates.')
         # Extract the coordinates from the current line.
         coords = re.findall(r'<point>\s*(\d+)\s+(\d+)\s*</point>', line_str)
         coords_int = [(int(x), int(y)) for x, y in coords]
@@ -275,8 +277,8 @@ def ZOOM(image_bytes: bytes, bbox_str: str = "", scale: float = 0.0) -> dict:
     }
     """
     ## avoid too large image
-    if scale > 4.0:
-        scale = 4.0
+    if (scale <= 0) or (scale > 2.0):
+        raise ValueError(f"Scale should be between 0.0 (excluded) and 2.0 (included), but got {scale}.")
     # Validate and parse the bbox if present
     x1_rel = y1_rel = x2_rel = y2_rel = None
     if bbox_str:
@@ -289,8 +291,9 @@ def ZOOM(image_bytes: bytes, bbox_str: str = "", scale: float = 0.0) -> dict:
     with Image.open(BytesIO(image_bytes)) as raw_img:
         img = convert_image_to_rgb(raw_img)
         w, h = img.size
+        has_bbox = all(x is not None for x in (x1_rel, y1_rel, x2_rel, y2_rel))
         # If there is a bounding box, crop and scale only that region
-        if all(x is not None for x in (x1_rel, y1_rel, x2_rel, y2_rel)):
+        if has_bbox:
             # Convert (0..999) coords to actual pixel coords
             x1_pix = int((x1_rel / 999) * w)
             y1_pix = int((y1_rel / 999) * h)
@@ -299,6 +302,7 @@ def ZOOM(image_bytes: bytes, bbox_str: str = "", scale: float = 0.0) -> dict:
             # Ensure valid order
             left, right = sorted([x1_pix, x2_pix])
             top, bottom = sorted([y1_pix, y2_pix])
+            region_occupy_ratio = (right - left) * (bottom - top) / (w * h)
 
             # Crop region
             crop_region = img.crop((left, top, right, bottom))
@@ -308,6 +312,10 @@ def ZOOM(image_bytes: bytes, bbox_str: str = "", scale: float = 0.0) -> dict:
             if scale < 1e-3:
                 # Scale the cropped region to fill the entire original image size
                 new_size = (w, h)
+            elif scale >= 1.0 and region_occupy_ratio >= 0.5:
+                raise ValueError(
+                    'Zooming in on a very large region is a waste of computation. Please consider zooming in on a smaller region.'
+                )
             else:
                 # Scale the cropped region by "scale"
                 new_cw = int(cw * scale)
@@ -322,19 +330,34 @@ def ZOOM(image_bytes: bytes, bbox_str: str = "", scale: float = 0.0) -> dict:
                 # scale=0 with empty bbox => effectively no change
                 # we can just copy the original image
                 img = img.copy()
+            elif scale >= 1.0:
+                raise ValueError(
+                    'Zooming the entire image is a waste of computation. Please consider zooming in on a specific region.'
+                )
             else:
                 new_w = int(w * scale)
                 new_h = int(h * scale)
                 if new_w < 1 or new_h < 1:
                     raise ValueError('Invalid scale factor results in zero or negative dimension.')
                 img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+        out_w, out_h = img.size
+        if out_w * out_h > 1920 * 1080:
+            if has_bbox:
+                raise ValueError(
+                    'The resulting image is too large. Please consider using a smaller scale factor or a smaller bounding box.'
+                )
+            else:
+                raise ValueError(
+                    'The resulting image is too large. Please consider focusing on only a local region of interest.')
+
         # Save the updated (zoomed) image
         base64_image = encode_image_as_base64(img, include_media_type=False)
 
     return dict(text="", image_base64=base64_image)
 
 
-class VisualCotEnv(BaseEnv):
+class VisualCotEnv(BaseTool):
     """
     Only support native python function now.
     """
@@ -346,8 +369,16 @@ class VisualCotEnv(BaseEnv):
         assert tokenizer is not None and image_processor is not None, f"tokenizer or image_processor is None"
         self.tokenizer = tokenizer
         self.image_processor = image_processor
+        self._metrics = defaultdict(list)
 
         self._is_finished = False
+
+    @property
+    def metrics(self) -> dict:
+        metrics = {}
+        metrics.update({f'avg_{k}': np.mean(v) for k, v in self._metrics.items()})
+        metrics.update({f'max_{k}': np.max(v) for k, v in self._metrics.items()})
+        return {f"visual_cot_{k}": v for k, v in metrics.items()}
 
     def action_supported(self, action: str) -> bool:
         return True
@@ -372,6 +403,7 @@ class VisualCotEnv(BaseEnv):
             return False, f"{function_name} is not available now."
         if ('image_bytes' not in action) and (function_name != 'PYTHON'):
             return False, "Missing image input."
+        self._metrics[function_name].append(1)
 
         try:
             raw_visual_cot_output = await self.async_eval(action, globals=globals())

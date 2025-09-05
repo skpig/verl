@@ -36,28 +36,6 @@ VERIFY_TEMPLATE = '''你是一个超强的判题专家。给定一道题目的�
 '''
 
 
-def get_text_after_think_tag(text):
-    """
-    查找文本中"<Think>"之后的内容。
-    参数:
-        text (str): 输入的文本。
-    返回:
-        str 或 None: 返回Think后的内容，或如果未找到则返回None。
-    """
-    search_phrase = "</Think>".lower()
-    lower_text = text.lower()
-    start_index = lower_text.rfind(search_phrase)
-    if start_index == -1:
-        return None
-    content_start = start_index + len(search_phrase)
-    content = text[content_start:].strip()
-    for eos in ["<|endoftext|>", "<|im_end|>", "<[EOS_never_used_51bce0c785ca2f68081bfa7d91973934]>"]:
-        if eos in content:
-            content = content.split(eos)[0].strip()
-            break
-    return content if content else None
-
-
 class ModelBasedGroundingComplexVerifierVolc(BaseVerifier):
 
     def __init__(self, volc_ark_key: str, volc_model_name: str) -> None:
@@ -76,17 +54,9 @@ class ModelBasedGroundingComplexVerifierVolc(BaseVerifier):
         answer = verifier_feature_dict['answer']
         problem = verifier_feature_dict['problem']
 
-        for i in range(3):
+        for i in range(10):
             try:
-                candidate_answer = get_text_after_think_tag(response)
-                if candidate_answer is None:
-                    extracted_response = response[-200:]
-                else:
-                    extracted_response = candidate_answer
-
-                prompt = VERIFY_TEMPLATE.format(problem=problem,
-                                                reference_answer=answer,
-                                                model_response=extracted_response)
+                prompt = VERIFY_TEMPLATE.format(problem=problem, reference_answer=answer, model_response=response)
 
                 completion = self.client.chat.completions.create(
                     model=self.model,
@@ -108,6 +78,6 @@ class ModelBasedGroundingComplexVerifierVolc(BaseVerifier):
             except Exception as ex:
                 import traceback
                 logger.info(traceback.format_exc())
-                time.sleep(random.choice(list(range(10, 25))))
+                time.sleep(random.choice(list(range(60, 150))))
                 continue
         raise VerifierFailed

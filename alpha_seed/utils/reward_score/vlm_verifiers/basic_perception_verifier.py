@@ -7,22 +7,20 @@ from alpha_seed.utils.reward_score.vlm_verifiers.base_verifier import BaseVerifi
 
 logger = logging.getLogger()
 
-VERIFY_TEMPLATE = """你是一个超强的判题专家。给定一道视觉谜题的参考答案和一段学生的回答，你的任务是判断该回答是否符合参考答案。若符合，回答是，否则回答否。
+VERIFY_TEMPLATE = """你是一个超强的判题专家。给定一道题目的参考答案和一段学生的回答。你的任务是判断该回答是否正确。若符合，回答是，否则回答否。
 **请注意：**
-1. 学生的回答不一定要和参考答案完全一致，要结合谜题的要求判断学生的答案是否和参考答案一样满足题意。
-2. 如果参考答案中存在多个正确答案，只要学生的回答与其中一个正确答案相符，就认为该回答符合参考答案。
-3. 如果参考答案中存在多个得分点，学生的回答必须同时满足所有得分点，才认为该回答符合参考答案。
-4. 如果学生的回答不完整，有被截断的现象，则认为该回答不符合参考答案。
-5. 你的回答要么是“是”，要么是“否”，不能含有其他内容。
-<视觉谜题>
+1. 如果参考答案中存在多个正确答案，只要学生的回答与其中一个正确答案相符，就认为该回答符合参考答案。
+2. 如果学生的答案不在参考答案中，但是不与参考答案冲突，且满足题目的要求，也认为该回答是正确的。
+3. 你的回答要么是是，要么是否，不能含有其他内容。
+<问题>
 {problem}
 <学生的回答>
-{reference_answer}
+{model_response}
 <参考答案>
-{model_response}"""
+{reference_answer}"""
 
 
-class ModelBasedPuzzleVerifierVolc(BaseVerifier):
+class ModelBasedPerceptionVerifierVolc(BaseVerifier):
 
     def __init__(self, volc_ark_key: str, volc_model_name: str) -> None:
         super().__init__()
@@ -60,6 +58,6 @@ class ModelBasedPuzzleVerifierVolc(BaseVerifier):
             except Exception as ex:
                 import traceback
                 logger.info(traceback.format_exc())
-                time.sleep(random.randint(60, 150))
+                time.sleep(random.choice(list(range(120, 300))))
                 continue
         raise VerifierFailed

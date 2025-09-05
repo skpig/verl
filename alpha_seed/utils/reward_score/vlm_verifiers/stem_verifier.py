@@ -46,7 +46,7 @@ class ModelBasedStemVerifierVolc(BaseVerifier):
         problem = verifier_feature_dict['problem']
 
         tb = ''
-        for i in range(3):
+        for i in range(10):
             try:
                 prompt_template = '<题目>：\n{problem}\n<标准答案>：\n{answer}\n<学生答案>：\n{response}\n\n'
                 prompt = prompt_template.format(problem=problem, answer=answer, response=response)
@@ -71,6 +71,6 @@ class ModelBasedStemVerifierVolc(BaseVerifier):
                 import traceback
                 logger.info(traceback.format_exc())
                 logger.info(f'Got exception in compute_score via stem verifier_service: {ex}')
-                time.sleep(random.choice(list(range(10, 25))))
+                time.sleep(random.randint(60, 150))
                 continue
         raise VerifierFailed

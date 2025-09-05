@@ -155,4 +155,6 @@ python3 tasks/main_ppo.py \
     trainer.total_steps=${NUM_STEPS} \
     trainer.save_cases_to_hdfs=False \
     actor_rollout_ref.rollout.mode=server \
-    data.dist_image=True
+    data.dist_image=True \
+    trainer.volc_ark_key=123 \
+    trainer.volc_model_name=123

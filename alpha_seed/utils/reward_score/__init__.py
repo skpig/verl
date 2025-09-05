@@ -127,5 +127,8 @@ def _select_rm_score_fn(reward_style, external_lib: str = None):
     elif reward_style == "vlm_verifier_router":
         from alpha_seed.utils.reward_score.vlm_verifiers import vlm_verifier_router
         return vlm_verifier_router.compute_score_client
+    elif reward_style == "verifier_service_volc":
+        from alpha_seed.utils.reward_score import verifier_service_volc
+        return verifier_service_volc.compute_score_client
     else:
         raise NotImplementedError(f"{reward_style=} not implemented")

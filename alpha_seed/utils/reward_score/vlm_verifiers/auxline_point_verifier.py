@@ -1,14 +1,9 @@
-import json
-import traceback
+import math
 import re
 import sys
-import os
-import random
-import time
-import math
+
 import numpy as np
 
-from alpha_seed.utils.reward_score.extra_reward import visual_function_call_format
 from alpha_seed.utils.reward_score.vlm_verifiers.base_verifier import BaseVerifier, VerifyResult, ExtractAnswerFailed
 from alpha_seed.utils.reward_score.vlm_verifiers.base_verifier import VerifierFailed
 from alpha_seed.utils.reward_score.vlm_verifiers.utils import check_language_correctness
@@ -124,7 +119,7 @@ class AuxlinePointVerifier(BaseVerifier):
             return VerifyResult(score=float(np.mean(score_list)), extracted_answer=response)
         except Exception:
             import traceback
-            tb = "".join(traceback.format_exception(*sys.exc_info()))
+            tb = "".join(traceback.format_exception(*sys.exc_info()))  # noqa
             raise VerifierFailed(message=tb)
 
 
