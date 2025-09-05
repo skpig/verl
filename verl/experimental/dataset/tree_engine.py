@@ -571,8 +571,10 @@ class PGTreeEngine(TreeEngine):
         # add new node to the tree
         cur_psi = self.rng.normal(loc=father_psi, scale=final_sigma)
         self.psi = np.append(self.psi, cur_psi)
-        self.s = np.append(self.s, score)
-        self.n = np.append(self.n, 1.0)
+        # self.s = np.append(self.s, score)
+        # self.n = np.append(self.n, 1.0)
+        self.s = np.append(self.s, 0.0)
+        self.n = np.append(self.n, 0.0)
         self.variance = np.append(self.variance, final_sigma ** 2)
         self.last_touch = np.append(self.last_touch, step_num)
         self.select_num = np.append(self.select_num, 0)
