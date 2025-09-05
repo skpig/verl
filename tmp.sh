@@ -1,10 +1,10 @@
-RUN_ID=53
+RUN_ID=4
 WANDB_VERSION=bwandb
 # one node
-FORWARD_RATIO=10
-BACKWARD_RATIO=3
+FORWARD_RATIO=16
+BACKWARD_RATIO=6
 
-resume=auto
+resume=disable
 
 # for qwen3
 VAL_TEMP=0.6
@@ -13,13 +13,13 @@ VAL_TOPK=20
 
 # Model settings
 USE_OVERLONG=True
-SAMPLER=tree # null, tree, mopps
+SAMPLER=None # null, tree, mopps
 DATA_WORKERS=0
 CRITIC_WARMUP=0
 PROMPT_ID=4
-ROLLOUT_N=1
-BATCH_SIZE=4096
-MINI_BSZ=512
+ROLLOUT_N=8
+BATCH_SIZE=512
+MINI_BSZ=64
 OVERLONG_BUFFER_LEN=$((1024 * 1))
 OVERLONG_COEF=1
 MAX_PROMPT_LEN=$((1024 * 1))
@@ -28,10 +28,10 @@ CLIP_HIGHER=0.28
 
 # Tree Sampler settings
 TREE_SAMPLER=epsilon # mcts pg
-EPSILON=0.5
+EPSILON=0.2
 
 # Tree Selector
-TREE_SELECTOR=mix # entropy mix1
+TREE_SELECTOR=value # entropy mix1
 ROLLOUT_RATIO=0.7
 
 
@@ -51,11 +51,12 @@ BACKWARD_MAX_TOKEN_LEN=$((BACKWARD_RATIO * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN)))
 
 
 MY_CKPT_DIR=/mnt/hdfs/huangbaizhou/tmp/ckpt/
-BASE_MODEL=${MY_MODEL_DIR}Qwen/Qwen3-8B-Base
-CRITIC_MODEL=${MY_CKPT_DIR}debug_hbz/Qwen3-8B-critic/0821-s8-v1
+BASE_MODEL=${MY_MODEL_DIR}Qwen/Qwen3-4B-Base
+CRITIC_MODEL=${MY_CKPT_DIR}debug_hbz/Qwen3-4B-critic/0810_v1_critic
 
 TEMPLATE_TYPE=chat
-TRAIN_FILE="${MY_DATA_DIR}DAPO-Math-17k/train.parquet"
+# TRAIN_FILE="${MY_DATA_DIR}DAPO-Math-17k/train.parquet"
+TRAIN_FILE="${MY_DATA_DIR}LIMR/train.parquet"
 TEST_FILES="${MY_DATA_DIR}merged_math_datasets/merged_test.parquet"
 
 # BASE_MODEL=/tmp/pretrain/Qwen/Qwen2.5-3B-Instruct
@@ -65,9 +66,10 @@ TEST_FILES="${MY_DATA_DIR}merged_math_datasets/merged_test.parquet"
 # train_files="['$gsm8k_train_path']"
 # test_files="['$gsm8k_test_path']"
 
-PROJ_NAME="debug_hbz"
+PROJ_NAME="debug_hbz2"
 MODEL_NAME=$(basename $BASE_MODEL)
-DATA_NAME=DAPOMATH
+# DATA_NAME=DAPOMATH
+DATA_NAME=LIMR
 EXPERIMENT_NAME="ID${RUN_ID}_${DATA_NAME}_ppo_sampler${SAMPLER}_clip${CLIP_HIGHER}_${MODEL_NAME}_prompt${PROMPT_ID}_n${ROLLOUT_N}_resplen${MAX_RESPONSE_LEN}_bsz${BATCH_SIZE}-${MINI_BSZ}"
 
 python3 examples/data_preprocess/custom.py \
@@ -123,7 +125,7 @@ CMD="python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=$FORWARD_MAX_TOKEN_LEN \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP_SIZE \
     actor_rollout_ref.rollout.name=sglang \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.65 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.n=$ROLLOUT_N \
     actor_rollout_ref.rollout.val_kwargs.temperature=${VAL_TEMP} \
     actor_rollout_ref.rollout.val_kwargs.top_k=${VAL_TOPK} \
