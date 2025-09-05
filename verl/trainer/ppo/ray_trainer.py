@@ -20,6 +20,8 @@ This trainer supports model-agonistic model initialization with huggingface
 
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
+import pickle
+import random
 import time
 import json
 import os
@@ -714,7 +716,7 @@ class RayPPOTrainer:
         else:
             self.train_dataloader = StatefulDataLoader(
                 dataset=self.train_dataset,
-                batch_size=self.config.data.get("gen_batch_size", self.config.data.train_batch_size),
+                batch_size=(len(self.train_dataset) // 128 * 128),
                 num_workers=num_workers,
                 drop_last=True,
                 collate_fn=collate_fn,
@@ -1299,7 +1301,8 @@ class RayPPOTrainer:
 
         # perform validation before training
         # currently, we only support validation using the reward_function.
-        if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True) and self.global_steps == 0:
+        # if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True) and self.global_steps == 0:
+        if False:
             self.ray_validate_task_list.append(self._validate())
             # val_metrics = self._validate()
             # assert val_metrics, f"{val_metrics=}"
@@ -1319,8 +1322,8 @@ class RayPPOTrainer:
         last_val_metrics = None
         self.max_steps_duration = 0
 
-        for epoch in range(self.config.trainer.total_epochs):
-            for batch_dict in self.train_dataloader:
+        for epoch in range(1):
+            for batch_idx, batch_dict in enumerate(self.train_dataloader):
                 metrics = {"perf/total_dedup_num_response_tokens": 0, "perf/total_dedup_num_prompt_tokens": 0}
                 timing_raw = {}
 
@@ -1397,27 +1400,28 @@ class RayPPOTrainer:
                     # repeat to align with repeated responses in rollout
                     rollout_index_batch = torch.arange(self.config.actor_rollout_ref.rollout.n, device=batch.batch.device).repeat(len(batch)) # [0, 1, 2, ..., n, 0, 1, 2, ..., n, ...]
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                    print(f"Repeat {self.config.actor_rollout_ref.rollout.n} times, After repeat, batch length: {len(batch)}")
                     batch = batch.union(gen_batch_output)
                     batch.batch['rollout_index'] = rollout_index_batch
 
-                    batch.batch['response_mask'] = compute_response_mask(batch) # TODO: the response_mask here should be handled carefully，可以保持原有的形状，但是需要移除开头的partial rollout的mask，但需要搜索所有使用它的地方是否存在可能的错误
-                    metrics['perf/total_dedup_num_response_tokens'] += batch.batch['response_mask'].sum().item()
-                    metrics['perf/total_dedup_num_prompt_tokens'] += sum(len(i) for i in gen_batch.non_tensor_batch['raw_prompt_ids'])
-                    if 'partial_rollout_len' in batch.non_tensor_batch:
-                        batch.batch['response_mask_w_partial_rollouts'] = batch.batch['response_mask'].clone()
-                        for i in range(len(batch)):
-                            batch.batch['response_mask_w_partial_rollouts'][i, :batch.non_tensor_batch['partial_rollout_len'][i]] = 0
-                        metrics['perf/total_dedup_num_response_tokens'] -= batch.non_tensor_batch['partial_rollout_len'].sum()
+                    # batch.batch['response_mask'] = compute_response_mask(batch) # TODO: the response_mask here should be handled carefully，可以保持原有的形状，但是需要移除开头的partial rollout的mask，但需要搜索所有使用它的地方是否存在可能的错误
+                    # metrics['perf/total_dedup_num_response_tokens'] += batch.batch['response_mask'].sum().item()
+                    # metrics['perf/total_dedup_num_prompt_tokens'] += sum(len(i) for i in gen_batch.non_tensor_batch['raw_prompt_ids'])
+                    # if 'partial_rollout_len' in batch.non_tensor_batch:
+                    #     batch.batch['response_mask_w_partial_rollouts'] = batch.batch['response_mask'].clone()
+                    #     for i in range(len(batch)):
+                    #         batch.batch['response_mask_w_partial_rollouts'][i, :batch.non_tensor_batch['partial_rollout_len'][i]] = 0
+                    #     metrics['perf/total_dedup_num_response_tokens'] -= batch.non_tensor_batch['partial_rollout_len'].sum()
                     # compute_rollout_metrics(batch=batch, tokenizer=self.tokenizer)
-                    rollout_metrics = compute_rollout_metrics.remote(batch=batch, tokenizer=self.tokenizer)
+                    # rollout_metrics = compute_rollout_metrics.remote(batch=batch, tokenizer=self.tokenizer)
 
                     # Balance the number of valid tokens across DP ranks.
                     # NOTE: This usually changes the order of data in the `batch`,
                     # which won't affect the advantage calculation (since it's based on uid),
                     # but might affect the loss calculation (due to the change of mini-batching).
                     # TODO: Decouple the DP balancing and mini-batching.
-                    if self.config.trainer.balance_batch:
-                        self._balance_batch(batch, metrics=metrics)
+                    # if self.config.trainer.balance_batch:
+                    #     self._balance_batch(batch, metrics=metrics)
 
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
@@ -1428,7 +1432,8 @@ class RayPPOTrainer:
                             reward_tensor = self.rm_wg.compute_rm_score(batch)
                             batch = batch.union(reward_tensor)
 
-                        if self.config.reward_model.launch_reward_fn_async:
+                        # if self.config.reward_model.launch_reward_fn_async:
+                        if False:
                             future_reward = compute_reward_async.remote(batch, self.config, self.tokenizer)
                         else:
                             reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
@@ -1503,250 +1508,255 @@ class RayPPOTrainer:
                     #         self._balance_batch(batch, metrics=metrics)
 
 
-                    # recompute old_log_probs
-                    with marked_timer("old_log_prob", timing_raw, color="blue"):
-                        old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
-                        entropys = old_log_prob.batch["entropys"]
-                        response_masks = batch.batch["response_mask"]
-                        loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
-                        entropy_agg = agg_loss(loss_mat=entropys, loss_mask=response_masks, loss_agg_mode=loss_agg_mode)
-                        old_log_prob_metrics = {"actor/entropy": entropy_agg.detach().item()}
-                        metrics.update(old_log_prob_metrics)
-                        # old_log_prob.batch.pop("entropys")
-                        batch = batch.union(old_log_prob)
+                    # # recompute old_log_probs
+                    # with marked_timer("old_log_prob", timing_raw, color="blue"):
+                    #     old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
+                    #     entropys = old_log_prob.batch["entropys"]
+                    #     response_masks = batch.batch["response_mask"]
+                    #     loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
+                    #     entropy_agg = agg_loss(loss_mat=entropys, loss_mask=response_masks, loss_agg_mode=loss_agg_mode)
+                    #     old_log_prob_metrics = {"actor/entropy": entropy_agg.detach().item()}
+                    #     metrics.update(old_log_prob_metrics)
+                    #     # old_log_prob.batch.pop("entropys")
+                    #     batch = batch.union(old_log_prob)
 
-                        if "rollout_log_probs" in batch.batch.keys():
-                            # TODO: we may want to add diff of probs too.
-                            rollout_old_log_probs = batch.batch["rollout_log_probs"]
-                            actor_old_log_probs = batch.batch["old_log_probs"]
-                            attention_mask = batch.batch["attention_mask"]
-                            responses = batch.batch["responses"]
-                            response_length = responses.size(1)
-                            response_mask = attention_mask[:, -response_length:]
+                    #     if "rollout_log_probs" in batch.batch.keys():
+                    #         # TODO: we may want to add diff of probs too.
+                    #         rollout_old_log_probs = batch.batch["rollout_log_probs"]
+                    #         actor_old_log_probs = batch.batch["old_log_probs"]
+                    #         attention_mask = batch.batch["attention_mask"]
+                    #         responses = batch.batch["responses"]
+                    #         response_length = responses.size(1)
+                    #         response_mask = attention_mask[:, -response_length:]
 
-                            rollout_probs = torch.exp(rollout_old_log_probs)
-                            actor_probs = torch.exp(actor_old_log_probs)
-                            rollout_probs_diff = torch.abs(rollout_probs - actor_probs)
-                            rollout_probs_diff = torch.masked_select(rollout_probs_diff, response_mask.bool())
-                            rollout_probs_diff_max = torch.max(rollout_probs_diff)
-                            rollout_probs_diff_mean = torch.mean(rollout_probs_diff)
-                            rollout_probs_diff_std = torch.std(rollout_probs_diff)
-                            metrics.update(
-                                {
-                                    "training/rollout_probs_diff_max": rollout_probs_diff_max.detach().item(),
-                                    "training/rollout_probs_diff_mean": rollout_probs_diff_mean.detach().item(),
-                                    "training/rollout_probs_diff_std": rollout_probs_diff_std.detach().item(),
-                                }
-                            )
+                    #         rollout_probs = torch.exp(rollout_old_log_probs)
+                    #         actor_probs = torch.exp(actor_old_log_probs)
+                    #         rollout_probs_diff = torch.abs(rollout_probs - actor_probs)
+                    #         rollout_probs_diff = torch.masked_select(rollout_probs_diff, response_mask.bool())
+                    #         rollout_probs_diff_max = torch.max(rollout_probs_diff)
+                    #         rollout_probs_diff_mean = torch.mean(rollout_probs_diff)
+                    #         rollout_probs_diff_std = torch.std(rollout_probs_diff)
+                    #         metrics.update(
+                    #             {
+                    #                 "training/rollout_probs_diff_max": rollout_probs_diff_max.detach().item(),
+                    #                 "training/rollout_probs_diff_mean": rollout_probs_diff_mean.detach().item(),
+                    #                 "training/rollout_probs_diff_std": rollout_probs_diff_std.detach().item(),
+                    #             }
+                    #         )
 
-                    if self.use_reference_policy:
-                        # compute reference log_prob
-                        with marked_timer("ref", timing_raw, color="olive"):
-                            if not self.ref_in_actor:
-                                ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
-                            else:
-                                ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
-                            batch = batch.union(ref_log_prob)
+                    # if self.use_reference_policy:
+                    #     # compute reference log_prob
+                    #     with marked_timer("ref", timing_raw, color="olive"):
+                    #         if not self.ref_in_actor:
+                    #             ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
+                    #         else:
+                    #             ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
+                    #         batch = batch.union(ref_log_prob)
 
-                    # compute values
-                    if self.use_critic:
-                        with marked_timer("values", timing_raw, color="cyan"):
-                            values = self.critic_wg.compute_values(batch)
-                            batch = batch.union(values)
+                    # # compute values
+                    # if self.use_critic:
+                    #     with marked_timer("values", timing_raw, color="cyan"):
+                    #         values = self.critic_wg.compute_values(batch)
+                    #         batch = batch.union(values)
 
-                    with marked_timer("adv", timing_raw, color="brown"):
-                        # we combine with rule-based rm
-                        reward_extra_infos_dict: dict[str, list]
-                        if self.config.reward_model.launch_reward_fn_async:
-                            reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
-                        batch.batch["token_level_scores"] = reward_tensor
+                    # with marked_timer("adv", timing_raw, color="brown"):
+                    #     # we combine with rule-based rm
+                    #     reward_extra_infos_dict: dict[str, list]
+                    #     if self.config.reward_model.launch_reward_fn_async:
+                    #         reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
+                    #     batch.batch["token_level_scores"] = reward_tensor
 
-                        if reward_extra_infos_dict:
-                            batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
+                    #     if reward_extra_infos_dict:
+                    #         batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
 
-                        # compute rewards. apply_kl_penalty if available
-                        if self.config.algorithm.use_kl_in_reward:
-                            batch, kl_metrics = apply_kl_penalty(
-                                batch, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty
-                            )
-                            metrics.update(kl_metrics)
-                        else:
-                            batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
+                    #     # compute rewards. apply_kl_penalty if available
+                    #     if self.config.algorithm.use_kl_in_reward:
+                    #         batch, kl_metrics = apply_kl_penalty(
+                    #             batch, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty
+                    #         )
+                    #         metrics.update(kl_metrics)
+                    #     else:
+                    #         batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
 
-                        # compute advantages, executed on the driver process
+                    #     # compute advantages, executed on the driver process
 
-                        norm_adv_by_std_in_grpo = self.config.algorithm.get(
-                            "norm_adv_by_std_in_grpo", True
-                        )  # GRPO adv normalization factor
+                    #     norm_adv_by_std_in_grpo = self.config.algorithm.get(
+                    #         "norm_adv_by_std_in_grpo", True
+                    #     )  # GRPO adv normalization factor
 
-                        batch = compute_advantage(
-                            batch,
-                            adv_estimator=self.config.algorithm.adv_estimator,
-                            gamma=self.config.algorithm.gamma,
-                            lam=self.config.algorithm.lam,
-                            num_repeat=self.config.actor_rollout_ref.rollout.n,
-                            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
-                            config=self.config.algorithm,
-                        )
+                    #     batch = compute_advantage(
+                    #         batch,
+                    #         adv_estimator=self.config.algorithm.adv_estimator,
+                    #         gamma=self.config.algorithm.gamma,
+                    #         lam=self.config.algorithm.lam,
+                    #         num_repeat=self.config.actor_rollout_ref.rollout.n,
+                    #         norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+                    #         config=self.config.algorithm,
+                    #     )
 
-                    # update critic
-                    if self.use_critic:
-                        with marked_timer("update_critic", timing_raw, color="pink"):
-                            critic_output = self.critic_wg.update_critic(batch)
-                        critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
-                        metrics.update(critic_output_metrics)
+                    # # update critic
+                    # if self.use_critic:
+                    #     with marked_timer("update_critic", timing_raw, color="pink"):
+                    #         critic_output = self.critic_wg.update_critic(batch)
+                    #     critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
+                    #     metrics.update(critic_output_metrics)
                     
-                    # Update dataset sampler (Async)
-                    if isinstance(self.train_dataloader.sampler, AysncUpdater):
-                        self.train_dataloader.sampler.async_update(batch=batch, step_num=self.global_steps)
-                    elif isinstance(self.train_dataloader.batch_sampler, AysncUpdater):
-                        self.train_dataloader.batch_sampler.async_update(batch=batch, step_num=self.global_steps)
+                    # # Update dataset sampler (Async)
+                    # if isinstance(self.train_dataloader.sampler, AysncUpdater):
+                    #     self.train_dataloader.sampler.async_update(batch=batch, step_num=self.global_steps)
+                    # elif isinstance(self.train_dataloader.batch_sampler, AysncUpdater):
+                    #     self.train_dataloader.batch_sampler.async_update(batch=batch, step_num=self.global_steps)
 
-                    # implement critic warmup
-                    if self.config.trainer.critic_warmup <= self.global_steps:
-                        # update actor
-                        with marked_timer("update_actor", timing_raw, color="red"):
-                            batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
-                            actor_output = self.actor_rollout_wg.update_actor(batch)
-                        actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
-                        metrics.update(actor_output_metrics)
-                        actor_output.meta_info.pop("metrics")
-                        batch = batch.union(actor_output)
+                    # # implement critic warmup
+                    # if self.config.trainer.critic_warmup <= self.global_steps:
+                    #     # update actor
+                    #     with marked_timer("update_actor", timing_raw, color="red"):
+                    #         batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
+                    #         actor_output = self.actor_rollout_wg.update_actor(batch)
+                    #     actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
+                    #     metrics.update(actor_output_metrics)
+                    #     actor_output.meta_info.pop("metrics")
+                    #     batch = batch.union(actor_output)
                     
 
-                    # Log rollout generations if enabled
-                    rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
-                    if rollout_data_dir:
-                        with marked_timer("dump_rollout_generations", timing_raw, color="green"):
-                            inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
-                            outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
-                            scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
-                            self._dump_generations(
-                                inputs=inputs,
-                                outputs=outputs,
-                                scores=scores,
-                                reward_extra_infos_dict=reward_extra_infos_dict,
-                                dump_path=rollout_data_dir,
-                            )
-
-                    # log the previous validation metrics
-                    if len(self.ray_validate_task_list) > 0:
-                        # wait until previous ray_task is finished
-                        for task in self.ray_validate_task_list:
-                            prev_metric, prev_step = ray.get(task)
-                            logger.log(data=prev_metric, step=prev_step)
-                        self.ray_validate_task_list = []
-
-                    # validate
-                    if (
-                        self.val_reward_fn is not None
-                        and self.config.trainer.test_freq > 0
-                        and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0)
-                    ):
-                        with marked_timer("testing", timing_raw, color="green"):
-                            # hackin: log the data within the validation function as a ray task
-                            self.ray_validate_task_list.append(self._validate())
-                        #     val_metrics: dict = self._validate()
-                        #     if is_last_step:
-                        #         last_val_metrics = val_metrics
-                        # metrics.update(val_metrics)
-
-                    # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
-                    esi_close_to_expiration = should_save_ckpt_esi(
-                        max_steps_duration=self.max_steps_duration,
-                        redundant_time=self.config.trainer.esi_redundant_time,
+                    local_global_step_folder = os.path.join(
+                        self.config.trainer.default_local_dir, f"global_step_{self.global_steps}"
                     )
-                    # Check if the conditions for saving a checkpoint are met.
-                    # The conditions include a mandatory condition (1) and
-                    # one of the following optional conditions (2/3/4):
-                    # 1. The save frequency is set to a positive value.
-                    # 2. It's the last training step.
-                    # 3. The current step number is a multiple of the save frequency.
-                    # 4. The ESI(Elastic Server Instance)/training plan is close to expiration.
-                    if self.config.trainer.save_freq > 0 and (
-                        is_last_step
-                        or self.global_steps % self.config.trainer.save_freq == 0
-                        or esi_close_to_expiration
-                    ):
-                        if esi_close_to_expiration:
-                            print("Force saving checkpoint: ESI instance expiration approaching.")
-                        with marked_timer("save_checkpoint", timing_raw, color="green"):
-                            self._save_checkpoint()
+                    os.makedirs(local_global_step_folder, exist_ok=True)
 
-                with marked_timer("stop_profile", timing_raw):
-                    self._stop_profiling(do_profile)
+                    # 保存 acc 信息，使用 pickle 格式
+                    scores = reward_extra_infos_dict['score']
+                    items = list(batch.non_tensor_batch['item'].astype(int))
+                    with open(os.path.join(local_global_step_folder, "scores.pkl"), "wb") as f:
+                        pickle.dump(list(zip(scores, items)), f)
+                    # 保存 rollout generations，如果启用，使用 pickle 格式
+                    batch = batch.select_idxs(list(range(32000)))
+                    prompts = self.tokenizer.batch_decode(batch.batch['prompts'], skip_special_tokens=True)
+                    responses = self.tokenizer.batch_decode(batch.batch['responses'], skip_special_tokens=True)
+                    with open(os.path.join(local_global_step_folder, "prompts.pkl"), "wb") as f:
+                        pickle.dump(prompts, f)
+                    with open(os.path.join(local_global_step_folder, "responses.pkl"), "wb") as f:
+                        pickle.dump(responses, f)
+                    print(f"Dumped batch of length {len(batch)} to {local_global_step_folder}")
 
-                steps_duration = timing_raw["step"]
-                self.max_steps_duration = max(self.max_steps_duration, steps_duration)
+                #     # log the previous validation metrics
+                #     if len(self.ray_validate_task_list) > 0:
+                #         # wait until previous ray_task is finished
+                #         for task in self.ray_validate_task_list:
+                #             prev_metric, prev_step = ray.get(task)
+                #             logger.log(data=prev_metric, step=prev_step)
+                #         self.ray_validate_task_list = []
 
-                # training metrics
-                metrics.update(
-                    {
-                        "training/global_step": self.global_steps,
-                        "training/epoch": epoch,
-                    }
-                )
-                # collect metrics
-                with marked_timer('log', timing_raw):
-                    metrics.update(ray.get(rollout_metrics))
-                    # self._maybe_log_train_generations(batch) # TODO: 降低开销
-                    metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
-                    # TODO: implement actual tflpo and theoretical tflpo
-                    n_gpus = self.resource_pool_manager.get_n_gpus()
-                    metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
-                    metrics['perf/total_dedup_num_tokens'] = metrics['perf/total_dedup_num_response_tokens'] + metrics['perf/total_dedup_num_prompt_tokens']
+                #     # validate
+                #     if (
+                #         self.val_reward_fn is not None
+                #         and self.config.trainer.test_freq > 0
+                #         and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0)
+                #     ):
+                #         with marked_timer("testing", timing_raw, color="green"):
+                #             # hackin: log the data within the validation function as a ray task
+                #             self.ray_validate_task_list.append(self._validate())
+                #         #     val_metrics: dict = self._validate()
+                #         #     if is_last_step:
+                #         #         last_val_metrics = val_metrics
+                #         # metrics.update(val_metrics)
 
-                    # async log samples
-                    finished = set()
-                    for t in self.async_tracking_running_tasks:
-                        if t.done():
-                            t.result()  # call this to collect the result(including error traceback)
-                            finished.add(t)
-                    for t in finished:
-                        self.async_tracking_running_tasks.remove(t)
-                    print(f"remaining async tracking tasks {len(self.async_tracking_running_tasks)}")
+                #     # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
+                #     esi_close_to_expiration = should_save_ckpt_esi(
+                #         max_steps_duration=self.max_steps_duration,
+                #         redundant_time=self.config.trainer.esi_redundant_time,
+                #     )
+                #     # Check if the conditions for saving a checkpoint are met.
+                #     # The conditions include a mandatory condition (1) and
+                #     # one of the following optional conditions (2/3/4):
+                #     # 1. The save frequency is set to a positive value.
+                #     # 2. It's the last training step.
+                #     # 3. The current step number is a multiple of the save frequency.
+                #     # 4. The ESI(Elastic Server Instance)/training plan is close to expiration.
+                #     if self.config.trainer.save_freq > 0 and (
+                #         is_last_step
+                #         or self.global_steps % self.config.trainer.save_freq == 0
+                #         or esi_close_to_expiration
+                #     ):
+                #         if esi_close_to_expiration:
+                #             print("Force saving checkpoint: ESI instance expiration approaching.")
+                #         with marked_timer("save_checkpoint", timing_raw, color="green"):
+                #             self._save_checkpoint()
 
-                    # DEBUG:
-                    max_upload = min(50, len(batch))
-                    task = self.async_tracking_pool.submit(async_tracking_log_samples, *(batch.select_idxs(list(range(max_upload))), self.tokenizer, metrics, self.global_steps))
-                    self.async_tracking_running_tasks.add(task)
+                # with marked_timer("stop_profile", timing_raw):
+                #     self._stop_profiling(do_profile)
+
+                # steps_duration = timing_raw["step"]
+                # self.max_steps_duration = max(self.max_steps_duration, steps_duration)
+
+                # # training metrics
+                # metrics.update(
+                #     {
+                #         "training/global_step": self.global_steps,
+                #         "training/epoch": epoch,
+                #     }
+                # )
+                # # collect metrics
+                # with marked_timer('log', timing_raw):
+                #     metrics.update(ray.get(rollout_metrics))
+                #     # self._maybe_log_train_generations(batch) # TODO: 降低开销
+                #     metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
+                #     # TODO: implement actual tflpo and theoretical tflpo
+                #     n_gpus = self.resource_pool_manager.get_n_gpus()
+                #     metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
+                #     metrics['perf/total_dedup_num_tokens'] = metrics['perf/total_dedup_num_response_tokens'] + metrics['perf/total_dedup_num_prompt_tokens']
+
+                #     # async log samples
+                #     finished = set()
+                #     for t in self.async_tracking_running_tasks:
+                #         if t.done():
+                #             t.result()  # call this to collect the result(including error traceback)
+                #             finished.add(t)
+                #     for t in finished:
+                #         self.async_tracking_running_tasks.remove(t)
+                #     print(f"remaining async tracking tasks {len(self.async_tracking_running_tasks)}")
+
+                #     # DEBUG:
+                #     max_upload = min(50, len(batch))
+                #     task = self.async_tracking_pool.submit(async_tracking_log_samples, *(batch.select_idxs(list(range(max_upload))), self.tokenizer, metrics, self.global_steps))
+                #     self.async_tracking_running_tasks.add(task)
 
 
-                    # update global metrics
-                    self.global_metrics['perf/global_cumsum_total_dedup_num_prompt_tokens'] += metrics['perf/total_dedup_num_prompt_tokens']
-                    self.global_metrics['perf/global_cumsum_total_dedup_num_response_tokens'] += metrics['perf/total_dedup_num_response_tokens']
-                    self.global_metrics['perf/global_cumsum_total_dedup_num_tokens'] += metrics['perf/total_dedup_num_tokens']
-                    self.global_metrics['perf/global_time'] += timing_raw['step']
+                #     # update global metrics
+                #     self.global_metrics['perf/global_cumsum_total_dedup_num_prompt_tokens'] += metrics['perf/total_dedup_num_prompt_tokens']
+                #     self.global_metrics['perf/global_cumsum_total_dedup_num_response_tokens'] += metrics['perf/total_dedup_num_response_tokens']
+                #     self.global_metrics['perf/global_cumsum_total_dedup_num_tokens'] += metrics['perf/total_dedup_num_tokens']
+                #     self.global_metrics['perf/global_time'] += timing_raw['step']
 
-                    metrics.update(self.global_metrics)
-                metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
+                #     metrics.update(self.global_metrics)
+                # metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
 
-                # this is experimental and may be changed/removed in the future in favor of a general-purpose ones
-                sampler_metrics = None
-                if isinstance(self.train_dataloader.sampler, AbstractCurriculumSampler):
-                    sampler_metrics = self.train_dataloader.sampler.update(batch=batch, step_num=self.global_steps)
-                elif isinstance(self.train_dataloader.batch_sampler, AbstractCurriculumBatchSampler):
-                    sampler_metrics = self.train_dataloader.batch_sampler.update(batch=batch, step_num=self.global_steps)
-                if sampler_metrics:
-                    metrics.update(sampler_metrics)
+                # # this is experimental and may be changed/removed in the future in favor of a general-purpose ones
+                # sampler_metrics = None
+                # if isinstance(self.train_dataloader.sampler, AbstractCurriculumSampler):
+                #     sampler_metrics = self.train_dataloader.sampler.update(batch=batch, step_num=self.global_steps)
+                # elif isinstance(self.train_dataloader.batch_sampler, AbstractCurriculumBatchSampler):
+                #     sampler_metrics = self.train_dataloader.batch_sampler.update(batch=batch, step_num=self.global_steps)
+                # if sampler_metrics:
+                #     metrics.update(sampler_metrics)
 
-                # TODO: make a canonical logger that supports various backend
-                logger.log(data=metrics, step=self.global_steps)
+                # # TODO: make a canonical logger that supports various backend
+                # logger.log(data=metrics, step=self.global_steps)
 
-                if is_last_step:
-                    for task in self.ray_validate_task_list:
-                        prev_metric, prev_step = ray.get(task)
-                        logger.log(data=prev_metric, step=prev_step)
-                    pprint(f"Final validation metrics: {last_val_metrics}")
-                    progress_bar.close()
-                    # # save train result to local file
-                    # data_path = '/home/huangbz/verl/train_result.parquet'
-                    # df = pd.read_parquet(self.cache_file_path, engine='pyarrow')
-                    # if os.path.exists(data_path):
-                    #     old_df = pd.read_parquet(data_path, engine='pyarrow')
-                    #     df = pd.concat([old_df, df], ignore_index=True)
-                    # df.to_parquet(data_path, engine='pyarrow')
-                    return
+                # if is_last_step:
+                #     for task in self.ray_validate_task_list:
+                #         prev_metric, prev_step = ray.get(task)
+                #         logger.log(data=prev_metric, step=prev_step)
+                #     pprint(f"Final validation metrics: {last_val_metrics}")
+                #     progress_bar.close()
+                #     # # save train result to local file
+                #     # data_path = '/home/huangbz/verl/train_result.parquet'
+                #     # df = pd.read_parquet(self.cache_file_path, engine='pyarrow')
+                #     # if os.path.exists(data_path):
+                #     #     old_df = pd.read_parquet(data_path, engine='pyarrow')
+                #     #     df = pd.concat([old_df, df], ignore_index=True)
+                #     # df.to_parquet(data_path, engine='pyarrow')
+                #     return
 
                 progress_bar.update(1)
                 self.global_steps += 1
