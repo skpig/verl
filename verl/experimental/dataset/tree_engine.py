@@ -707,7 +707,7 @@ class PGTreeEngine(TreeEngine):
                 continue
             # if the father has been selected too recently, skip it
             # step_num - self.father_last_touch[parent] == 0 indicates the father has just been selected last time
-            if step_num > self.diverse_threshold and step_num - self.father_last_touch[parent] < self.diverse_threshold:
+            if step_num > self.diverse_threshold + 2 and step_num - self.father_last_touch[parent] < self.diverse_threshold:
                 continue
             
             if father_only_round is not None:

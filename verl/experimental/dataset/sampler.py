@@ -371,14 +371,21 @@ class PrioritySampler(AbstractBatchSampler):
     def __iter__(self):
         """Iterate over the sampler, yielding batches of indices."""
         while True:
-            # Ensure we have enough items in the queue for a full batch
-            # if len(self.queue) < self.bsz:
-            #     self.fill_queue()
-            assert len(self.queue) >= self.bsz
-            
-            # Create a batch by popping bsz items from the queue
+            # # 若不够一个 batch 就补货
+            if len(self.queue) < self.bsz:
+                print("[Sampler] Current queue size: ", len(self.queue))
+                print("[Sampler] Not enough items in queue, filling queue...")
+                # print current runtime stack
+                traceback.print_stack()
+                self.fill_queue()
+            # assert len(self.queue) >= self.bsz
+
+            # 组装一个 batch
+            print("[Sampler] Pop queue")
             batch = [self.queue.popleft() for _ in range(self.bsz)]
+            print("[Sampler] Current Train Batch: ", batch)
             yield batch
+
     
     def state_dict(self):
         return {

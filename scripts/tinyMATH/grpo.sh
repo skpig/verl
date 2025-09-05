@@ -1,4 +1,4 @@
-RUN_ID=80
+RUN_ID=106
 WANDB_VERSION=bwandb
 # one node
 FORWARD_RATIO=10
@@ -33,11 +33,14 @@ EPSILON=0.2
 # Tree Selector
 TREE_SELECTOR=entropy # value entropy mix, mix2
 ROLLOUT_RATIO=0.7
-INCORRECT_PROB=0.3
+INCORRECT_PROB=0.
 ROOT_ONLY=True
 DIV_THRESHOLD=3 # 0 by default
 NUM_GIBBS=20
 GIBBS_DISCOUNT=0.99
+USE_WARMUP=True # default is False
+GIBBS_SIGMA=0.5 #  null by default
+GIBBS_MU=0 # -0.5 by default
 
 # Performance tuning
 N_NODES=${ARNOLD_WORKER_NUM:-1}
@@ -105,6 +108,9 @@ CMD="python3 -m verl.trainer.main_ppo \
     data.sampler.tree_sampler.diverse_threshold=${DIV_THRESHOLD} \
     data.sampler.tree_sampler.gibbs_sweeps=${NUM_GIBBS} \
     data.sampler.tree_sampler.gamma=${GIBBS_DISCOUNT} \
+    data.sampler.tree_sampler.use_warmup=${USE_WARMUP} \
+    data.sampler.tree_sampler.sigma0=${GIBBS_SIGMA} \
+    data.sampler.tree_sampler.mu0=${GIBBS_MU} \
     data.tree_data.partial_rollout_ratio=${ROLLOUT_RATIO} \
     data.tree_data.keep_incorrect_prob=${INCORRECT_PROB} \
     data.tree_data.root_only=${ROOT_ONLY} \
