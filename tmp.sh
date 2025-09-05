@@ -1,4 +1,4 @@
-RUN_ID=88
+RUN_ID=101
 WANDB_VERSION=bwandb
 # one node
 FORWARD_RATIO=10
@@ -33,7 +33,7 @@ EPSILON=0.2
 # Tree Selector
 TREE_SELECTOR=mix2 # value entropy mix, mix2
 ROLLOUT_RATIO=0.7
-INCORRECT_PROB=0.3
+INCORRECT_PROB=0.
 ROOT_ONLY=True
 DIV_THRESHOLD=3 # 0 by default
 NUM_GIBBS=20
