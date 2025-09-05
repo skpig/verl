@@ -474,6 +474,7 @@ class PGTreeEngine(TreeEngine):
         super().__init__(original_data_len, data_config)
 
         # Fixed parameters
+        self.use_warmup = data_config.sampler.tree_sampler.use_warmup
         self.diverse_threshold = int(data_config.sampler.tree_sampler.diverse_threshold)
         self.father_only_ratio = data_config.sampler.tree_sampler.father_only_ratio
         self.mu0 = float(data_config.sampler.tree_sampler.mu0)
@@ -680,6 +681,9 @@ class PGTreeEngine(TreeEngine):
 
     def select_batch(self, batch_size: int, step_num: int) -> Tuple[List[int], Dict[str, float]]:
         thetas = 1 / (1 + np.exp(-self.psi)) # [num_nodes, ]
+
+        if self.use_warmup and step_num < self.original_datalength / batch_size:
+            return [i % self.original_datalength for i in range(batch_size * step_num, batch_size * (step_num + 1))], {}
         
         # father_only_ratio = self.tree_config.father_only_ratio
         if self.father_only_ratio is not None:
@@ -701,7 +705,7 @@ class PGTreeEngine(TreeEngine):
                 continue
             # if the father has been selected too recently, skip it
             # step_num - self.father_last_touch[parent] == 0 indicates the father has just been selected last time
-            if self.father_last_touch[parent] > 5 and step_num - self.father_last_touch[parent] < self.diverse_threshold:
+            if step_num > self.diverse_threshold and step_num - self.father_last_touch[parent] < self.diverse_threshold:
                 continue
             
             if father_only_round is not None:
