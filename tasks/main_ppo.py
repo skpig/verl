@@ -47,11 +47,6 @@ import wandb
 import pandas as pd
 import hdfs_io
 from hdfs_io import makedirs
-try:
-    from bytedance.trainingmetrics.rl_metrics_client_context_manager import \
-        RLMetricsClientContextManager as MegavisionMetricsCtx
-except ImportError:
-    MegavisionMetricsCtx = None
 
 from alpha_seed.utils.server_client import is_local_ray_instance, validate_client_config, KVStore, ServerHealthCheck, TaskRunner, \
     ClientTaskRunner, check_all_workers_alive, recreate_actor
@@ -68,9 +63,11 @@ from alpha_seed.utils.server_client import validate_client_config, KVStore, Serv
 from alpha_seed.utils.ckpt import download_minimal_required_files
 from alpha_seed.utils.chat_template import CHATML, CHATML_TOOL, CHATML_TOOL_V2, CHATML_TOOL_V3, CHATML_TOOL_V4, CHATML_TOOL_V5
 from alpha_seed.workers.streaming_service.rollout_request_manager import RequestManager, RequestManagerRegisterCenter
-from alpha_seed.utils.functional import import_from_string
+from alpha_seed.utils.functional import import_from_string, SafeStageLogger
 from alpha_seed.utils.tracking_utils import async_save_cases_to_hdfs
 from databus import collect_array
+
+stage_logger = SafeStageLogger()
 
 user_email = os.getenv('ARNOLD_LARK_RECEIVER', '')
 task_url = os.getenv('ARNOLD_ORIGIN_PLATFORM_URL', '')
@@ -894,15 +891,8 @@ def check_duplicate_overrides():
         raise ValueError(error_msg)
 
 
-@hydra.main(config_path='config', config_name='ppo_trainer', version_base=None)
-def main(config):
-    # Check for duplicate command line arguments first
-    # This prevents hard-to-debug issues from duplicate parameters
-    check_duplicate_overrides()
-
-    metric_collection_context = MegavisionMetricsCtx().collect_init_ray_cluster_duration() \
-        if MegavisionMetricsCtx else contextlib.nullcontext()
-
+@stage_logger.log_duration('auto_recipe')
+def auto_recipe(config):
     if config.recipe:
         skips = {}
         for kv in HydraConfig.get().overrides.task:
@@ -920,37 +910,54 @@ def main(config):
         recipe = omegaconf.OmegaConf.load(filepath)
         print(f"recipe found: {config.recipe}, overriding with config: {recipe}")
         override(config, recipe, skips)
+    return config
 
-    with metric_collection_context:
-        if config.server_client.role == "client":
-            init_ray(config)
-            config_yaml_dir = os.path.join(os.path.dirname(__file__), "config")
-            ref_server_client_common_config = omegaconf.OmegaConf.load(
-                os.path.join(config_yaml_dir, "ppo_trainer_server_client_common.yaml"))
-            ref_server_config = omegaconf.OmegaConf.load(os.path.join(config_yaml_dir, "ppo_trainer_server.yaml"))
-            config = validate_client_config(config, ref_server_config, ref_server_client_common_config)
-        else:
-            init_ray(config)
-            check_arnold_resources(config=config)
 
-    # RequestManager register center
+@stage_logger.log_duration('init_ray_cluster')
+def init_ray_cluster(config):
+    if config.server_client.role == "client":
+        init_ray(config)
+        config_yaml_dir = os.path.join(os.path.dirname(__file__), "config")
+        ref_server_client_common_config = omegaconf.OmegaConf.load(
+            os.path.join(config_yaml_dir, "ppo_trainer_server_client_common.yaml"))
+        ref_server_config = omegaconf.OmegaConf.load(os.path.join(config_yaml_dir, "ppo_trainer_server.yaml"))
+        config = validate_client_config(config, ref_server_config, ref_server_client_common_config)
+    else:
+        init_ray(config)
+        check_arnold_resources(config=config)
+    return config
+
+
+@stage_logger.log_duration('setup_resource_manager')
+def setup_resource_manager(config):
     rm_reg = RequestManagerRegisterCenter.init(config)
-
+    elastic_res_managers = []
     # server 模式下，gen的架构均为RequestManager+Proxy+ReplicatedWorker，所以这里把RequestManager启动起来
     if config.actor_rollout_ref.rollout.mode == "server":
         ray.get([
             rm_reg.create.remote('train_rollout'),
             rm_reg.create.remote('val_rollout'),
         ])
-
     # elastic resource pool managers
     # FIXME(lixiang): arnold 扩缩容api不能并发调用，这里先假设只有1个弹性池，之后再改
     if config.elastic.hpa.enable:
-        elastic_res_managers = []
         for elastic_pool in config.elastic.hpa.pools:
             name = elastic_pool.name
             mgr = ArnoldTrialResourceManager(name, elastic_pool)
             elastic_res_managers.append(mgr)
+
+    return rm_reg, elastic_res_managers
+
+
+@hydra.main(config_path='config', config_name='ppo_trainer', version_base=None)
+def main(config):
+    # Check for duplicate command line arguments first
+    # This prevents hard-to-debug issues from duplicate parameters
+    check_duplicate_overrides()
+    with stage_logger.log_duration_context("initilization"):
+        config = auto_recipe(config)
+        config = init_ray_cluster(config)
+        rm_reg, elastic_res_managers = setup_resource_manager(config)
 
     if config.server_client.role == "server":
         main_task(config=config)
@@ -1346,32 +1353,29 @@ def check_all_workers_alive(workers):
 
 def main_task(config):
 
-    metric_collection_context = MegavisionMetricsCtx().collect_setup_trainer_duration() \
-        if MegavisionMetricsCtx else contextlib.nullcontext()
+    with stage_logger.log_duration_context("initialization"):
+        with stage_logger.log_duration_context("setup_trainer"):
+            validate_config(config)
+            trainer_kwargs, kv_store = config_to_trainer_kwargs(config)
+            trainer_cls = import_from_string(config.tasks.trainer)
+            trainer = trainer_cls(**trainer_kwargs)
 
-    with metric_collection_context:
-        validate_config(config)
-        trainer_kwargs, kv_store = config_to_trainer_kwargs(config)
-        trainer_cls = import_from_string(config.tasks.trainer)
-        trainer = trainer_cls(**trainer_kwargs)
+        global_step, resume_folder = trainer.get_resume_checkpoint_info()
 
-    global_step, resume_folder = trainer.get_resume_checkpoint_info()
-
-    metric_collection_context = MegavisionMetricsCtx().collect_init_worker_duration() \
-        if MegavisionMetricsCtx else contextlib.nullcontext()
-    with metric_collection_context:
-        trainer.init_workers(kv_store, from_step=global_step, resume_folder=resume_folder)
+        with stage_logger.log_duration_context("init_workers"):
+            trainer.init_workers(kv_store, from_step=global_step, resume_folder=resume_folder)
 
     if config.server_client.role == "server":
-        send_message_to_employee("alpha seed server启动", f"任务链接: {task_url}", user_email)
-        health_check = recreate_actor(ServerHealthCheck, name=ServerHealthCheck.name)
-        print("============== server started ==============")
-        while True:
-            if not check_all_workers_alive(trainer.workers):
-                ray.get(health_check.set_ready.remote(ready=False))
-                raise RuntimeError(f"found worker dead, exiting")
-            ray.get(health_check.set_ready.remote(ready=True))
-            time.sleep(60 * 1)
+        with stage_logger.log_duration_context("head_health_check"):
+            send_message_to_employee("alpha seed server启动", f"任务链接: {task_url}", user_email)
+            health_check = recreate_actor(ServerHealthCheck, name=ServerHealthCheck.name)
+            print("============== server started ==============")
+            while True:
+                if not check_all_workers_alive(trainer.workers):
+                    ray.get(health_check.set_ready.remote(ready=False))
+                    raise RuntimeError(f"found worker dead, exiting")
+                ray.get(health_check.set_ready.remote(ready=True))
+                time.sleep(60 * 1)
     elif config.convert_ckpt_to_omnistore_task.enable:
         trainer.convert_ckpt_to_omnistore()
         send_message_to_employee("alpha seed任务转换ckpt到omnistore完成，任务结束", f"任务链接: {task_url}", user_email)

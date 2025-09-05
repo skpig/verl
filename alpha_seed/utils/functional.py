@@ -6,8 +6,33 @@ import torch
 from mono_rl import DataProto
 from verl.utils.seqlen_balancing import rearrange_micro_batches
 from typing import Dict, Any
+import contextlib
 
 logger = logging.getLogger(__name__)
+
+
+# Megavision ETTR Logger, Ensure no error if training metrics is not installed
+class SafeStageLogger:
+
+    def __init__(self):
+        self._logger = None
+        try:
+            from bytedance.trainingmetrics.logger import get_stage_logger
+            self._logger = get_stage_logger()
+        except:
+            pass
+
+    def __getattr__(self, name):
+        if name == '_logger':
+            return None
+
+        if self._logger is not None:
+            return getattr(self._logger, name)
+
+        if name.endswith('_context'):
+            return lambda *a, **k: contextlib.nullcontext()
+        else:
+            return lambda *a, **k: (lambda f: f)
 
 
 def clip_by_value_preserve_gradient(t, min=None, max=None):

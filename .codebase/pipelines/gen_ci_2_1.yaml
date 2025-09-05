@@ -30,6 +30,7 @@ jobs:
           - sudo pip3 install pylatexenc
           - sudo pip3 install openai
           - sudo pip3 install pytest-xdist pytest-timeout
+          - sudo pip3 install bytedance.trainingmetrics
 
       - name: rollout
         commands:

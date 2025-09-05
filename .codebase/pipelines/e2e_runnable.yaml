@@ -31,6 +31,7 @@ jobs:
           - pip3 install pydantic==1.10.15
           - pip3 install bytedloadbalance==0.0.14a9
           - pip3 install bytedagi==0.0.37a7
+          - pip3 install bytedance.trainingmetrics
 
       - name: math v1 ppo async and grpo
         commands:

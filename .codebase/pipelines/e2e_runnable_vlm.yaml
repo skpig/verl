@@ -37,6 +37,7 @@ jobs:
           - sudo pip3 install pytest ray wandb
           - sudo pip3 install bytedloadbalance==0.0.14a9
           - sudo pip3 install bytedagi==0.0.37a7
+          - sudo pip3 install bytedance.trainingmetrics
 
       - name: vlm hybrid engine tests
         commands:

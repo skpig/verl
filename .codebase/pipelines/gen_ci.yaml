@@ -32,6 +32,7 @@ jobs:
           - sudo pip3 install pytest-xdist pytest-timeout
           - sudo pip3 install bytedloadbalance==0.0.14a9
           - sudo pip3 install bytedagi==0.0.37a7
+          - sudo pip3 install bytedance.trainingmetrics
 
       - name: agents
         commands:
