@@ -716,7 +716,7 @@ class RayPPOTrainer:
         else:
             self.train_dataloader = StatefulDataLoader(
                 dataset=self.train_dataset,
-                batch_size=(len(self.train_dataset) // 128 * 128),
+                batch_size=self.config.data.get("gen_batch_size", self.config.data.train_batch_size),
                 num_workers=num_workers,
                 drop_last=True,
                 collate_fn=collate_fn,
@@ -1630,7 +1630,7 @@ class RayPPOTrainer:
                     with open(os.path.join(local_global_step_folder, "scores.pkl"), "wb") as f:
                         pickle.dump(list(zip(scores, items)), f)
                     # 保存 rollout generations，如果启用，使用 pickle 格式
-                    batch = batch.select_idxs(list(range(32000)))
+                    batch = batch.select_idxs(list(range(4096)))
                     prompts = self.tokenizer.batch_decode(batch.batch['prompts'], skip_special_tokens=True)
                     responses = self.tokenizer.batch_decode(batch.batch['responses'], skip_special_tokens=True)
                     with open(os.path.join(local_global_step_folder, "prompts.pkl"), "wb") as f:
