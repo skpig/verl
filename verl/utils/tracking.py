@@ -151,6 +151,14 @@ def async_tracking_log_samples(train_batch, tokenizer, metrics, global_step):
     wandb.log({"train_samples": rl_samples}, step=global_step)
     print(time.ctime(), "sample wandb.log done")
 
+
+    # score distribution
+    score_distribution = list(train_batch.non_tensor_batch['score'])
+    table = wandb.Table(columns=["score_distribution"], data=[[i] for i in score_distribution])
+    box = wandb.plot.box(table, title="score_distribution", columns=["score_distribution"])
+    wandb.log({f"score_distribution/score_distribution_step{global_step}": box}, step=global_step)
+    
+
     if train_batch.non_tensor_batch.get('partial_rollout_len', None) is not None and global_step % 20 == 0:
         # log partial rollouts
         responses = train_batch.batch['responses']

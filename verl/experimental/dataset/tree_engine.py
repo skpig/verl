@@ -380,7 +380,7 @@ class TreeEngine:
             original_ancestor = self.get_original_ancestor_item(item)
             unique_parents.add(original_ancestor)
             self.parent_selection_counts[original_ancestor] += 1
-        
+
         return {
             "sampler/unique_parent_nodes_in_batch": len(unique_parents),
         }
@@ -802,6 +802,24 @@ class PGTreeEngine(TreeEngine):
                 f"sampler/select_num/{i}selectnum_gt_{threshold}_num": np.sum(mask),
                 f"sampler/father/select_num/{i}selectnum_gt_{threshold}_num": np.sum(father_mask),
             })
+        
+        total_select_num = np.sum(self.select_num)
+        sort_select_num = np.sort(self.select_num)[::-1]
+        sort_father_select_num = np.sort(self.father_select_num)[::-1]
+        for ratio in [0.01, 0.05, 0.1, 0.2, 0.5, 0.8]:
+            largest_k = int(len(self.select_num) * ratio)
+            largest_k_select_num = np.sum(sort_select_num[:largest_k])
+            parent_metrics.update({
+                f"sampler/coverage/top_{int(ratio * 100)}%_ratio": largest_k_select_num / total_select_num,
+            })
+            # for father
+            largest_k = int(len(self.father_select_num) * ratio)
+            largest_k_father_select_num = np.sum(sort_father_select_num[:largest_k])
+            parent_metrics.update({
+                f"sampler/father/coverage/top_{int(ratio * 100)}%_ratio": largest_k_father_select_num / total_select_num,
+            })
+        
+
         
         return parent_metrics
 
