@@ -180,6 +180,7 @@ class RLHFDataset(Dataset):
         self.return_full_prompt = config.get("return_full_prompt", False)
         self.truncation = config.get("truncation", "error")
         self.filter_overlong_prompts = config.get("filter_overlong_prompts", True)
+        self.max_data_len = config.get("max_data_len", None)
 
         self.num_workers = config.get("filter_overlong_prompts_workers", max(1, os.cpu_count() // 4))
         self.num_workers = min(self.num_workers, os.cpu_count())
@@ -219,7 +220,8 @@ class RLHFDataset(Dataset):
             dataframes.append(dataframe)
         self.dataframe: datasets.Dataset = datasets.concatenate_datasets(dataframes)
         # DEBUG:
-        # self.dataframe = self.dataframe.select(range(50))
+        if self.max_data_len is not None:
+            self.dataframe = self.dataframe.select(range(self.max_data_len))
 
         print(f"dataset len: {len(self.dataframe)}")
 

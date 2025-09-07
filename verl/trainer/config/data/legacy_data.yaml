@@ -1,6 +1,7 @@
 # by HBZ
 prompt_id: null
 template_type: chat
+max_data_len: null
 
 # Tokenizer class or path. If null, it will be inferred from the model.
 tokenizer: null
