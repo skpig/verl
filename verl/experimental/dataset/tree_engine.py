@@ -290,7 +290,6 @@ class TreeEngine:
         # ----- gather group tensors -----
         responses_g = all_responses.index_select(0, idx)                # (m, T)
         scores_g   = all_scores.index_select(0, idx)                    # (m,)
-        start_g    = torch.clamp_min(all_partial_rollout_len.index_select(0, idx), min=10)       # (m,) We don't want a too short partial rollout
         rlen_g     = all_response_len.index_select(0, idx)              # (m,)
         values_g   = all_values.index_select(0, idx) if all_values is not None else None # (m, T)
         entropies_g= all_entropys.index_select(0, idx) # (m, T)
@@ -305,6 +304,11 @@ class TreeEngine:
 
         # 有效窗口长度
 
+        if cfg.partial_rollout_begin_ratio is not None:
+            start_g = torch.floor(rlen_g.to(torch.float32) * cfg.partial_rollout_begin_ratio).to(torch.long) # (m,)
+        else:
+            start_g = torch.full_like(rlen_g, 10, dtype=torch.long)       #  We don't want a too short partial rollout
+        start_g = torch.maximum(all_partial_rollout_len.index_select(0, idx), start_g) # (m,)
         end_g = torch.floor(rlen_g.to(torch.float32) * ratio).to(torch.long)  # (m,), we need to ensure a sufficient long response space
         valid_len = end_g - start_g                                           # (m,)
         valid_row &= (valid_len > min_len)

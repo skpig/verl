@@ -1,10 +1,11 @@
-RUN_ID=101
+RUN_ID=21
 WANDB_VERSION=bwandb
 # one node
-FORWARD_RATIO=10
-BACKWARD_RATIO=3
+FORWARD_RATIO=16
+BACKWARD_RATIO=6
 
 resume=disable
+max_data_len=1024
 
 # for qwen3
 VAL_TEMP=0.6
@@ -33,10 +34,10 @@ EPSILON=0.2
 # Tree Selector
 TREE_SELECTOR=mix2 # value entropy mix, mix2
 ROLLOUT_RATIO=0.7
-INCORRECT_PROB=0.
+INCORRECT_PROB=0.3
 ROOT_ONLY=True
 DIV_THRESHOLD=3 # 0 by default
-NUM_GIBBS=20
+NUM_GIBBS=100
 GIBBS_DISCOUNT=0.99
 
 # Performance tuning
@@ -54,11 +55,12 @@ BACKWARD_MAX_TOKEN_LEN=$((BACKWARD_RATIO * (MAX_PROMPT_LEN + MAX_RESPONSE_LEN)))
 
 
 MY_CKPT_DIR=/mnt/hdfs/huangbaizhou/tmp/ckpt/
-BASE_MODEL=${MY_MODEL_DIR}Qwen/Qwen3-8B-Base
-CRITIC_MODEL=${MY_CKPT_DIR}debug_hbz/Qwen3-8B-critic/0821-s8-v1
+BASE_MODEL=${MY_MODEL_DIR}Qwen/Qwen3-4B-Base
+CRITIC_MODEL=${MY_CKPT_DIR}debug_hbz/Qwen3-4B-critic/0810_v1_critic
 
 TEMPLATE_TYPE=chat
-TRAIN_FILE="${MY_DATA_DIR}DAPO-Math-17k/train.parquet"
+# TRAIN_FILE="${MY_DATA_DIR}DAPO-Math-17k/train.parquet"
+TRAIN_FILE="${MY_DATA_DIR}LIMR/train.parquet"
 TEST_FILES="${MY_DATA_DIR}merged_math_datasets/merged_test.parquet"
 
 # BASE_MODEL=/tmp/pretrain/Qwen/Qwen2.5-3B-Instruct
@@ -68,9 +70,10 @@ TEST_FILES="${MY_DATA_DIR}merged_math_datasets/merged_test.parquet"
 # train_files="['$gsm8k_train_path']"
 # test_files="['$gsm8k_test_path']"
 
-PROJ_NAME="debug_hbz"
+PROJ_NAME="debug_hbz3"
 MODEL_NAME=$(basename $BASE_MODEL)
-DATA_NAME=DAPOMATH
+# DATA_NAME=DAPOMATH
+DATA_NAME=SMALLDAPO
 EXPERIMENT_NAME="ID${RUN_ID}_${DATA_NAME}_ppo_sampler${SAMPLER}_clip${CLIP_HIGHER}_${MODEL_NAME}_prompt${PROMPT_ID}_n${ROLLOUT_N}_resplen${MAX_RESPONSE_LEN}_bsz${BATCH_SIZE}-${MINI_BSZ}"
 
 python3 examples/data_preprocess/custom.py \
@@ -85,6 +88,7 @@ export PYTHONPATH="."
 
 # 定义要执行的命令
 CMD="python3 -m verl.trainer.main_ppo \
+    data.max_data_len=$max_data_len \
     data.sampler.name=$SAMPLER \
     data.dataloader_num_workers=${DATA_WORKERS} \
     actor_rollout_ref.actor.clip_ratio_high=${CLIP_HIGHER} \

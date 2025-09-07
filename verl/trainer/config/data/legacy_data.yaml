@@ -132,7 +132,9 @@ tree_data:
   keep_incorrect_prob: 0.0 # the probability of creating new node from incorrect response
   root_only: True # only create new node from root node
   partial_rollout_ratio: 0.7 # only create partial rollout from the first partial_rollout_ratio of the response
+  partial_rollout_begin_ratio: null # 0.2
   min_partial_rollout_len: 1000 # if the partial rollout is too short, skip
+
 
 
   name: value # value, entropy, mix
