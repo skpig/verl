@@ -116,6 +116,7 @@ sampler:
 
     # params for pg
     use_warmup: False # whether to use the first epoch as warmup
+    use_sample: False # topk or sample for k times
     diverse_threshold: 0 # the minimum number for reuse one **father**
     father_only_ratio: null # null indicates no father-children split, 0.3 might be a good value
     mu0: -0.5 # \psi_p ~ N(\mu0, \tau0)

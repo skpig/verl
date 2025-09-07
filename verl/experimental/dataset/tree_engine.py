@@ -1,4 +1,5 @@
 from collections import defaultdict
+import time
 import scipy
 from dataclasses import dataclass, is_dataclass
 import math
@@ -479,6 +480,7 @@ class PGTreeEngine(TreeEngine):
 
         # Fixed parameters
         self.use_warmup = data_config.sampler.tree_sampler.use_warmup
+        self.use_sample = data_config.sampler.tree_sampler.use_sample
         self.diverse_threshold = int(data_config.sampler.tree_sampler.diverse_threshold)
         self.father_only_ratio = data_config.sampler.tree_sampler.father_only_ratio
         self.mu0 = float(data_config.sampler.tree_sampler.mu0)
@@ -633,12 +635,14 @@ class PGTreeEngine(TreeEngine):
             self.father_last_touch[int(father_item)] = step_num
 
         # group all items by parent
+        start_time = time.time()
         parent_items = list(range(self.original_datalength))
         # parent_items = self.get_father_item(items)
         # parent_items = np.unique(parent_items)
         for _ in range(self.gibbs_sweeps):
             self._gibbs_one_sweep_selected(parent_items)
-
+        end_time = time.time()
+        print("[PG Engine] Gibbs one sweep selected time: {}".format(end_time - start_time))
         return metrics
 
     def _gibbs_one_sweep_selected(self, p_lst):
@@ -707,34 +711,54 @@ class PGTreeEngine(TreeEngine):
             diverse_enable = True
 
         error = np.abs(thetas - 0.5)
-        ids = np.argsort(error)
-        batch = []
-        parent_set = set()
-        for idx in ids:
-            parent = self.get_original_ancestor_item(idx)
-            # one father at a time to ensure diveristy
-            if parent in parent_set:
-                continue
-            # if the father has been selected too recently, skip it
-            # step_num - self.father_last_touch[parent] == 0 indicates the father has just been selected last time
-            if diverse_enable and step_num - self.father_last_touch[parent] < self.diverse_threshold:
-                continue
-            
-            if father_only_round is not None:
-                if father_only_round and idx != parent: # skip child nodes
+        if self.use_sample == True:
+            raise NotImplementedError("use_sample is not implemented")
+            norm_error = error / error.sum()
+            dist = torch.distributions.Categorical(probs=norm_error)
+            batch = []
+            parent_set = set()
+            for _ in range(len(ids)):
+                # sample once
+                idx = dist.sample()
+                parent = self.get_original_ancestor_item(idx)
+                if parent in parent_set:
                     continue
-                if not father_only_round and idx == parent: # skip father nodes
-                    continue
+                parent_set.add(parent)
+                batch.append(int(idx))
+                self.select_num[idx] += 1
+                self.father_select_num[parent] += 1
+                if len(batch) == batch_size:
+                    break
 
-            parent_set.add(parent)
-            batch.append(int(idx))
-            self.select_num[idx] += 1
-            self.father_select_num[parent] += 1
-            if len(batch) == batch_size:
-                break
-            
         else:
-            raise ValueError(f"Only {len(batch)} is collected")
+            ids = np.argsort(error)
+            batch = []
+            parent_set = set()
+            for idx in ids:
+                parent = self.get_original_ancestor_item(idx)
+                # one father at a time to ensure diveristy
+                if parent in parent_set:
+                    continue
+                # if the father has been selected too recently, skip it
+                # step_num - self.father_last_touch[parent] == 0 indicates the father has just been selected last time
+                if diverse_enable and step_num - self.father_last_touch[parent] < self.diverse_threshold:
+                    continue
+                
+                if father_only_round is not None:
+                    if father_only_round and idx != parent: # skip child nodes
+                        continue
+                    if not father_only_round and idx == parent: # skip father nodes
+                        continue
+
+                parent_set.add(parent)
+                batch.append(int(idx))
+                self.select_num[idx] += 1
+                self.father_select_num[parent] += 1
+                if len(batch) == batch_size:
+                    break
+                
+            else:
+                raise ValueError(f"Only {len(batch)} is collected")
 
         metrics = self._get_batch_statistics(batch, step_num)
 
