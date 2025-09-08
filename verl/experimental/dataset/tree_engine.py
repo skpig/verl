@@ -1,4 +1,5 @@
 from collections import defaultdict
+import time
 import scipy
 from dataclasses import dataclass, is_dataclass
 import math
@@ -290,7 +291,6 @@ class TreeEngine:
         # ----- gather group tensors -----
         responses_g = all_responses.index_select(0, idx)                # (m, T)
         scores_g   = all_scores.index_select(0, idx)                    # (m,)
-        start_g    = torch.clamp_min(all_partial_rollout_len.index_select(0, idx), min=10)       # (m,) We don't want a too short partial rollout
         rlen_g     = all_response_len.index_select(0, idx)              # (m,)
         values_g   = all_values.index_select(0, idx) if all_values is not None else None # (m, T)
         entropies_g= all_entropys.index_select(0, idx) # (m, T)
@@ -305,6 +305,11 @@ class TreeEngine:
 
         # 有效窗口长度
 
+        if cfg.partial_rollout_begin_ratio is not None:
+            start_g = torch.floor(rlen_g.to(torch.float32) * cfg.partial_rollout_begin_ratio).to(torch.long) # (m,)
+        else:
+            start_g = torch.full_like(rlen_g, 10, dtype=torch.long)       #  We don't want a too short partial rollout
+        start_g = torch.maximum(all_partial_rollout_len.index_select(0, idx), start_g) # (m,)
         end_g = torch.floor(rlen_g.to(torch.float32) * ratio).to(torch.long)  # (m,), we need to ensure a sufficient long response space
         valid_len = end_g - start_g                                           # (m,)
         valid_row &= (valid_len > min_len)
@@ -380,7 +385,7 @@ class TreeEngine:
             original_ancestor = self.get_original_ancestor_item(item)
             unique_parents.add(original_ancestor)
             self.parent_selection_counts[original_ancestor] += 1
-        
+
         return {
             "sampler/unique_parent_nodes_in_batch": len(unique_parents),
         }
@@ -474,6 +479,8 @@ class PGTreeEngine(TreeEngine):
         super().__init__(original_data_len, data_config)
 
         # Fixed parameters
+        self.use_warmup = data_config.sampler.tree_sampler.use_warmup
+        self.use_sample = data_config.sampler.tree_sampler.use_sample
         self.diverse_threshold = int(data_config.sampler.tree_sampler.diverse_threshold)
         self.father_only_ratio = data_config.sampler.tree_sampler.father_only_ratio
         self.mu0 = float(data_config.sampler.tree_sampler.mu0)
@@ -570,8 +577,10 @@ class PGTreeEngine(TreeEngine):
         # add new node to the tree
         cur_psi = self.rng.normal(loc=father_psi, scale=final_sigma)
         self.psi = np.append(self.psi, cur_psi)
-        self.s = np.append(self.s, score)
-        self.n = np.append(self.n, 1.0)
+        # self.s = np.append(self.s, score)
+        # self.n = np.append(self.n, 1.0)
+        self.s = np.append(self.s, 0.0)
+        self.n = np.append(self.n, 0.0)
         self.variance = np.append(self.variance, final_sigma ** 2)
         self.last_touch = np.append(self.last_touch, step_num)
         self.select_num = np.append(self.select_num, 0)
@@ -626,12 +635,14 @@ class PGTreeEngine(TreeEngine):
             self.father_last_touch[int(father_item)] = step_num
 
         # group all items by parent
+        start_time = time.time()
         parent_items = list(range(self.original_datalength))
         # parent_items = self.get_father_item(items)
         # parent_items = np.unique(parent_items)
         for _ in range(self.gibbs_sweeps):
             self._gibbs_one_sweep_selected(parent_items)
-
+        end_time = time.time()
+        print("[PG Engine] Gibbs one sweep selected time: {}".format(end_time - start_time))
         return metrics
 
     def _gibbs_one_sweep_selected(self, p_lst):
@@ -680,6 +691,9 @@ class PGTreeEngine(TreeEngine):
 
     def select_batch(self, batch_size: int, step_num: int) -> Tuple[List[int], Dict[str, float]]:
         thetas = 1 / (1 + np.exp(-self.psi)) # [num_nodes, ]
+
+        if self.use_warmup and step_num < self.original_datalength / batch_size:
+            return [i % self.original_datalength for i in range(batch_size * step_num, batch_size * (step_num + 1))], {}
         
         # father_only_ratio = self.tree_config.father_only_ratio
         if self.father_only_ratio is not None:
@@ -689,36 +703,68 @@ class PGTreeEngine(TreeEngine):
                 father_only_round = False
         else:
             father_only_round = None
+        
+        # test diverse_threshold
+        # if (step_num - self.father_last_touch > self.diverse_threshold).sum() < batch_size:
+        #     diverse_enable = False
+        # else:
+        #     diverse_enable = True
+        diverse_threshold = self.diverse_threshold
+        while diverse_threshold > 0:
+            if (step_num - self.father_last_touch > diverse_threshold).sum() < batch_size:
+                diverse_threshold -= 1
+            else:
+                break
 
         error = np.abs(thetas - 0.5)
-        ids = np.argsort(error)
-        batch = []
-        parent_set = set()
-        for idx in ids:
-            parent = self.get_original_ancestor_item(idx)
-            # one father at a time to ensure diveristy
-            if parent in parent_set:
-                continue
-            # if the father has been selected too recently, skip it
-            # step_num - self.father_last_touch[parent] == 0 indicates the father has just been selected last time
-            if self.father_last_touch[parent] > 5 and step_num - self.father_last_touch[parent] < self.diverse_threshold:
-                continue
-            
-            if father_only_round is not None:
-                if father_only_round and idx != parent: # skip child nodes
+        if self.use_sample == True:
+            raise NotImplementedError("use_sample is not implemented")
+            norm_error = error / error.sum()
+            dist = torch.distributions.Categorical(probs=norm_error)
+            batch = []
+            parent_set = set()
+            for _ in range(len(ids)):
+                # sample once
+                idx = dist.sample()
+                parent = self.get_original_ancestor_item(idx)
+                if parent in parent_set:
                     continue
-                if not father_only_round and idx == parent: # skip father nodes
-                    continue
+                parent_set.add(parent)
+                batch.append(int(idx))
+                self.select_num[idx] += 1
+                self.father_select_num[parent] += 1
+                if len(batch) == batch_size:
+                    break
 
-            parent_set.add(parent)
-            batch.append(int(idx))
-            self.select_num[idx] += 1
-            self.father_select_num[parent] += 1
-            if len(batch) == batch_size:
-                break
-            
         else:
-            raise ValueError(f"Only {len(batch)} is collected")
+            ids = np.argsort(error)
+            batch = []
+            parent_set = set()
+            for idx in ids:
+                parent = self.get_original_ancestor_item(idx)
+                # one father at a time to ensure diveristy
+                if parent in parent_set:
+                    continue
+                # if the father has been selected too recently, skip it
+                # step_num - self.father_last_touch[parent] == 0 indicates the father has just been selected last time
+                if step_num - self.father_last_touch[parent] < diverse_threshold:
+                    continue
+                
+                if father_only_round is not None:
+                    if father_only_round and idx != parent: # skip child nodes
+                        continue
+                    if not father_only_round and idx == parent: # skip father nodes
+                        continue
+
+                parent_set.add(parent)
+                batch.append(int(idx))
+                self.select_num[idx] += 1
+                self.father_select_num[parent] += 1
+                if len(batch) == batch_size:
+                    break
+                
+            else:
+                raise ValueError(f"Only {len(batch)} is collected")
 
         metrics = self._get_batch_statistics(batch, step_num)
 
@@ -790,6 +836,24 @@ class PGTreeEngine(TreeEngine):
                 f"sampler/select_num/{i}selectnum_gt_{threshold}_num": np.sum(mask),
                 f"sampler/father/select_num/{i}selectnum_gt_{threshold}_num": np.sum(father_mask),
             })
+        
+        total_select_num = np.sum(self.select_num)
+        sort_select_num = np.sort(self.select_num)[::-1]
+        sort_father_select_num = np.sort(self.father_select_num)[::-1]
+        for ratio in [0.01, 0.05, 0.1, 0.2, 0.5, 0.8]:
+            largest_k = int(len(self.select_num) * ratio)
+            largest_k_select_num = np.sum(sort_select_num[:largest_k])
+            parent_metrics.update({
+                f"sampler/coverage/top_{int(ratio * 100)}%_ratio": largest_k_select_num / total_select_num,
+            })
+            # for father
+            largest_k = int(len(self.father_select_num) * ratio)
+            largest_k_father_select_num = np.sum(sort_father_select_num[:largest_k])
+            parent_metrics.update({
+                f"sampler/father/coverage/top_{int(ratio * 100)}%_ratio": largest_k_father_select_num / total_select_num,
+            })
+        
+
         
         return parent_metrics
 

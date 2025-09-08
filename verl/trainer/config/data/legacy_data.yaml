@@ -1,6 +1,7 @@
 # by HBZ
 prompt_id: null
 template_type: chat
+max_data_len: null
 
 # Tokenizer class or path. If null, it will be inferred from the model.
 tokenizer: null
@@ -114,6 +115,8 @@ sampler:
     epsilon: 0.3  
 
     # params for pg
+    use_warmup: False # whether to use the first epoch as warmup
+    use_sample: False # topk or sample for k times
     diverse_threshold: 0 # the minimum number for reuse one **father**
     father_only_ratio: null # null indicates no father-children split, 0.3 might be a good value
     mu0: -0.5 # \psi_p ~ N(\mu0, \tau0)
@@ -130,7 +133,9 @@ tree_data:
   keep_incorrect_prob: 0.0 # the probability of creating new node from incorrect response
   root_only: True # only create new node from root node
   partial_rollout_ratio: 0.7 # only create partial rollout from the first partial_rollout_ratio of the response
+  partial_rollout_begin_ratio: null # 0.2
   min_partial_rollout_len: 1000 # if the partial rollout is too short, skip
+
 
 
   name: value # value, entropy, mix
