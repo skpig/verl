@@ -215,12 +215,12 @@ def ray_compute_group_means(
     return results, edit_results
 
 
-def load_case(dir, args, output_dir, bon=64):
+def load_case(dir, args, output_dir, bon=64, num_groups=1000):
     prompts = []
     responses = []
     sorted_child_dirs = sorted(glob.glob(f"{dir}/global_step*"), key=lambda x: int(x.split("/")[-1].split("_")[-1]))
     for child_dir in sorted_child_dirs:
-        if len(prompts) // bon > 1000:
+        if len(prompts) // bon > num_groups:
             break
         path = os.path.join(child_dir, "prompts.pkl")
         with open(path, "rb") as f:
@@ -393,6 +393,7 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--num_gpus", type=int, default=128)
+    parser.add_argument("--num_groups", type=int, default=1000)
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--no_fa2", action="store_true")
     parser.add_argument("--no_pad_left", action="store_true")
@@ -401,13 +402,13 @@ if __name__ == '__main__':
     # Use id80 to calculate case similarity
     # ID80_LIMR = "/mnt/hdfs/huangbaizhou/tmp/ckpt/debug_hbz2/LIMR_ID80_bon64/"
     # load_case(ID80_LIMR, args, bon=64, output_dir=ID80_LIMR)
-    # ID80_DAPO = "/mnt/hdfs/huangbaizhou/tmp/ckpt/debug_hbz2/DAPO_ID80_bon128/"
-    # load_case(ID80_DAPO, args, bon=128, output_dir=ID80_DAPO)
+    ID80_DAPO = "/mnt/hdfs/huangbaizhou/tmp/ckpt/debug_hbz2/DAPO_ID80_bon128/"
+    load_case(ID80_DAPO, args, bon=128, output_dir=ID80_DAPO, num_groups=args.num_groups)
 
 
     """Post Processing"""
-    ID80_LIMR = "/mnt/hdfs/huangbaizhou/tmp/ckpt/debug_hbz2/LIMR_ID80_bon64/"
-    post_process(ID80_LIMR, args)
+    # ID80_LIMR = "/mnt/hdfs/huangbaizhou/tmp/ckpt/debug_hbz2/LIMR_ID80_bon64/"
+    # post_process(ID80_LIMR, args)
 
 
 
