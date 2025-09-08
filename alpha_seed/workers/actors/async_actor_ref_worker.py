@@ -525,7 +525,7 @@ class AsyncActorRolloutRefWorker(Worker):
         self.rollout.set_rollout_callback_function(eos_callback_fn=eos_callback_fn)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    def update_standalone_worker(self, role):
+    def update_standalone_worker(self, role, need_hybrid_weights_update=True, offload_hybrid_mem=True):
         # Note(zhangchi.usc1992)
         # self.sharding_manager.standalone indicates that it is a standalone_rollout or standalone_validator
         # if it is streaming rollout, the weight is latest, so no need to bind weight again.
@@ -537,13 +537,14 @@ class AsyncActorRolloutRefWorker(Worker):
             self.to("cuda", model=True, optimizer=False)
         # sharding_manager.__enter__ 会把 FSDP 的weights格式转换到megatron的格式
         # 然后才做下面的收发，发送之后就不用在standalone rollout里转
-
-        # TODO(zhangchi.usc1992): we have a redundant weight binding here for standalone validator
-        # Try to remove it by introduing an argument
-        with self.sharding_manager:
-            # hybrid rollout send
-            # standalone rollout recv
-            # 总共收发 standalone world_size 次
+        self.sharding_manager.ignore_offload_hybrid_rollout(not offload_hybrid_mem)
+        if need_hybrid_weights_update:
+            with self.sharding_manager:
+                # hybrid rollout send
+                # standalone rollout recv
+                # 总共收发 standalone world_size 次
+                self.sharding_manager.weights_communicator.update_standalone_worker(role)
+        else:
             self.sharding_manager.weights_communicator.update_standalone_worker(role)
         if not self.sharding_manager.standalone and self.config.actor.train_memory_offload:
             # 再把hybrid rollout的参数卸载回cpu
@@ -1060,7 +1061,7 @@ class AsyncActorRolloutRefWorker(Worker):
                                                                                 standalone_master_address, port, role)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
-    def toggle_inference_server_state(self, sleep):
+    def toggle_inference_server_state(self, sleep, need_hybrid_weights_update: bool = True):
         """
             Toggle the inference server state between running and sleeping modes.
 
@@ -1084,12 +1085,14 @@ class AsyncActorRolloutRefWorker(Worker):
             # Make sure the engine is fully stopped before offloading the
             self.rollout.gen_loop_exited.wait()
             # offload weights
+            self.sharding_manager.ignore_offload_hybrid_rollout(False)
             self.sharding_manager.__exit__(None, None, None)
             return
         assert (self.rollout.inference_engine.status == "idle")
         if self.config.actor.train_memory_offload:
             self.to("cuda", model=True, optimizer=False)
-        self.sharding_manager.__enter__()
+        if need_hybrid_weights_update:
+            self.sharding_manager.__enter__()
         with self.rollout.inference_engine.update_weights_lock:
             self.rollout.stop_event.clear()
             # 通知 engine weights loaded

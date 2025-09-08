@@ -181,4 +181,6 @@ def test_plugin_train_gen(set_common_envs, gpu_allocator, ray_fixture, mode):
 
 
 if __name__ == "__main__":
-    pytest.main()
+    import ray
+    ray.init()
+    test_plugin_val_gen(set_common_envs, [4], ray_fixture, "batch", True)

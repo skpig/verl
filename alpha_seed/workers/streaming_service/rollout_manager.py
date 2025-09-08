@@ -84,8 +84,10 @@ def _setup_standalone_comm_ucx(all_actor_info: List[WeightsRankInfo], standalone
 def _update_standalone_weights(hybrid_wg,
                                standalone_wg,
                                standalone_role: str,
-                               threadsafe_nccl_comm: threading.Event = None):
-    actor_fut = hybrid_wg.update_standalone_worker(standalone_role)
+                               threadsafe_nccl_comm: threading.Event = None,
+                               need_hybrid_weights_update: bool = True,
+                               offload_hybrid_mem: bool = True):
+    actor_fut = hybrid_wg.update_standalone_worker(standalone_role, need_hybrid_weights_update, offload_hybrid_mem)
     standalone_fut = standalone_wg.update_standalone_worker(standalone_role)
     # note that we should wait for the weight sync to be completed to avoid standalone fail and driver continues
     ray.get(standalone_fut)
@@ -95,7 +97,6 @@ def _update_standalone_weights(hybrid_wg,
     # For the async gen in training, it is safe. Only the main thread is used.
     if threadsafe_nccl_comm is not None:
         threadsafe_nccl_comm.set()
-    hybrid_wg.release_param_and_cache()
 
 
 @contextmanager
@@ -106,8 +107,8 @@ def server_update_weights_ctx(server_wg):
 
 
 @contextmanager
-def hybrid_enable_server_ctx(hybrid_wg):
-    hybrid_wg.toggle_inference_server_state(sleep=False)
+def hybrid_enable_server_ctx(hybrid_wg, need_hybrid_weights_update: bool = True):
+    hybrid_wg.toggle_inference_server_state(sleep=False, need_hybrid_weights_update=need_hybrid_weights_update)
     yield
     hybrid_wg.toggle_inference_server_state(sleep=True)
 
@@ -690,6 +691,7 @@ class RolloutManager:
         ready_batch = []
 
         with Timer(name="gen", logger=None) as timer:
+
             gen_batch_output = self.hybrid_wg.generate_sequences(gen_batch)
             # TODO: The following two lines should be memory view. However it's not. Let's remove it by removing all its dependency
             gen_batch_output.batch["prompts"] = gen_batch_output.batch["input_ids"][:, :self.config.data.
@@ -806,7 +808,9 @@ class RolloutManager:
         with Timer(name="update_standalone", logger=None) as timer:
             with self._hybrid_wg_lock:
                 if self.train_standalone_wg is not None:
-                    _update_standalone_weights(self.hybrid_wg, self.train_standalone_wg, "standalone_rollout")
+                    # TODO: redundant hybrid update
+                    _update_standalone_weights(self.hybrid_wg, self.train_standalone_wg, "standalone_rollout", None,
+                                               True, True)
         metrics["timing/update_standalone"] = timer.last
 
         # standalone generate (off policy)
@@ -947,9 +951,9 @@ class RolloutManager:
             return done, pending
 
         xperf_metrics: List = []
-        with self.enable_hybrid_server_gen_ctx(is_train=True, xperf_metrics=xperf_metrics):
-            # print(f"[INFO] {step} generate streaming[update weights and restart] {timer.last}")
-            # metrics["timing/update_rollout_server"] = timer.last
+        with self.enable_hybrid_server_gen_ctx(is_train=True,
+                                               xperf_metrics=xperf_metrics,
+                                               need_hybrid_weights_update=self.train_standalone_wg is None):
             done, pending = asyncio.run_coroutine_threadsafe(submit_and_wait(), self.loop).result()
         pending = list(pending)
         ready_batch = self._normalize_done_tasks(done)
@@ -1387,7 +1391,10 @@ class RolloutManager:
         await asyncio.Future()
 
     @contextmanager
-    def enable_hybrid_server_gen_ctx(self, is_train: bool, xperf_metrics: List = None):
+    def enable_hybrid_server_gen_ctx(self,
+                                     is_train: bool,
+                                     xperf_metrics: List = None,
+                                     need_hybrid_weights_update: bool = True):
         """Set hybrid server to be ready for gen"""
         flag_key = f'_hybrid_server_enabled__is_train_{is_train}'
         if getattr(self, flag_key, False):
@@ -1398,9 +1405,9 @@ class RolloutManager:
 
         has_standalone = self.train_standalone_wg is not None
         replicas = self.train_replicas if is_train else self.val_replicas
+        replicas.set_replica_ready_state(name='hybrid', ready=True)
         with self._hybrid_wg_lock:
-            with hybrid_enable_server_ctx(self.hybrid_wg):
-                replicas.set_replica_ready_state(name='hybrid', ready=True)
+            with hybrid_enable_server_ctx(self.hybrid_wg, need_hybrid_weights_update):
                 yield
                 if has_standalone:
                     replicas.set_replica_ready_state(name='hybrid', ready=False)
@@ -1443,6 +1450,6 @@ class RolloutManager:
         with server_update_weights_ctx(standalone_wg):
             with self._hybrid_wg_lock:
                 _update_standalone_weights(self.hybrid_wg, standalone_wg, standalone_role,
-                                           self.threadsafe_nccl_comm if not is_train else None)
+                                           self.threadsafe_nccl_comm if not is_train else None, True, False)
                 standalone_metric = self.get_standalone_metrics(standalone_wg)
         return standalone_metric

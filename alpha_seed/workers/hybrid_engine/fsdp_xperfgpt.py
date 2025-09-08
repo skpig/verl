@@ -70,7 +70,7 @@ class ActorXPerfGPTShardingManager(BaseShardingManager):
         self.weights_communicator = weights_communicator
         self.weights_communicator_enable_aiomonitor = weights_communicator_enable_aiomonitor
         self.enable_actor_critic_spatial_mux = enable_actor_critic_spatial_mux
-
+        self.ignore_rollout_mem_offload = False
         # here standalone means standalone validator or standalone validator
         self.standalone = standalone
         self.bind_fn = get_xperf_gpt_weight_bind_fn(model_config,
@@ -112,6 +112,9 @@ class ActorXPerfGPTShardingManager(BaseShardingManager):
     def _get_actor_state_dict(self):
         raise NotImplementedError
 
+    def ignore_offload_hybrid_rollout(self, ignored: bool):
+        self.ignore_rollout_mem_offload = ignored
+
     def __enter__(self):
         # standalone worker does not need to do this
         if self.standalone:
@@ -134,7 +137,6 @@ class ActorXPerfGPTShardingManager(BaseShardingManager):
             self._bind_fn_called = True
         else:
             load_to_cuda(tp_model=self.inference_engine.engine.module)
-
         # important: need to manually set the random states of each tp to be identical. Otherwise, xperf_gpt will hang
         if self.device_mesh is not None:
             self.torch_random_states = torch.cuda.get_rng_state()
@@ -151,9 +153,8 @@ class ActorXPerfGPTShardingManager(BaseShardingManager):
             torch.cuda.set_rng_state(self.torch_random_states)
         # only support to release xperf weight and kv cache
         # right after generation when there is no standalone workers
-        if (not self.standalone):
-            device = "meta" if not self.only_bind_once else "cpu"
-            offload_to_device(tp_model=self.inference_engine.engine.module, device=device)
+        if (not self.standalone) and (not self.ignore_rollout_mem_offload):
+            self.release_param_and_cache()
 
     def preprocess_data(self, data: DataProto) -> DataProto:
         """
