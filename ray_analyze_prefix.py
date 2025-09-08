@@ -13,8 +13,6 @@ import pickle
 import numpy as np
 import ray
 import pandas as pd
-# from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
-# from nltk.metrics.distance import edit_distance
 from transformers import AutoTokenizer
 
 
@@ -68,6 +66,8 @@ class EmbedWorker:
         :param responses: list[list[int]], 包含多条由token ID组成的生成文本
         :return: (avg_self_bleu, avg_edit_distance)
         """
+        from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+        from nltk.metrics.distance import edit_distance
         idx, length, responses = idx_and_texts
 
         N = len(responses)
