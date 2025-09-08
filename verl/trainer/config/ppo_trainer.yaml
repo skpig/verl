@@ -197,6 +197,7 @@ algorithm:
 
     # metric for filtering groups
     metric: "acc"
+    max_num_gen_batches: -1
 
   # Prioritized from KIMI 1.5
 

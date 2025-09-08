@@ -665,9 +665,9 @@ class RayPPOTrainer:
                 "validation gen temperature should be greater than 0 when enabling do_sample"
             )
         
-        # check sampling related config
-        if config.algorithm.filter_groups.enable:
-            assert not self.config.reward_model.launch_reward_fn_async, "filter_groups(dynamic sampling) is not supported with async reward function"
+        # # check sampling related config
+        # if config.algorithm.filter_groups.enable:
+        #     assert not self.config.reward_model.launch_reward_fn_async, "filter_groups(dynamic sampling) is not supported with async reward function"
         
         # sampler related
         assert not (self.config.actor_rollout_ref.rollout.name == 'vllm' and  'tree' in self.config.data.sampler.name)
@@ -1319,10 +1319,13 @@ class RayPPOTrainer:
         last_val_metrics = None
         self.max_steps_duration = 0
 
+        batch = None
+        num_prompt_in_batch = 0
+        num_gen_batches = 0
+        timing_raw = {}
         for epoch in range(self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
                 metrics = {"perf/total_dedup_num_response_tokens": 0, "perf/total_dedup_num_prompt_tokens": 0}
-                timing_raw = {}
 
                 do_profile = (
                     self.global_steps in self.config.trainer.profile_steps
@@ -1332,28 +1335,29 @@ class RayPPOTrainer:
                 with marked_timer("start_profile", timing_raw):
                     self._start_profiling(do_profile)
 
-                batch: DataProto = DataProto.from_single_dict(batch_dict)
+                new_batch: DataProto = DataProto.from_single_dict(batch_dict)
+                num_gen_batches += 1
                 # breakpoint()
 
                 # pop those keys for generation
                 batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
                 non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
-                if "partial_rollout_len" in batch.non_tensor_batch:
+                if "partial_rollout_len" in new_batch.non_tensor_batch:
                     non_tensor_batch_keys_to_pop.append("partial_rollout_len")
-                if "multi_modal_data" in batch.non_tensor_batch:
+                if "multi_modal_data" in new_batch.non_tensor_batch:
                     non_tensor_batch_keys_to_pop.append("multi_modal_data")
-                if "raw_prompt" in batch.non_tensor_batch:
+                if "raw_prompt" in new_batch.non_tensor_batch:
                     non_tensor_batch_keys_to_pop.append("raw_prompt")
-                if "tools_kwargs" in batch.non_tensor_batch:
+                if "tools_kwargs" in new_batch.non_tensor_batch:
                     non_tensor_batch_keys_to_pop.append("tools_kwargs")
-                if "interaction_kwargs" in batch.non_tensor_batch:
+                if "interaction_kwargs" in new_batch.non_tensor_batch:
                     non_tensor_batch_keys_to_pop.append("interaction_kwargs")
-                if "index" in batch.non_tensor_batch:
+                if "index" in new_batch.non_tensor_batch:
                     non_tensor_batch_keys_to_pop.append("index")
-                if "agent_name" in batch.non_tensor_batch:
+                if "agent_name" in new_batch.non_tensor_batch:
                     non_tensor_batch_keys_to_pop.append("agent_name")
 
-                gen_batch = batch.pop(
+                gen_batch = new_batch.pop(
                     batch_keys=batch_keys_to_pop,
                     non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
                 )
@@ -1375,132 +1379,94 @@ class RayPPOTrainer:
                         timing_raw.update(gen_batch_output.meta_info["timing"])
                         gen_batch_output.meta_info.pop("timing", None)
 
-                    if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
-                        with marked_timer("gen_max", timing_raw, color="purple"):
-                            gen_baseline_batch = deepcopy(gen_batch)
-                            gen_baseline_batch.meta_info["do_sample"] = False
-                            gen_baseline_output = self.actor_rollout_wg.generate_sequences(gen_baseline_batch)
-
-                            batch = batch.union(gen_baseline_output)
-                            reward_baseline_tensor = self.reward_fn(batch)
-                            reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
-
-                            batch.pop(batch_keys=list(gen_baseline_output.batch.keys()))
-
-                            batch.batch["reward_baselines"] = reward_baseline_tensor
-
-                            del gen_baseline_batch, gen_baseline_output
-
-                    batch.non_tensor_batch["uid"] = np.array(
-                        [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
+                    new_batch.non_tensor_batch["uid"] = np.array(
+                        [str(uuid.uuid4()) for _ in range(len(new_batch.batch))], dtype=object
                     )
                     # repeat to align with repeated responses in rollout
-                    rollout_index_batch = torch.arange(self.config.actor_rollout_ref.rollout.n, device=batch.batch.device).repeat(len(batch)) # [0, 1, 2, ..., n, 0, 1, 2, ..., n, ...]
-                    batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
-                    batch = batch.union(gen_batch_output)
-                    batch.batch['rollout_index'] = rollout_index_batch
+                    rollout_index_batch = torch.arange(self.config.actor_rollout_ref.rollout.n, device=new_batch.batch.device).repeat(len(new_batch)) # [0, 1, 2, ..., n, 0, 1, 2, ..., n, ...]
+                    new_batch = new_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                    new_batch = new_batch.union(gen_batch_output)
+                    new_batch.batch['rollout_index'] = rollout_index_batch
 
-                    batch.batch['response_mask'] = compute_response_mask(batch) # TODO: the response_mask here should be handled carefully，可以保持原有的形状，但是需要移除开头的partial rollout的mask，但需要搜索所有使用它的地方是否存在可能的错误
-                    metrics['perf/total_dedup_num_response_tokens'] += batch.batch['response_mask'].sum().item()
+                    new_batch.batch['response_mask'] = compute_response_mask(new_batch) # TODO: the response_mask here should be handled carefully，可以保持原有的形状，但是需要移除开头的partial rollout的mask，但需要搜索所有使用它的地方是否存在可能的错误
+                    metrics['perf/total_dedup_num_response_tokens'] += new_batch.batch['response_mask'].sum().item()
                     metrics['perf/total_dedup_num_prompt_tokens'] += sum(len(i) for i in gen_batch.non_tensor_batch['raw_prompt_ids'])
-                    if 'partial_rollout_len' in batch.non_tensor_batch:
-                        batch.batch['response_mask_w_partial_rollouts'] = batch.batch['response_mask'].clone()
-                        for i in range(len(batch)):
-                            batch.batch['response_mask_w_partial_rollouts'][i, :batch.non_tensor_batch['partial_rollout_len'][i]] = 0
-                        metrics['perf/total_dedup_num_response_tokens'] -= batch.non_tensor_batch['partial_rollout_len'].sum()
-                    # compute_rollout_metrics(batch=batch, tokenizer=self.tokenizer)
-                    rollout_metrics = compute_rollout_metrics.remote(batch=batch, tokenizer=self.tokenizer)
-
-                    # Balance the number of valid tokens across DP ranks.
-                    # NOTE: This usually changes the order of data in the `batch`,
-                    # which won't affect the advantage calculation (since it's based on uid),
-                    # but might affect the loss calculation (due to the change of mini-batching).
-                    # TODO: Decouple the DP balancing and mini-batching.
-                    if self.config.trainer.balance_batch:
-                        self._balance_batch(batch, metrics=metrics)
-
-                    # compute global_valid tokens
-                    batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
+                    assert 'partial_rollout_len' not in new_batch.non_tensor_batch, "partial rollout not supported in this version"
 
                     with marked_timer("reward", timing_raw, color="yellow"):
                         # compute reward model score
                         if self.use_rm:
-                            reward_tensor = self.rm_wg.compute_rm_score(batch)
-                            batch = batch.union(reward_tensor)
+                            reward_tensor = self.rm_wg.compute_rm_score(new_batch)
+                            new_batch = new_batch.union(reward_tensor)
 
                         if self.config.reward_model.launch_reward_fn_async:
-                            future_reward = compute_reward_async.remote(batch, self.config, self.tokenizer)
+                            reward_tensor, reward_extra_infos_dict = ray.get(compute_reward_async.remote(new_batch, self.config, self.tokenizer))
                         else:
-                            reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
+                            reward_tensor, reward_extra_infos_dict = compute_reward(new_batch, self.reward_fn)
                     
-                    # if self.config.algorithm.filter_groups.enable:
-                    #     # NOTE: When prompts after filtering is less than train batch size,
-                    #     # we skip to the next generation batch
-                    #     metric_name = self.config.algorithm.filter_groups.metric
-                    #     # only score of reward_manager is supported
-                    #     if metric_name == "acc":
-                    #         # Turn to numpy for easier filtering
-                    #         new_batch.non_tensor_batch["filter_groups_metric_seq_score"] = (
-                    #             new_batch.batch["token_level_scores"].sum(dim=-1).numpy()
-                    #         )
-                    #     else:
-                    #         raise NotImplementedError(
-                    #             f"Only acc is supported for filter_groups, but got {metric_name}."
-                    #         )
+                    if self.config.algorithm.filter_groups.enable:
+                        # NOTE: When prompts after filtering is less than train batch size,
+                        # we skip to the next generation batch
+                        # metric_name = self.config.algorithm.filter_groups.metric
+                        metric_name = "acc"
+                        # Collect the sequence reward for each trajectory
+                        prompt_uid2metric_vals = defaultdict(list)
+                        for uid, metric_val in zip(
+                            new_batch.non_tensor_batch["uid"], reward_extra_infos_dict["score"], strict=True
+                        ):
+                            prompt_uid2metric_vals[uid].append(metric_val)
 
-                    #     # Collect the sequence reward for each trajectory
-                    #     prompt_uid2metric_vals = defaultdict(list)
-                    #     for uid, metric_val in zip(
-                    #         new_batch.non_tensor_batch["uid"], new_batch.non_tensor_batch[metric_name], strict=True
-                    #     ):
-                    #         prompt_uid2metric_vals[uid].append(metric_val)
+                        prompt_uid2metric_std = {}
+                        for prompt_uid, metric_vals in prompt_uid2metric_vals.items():
+                            prompt_uid2metric_std[prompt_uid] = np.std(metric_vals)
 
-                    #     prompt_uid2metric_std = {}
-                    #     for prompt_uid, metric_vals in prompt_uid2metric_vals.items():
-                    #         prompt_uid2metric_std[prompt_uid] = np.std(metric_vals)
+                        kept_prompt_uids = [
+                            uid
+                            for uid, std in prompt_uid2metric_std.items()
+                            if std > 0 or len(prompt_uid2metric_vals[uid]) == 1
+                        ]
+                        num_prompt_in_batch += len(kept_prompt_uids)
 
-                    #     kept_prompt_uids = [
-                    #         uid
-                    #         for uid, std in prompt_uid2metric_std.items()
-                    #         if std > 0 or len(prompt_uid2metric_vals[uid]) == 1
-                    #     ]
-                    #     num_prompt_in_batch += len(kept_prompt_uids)
+                        kept_traj_idxs = []
+                        for idx, traj_from_prompt_uid in enumerate(new_batch.non_tensor_batch["uid"]):
+                            if traj_from_prompt_uid in kept_prompt_uids:
+                                kept_traj_idxs.append(idx)
 
-                    #     kept_traj_idxs = []
-                    #     for idx, traj_from_prompt_uid in enumerate(new_batch.non_tensor_batch["uid"]):
-                    #         if traj_from_prompt_uid in kept_prompt_uids:
-                    #             kept_traj_idxs.append(idx)
+                        new_batch = new_batch[kept_traj_idxs]
+                        batch = new_batch if batch is None else DataProto.concat([batch, new_batch])
 
-                    #     new_batch = new_batch[kept_traj_idxs]
-                    #     batch = new_batch if batch is None else DataProto.concat([batch, new_batch])
-
-                    #     prompt_bsz = self.config.data.train_batch_size
-                    #     if num_prompt_in_batch < prompt_bsz:
-                    #         print(f"{num_prompt_in_batch=} < {prompt_bsz=}")
-                    #         max_num_gen_batches = self.config.algorithm.filter_groups.max_num_gen_batches
-                    #         if max_num_gen_batches <= 0 or num_gen_batches < max_num_gen_batches:
-                    #             print(f"{num_gen_batches=}. Keep generating...")
-                    #             progress_bar.update(1)
-                    #             continue
-                    #         else:
-                    #             raise ValueError(
-                    #                 f"{num_gen_batches=} >= {max_num_gen_batches=}."
-                    #                 + " Generated too many. Please check if your data are too difficult."
-                    #                 + " You could also try set max_num_gen_batches=0 to enable endless trials."
-                    #             )
-                    #     else:
-                    #         # Align the batch
-                    #         traj_bsz = self.config.data.train_batch_size * self.config.actor_rollout_ref.rollout.n
-                    #         batch = batch[:traj_bsz]
+                        prompt_bsz = self.config.data.train_batch_size
+                        if num_prompt_in_batch < prompt_bsz:
+                            print(f"{num_prompt_in_batch=} < {prompt_bsz=}")
+                            max_num_gen_batches = self.config.algorithm.filter_groups.max_num_gen_batches
+                            if max_num_gen_batches <= 0 or num_gen_batches < max_num_gen_batches:
+                                print(f"{num_gen_batches=}. Keep generating...")
+                                progress_bar.update(1)
+                                continue
+                            else:
+                                raise ValueError(
+                                    f"{num_gen_batches=} >= {max_num_gen_batches=}."
+                                    + " Generated too many. Please check if your data are too difficult."
+                                    + " You could also try set max_num_gen_batches=0 to enable endless trials."
+                                )
+                        else:
+                            # Align the batch
+                            traj_bsz = self.config.data.train_batch_size * self.config.actor_rollout_ref.rollout.n
+                            batch = batch[:traj_bsz]
 
 
-                    #     # Balance the number of valid tokens across DP ranks.
-                    #     # NOTE: This usually changes the order of data in the `batch`,
-                    #     # which won't affect the advantage calculation (since it's based on uid),
-                    #     # but might affect the loss calculation (due to the change of mini-batching).
-                    #     # TODO: Decouple the DP balancing and mini-batching.
-                    #     if self.config.trainer.balance_batch:
-                    #         self._balance_batch(batch, metrics=metrics)
+                        # Balance the number of valid tokens across DP ranks.
+                        # NOTE: This usually changes the order of data in the `batch`,
+                        # which won't affect the advantage calculation (since it's based on uid),
+                        # but might affect the loss calculation (due to the change of mini-batching).
+                        # TODO: Decouple the DP balancing and mini-batching.
+                        if self.config.trainer.balance_batch:
+                            self._balance_batch(batch, metrics=metrics)
+
+
+                    rollout_metrics = compute_rollout_metrics.remote(batch=batch, tokenizer=self.tokenizer)
+                    # compute global_valid tokens
+                    batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 
 
                     # recompute old_log_probs
@@ -1684,6 +1650,7 @@ class RayPPOTrainer:
                     {
                         "training/global_step": self.global_steps,
                         "training/epoch": epoch,
+                        "training/num_gen_batches": num_gen_batches,
                     }
                 )
                 # collect metrics
@@ -1748,5 +1715,9 @@ class RayPPOTrainer:
                     # df.to_parquet(data_path, engine='pyarrow')
                     return
 
+                timing_raw = defaultdict(float)
+                batch = None
+                num_prompt_in_batch = 0
+                num_gen_batches = 0
                 progress_bar.update(1)
                 self.global_steps += 1
