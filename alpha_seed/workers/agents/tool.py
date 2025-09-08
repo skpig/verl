@@ -12,6 +12,8 @@ class ToolResult:
     retries: int = 0  # 调用过程中重试的次数，如果这个值等于max_attempts-1表示达到最大重试次数了，如果是0表示1次成功
     max_attempts: int = 0  # 最尝试次数，工具超过这个尝试次数应该放弃尝试
     success: bool = True  # 无论重试多少次，只要最后结果给到下一轮llm的就算成功，除非明确知道这个调用失败，否则默认按成功处理
+    error_msg: str = ""  # 当tool call发生error时记录其str(e)
+    error_traceback: str = ""  # 当tool call发生error时记录error的stack
 
     # 其他字段按需添加
 
@@ -22,8 +24,12 @@ class ToolResult:
             try:
                 safe_result = str(self.result)
             except Exception as e:
+                tb = traceback.format_exc()
                 safe_result = f"exception during converting ToolResult.result to string: {e}"
-        return ToolResult(safe_result, self.retries, self.max_attempts, self.success)
+                self.error_msg += "\n" + safe_result
+                self.error_traceback += "\n---\n" + tb
+        return ToolResult(safe_result, self.retries, self.max_attempts, self.success, self.error_msg,
+                          self.error_traceback)
 
 
 class BaseTool(OSSBaseTool):

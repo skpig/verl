@@ -14,7 +14,7 @@ from scripts.query_tool.utils import _print_list, compact_list_fields, FlowStyle
 yaml.add_representer(FlowStyleList, represent_flow_list)
 
 
-def list_running_queries_str(request_managers: list, step: Optional[int] = None):
+def list_running_queries_str(console_width: int, request_managers: list, step: Optional[int] = None):
     from alpha_seed.workers.streaming_service.rollout_request_manager_diagnosis import RequestDigest
     all_running_queries: List[List[RequestDigest]] = ray.get(
         [rm.get_inflight_query_digest.remote(step) for _, rm in request_managers])
@@ -24,11 +24,11 @@ def list_running_queries_str(request_managers: list, step: Optional[int] = None)
         return "No inflight queries found."
 
     # Create rich table (3-line table style: no vertical lines)
-    table = Table(show_header=True, header_style="bold magenta", box=box.SIMPLE_HEAD, width=200)
-    table.add_column("Pool", style="cyan", no_wrap=True, width=15)
-    table.add_column("Query ID", style="cyan", no_wrap=True, width=26)
-    table.add_column("Engine Name", style="green", no_wrap=True, width=35)
-    table.add_column("Step", style="green", no_wrap=True, width=10)
+    table = Table(show_header=True, header_style="bold magenta", box=box.SIMPLE_HEAD)
+    table.add_column("Pool", style="cyan", no_wrap=True)
+    table.add_column("Query ID", style="cyan", overflow="fold")
+    table.add_column("Engine Name", style="green", overflow="fold")
+    table.add_column("Step", style="green", no_wrap=True)
     table.add_column("Input", style="blue", justify="right", no_wrap=True)
     table.add_column("Output", style="blue", justify="right", no_wrap=True)
     table.add_column("Aborted", style="red", justify="right", no_wrap=True)
@@ -70,7 +70,7 @@ def list_running_queries_str(request_managers: list, step: Optional[int] = None)
         )
 
     # Render table to string with wide console
-    console = Console(width=200)
+    console = Console(width=console_width)
     with console.capture() as capture:
         console.print(table)
         console.print(f"\nTotal inflight queries: {len(running_query_digest_flatten)}")

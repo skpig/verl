@@ -1,7 +1,7 @@
 import copy
 import time
 from dataclasses import asdict
-from typing import List
+from typing import List, Optional
 
 from omegaconf import DictConfig
 
@@ -17,7 +17,7 @@ class QueryTracer:
         self.query_trace_config = query_trace_config
         self._rm_name = rm_name
 
-        self.tracer = Tracer.get_instance()
+        self.tracer = Tracer.get_instance(retention_hours=query_trace_config.retention_hours)
         self.waterfall_tracer = WaterfallSlotTracer(self.tracer)
         self._pending_events_to_flows: List[List[CompleteEvent | CoherentCompleteEvent]] = []  # 每个List[CE]要串在一起
 
@@ -30,9 +30,10 @@ class QueryTracer:
             self.tracer.trace(CombinedEvents(flows))
 
     def dump_request_trace(self,
-                           with_extra_events: List[List[CompleteEvent | CoherentCompleteEvent]] = None) -> List[dict]:
+                           with_extra_events: List[List[CompleteEvent | CoherentCompleteEvent]] = None,
+                           after_ts: float = 0.) -> List[dict]:
         with_extra_events = with_extra_events or []
-        tracer_spans = Tracer.merge_all()
+        tracer_spans = Tracer.merge_all(after_ts=after_ts)
 
         # 分配thread slot
         buffered_spans = self.waterfall_tracer.dump(with_extra_events)

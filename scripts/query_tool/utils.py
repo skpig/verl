@@ -1,5 +1,5 @@
 import time
-from typing import Any, List
+from typing import Any, List, Dict
 
 import yaml
 
@@ -53,7 +53,7 @@ def _render_progress_bar(done: int, total: int, width=40):
     return f"[{bar}] {percent}"
 
 
-def render_rollout_progress(stats: List[dict]) -> str:
+def render_rollout_progress(stats: List[dict], task_complete_stats: Dict[str, dict]) -> str:
     lines = []
     now = time.time()
     lines.append("")
@@ -75,16 +75,20 @@ def render_rollout_progress(stats: List[dict]) -> str:
             least_recent_update = int(now - stat['oldest_updated_time'])
 
         bar = _render_progress_bar(stat['finished'], stat['total'], width=40)
+        step_completion = task_complete_stats.get(str(stat['step']), {"running": 0, "completed": 0})
+        step_total_tasks = step_completion["running"] + step_completion["completed"]
         line = (f"{stat['pool_name']:13s} | "
                 f"Step {stat['step']}: {bar} | "
-                f"done {stat['finished']} / {stat['total']} | "
+                f"{step_completion['completed']} / {step_total_tasks} | "
                 f"P/D {stat['prefill_throughput']:.0f}/{stat['token_throughput']:.1f} TPS | "
-                f"running {stat['running_queries']} pending {stat['pending_queries']} | "
+                f"assigned {stat['running_queries']} pending {stat['pending_queries']} done {stat['finished']} | "
                 f"old {oldest} LRU {least_recent_update} new {latest} (sec ago) | "
                 f"Engine: active {stat['active_engines']}")
         lines.append(line)
     lines.append("")
     lines.append("Notes:")
+    lines.append("  assigned: LLM queries assigned to engine")
+    lines.append("  pending: LLM queries pending in request pool")
     lines.append("  old: the earliest query in the running queue")
     lines.append("  LRU: least recent updated: the most staled query in the running queue")
     lines.append("  new: the latest query in the running queue")

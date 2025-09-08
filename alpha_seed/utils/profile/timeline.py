@@ -21,7 +21,7 @@ import csv
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from types import FrameType
-from typing import Union, Optional, List, Any, Dict, Tuple
+from typing import Union, Optional, List, Any, Dict, Tuple, Deque
 
 
 def filter_by(tl_file: str, pred: callable):
@@ -279,6 +279,10 @@ class FlowEvent(TracingEvent):
         ret[-1]['ph'] = 'f'
         return ret
 
+    @property
+    def ts(self):
+        return self.flows[0][2]
+
 
 @dataclass
 class CounterEvent(TracingEvent):
@@ -308,12 +312,19 @@ class CombinedEvents(TracingEvent):
 
     def __init__(self, events: List[TracingEvent]):
         self.events = events
+        self._created_ts = time.time() * 1e6
 
     def to_objects(self) -> List[dict]:
         obj = []
         for e in self.events:
             obj.extend(e.to_objects())
         return obj
+
+    @property
+    def ts(self):
+        if not self.events:
+            return 0
+        return max(self._created_ts, self.events[0].ts)  # noqa
 
 
 @dataclass
@@ -352,6 +363,11 @@ class ProcessMetadataEvent(TracingEvent):
             })
         return ret
 
+    @property
+    def ts(self):
+        # 必保留的event
+        return float("inf")
+
 
 @dataclass
 class ThreadMetadataEvent(TracingEvent):
@@ -382,6 +398,11 @@ class ThreadMetadataEvent(TracingEvent):
             })
         return ret
 
+    @property
+    def ts(self):
+        # 必保留的event
+        return float("inf")
+
 
 class DummyEvent(TracingEvent):
 
@@ -399,32 +420,40 @@ class DummyEvent(TracingEvent):
             'ph': 'i',
         }]
 
+    @property
+    def ts(self):
+        return 0
+
 
 class Tracer(object):
 
     @classmethod
-    def get_instance(cls, namespace: str = 'default', max_events: Optional[int] = None) -> 'Tracer':
+    def get_instance(cls,
+                     namespace: str = 'default',
+                     max_events: Optional[int] = None,
+                     retention_hours: int = 12) -> 'Tracer':
         tracer_key = f'tracer_{namespace}'
         tracer = getattr(_local_tracers, tracer_key, None)
         if tracer is None:
             tid = threading.current_thread().ident
-            tracer = Tracer(max_events)
+            tracer = Tracer(max_events, retention_hours)
             setattr(_local_tracers, tracer_key, tracer)
             with _tracer_map_mtx:
                 _local_tracer_map[(f"{tid}", namespace)] = tracer
         return tracer
 
-    def __init__(self, max_events: Optional[int] = None):
+    def __init__(self, max_events: Optional[int] = None, retention_hours: int = 12):
         # local data store (access from current thread only)
         self._max_events = max_events  # 最大存多少个events，None表示不限制
+        self.retention_hours = retention_hours
         self._buffer_size = 256
         self._max_num_buffers = None
         if self._max_events is not None:
             self._max_num_buffers = max(1, self._max_events // self._buffer_size)  # 至少要1个buffer
         self.current_buf: List[Optional[TracingEvent]] = [None] * self._buffer_size
         self.current_pos: int = 0
-        self.merged_buffers: List[List[TracingEvent]] = deque(
-            maxlen=self._max_num_buffers)  # noqa [[buf0], [buf1], ...]
+        self.merged_buffers: Deque[List[TracingEvent]] = deque(maxlen=self._max_num_buffers)  # [[e0], [e1], ...]
+        self.merged_buf_mutex = threading.Lock()  # deque迭代和长度变化互斥
         self._disabled = False
 
     def trace(self, evt: TracingEvent):
@@ -456,12 +485,14 @@ class Tracer(object):
         ))
 
     def _rotate(self):
-        self.merged_buffers.append(self.current_buf)  # noqa
-        self.current_buf = [None] * self._buffer_size
-        self.current_pos = 0
+        with self.merged_buf_mutex:
+            self.merged_buffers.append(self.current_buf)  # noqa
+            self.current_buf = [None] * self._buffer_size
+            self.current_pos = 0
 
     @staticmethod
-    def merge_all(namespace: str = 'default') -> List[dict]:
+    def merge_all(namespace: str = 'default', after_ts: float = 0.) -> List[dict]:
+        after_ts_us = after_ts * 1e6
         with _tracer_map_mtx:
             print(f'got {len(_local_tracer_map)} tracers in all threads')
             ret = []
@@ -471,16 +502,31 @@ class Tracer(object):
                     continue
                 total_events_count = len(tracer.merged_buffers) * tracer._buffer_size + tracer.current_pos
                 print(f'thread({tid}) generated {total_events_count} events in namespace({t_ns})')
-                for buf in tracer.merged_buffers:
-                    buf_obj = []
-                    for e in buf:
-                        buf_obj.extend(e.to_objects())
-                        ret.extend(e.to_objects())
-                    # ret.extend(buf_obj)
+                out_of_date_ts_us = (time.time() - tracer.retention_hours * 60 * 60) * 1e6
+                with tracer.merged_buf_mutex:
+                    drop_block_index = 0
+                    for i, buf in enumerate(tracer.merged_buffers):
+                        should_keep_this_block = False
+                        buf_obj = []
+                        for e in buf:
+                            ts = e.ts
+                            if ts > after_ts_us:
+                                buf_obj.extend(e.to_objects())
+                            if ts > out_of_date_ts_us:
+                                should_keep_this_block = True
+                        ret.extend(buf_obj)
+                        if not should_keep_this_block:
+                            drop_block_index = i
+
+                    # 丢掉过期的
+                    if drop_block_index > 0:
+                        tracer.merged_buffers = deque(itertools.islice(tracer.merged_buffers, drop_block_index, None))
+
                 for e in tracer.current_buf:
                     if e is None:
                         break
-                    ret.extend(e.to_objects())
+                    if e.ts > after_ts_us:
+                        ret.extend(e.to_objects())
             return ret
 
 

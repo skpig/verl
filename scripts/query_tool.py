@@ -38,12 +38,14 @@ def handle_client(conn, server):
     from alpha_seed.workers.streaming_service.rollout_request_manager import get_all_request_manager_actors_with_names
     from alpha_seed.workers.streaming_service.rollout_request_manager_diagnosis import ProgressStat
     from alpha_seed.workers.agents.metrics_collector import get_agent_metrics_collector
+    from alpha_seed.workers.agents.trajectory import get_agent_trajectory_collector
 
     @dataclass
     class RealTimeStats:
         rollout: ProgressStat
         agent: dict  # 定义见 collector.get_basic_stats
         agent_collector_info: dict  # 见 collector.agent_collector_info
+        task_complete_stats: dict  # 见 get_task_complete_stats
         query_cost: float  # 读取一轮数据花多久
 
     try:
@@ -80,7 +82,7 @@ def handle_client(conn, server):
 
             if cmd == "list":
                 step = args.get("step")
-                response = list_running_queries_str(rms, step)
+                response = list_running_queries_str(console_width, rms, step)
             elif cmd == "list-finished":
                 response = list_finished_queries_str(rms)
             elif cmd == "list-tasks":
@@ -88,7 +90,12 @@ def handle_client(conn, server):
                 task_type = args['type']  # filter by agent class name
                 limit = args['limit']
                 no_color = args['no_color']
-                response = list_agent_tasks_str(console_width, list_all, task_type, limit, no_color)
+                response = list_agent_tasks_str(console_width, list_all, False, task_type, limit, no_color)
+            elif cmd == "list-exception-tasks":
+                task_type = args['type']  # filter by agent class name
+                limit = args['limit']
+                no_color = args['no_color']
+                response = list_agent_tasks_str(console_width, True, True, task_type, limit, no_color)
             elif cmd == "get":
                 stdout, stderr = get_query_details_str(rms, args["query_id"])
                 response = json.dumps({"stdout": stdout, "stderr": stderr})
@@ -170,6 +177,7 @@ def handle_client(conn, server):
                         response += "\n[ERROR] upload profiler trace fail. please see the log around"
             elif cmd == "watch-all":
                 collector = get_agent_metrics_collector()
+                traj_collector = get_agent_trajectory_collector()
                 while True:
                     try:
                         t0 = time.time()
@@ -178,8 +186,10 @@ def handle_client(conn, server):
                                                rollout_stats)  # [[rollout], [val]] => [rollout, val]
                         agent_stats = ray.get(collector.get_basic_stats.remote())
                         agent_collector_info = ray.get(collector.get_collector_info.remote())
+                        task_complete_stats = ray.get(traj_collector.get_task_complete_stats.remote())
                         t1 = time.time()
-                        rt_stats = RealTimeStats(rollout_stats, agent_stats, agent_collector_info, t1 - t0)
+                        rt_stats = RealTimeStats(rollout_stats, agent_stats, agent_collector_info, task_complete_stats,
+                                                 t1 - t0)
 
                         # flush frame buffer
                         payload = json.dumps(asdict(rt_stats)) + '\n'
@@ -284,7 +294,10 @@ def send_to_daemon(cmd, args_dict):
 
                                 # rollout
                                 if rt_stats['rollout']:
-                                    rollout_frame_buf = render_rollout_progress(rt_stats['rollout'])
+                                    rollout_frame_buf = render_rollout_progress(
+                                        rt_stats['rollout'],
+                                        rt_stats['task_complete_stats'],
+                                    )
                                 else:
                                     rollout_frame_buf = "\n(no running steps, please hold on ...)\n"
 
@@ -373,6 +386,15 @@ def main():
                                    '`class XXAgent(AsyncAgent):` -> XXAgent, default to get all in the same UID')
     list_tasks_parser.add_argument('--limit', default=500, type=int, help='number of segments to list at one time')
     list_tasks_parser.add_argument('--no-color', action='store_true', help='output without coloring')
+
+    list_exc_tasks_parser = subparsers.add_parser('list-exception-tasks',
+                                                  help='List agent tasks, which has any errors during the agent loop')
+    list_exc_tasks_parser.add_argument('--type',
+                                       default=None,
+                                       help='agent task type, same aka agent class name '
+                                       '`class XXAgent(AsyncAgent):` -> XXAgent, default to get all in the same UID')
+    list_exc_tasks_parser.add_argument('--limit', default=500, type=int, help='number of segments to list at one time')
+    list_exc_tasks_parser.add_argument('--no-color', action='store_true', help='output without coloring')
 
     get_task_parser = subparsers.add_parser('get-task', help='Get details of an agent task (--format)')
     get_task_parser.add_argument('uid', help='UID of the agent task')

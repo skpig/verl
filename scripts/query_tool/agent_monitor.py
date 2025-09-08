@@ -179,6 +179,8 @@ ROLE_COLORS = {
     "result": "dodger_blue2",
 }
 
+system_exception_content_prefix = "[System/Framework exception"
+
 
 def _colorize(v):
     color = ACTION_COLORS.get(v) or ROLE_COLORS.get(v)
@@ -188,6 +190,8 @@ def _colorize(v):
 
 
 def _colorize_with(role, v):
+    if v.startswith(system_exception_content_prefix):
+        return f"[bright_red]{v}[/]"
     color = ACTION_COLORS.get(role) or ROLE_COLORS.get(role)
     if not color:
         return v
@@ -196,22 +200,22 @@ def _colorize_with(role, v):
 
 def list_agent_tasks_str(width,
                          list_all: bool,
+                         list_exception_only: bool,
                          task_type: Optional[str],
-                         limit: int = 2000,
+                         limit: int = 500,
                          no_color: bool = False) -> str:
     from alpha_seed.workers.agents.trajectory import TrajectoryCollector, Trajectory
     try:
         traj_collector: TrajectoryCollector = ray.get_actor("TrajectoryCollector")  # noqa
         if list_all:
-            trajectories: List[Trajectory] = ray.get(traj_collector.get_all.remote(limit, task_type))
+            trajectories: List[Trajectory] = ray.get(
+                traj_collector.get_all.remote(limit, task_type, list_exception_only))
         else:
             trajectories: List[Trajectory] = ray.get(traj_collector.get_running.remote(task_type))
 
         # Create table
         table = Table(title="Agent Tasks", show_header=True, box=box.SIMPLE_HEAD)
-        table.add_column("Agent", style="white")
-        table.add_column("UID", style="cyan", overflow="fold")
-        table.add_column("Traj ID", style="cyan")
+        table.add_column("Agent/UID", style="white", overflow="fold")
         table.add_column("Role", style="white")
         table.add_column("Start", style="magenta")
         table.add_column("Dur", style="yellow")
@@ -219,12 +223,15 @@ def list_agent_tasks_str(width,
         table.add_column("Tokens", style="cyan")
 
         if not trajectories:
-            table.add_row("", "", "", "", "", "", "No running tasks", "")
+            table.add_row("", "", "", "", "No running tasks", "")
         else:
             for traj in trajectories:
                 # Format segments info
                 paired_segments = traj.get_paired_segments()
                 uid, agent_name, traj_id = traj.agent_ident.uid, traj.agent_ident.agent_name, traj.trajectory_id
+                row_title = (f"{agent_name}\n"
+                             f"[cyan]{uid}[/]\n"
+                             f"TrajID: {traj_id} Step: {traj.agent_ident.global_step}")
                 for i, (start_seg, end_seg) in enumerate(paired_segments):
                     if start_seg is not None:
                         start_time = _format_timestamp(start_seg.start_ts)
@@ -232,13 +239,11 @@ def list_agent_tasks_str(width,
                         duration = _format_duration(start_seg.start_ts, end_ts)
 
                         if i > 0:
-                            uid, agent_name, traj_id = "", "", ""
+                            row_title = ""
 
                         # seg start
                         table.add_row(
-                            agent_name,
-                            uid,
-                            f"{traj_id}",
+                            row_title,
                             _colorize(start_seg.role),
                             start_time,
                             duration,
@@ -247,9 +252,7 @@ def list_agent_tasks_str(width,
                         )
                     else:
                         table.add_row(
-                            agent_name,
-                            uid,
-                            f"{traj_id}",
+                            row_title,
                             "",
                             "",
                             "",
@@ -259,16 +262,18 @@ def list_agent_tasks_str(width,
 
                     # seg end
                     if end_seg is not None:
-                        table.add_row("", "", "", _colorize(end_seg.role), "", "",
+                        table.add_row("", _colorize(end_seg.role), "", "",
                                       _colorize_with(end_seg.role, end_seg.to_digest()), f"{end_seg.num_tokens}")
 
                 if not paired_segments:
                     # maybe no segments in this traj
-                    table.add_row(traj.agent_ident.agent_name, traj.agent_ident.uid, f"{traj.trajectory_id}", "", "",
-                                  "", "(no segments)", "")
+                    row_title = (f"{traj.agent_ident.agent_name}\n"
+                                 f"[cyan]{traj.agent_ident.uid}[/]\n"
+                                 f"TrajID: {traj.trajectory_id} Step: {traj.agent_ident.global_step}")
+                    table.add_row(row_title, "", "", "", "(no segments)", "")
 
                 # delimiter
-                table.add_row("", "", "", "", "", "", "-" * 80, "")
+                table.add_row("", "", "", "", "-" * 80, "")
 
         # Capture table output
         console = Console(force_terminal=not no_color, width=width, no_color=no_color)

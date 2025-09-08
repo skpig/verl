@@ -211,6 +211,10 @@ class ToolEndSegment(EndSegment):
         return "result"
 
     def to_digest(self) -> str:
+        if self.result and self.result.error_traceback:
+            # 特殊字符串识别
+            return (f"[System/Framework exception during tool call]\n"
+                    f"{self.result.error_traceback}")
         if self.result and self.result.result is not None:
             result = self.result.result.lstrip()
             if len(result) > 40:
@@ -219,6 +223,9 @@ class ToolEndSegment(EndSegment):
         return "(No result)"
 
     def to_content(self) -> str:
+        if self.result and self.result.error_traceback:
+            return (f"[System/Framework exception during tool call]\n"
+                    f"{self.result.error_traceback}")
         return self.result.result
 
 
@@ -243,6 +250,7 @@ TrajectoryPhase = Literal["init", "processing", "llm", "tool", "env", "finished"
 class AgentIdentity:
     uid: str  # agent loop uid
     agent_name: str  # agent class name
+    global_step: int  # 从第几个global_step过来的的task，无论task持续多少个step
 
 
 class Trajectory:
@@ -259,6 +267,15 @@ class Trajectory:
         self.finished: bool = False
         # 标记已经上传了的序号，即前N个segments
         self.collected_seq: int = 0
+        # 是否在tool call中遇到训练程序错误(不是因输入导致的错误)
+        self.has_tool_exception: bool = self._has_tool_exception_segment()
+
+    def _has_tool_exception_segment(self):
+        for seg in self.segments:
+            if isinstance(seg, ToolEndSegment):
+                if seg.result is not None and seg.result.error_traceback:
+                    return True
+        return False
 
     def append(self, segment: Segment):
         segment.trajectory_id = self.trajectory_id
@@ -272,6 +289,9 @@ class Trajectory:
                 if isinstance(prev_turn, LLMEndSegment):
                     segment.input_ids = segment.input_ids[len(prev_turn.output_ids):]
                     break
+        if isinstance(segment, ToolEndSegment):
+            if segment.result.error_traceback:
+                self.has_tool_exception = True
         self.segments.append(segment)
 
     def decode(self, tokenizer):
@@ -310,8 +330,8 @@ class TrajectoryFactory:
     管理某个agent task实例下的多个trajectory，根据实际情况再添加fork方法之类
     """
 
-    def __init__(self, uid: str, agent_name: str):
-        self.agent_ident = AgentIdentity(uid, agent_name)
+    def __init__(self, uid: str, agent_name: str, global_step: int):
+        self.agent_ident = AgentIdentity(uid, agent_name, global_step)
         self.trajectories: List[Trajectory] = []
         self._mutex = threading.Lock()
 
@@ -404,7 +424,12 @@ class TrajectoryTracer:
 
     def _normalize_string(self, val: str) -> str:
         # 有些字符会导致perfetto UI显示不了，这里暂时转义掉
-        return val.replace("\"", "[(dquote)]").replace("\'", "[(squote)]").replace("$", "[(dollar)]")
+        return (val.replace("\"", "[(dquote)]").replace("\'",
+                                                        "[(squote)]").replace("$",
+                                                                              "[(dollar)]").replace("{",
+                                                                                                    "｛")  # 注意右边的是全角字符
+                .replace("}", "｝")  # 注意右边的是全角字符
+               )
 
     def dump_trajectory_trace(self) -> List[dict]:
         tracer_spans = Tracer.merge_all("agent")
@@ -477,12 +502,19 @@ class TrajectoryCollector:
                 self.tracer.waterfall_tracer.flush()
                 last_tracer_flush_time = time.time()
 
-    def get_all(self, max_num_segs: int, task_type: Optional[str] = None) -> List[Trajectory]:
-        ret = self._build_traj_from_segments(self.segments, task_type)
+    def get_all(self,
+                max_num_segs: int,
+                task_type: Optional[str] = None,
+                with_exception_only: bool = False) -> List[Trajectory]:
+        ret = self._build_traj_from_segments(self.segments, task_type, max_num_segs, with_exception_only)
         current_seg_count = sum([len(t.segments) for t in ret])
+        if current_seg_count >= max_num_segs:
+            return ret
         for traj in list(self.trajectories.values()):
             if task_type is not None:
                 traj = [t for t in traj if t.agent_ident.agent_name == task_type]
+            if with_exception_only:
+                traj = [t for t in traj if t.has_tool_exception]
             ret.extend(traj)
             current_seg_count += sum([len(t.segments) for t in traj])
             if current_seg_count >= max_num_segs:
@@ -502,10 +534,35 @@ class TrajectoryCollector:
             ret = [traj for traj in ret if traj.trajectory_id == traj_id]
         return ret
 
+    def get_task_complete_stats(self) -> Dict[int, dict]:
+        """
+        返回每个global step的agent task的完成数统计，用于observability
+        """
+        running_stats = defaultdict(int)  # global_step ->
+        complete_stats = defaultdict(int)  # global_step ->
+        for agent_ident in list(self.agent_ident_map.values()):
+            running_stats[agent_ident.global_step] += 1
+        for traj in list(self.trajectories.values()):
+            if not traj:
+                continue
+            complete_stats[traj[0].agent_ident.global_step] += 1
+
+        ret = {}
+        for global_step in set(running_stats.keys()) & set(complete_stats.keys()):
+            ret[global_step] = dict(
+                global_step=global_step,  # task from global step
+                running=running_stats[global_step],  # number of running tasks
+                completed=complete_stats[global_step],  # number of completed tasks
+            )
+        return ret
+
     def _build_traj_from_segments(self,
                                   segments: Dict[str, List[Segment]],
-                                  task_type: Optional[str] = None) -> List[Trajectory]:
+                                  task_type: Optional[str] = None,
+                                  max_num_segs: Optional[int] = None,
+                                  with_exception_only: bool = False) -> List[Trajectory]:
         trajs: Dict[Tuple[str, int], List[Segment]] = defaultdict(list)  # (uid, traj_id) -> List[Segments]
+        max_num_segs = max_num_segs or 999999999  # 很大不会超过的数就行
 
         uids = list(segments.keys())
         for uid in uids:
@@ -520,6 +577,7 @@ class TrajectoryCollector:
                 trajs[uid, seg.trajectory_id].append(seg)
 
         ret = []
+        accumulated_num_segs = 0
         for (uid, traj_id), segs in trajs.items():
             ident = self.agent_ident_map.get(uid)
             if not ident:
@@ -527,7 +585,12 @@ class TrajectoryCollector:
             if task_type is not None and ident.agent_name != task_type:
                 continue
             traj = Trajectory(ident, traj_id, segs)
+            if with_exception_only and not traj.has_tool_exception:
+                continue
             ret.append(traj)
+            accumulated_num_segs += len(segs)
+            if accumulated_num_segs >= max_num_segs:
+                break
         return ret
 
     def dump_trajectory_trace(self):

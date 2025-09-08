@@ -303,7 +303,12 @@ class ToolResultCapturer:
         self.result = result
 
     def capture_exception(self, e: Exception, tb: str):
-        self.result = ToolResult(f"exception during tool call, e={e}\n{tb}", success=False)
+        self.result = ToolResult(
+            f"exception during tool call, e={e}\n{tb}",
+            success=False,
+            error_msg=str(e),
+            error_traceback=tb,
+        )
 
 
 class AgentTaskTracker:
@@ -364,7 +369,6 @@ class AgentTaskTracker:
                                                     execution_time=self.execution_finish_time -
                                                     self.execution_start_time,
                                                     total_time=self.execution_finish_time - self.creation_start_time)
-                self._make_trace_event()
 
     @contextmanager
     def llm_call(self, prompt: DataProto):
@@ -427,9 +431,6 @@ class AgentTaskTracker:
     def incr_tool_call_counter(self, tool_class_name: str, retries: int, exceeded_max_attempts: bool, success: bool):
         self.monitor.incr_tool_call_counter(self.agent_cls.__name__, tool_class_name, retries, exceeded_max_attempts,
                                             success)
-
-    def _make_trace_event(self):
-        pass
 
 
 class AgentWorkerMonitor:

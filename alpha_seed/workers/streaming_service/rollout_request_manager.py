@@ -660,13 +660,13 @@ class RequestManager:
     def get_concurrency(self) -> Dict[str, int]:
         return self.req_pool.get_concurrency()
 
-    def dump_request_trace(self) -> List[dict]:
+    def dump_request_trace(self, after_ts: float = 0.) -> List[dict]:
         running_reqs = self.req_pool.get_running_requests()
         extra_events = []
         for r in running_reqs:
             cce = self.query_tracer.trace(r, persist=False)
             extra_events.append(cce)
-        return self.query_tracer.dump_request_trace(extra_events)
+        return self.query_tracer.dump_request_trace(extra_events, after_ts)
 
     def get_step_metrics(self, step) -> Dict[str, float]:
         return self.req_stat.get_step_metrics(step)

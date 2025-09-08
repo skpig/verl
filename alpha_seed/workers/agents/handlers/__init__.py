@@ -19,6 +19,9 @@ class GlobalState:
         self.global_step = global_step
 
     def get_global_step(self) -> int:
+        """
+        这个是当前trainer正在train的step
+        """
         return self.global_step
 
 

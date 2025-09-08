@@ -570,8 +570,12 @@ streaming_rollout:
     scale_down_wait: 10  # 类似上面
   query_trace:
     enable: True
-    from_step: 0
-    to_step: 5
+    from_step: 0  # deprecated
+    to_step: 5  # deprecated
+    # 每隔多少个step dump一次query trace，每次dump的内容会包含此刻往前2N个step的trace event
+    # 注意是step % N == 0，不是从最开始的N开始
+    dump_every_n_steps: 4  # 每隔多少个step dump一次query trace，每次dump的内容会包含此刻往前2N个step的trace event
+    retention_hours: 12  # query trace在内存里最多保留多少小时
     upload_to_mlx: True
     renderer:
       no_waiting_spans: True  # 是否在trace threads上显示waiting，不显示W可以更清晰看出engine填充程度
@@ -580,6 +584,11 @@ streaming_rollout:
     lb_mode: dynamic-balancing  # ["dynamic-balancing", "even-distribution", "cache-aware-balancing"]
     poll_internal_seconds: 2.  # 1轮最短间隔
     rebalance_threshold: 2  # 最小溢出x个才重新分发给其他
+    # 是否将没有prefix cache的query从waiting列表里abort回到request pool
+    # 一般是每个step weights更新完后，可能会有大量query pending在standalone rollout，原本的思路是将其重新分给hybrid rollout以
+    # 负载均衡一下，但这样做在轮数特别多的任务里发现频繁调整query造成的命中率下降带来的性能损失更大，命中率下降的原因还在分析中。
+    # 默认先不开启，可以打开对比效果，如果query_trace里观察到负载很不平衡可以开启
+    enable_no_cache_rebalancing: False
     # 负载平衡度阈值，cov=std(kv)/mean(kv) 超过阈值才触发rebalance，仅cache-aware-balancing下生效
     # cache-aware-balancing下，轮数越多越rebalance收益越小
     # 根据query trace的情况对这个进行调整，默认值1比较苛刻，几乎不会rebalance

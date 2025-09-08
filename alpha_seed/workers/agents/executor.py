@@ -81,11 +81,10 @@ class AgentWorker:
         self._metrics_task = self.get_event_loop().create_task(self._metrics_collection_loop())
         self._traj_task = self.get_event_loop().create_task(self._trajectory_collection_loop())
 
-    async def execute(self, agent_cls: Type[AsyncAgent] | Type[ThreadedAgent], /, item: DataProto, *args, **kwargs):
+    async def execute(self, agent_cls: Type[AsyncAgent] | Type[ThreadedAgent], /, item: DataProto, context: TaskContext,
+                      **kwargs):
         # 兼容旧的functional handler，保持task context中有tokenizer赋值
-        for a in args:
-            if isinstance(a, TaskContext):
-                a.tokenizer = self.tokenizer
+        context.tokenizer = self.tokenizer
 
         # 用来跟踪整个trajectory
         uid = item.non_tensor_batch['uid'][0]
@@ -96,7 +95,7 @@ class AgentWorker:
             'agent_class': agent_cls.__name__,
         })
 
-        agent_init_kwargs = self._make_essential_init_kwargs(uid, agent_cls.__name__)
+        agent_init_kwargs = self._make_essential_init_kwargs(uid, agent_cls.__name__, context.global_step)
 
         if issubclass(agent_cls, AsyncAgent):
             tracker = self.monitor.task_tracker()
@@ -105,7 +104,7 @@ class AgentWorker:
                 self.tasks[agent.uid] = agent
             async with self.concurrency_limit:
                 with tracker.execution(agent):
-                    ret = await agent.run_task(item, *args, **kwargs)
+                    ret = await agent.run_task(item, context, **kwargs)
 
         elif issubclass(agent_cls, ThreadedAgent):
             tracker = self.monitor.task_tracker()
@@ -117,7 +116,7 @@ class AgentWorker:
                 with tracker.execution(agent):
                     agent_task = partial(agent.run_task, **kwargs) if kwargs else agent.run_task
                     loop = self.get_event_loop()
-                    ret = await loop.run_in_executor(self._thread_executor, agent_task, item, *args)
+                    ret = await loop.run_in_executor(self._thread_executor, agent_task, item, context)
         else:
             raise TypeError(f"agent_cls must be a subclass of AsyncAgent or ThreadedAgent. got {type(agent_cls)}")
 
@@ -129,7 +128,7 @@ class AgentWorker:
 
         return ret
 
-    def _make_essential_init_kwargs(self, uid: str, agent_name: str):
+    def _make_essential_init_kwargs(self, uid: str, agent_name: str, global_step: int) -> dict:
         """
         :param uid: 追踪整个trajectory的id，会一路传到train那边，数据集那边也可以加上，构造来源见
                     alpha_seed.trainer.ppo.RayPPOTrainer._preprocess_batch_before_gen
@@ -137,7 +136,7 @@ class AgentWorker:
         """
         return {
             'uid': uid,
-            'trajectory_factory': TrajectoryFactory(uid, agent_name),
+            'trajectory_factory': TrajectoryFactory(uid, agent_name, global_step),
             'config': self.config,
             'executor': self._thread_executor,
             'global_state': self.global_state,
@@ -178,7 +177,7 @@ class AgentWorker:
                 idents_map = {}
                 for agent in list(self.tasks.values()):
                     segs = agent.trajectory_factory.get_staging_segments(self.tokenizer)
-                    ident = AgentIdentity(agent.uid, agent.__class__.__name__)
+                    ident = agent.trajectory_factory.agent_ident
                     staging_segs[agent.uid] = segs
                     idents_map[agent.uid] = ident
                 await self.traj_collector.collect_segments.remote(staging_segs, idents_map)
@@ -266,13 +265,6 @@ class RayActorExecutor(ExecutorBase):
         refs = []
         for w in self.workers:
             ref = w.set_global_step.remote(global_step)
-            refs.append(ref)
-        ray.get(refs)
-
-    def stop(self):
-        refs = []
-        for w in self.workers:
-            ref = w.stop.remote()
             refs.append(ref)
         ray.get(refs)
 

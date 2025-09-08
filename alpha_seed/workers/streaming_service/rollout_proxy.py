@@ -550,7 +550,7 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
         self.replicas = replicas
         self.actor_info = actor_info  # hybrid rollout actor info
         self.config = config  # .streaming_rollout
-        self._tracer = Tracer.get_instance()
+        self._tracer = Tracer.get_instance(retention_hours=self.config.query_trace.retention_hours)
         self._stop_server_ts = 0
         self._update_worker_start_ts = 0
         self._request_manager_name = request_manager_name
@@ -781,6 +781,7 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
                     'decoding': metric.num_decoding,
                     'pending': metric.num_pending,
                     'waiting': metric.num_waiting,
+                    '$no_caching': len(metric.no_caching_query_ids),
                     'deviate': metric.num_running - load_skewness.running_avg,
                     'prefill TPS': prefill_tps,
                     'decode TPS': decode_tps,
@@ -1175,7 +1176,8 @@ class CacheAwareBalancedRolloutWorkerGroupProxy(RolloutWorkerGroupProxy):
             # rebalance1
             # 在engine waiting中一段时间但没有命中cache
             # (可能是刚step更新完，大家都没cache，重新abort掉平衡一下)
-            if load_skewness.p25 < self.config.proxy.gmem_high_water_level_threshold:
+            enable_no_cache_rebalancing = self.config.proxy.enable_no_cache_rebalancing
+            if enable_no_cache_rebalancing and load_skewness.p25 < self.config.proxy.gmem_high_water_level_threshold:
                 no_cache_query_ids: Dict[str, Set[str]] = {}  # engine_id -> {query_id}
                 for (engine_id, wg_name), load in loads.items():
                     gmem_insufficient = load.kv_cache_util > self.config.proxy.gmem_insufficient_threshold
