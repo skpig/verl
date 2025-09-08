@@ -13,8 +13,8 @@ import pickle
 import numpy as np
 import ray
 import pandas as pd
-from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
-from nltk.metrics.distance import edit_distance
+# from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+# from nltk.metrics.distance import edit_distance
 from transformers import AutoTokenizer
 
 
@@ -218,7 +218,8 @@ def ray_compute_group_means(
 def load_case(dir, args, output_dir, bon=64):
     prompts = []
     responses = []
-    for child_dir in glob.glob(f"{dir}/global_step*"):
+    sorted_child_dirs = sorted(glob.glob(f"{dir}/global_step*"), key=lambda x: int(x.split("/")[-1].split("_")[-1]))
+    for child_dir in sorted_child_dirs:
         if len(prompts) // bon > 1000:
             break
         path = os.path.join(child_dir, "prompts.pkl")
@@ -273,6 +274,45 @@ def load_case(dir, args, output_dir, bon=64):
     with open(f"{output_dir}/case_edit_results.pkl", "wb") as f:
         pickle.dump(edit_results, f)
 
+
+def mean_pairwise_similarity(S: np.ndarray, idx: np.ndarray) -> float:
+    """
+    计算子集 idx 的两两相似度均值（不含对角，按无序对计数）。
+    """
+    sub = S[np.ix_(idx, idx)]
+    m = len(idx)
+    return sub.sum() / (m * (m - 1) / 2)  # 等价于 sum_upper / C(m,2)
+
+def sim_at_m_bootstrap(S: np.ndarray, m: int = 32, B: int = 5000,
+                       replace: bool = False, ci: float = 0.95, seed: int | None = 0):
+    """
+    Bootstrap / Monte Carlo 估计 sim@m 的分布、点估计与置信区间。
+    - replace=False: 无放回（更贴近“32 个不同变量”的定义）
+    - replace=True : 有放回（严格的bootstrap重采样）
+    """
+    assert S.ndim == 2 and S.shape[0] == S.shape[1], "S 必须为 N×N 方阵"
+    N = S.shape[0]
+    rng = np.random.default_rng(seed)
+
+    stats = np.empty(B, dtype=float)
+    for b in range(B):
+        idx = rng.choice(N, size=m, replace=replace)
+        stats[b] = mean_pairwise_similarity(S, idx)
+
+    # 经验分布点估计 + 置信区间（百分位法）
+    est = stats.mean()
+    # alpha = (1 - ci) / 2
+    # lo, hi = np.quantile(stats, [alpha, 1 - alpha])
+
+    # # 同时给出“整体均值”的解析量，便于 sanity check
+    # off_mean = (S.sum() - np.trace(S)) / (N * (N - 1))  # 全局非对角平均
+    # diag_mean = np.trace(S) / N
+    # # 有放回时的期望（m 不出现；若 replace=False 则该值仅作参考）
+    # exp_with_repl = (diag_mean / N) + (1 - 1 / N) * off_mean
+
+    return est
+
+    
 def post_process(dir, args):
     with open(f"{dir}/case_emb_sim_mean.pkl", "rb") as f:
         results = pickle.load(f)
@@ -308,13 +348,10 @@ def post_process(dir, args):
     # sns.violinplot(x="length", y="cossim", data=cossim_df)
     # plt.savefig(f"case_emb_sim_mean.png")
     # plt.close()
-    plt.figure(figsize=(10, 5))
-    sns.violinplot(x="length", y="norm_editdist", data=editdist_df)
-    plt.savefig(f"case_edit_dist_mean.png")
-    plt.close()
-    plt.figure(figsize=(10, 5))
-    sns.violinplot(x="length", y="selfbleu", data=editdist_df)
-    plt.savefig(f"case_self_bleu_mean.png")
+    fig, (ax1, ax2) = plt.subplots(nrows=2, ncols=1, figsize=(10, 10), sharex=True)
+    sns.violinplot(x="length", y="norm_editdist", data=editdist_df, ax=ax1)
+    sns.violinplot(x="length", y="selfbleu", data=editdist_df, ax=ax2)
+    plt.savefig(f"case_edit_dist_and_self_bleu_mean.png")
     plt.close()
 
     
@@ -329,18 +366,22 @@ def post_process(dir, args):
     all_list = []
     for edit_metrix_path in tqdm(edit_metrix_path_list):
         with open(edit_metrix_path, "rb") as f:
-            rtn_tuple = pickle.load(f)
+            selfbleu, editdist = pickle.load(f)
         groups = re.search(r".cache/self_bleu_and_edit_distance-(.*)_(\d+).pkl", edit_metrix_path).groups()
         idx, length = int(groups[0]), int(groups[1])
-        cur_list = []
         # for i in range(len(rtn_tuple[0])):
         #     for j in range(i + 1, len(rtn_tuple[0])):
-        #         cur_list.append({"idx": idx, "length": length, "editdist": rtn_tuple[1][i, j], "norm_editdist": rtn_tuple[1][i, j] / length, "selfbleu": rtn_tuple[0][i, j]})
+        #         all_list.append({"idx": idx, "length": length, "editdist": rtn_tuple[1][i, j], "norm_editdist": rtn_tuple[1][i, j] / length, "selfbleu": rtn_tuple[0][i, j]})
+        selfbleu_sim_at_32 = sim_at_m_bootstrap(selfbleu, m=32)
+        editdist_sim_at_32 = sim_at_m_bootstrap(editdist, m=32)
+        all_list.append({"idx": idx, "length": length, "self-bleu": selfbleu_sim_at_32, "norm-editdist": editdist_sim_at_32 / length})
         
     editdist_df = pd.DataFrame(all_list)
-    plt.figure(figsize=(10, 5))
-    sns.violinplot(x="length", y="norm_editdist", data=editdist_df)
-    plt.savefig(f"case_edit_dist_mean_all.png")
+    fig, (ax1, ax2) = plt.subplots(nrows=2, ncols=1, figsize=(10, 10), sharex=True)
+
+    sns.violinplot(x="length", y="norm-editdist", data=editdist_df, ax=ax1)
+    sns.violinplot(x="length", y="self-bleu", data=editdist_df, ax=ax2)
+    plt.savefig(f"case_edit_dist_and_self_bleu_mean_all.png")
     plt.close()
 
     
@@ -360,13 +401,13 @@ if __name__ == '__main__':
     # Use id80 to calculate case similarity
     # ID80_LIMR = "/mnt/hdfs/huangbaizhou/tmp/ckpt/debug_hbz2/LIMR_ID80_bon64/"
     # load_case(ID80_LIMR, args, bon=64, output_dir=ID80_LIMR)
-    ID80_DAPO = "/mnt/hdfs/huangbaizhou/tmp/ckpt/debug_hbz2/DAPO_ID80_bon128/"
-    load_case(ID80_DAPO, args, bon=128, output_dir=ID80_DAPO)
+    # ID80_DAPO = "/mnt/hdfs/huangbaizhou/tmp/ckpt/debug_hbz2/DAPO_ID80_bon128/"
+    # load_case(ID80_DAPO, args, bon=128, output_dir=ID80_DAPO)
 
 
     """Post Processing"""
-    # ID80_LIMR = "/mnt/hdfs/huangbaizhou/tmp/ckpt/debug_hbz2/LIMR_ID80_bon64/"
-    # post_process(ID80_LIMR, args)
+    ID80_LIMR = "/mnt/hdfs/huangbaizhou/tmp/ckpt/debug_hbz2/LIMR_ID80_bon64/"
+    post_process(ID80_LIMR, args)
 
 
 

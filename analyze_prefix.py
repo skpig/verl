@@ -5,47 +5,8 @@ from collections import defaultdict
 import numpy as np
 import json
 import pandas as pd
-from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
-from Levenshtein import distance as edit_distance
 from transformers import AutoTokenizer
 
-def compute_self_bleu_and_edit_distance_for_ids(responses: list[list[int]]):
-    """
-    计算一组由整数ID列表表示的文本的 Self-BLEU 和编辑距离均值。
-    
-    :param responses: list[list[int]], 包含多条由token ID组成的生成文本
-    :return: (avg_self_bleu, avg_edit_distance)
-    """
-    bleu_scores = []
-    edit_distances = []
-    
-    # 检查输入是否为空或只有一个序列，避免计算错误
-    if len(responses) < 2:
-        return 0.0, 0.0
-
-    # 计算每对文本之间的 Self-BLEU 和编辑距离
-    for i in range(len(responses)):
-        for j in range(i + 1, len(responses)):
-            # 直接获取已经 "分词" 好的序列
-            candidate = responses[i]
-            reference = responses[j]
-            
-            # 计算编辑距离
-            # edit_distance 函数可以直接处理整数列表
-            edit_dist = edit_distance(candidate, reference)
-            edit_distances.append(edit_dist)
-            
-            # 计算 Self-BLEU
-            # sentence_bleu 也直接使用整数ID列表
-            # reference 需要被包裹在一个列表中, 因为一个candidate可以有多个references
-            bleu_score = sentence_bleu([reference], candidate, smoothing_function=SmoothingFunction().method1)
-            bleu_scores.append(bleu_score)
-            
-    # 计算平均值
-    avg_self_bleu = np.mean(bleu_scores) if bleu_scores else 0.0
-    avg_edit_distance = np.mean(edit_distances) if edit_distances else 0.0
-    
-    return avg_self_bleu, avg_edit_distance
 def load_acc(dir, outname, bon=32):
     item2scores = defaultdict(list)
     for child_dir in glob.glob(f"{dir}/global_step*"):
@@ -56,7 +17,7 @@ def load_acc(dir, outname, bon=32):
         for score, item in scores:
             item2scores[item].append(score)
     assert all(len(scores) == bon for scores in item2scores.values())
-    item2acc = {item: np.mean(scores) for item, scores in item2scores.items()}
+    item2acc = {item.item(): np.mean(scores).item() for item, scores in item2scores.items()}
     
     with open(f"{outname}_item2acc.json", "w") as f:
         json.dump(item2acc, f, indent=4)
