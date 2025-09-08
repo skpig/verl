@@ -282,6 +282,61 @@ def process_limr_dataset():
     train_dataset.to_parquet(train_path)
     print("Size of LIMR train dataset:", len(train_dataset))
 
+def process_oldaime_dataset():
+    data_source = "old_aime"
+    local_dir = "OLDAIME"
+    train_path = os.path.join(MY_DATA_DIR, local_dir, "train.parquet")
+    filtered_dataset_path = os.path.join(MY_DATA_DIR, local_dir, "filtered_dataset.parquet")
+    if RESUME and os.path.exists(train_path):
+        return
+
+    golden_extraction_target=(ExprExtractionConfig(),)
+    if os.path.exists(filtered_dataset_path):
+        print(f"Loading the filtered dataset from {filtered_dataset_path}...", flush=True)
+        dataset = datasets.load_dataset("parquet", data_files=filtered_dataset_path)
+    else:
+        print(f"Loading the {data_source} dataset from kaggle...", flush=True)
+        # 使用datasets库加载csv文件
+        dataset = datasets.load_dataset("csv", data_files="OLD_AIME.csv")["train"]
+        def filter_fn(example):
+            if not example.get("Answer"):
+                return False
+            try:
+                float(example["Answer"])
+                is_number = True
+            except (ValueError, TypeError):
+                is_number = False
+                print("Answer is not a number:", example["Answer"])
+            
+            golden_answer = example["Answer"]
+            extracted = parse(golden_answer, golden_extraction_target, parsing_timeout=5)
+            return len(extracted) > 0
+        dataset = dataset.filter(lambda x: x["Year"] < 2024)
+        dataset = dataset.filter(filter_fn)
+        if not os.path.exists(os.path.dirname(filtered_dataset_path)):
+            makedirs(os.path.dirname(filtered_dataset_path))
+        dataset.to_parquet(filtered_dataset_path)
+    print("Size of OLD-AIME dataset after filtering:", len(dataset))
+
+    train_dataset = dataset
+    
+    def make_map_fn(split):
+        def process_fn(example, idx):
+            question = example["Question"]
+            answer = example["Answer"]
+            example = {
+                "data_source": "oldaime",
+                "prompt": format_question_to_prompt(question),
+                "ability": "math",
+                "reward_model": {"style": "rule", "ground_truth": str(answer)},
+                "extra_info": {"split": split, "index": idx},
+            }
+            return example
+        return process_fn
+    train_dataset = train_dataset.map(function=make_map_fn("train"), with_indices=True)
+    train_dataset.to_parquet(train_path)
+    print("Size of OLD-AIME train dataset:", len(train_dataset))
+
 
 def process_math_dataset():
     data_source = "HuggingFaceH4/MATH"
@@ -468,4 +523,5 @@ if __name__ == "__main__":
     # process_numinamath_dataset()
     # process_dapomath_dataset()
     # process_math_dataset()
-    process_limr_dataset()
+    # process_limr_dataset()
+    process_oldaime_dataset()

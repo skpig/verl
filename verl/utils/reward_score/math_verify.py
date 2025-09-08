@@ -302,7 +302,7 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None, is_v
 
         # during training
         if not is_valid:
-            if data_source == "dapomath":
+            if data_source in ["dapomath", "oldaime"]:
                 extracted_predictions = extract_answer(solution_str, prompt_id) # only verify the answer part wrapped in <answer>...</answer>
                 gold_extraction_target=(ExprExtractionConfig(),) # reduce computation time for training, since DAPOmath only requires ExprExtractionConfig
             elif data_source == "limr":

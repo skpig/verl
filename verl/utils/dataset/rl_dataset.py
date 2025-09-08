@@ -159,6 +159,7 @@ class RLHFDataset(Dataset):
         config: DictConfig, # config.data
         processor: Optional[ProcessorMixin] = None,
         is_thinking_tokenizer: bool = False,
+        is_train: bool = True,
     ):
         if not isinstance(data_files, list | ListConfig):
             data_files = [data_files]
@@ -169,7 +170,7 @@ class RLHFDataset(Dataset):
         self.processor = processor
         self.config = config
         self.is_thinking_tokenizer = is_thinking_tokenizer
-
+        self.is_train = is_train
         self.cache_dir = os.path.expanduser(config.get("cache_dir", "~/.cache/verl/rlhf"))
         self.prompt_key = config.get("prompt_key", "prompt")
         self.image_key = config.get("image_key", "images")
@@ -220,7 +221,7 @@ class RLHFDataset(Dataset):
             dataframes.append(dataframe)
         self.dataframe: datasets.Dataset = datasets.concatenate_datasets(dataframes)
         # DEBUG:
-        if self.max_data_len is not None:
+        if self.max_data_len is not None and self.is_train:
             self.dataframe = self.dataframe.select(range(self.max_data_len))
 
         print(f"dataset len: {len(self.dataframe)}")
