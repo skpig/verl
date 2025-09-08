@@ -155,18 +155,14 @@ class InferScheduler():
             self.step_time = time.time()
 
     def init_cuda_graph(self):
-        self.bs_graph_map = {}
-        self.graph_decode_input_ids_placeholder = {}
-        self.graph_total_length_placeholder = {}
-        self.graph_kv_cache_index_placeholder = {}
-        self.output_placeholder = {}
-        self.graph_capture_bs_list = []
-        self.graph_capture_max_bs = 0
-        if not self.enable_cuda_graph or self.engine.module.wte_weight.is_meta or self.engine.is_xperf_triton:
+        self.release_cuda_graph()
+        if not self.enable_cuda_graph:
             return
+        assert not self.engine.module.wte_weight.is_meta
         memory_pool = None
         self.graph_capture_bs_list = [1, 2, 4] + list(range(8, 128 + 1, 8))
         self.graph_capture_max_bs = max(self.graph_capture_bs_list)
+        need_to_warmup = True
         for bs in self.graph_capture_bs_list:
             self.graph_decode_input_ids_placeholder[bs] = torch.zeros(bs, 1).cuda().int()
             self.graph_total_length_placeholder[bs] = torch.Tensor([1024] * bs).cuda().int()
@@ -177,8 +173,9 @@ class InferScheduler():
             self.output_placeholder[bs] = torch.zeros(bs, self.engine.module.config.vocab_size).cuda().bfloat16()
 
             self.bs_graph_map[bs] = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(self.bs_graph_map[bs], pool=memory_pool):
-                output = self.engine.forward_orca(context_labels_ids=None,
+
+            def run_inference():
+                output = self.engine.forward_orca(context_input_ids=None,
                                                   decode_input_ids=self.graph_decode_input_ids_placeholder[bs],
                                                   total_length=self.graph_total_length_placeholder[bs],
                                                   kv_cache_index=self.graph_kv_cache_index_placeholder[bs],
@@ -188,8 +185,23 @@ class InferScheduler():
                                                   return_padding_tensor=False,
                                                   last_token_only=True)
                 self.output_placeholder[bs].copy_(output)
+
+            if need_to_warmup:
+                run_inference()
+                need_to_warmup = False
+            with torch.cuda.graph(self.bs_graph_map[bs], pool=memory_pool):
+                run_inference()
             if memory_pool is None:
                 memory_pool = self.bs_graph_map[bs].pool()
+
+    def release_cuda_graph(self):
+        self.bs_graph_map = {}
+        self.graph_decode_input_ids_placeholder = {}
+        self.graph_total_length_placeholder = {}
+        self.graph_kv_cache_index_placeholder = {}
+        self.output_placeholder = {}
+        self.graph_capture_bs_list = []
+        self.graph_capture_max_bs = 0
 
     def internal_inference_orca(self, context_input: torch.Tensor, decode_input: torch.Tensor,
                                 total_length: torch.Tensor, kv_index: torch.Tensor, orca_updated: bool,
@@ -203,10 +215,10 @@ class InferScheduler():
                 # add padding
                 decode_input = torch.cat(
                     [decode_input,
-                     torch.zeros(padding_bs, dtype=decode_input.dtype, device=decode_input.device)])
+                     torch.zeros([padding_bs, 1], dtype=decode_input.dtype, device=decode_input.device)])
                 total_length = torch.cat(
                     [total_length,
-                     torch.ones(padding_bs, dtype=total_length.dtype, device=total_length.device)])
+                     torch.ones([padding_bs], dtype=total_length.dtype, device=total_length.device)])
                 kv_slot_for_padding = self.cache_manager.slot_num
                 if self.cache_manager.use_vllm:
                     kv_index = torch.cat([
@@ -220,7 +232,7 @@ class InferScheduler():
                 else:
                     kv_index = torch.cat([
                         kv_index,
-                        torch.full(padding_bs, kv_slot_for_padding, dtype=kv_index.dtype, device=kv_index.device)
+                        torch.full([padding_bs], kv_slot_for_padding, dtype=kv_index.dtype, device=kv_index.device)
                     ])
 
             self.graph_decode_input_ids_placeholder[cuda_graph_bs].copy_(decode_input)

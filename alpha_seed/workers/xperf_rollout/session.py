@@ -339,6 +339,18 @@ class InferenceSession:
         default_logger = logging.getLogger()
         default_logger.setLevel(logging_level)
 
+    def enter(self):
+        if self.is_xperf_triton:
+            self.engine.module.enter()
+        else:
+            self.infer_scheduler.init_cuda_graph()
+
+    def exit(self):
+        if self.is_xperf_triton:
+            self.engine.module.exit()
+        else:
+            self.infer_scheduler.release_cuda_graph()
+
     def init_inference_engine(
             self,
             session_config_path: str,

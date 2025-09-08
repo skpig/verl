@@ -141,12 +141,10 @@ class ActorXPerfGPTShardingManager(BaseShardingManager):
             # print("setting random states...", self.gen_random_states)
             torch.cuda.set_rng_state(self.gen_random_states)
 
-        if self.inference_engine.is_xperf_triton:
-            self.inference_engine.engine.module.enter()
+        self.inference_engine.enter()
 
     def __exit__(self, exc_type, exc_value, traceback):
-        if self.inference_engine.is_xperf_triton:
-            self.inference_engine.engine.module.exit()
+        self.inference_engine.exit()
         # restore random states
         if self.device_mesh is not None:
             self.gen_random_states = torch.cuda.get_rng_state()
