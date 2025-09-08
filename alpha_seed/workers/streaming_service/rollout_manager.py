@@ -780,14 +780,15 @@ class RolloutManager:
                                                               data=standalone_batch,
                                                               prefix="standalone_batch")
                     self._save_task_pool.extend([save_future1, save_future2])
-                # only report metrics from one generation replica
-                record_xperf_metrics(
-                    gen_batch_output,
-                    metrics,
-                    self.logger,
-                    step,
-                    prefix="standalone",
-                )
+                if not gen_batch_output.meta_info.get('xperf_metrics', None):
+                    # only report metrics from one generation replica
+                    record_xperf_metrics(
+                        gen_batch_output,
+                        metrics,
+                        self.logger,
+                        step,
+                        prefix="standalone",
+                    )
                 finished_num, ready_batch, pending_batch = process_output(
                     standalone_batch,
                     gen_batch_output,
