@@ -154,7 +154,7 @@ def async_tracking_log_samples(train_batch, tokenizer, metrics, global_step):
 
     # score distribution
     score_distribution = list(train_batch.non_tensor_batch['score'])
-    table = wandb.Table(columns=["score_distribution"], data=[[i] for i in score_distribution])
+    table = wandb.Table(columns=["score_distribution"], data=[[int(i)] for i in score_distribution])
     box = wandb.plot.box(table, title="score_distribution", columns=["score_distribution"])
     wandb.log({f"score_distribution/score_distribution_step{global_step}": box}, step=global_step)
     
