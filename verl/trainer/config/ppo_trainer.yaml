@@ -193,7 +193,7 @@ algorithm:
   # Dynamic Sampling from DAPO
   filter_groups:
 
-    enable: False
+    enable: True
 
     # metric for filtering groups
     metric: "acc"
