@@ -244,7 +244,7 @@ def load_case(dir, args, output_dir, bon=64, num_groups=1000):
         assert len(set(prompts[idx:idx+bon])) == 1
         # calculate response similarity
         cur_response_tokenized = response_tokenized[idx:idx+bon]
-        for length in [50, 200, 1000, 2000, 4000]:
+        for length in [50, 100, 200, 500, 1000]:
             trunc_response_tokenized = [i[:length] for i in cur_response_tokenized if len(i) > length]
             if len(trunc_response_tokenized) < 32:
                 continue
@@ -293,6 +293,9 @@ def sim_at_m_bootstrap(S: np.ndarray, m: int = 32, B: int = 5000,
     assert S.ndim == 2 and S.shape[0] == S.shape[1], "S 必须为 N×N 方阵"
     N = S.shape[0]
     rng = np.random.default_rng(seed)
+    if m == -1:
+        return S.sum() / (N * (N - 1) / 2)
+
 
     stats = np.empty(B, dtype=float)
     for b in range(B):
@@ -312,56 +315,31 @@ def sim_at_m_bootstrap(S: np.ndarray, m: int = 32, B: int = 5000,
 
     return est
 
-    
 def post_process(dir, args):
-    with open(f"{dir}/case_emb_sim_mean.pkl", "rb") as f:
-        results = pickle.load(f)
-    with open(f"{dir}/case_edit_results.pkl", "rb") as f:
-        edit_results = pickle.load(f)
-    # from collections import defaultdict
-    # idx2length2cossim = defaultdict(dict)
-    # idx2length2editdist = defaultdict(dict)
-    # idx2length2selfbleu = defaultdict(dict)
-    # for idx, length, cossim in results:
-    #     idx2length2cossim[idx][length] = cossim
-    # for idx, length, selfbleu, editdist in edit_results:
-    #     idx2length2editdist[idx][length] = editdist
-    #     idx2length2selfbleu[idx][length] = selfbleu
-
-    listofdict_cossim = []
-    listofdict_editdist = []
-    listofdict_selfbleu = []
-    for idx, length, cossim in results:
-        listofdict_cossim.append({"idx": idx, "length": length, "cossim": cossim})
-    for idx, length, selfbleu, editdist in edit_results:
-        listofdict_editdist.append({"idx": idx, "length": length, "editdist": editdist, "norm_editdist": editdist / length, "selfbleu": selfbleu})
-        listofdict_editdist.append({"idx": idx, "length": length, "editdist": editdist, "norm_editdist": editdist / length, "selfbleu": selfbleu})
-    
-    cossim_df = pd.DataFrame(listofdict_cossim)
-    editdist_df = pd.DataFrame(listofdict_editdist)
-    # selfbleu_df = pd.DataFrame(listofdict_selfbleu)
-
     import seaborn as sns
     import matplotlib.pyplot as plt
-    sns.set_theme(style="whitegrid")
-    # plt.figure(figsize=(10, 5))
-    # sns.violinplot(x="length", y="cossim", data=cossim_df)
-    # plt.savefig(f"case_emb_sim_mean.png")
+    # with open(os.path.join(dir, "case_emb_sim_mean.pkl"), "rb") as f:
+    #     results = pickle.load(f)
+    # with open(os.path.join(dir, "case_edit_results.pkl"), "rb") as f:
+    #     edit_results = pickle.load(f)
+    
+    # cossim_df = pd.DataFrame(listofdict_cossim)
+    # editdist_df = pd.DataFrame(listofdict_editdist)
+    # # selfbleu_df = pd.DataFrame(listofdict_selfbleu)
+
+    # sns.set_theme(style="whitegrid")
+    # # plt.figure(figsize=(10, 5))
+    # # sns.violinplot(x="length", y="cossim", data=cossim_df)
+    # # plt.savefig(f"case_emb_sim_mean.png")
+    # # plt.close()
+    # fig, (ax1, ax2) = plt.subplots(nrows=2, ncols=1, figsize=(10, 10), sharex=True)
+    # sns.violinplot(x="length", y="norm_editdist", data=editdist_df, ax=ax1)
+    # sns.violinplot(x="length", y="selfbleu", data=editdist_df, ax=ax2)
+    # plt.savefig(f"case_edit_dist_and_self_bleu_mean.png")
     # plt.close()
-    fig, (ax1, ax2) = plt.subplots(nrows=2, ncols=1, figsize=(10, 10), sharex=True)
-    sns.violinplot(x="length", y="norm_editdist", data=editdist_df, ax=ax1)
-    sns.violinplot(x="length", y="selfbleu", data=editdist_df, ax=ax2)
-    plt.savefig(f"case_edit_dist_and_self_bleu_mean.png")
-    plt.close()
 
     
 
-    # sim_matrix_path_list = glob.glob(f"{dir}/.cache/group_mean-*")
-    # for sim_matrix_path in sim_matrix_path_list:
-    #     with open(sim_matrix_path, "rb") as f:
-    #         sim_matrix = pickle.load(f)
-    #     groups = re.match(r".cache/group_mean-(.*)_(\d+).pkl", sim_matrix_path).groups()
-    #     idx, length = int(groups[0]), int(groups[1])
     edit_metrix_path_list = glob.glob(f"{dir}/.cache/self_bleu_and_edit_distance-*")
     all_list = []
     for edit_metrix_path in tqdm(edit_metrix_path_list):
@@ -372,9 +350,14 @@ def post_process(dir, args):
         # for i in range(len(rtn_tuple[0])):
         #     for j in range(i + 1, len(rtn_tuple[0])):
         #         all_list.append({"idx": idx, "length": length, "editdist": rtn_tuple[1][i, j], "norm_editdist": rtn_tuple[1][i, j] / length, "selfbleu": rtn_tuple[0][i, j]})
-        selfbleu_sim_at_32 = sim_at_m_bootstrap(selfbleu, m=32)
-        editdist_sim_at_32 = sim_at_m_bootstrap(editdist, m=32)
-        all_list.append({"idx": idx, "length": length, "self-bleu": selfbleu_sim_at_32, "norm-editdist": editdist_sim_at_32 / length})
+        # selfbleu_sim_at_32 = sim_at_m_bootstrap(selfbleu, m=32)
+        selfbleu_sim_at_all = sim_at_m_bootstrap(selfbleu, m=-1)
+        # editdist_sim_at_32 = sim_at_m_bootstrap(editdist, m=32)
+        editdist_sim_at_all = sim_at_m_bootstrap(editdist, m=-1)
+        if editdist_sim_at_all < 0:
+            print("Warning")
+
+        all_list.append({"idx": idx, "length": length, "self-bleu": selfbleu_sim_at_all, "norm-editdist": editdist_sim_at_all / length})
         
     editdist_df = pd.DataFrame(all_list)
     fig, (ax1, ax2) = plt.subplots(nrows=2, ncols=1, figsize=(10, 10), sharex=True)
@@ -409,6 +392,8 @@ if __name__ == '__main__':
     """Post Processing"""
     # ID80_LIMR = "/mnt/hdfs/huangbaizhou/tmp/ckpt/debug_hbz2/LIMR_ID80_bon64/"
     # post_process(ID80_LIMR, args)
+    # ID80_DAPO = "/mnt/hdfs/huangbaizhou/tmp/ckpt/debug_hbz2/DAPO_ID80_bon128/"
+    # post_process(ID80_DAPO, args)
 
 
 
