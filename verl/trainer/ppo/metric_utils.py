@@ -464,7 +464,7 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
 
     # query level acc
     query2acc = defaultdict(list)
-    for item, score in zip(batch.non_tensor_batch['item'], sequence_score):
+    for item, score in zip(batch.non_tensor_batch['item'], batch.non_tensor_batch['score']):
         query2acc[int(item)].append(score)
     query2acc = {query: np.mean(accs) for query, accs in query2acc.items()}
     metrics.update({f'critic/query_level_acc/mean': np.mean(list(query2acc.values())).item(), # this should be equal to critic/score/mean
