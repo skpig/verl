@@ -1403,6 +1403,10 @@ class RayPPOTrainer:
                             reward_tensor, reward_extra_infos_dict = ray.get(compute_reward_async.remote(new_batch, self.config, self.tokenizer))
                         else:
                             reward_tensor, reward_extra_infos_dict = compute_reward(new_batch, self.reward_fn)
+                        new_batch.batch["token_level_scores"] = reward_tensor
+
+                        if reward_extra_infos_dict:
+                            new_batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
                     
                     if self.config.algorithm.filter_groups.enable:
                         # NOTE: When prompts after filtering is less than train batch size,
@@ -1522,13 +1526,13 @@ class RayPPOTrainer:
 
                     with marked_timer("adv", timing_raw, color="brown"):
                         # we combine with rule-based rm
-                        reward_extra_infos_dict: dict[str, list]
-                        if self.config.reward_model.launch_reward_fn_async:
-                            reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
-                        batch.batch["token_level_scores"] = reward_tensor
+                        # reward_extra_infos_dict: dict[str, list]
+                        # if self.config.reward_model.launch_reward_fn_async:
+                            # reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
+                        # batch.batch["token_level_scores"] = reward_tensor
 
-                        if reward_extra_infos_dict:
-                            batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
+                        # if reward_extra_infos_dict:
+                        #     batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
 
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:
