@@ -23,6 +23,8 @@ import torch
 from uuid import uuid4
 import numpy as np
 from alpha_seed.workers.agents.envs.visual_cot import create_from_env_str
+from alpha_seed.workers.agents.handlers.vlm import post_process_eval_result
+from alpha_seed.utils.functional import import_from_string
 from mono_rl.utils.dataset.dist_data_util import get_dist_data_manager
 import ray
 
@@ -48,8 +50,20 @@ class VisualCotAgent(AsyncAgent):
         self.tools = {"visual_cot": self.visual_cot}
         self.tool_parser = VisualCotParser(tokenizer)
         self.dist_data_manager = get_dist_data_manager()
+        reward_manager_cls = import_from_string(kwargs['config'].tasks.reward_manager)
+        self.val_reward_fn = reward_manager_cls(tokenizer=tokenizer,
+                                                config=kwargs['config'],
+                                                logger=None,
+                                                rm_name="val",
+                                                single_batch=True)
 
     async def __call__(self, item: DataProto, context: TaskContext, **kwargs):
+        out = await self.__call_internal__(item, context, **kwargs)
+        if self.config.rollout_server.evals.enable:
+            out = await post_process_eval_result(item, out, self.executor, self.val_reward_fn)
+        return out
+
+    async def __call_internal__(self, item: DataProto, context: TaskContext, **kwargs):
         """Main agent loop with tool calling capability"""
         max_prompt_length = context.config.data.max_prompt_length
         max_response_length = context.config.data.max_response_length

@@ -9,7 +9,7 @@ echo $NUM_STEPS
 SFT_MODEL_PATH=hdfs://haruna/home/byte_data_seed/ssd_hldy/iccv/user/zhangxiaoying.xy/checkpoints/M8_2b5/hf/m8_vlm_m8_2b5_visualcot_ct_v393_s400_v4data_gt100_hf
 TRAIN_FILE=hdfs://harunawl/home/byte_data_seed_wl/user/caisonghua/v3.5.1-20B-PPO-PEv2_mini.parquet
 TEST_FILE=hdfs://harunawl/home/byte_data_seed_wl/user/caisonghua/vstar_fcsp_10.parquet
-default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/caisonghua/test/vlm_grpo3
+default_hdfs_dir=/mnt/hdfs/__MERLIN_USER_DIR__/vlm_evals2
 
 
 # 训练长度
@@ -102,7 +102,6 @@ python3 tasks/main_ppo.py \
     +actor_rollout_ref.rollout.num_slots=256 \
     +actor_rollout_ref.rollout.slot_block_size=1024 \
     actor_rollout_ref.ref.log_prob_micro_batch_size=${infer_micro_batch_size} \
-    actor_rollout_ref.ref.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.scale_pg_by_kl=False \
     actor_rollout_ref.actor.upgo_loss_weight=${upgo_loss_weight} \
     actor_rollout_ref.actor.upgo_loss_version=${upgo_loss_version} \
@@ -156,7 +155,18 @@ python3 tasks/main_ppo.py \
     rollout_server.handler="agent/tool/visual_cot" \
     data.dist_image=True \
     data.shuffle=False \
-    +trainer.volc_ark_key="f2b9d02c-4fd5-4a3c-a18f-ffaa806c1f64" \
-    +trainer.volc_model_name="ep-20250523002206-rn5sm" \
-    actor_rollout_ref.rollout.vlm.return_raw_output=True \
-    actor_rollout_ref.rollout.agent.max_turns=5
+    trainer.volc_ark_key="f2b9d02c-4fd5-4a3c-a18f-ffaa806c1f64" \
+    trainer.volc_model_name="ep-20250523002206-rn5sm" \
+    actor_rollout_ref.rollout.agent.max_turns=5 \
+    rollout_server.agent.executor_class=RayActorExecutor \
+    rollout_server.agent.max_workers=32 \
+    rollout_server.agent.worker_max_concurrency=256 \
+    +ext=vlm_ext \
+    tasks.reward_manager=tasks.vlm.reward_manager.VLMRewardManager \
+    rollout_server.evals.ckpt_interval_seconds=60 \
+    rollout_server.evals.enable=True \
+    actor_rollout_ref.rollout.max_ctx_batch_size=8 \
+    +actor_rollout_ref.rollout.vocab_tp=True \
+    actor_rollout_ref.rollout.vit_use_dp=True \
+    +data.think_template=v2
+

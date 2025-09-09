@@ -12,6 +12,7 @@ from alpha_seed.workers.agents.llm import AsyncLLMInterface
 from alpha_seed.workers.agents.handlers.vlm.parser import VisualCotParser
 from alpha_seed.workers.agents.envs.visual_cot import create_from_env_str
 from alpha_seed.utils.functional import import_from_string
+from alpha_seed.workers.agents.handlers.vlm import post_process_eval_result
 from mono_rl import DataProto
 
 logger = logging.getLogger(__name__)
@@ -44,19 +45,4 @@ class VLMEvalsAgent(AsyncAgent):
         from alpha_seed.workers.streaming_service.streaming_utils import DataPack, pack_to_dataproto
         data_pack = DataPack.create_from_completion_dict(completion['choices'][0]['message'])
         out = pack_to_dataproto(item, tokenizer, data_pack, rollout_config)
-        loop = asyncio.get_running_loop()
-        reward_tensor, prompt_str, solution_str = await loop.run_in_executor(self.executor, self.val_reward_fn, out, 0,
-                                                                             False, True, True)
-        reward_score = reward_tensor.sum(-1)[0].item()
-        val_epoch_id = item.meta_info['epoch_id']
-        bon_id = item.non_tensor_batch['bon_id'][0] if 'bon_id' in item.non_tensor_batch else 0
-        result = {
-            'prompt_id': item.non_tensor_batch['prompt_id'][0],
-            'index_id': item.non_tensor_batch['index'][0],
-            'val_epoch_id': val_epoch_id,
-            'bon_id': bon_id,
-            'reward': reward_score,
-            'prompt': prompt_str,
-            'response': solution_str,
-        }
-        return result
+        return await post_process_eval_result(item, out, self.executor, self.val_reward_fn)
