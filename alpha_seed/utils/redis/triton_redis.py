@@ -1,10 +1,14 @@
 import os
-from typing import Dict, List
+import json
+from typing import Dict, List, Optional
 import bytedredis
-from triton.runtime.cache import RedisRemoteCacheBackend, RemoteCacheBackend
+from triton.runtime.cache import RedisRemoteCacheBackend, RemoteCacheBackend, RemoteCacheManager
 from concurrent.futures import ThreadPoolExecutor
 import pickle
 import uuid
+import logging
+
+logger = logging.getLogger(__name__)
 
 ARNOLD_REGION = os.getenv("ARNOLD_REGION", "CN")
 if ARNOLD_REGION == "CN":
@@ -67,11 +71,43 @@ class HdfsRemoteCacheBackend(RemoteCacheBackend):
     def _write_to_hdfs(self, key, data):
         cache_path = os.path.join(self.root, key)
         tmp_path = cache_path + "_tmp_" + str(uuid.uuid4())
-        with open(tmp_path, 'wb') as f:
-            pickle.dump(data, f)
-        os.rename(tmp_path, cache_path)
+        try:
+            with open(tmp_path, 'wb') as f:
+                pickle.dump(data, f)
+            os.rename(tmp_path, cache_path)
+        except Exception as e:
+            logger.warning(f"[HDFS Cache WARN] write {cache_path} failed: {e}")
 
     def put(self, filename: str, data: bytes) -> Dict[str, bytes]:
         key = self._get_key(filename)
         self.memory_cache[key] = data
         self.executor.submit(self._write_to_hdfs, key, data)
+
+
+class HdfsRemoteCacheManager(RemoteCacheManager):
+
+    def get_group(self, filename: str) -> Optional[Dict[str, str]]:
+        # We don't handle the dump/override cases.
+        if self._dump or self._override:
+            return self._file_cache_manager.get_group(filename)
+
+        grp_filename = f"__grp__{filename}"
+        grp_filepath = self.get_file(grp_filename)
+        if grp_filepath is None:
+            return None
+        with open(grp_filepath) as f:
+            grp_data = json.load(f)
+        child_paths = grp_data.get("child_paths", None)
+
+        result = None
+
+        # Found group data.
+        if child_paths is not None:
+            result = {}
+            for child_path, data in self._backend.get(child_paths).items():
+                result[child_path] = self._materialize(child_path, data)
+        # ['*.cubin', '*.json', '*.llir', '*.ptx', '*.ttgir', '*.ttir']
+        if len(result) != 6:
+            logger.warning(f"[HDFS Cache WARN] {grp_filename} keys={list(result.keys())}, expect 6 files")
+            return None
+        return result
