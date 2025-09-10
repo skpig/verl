@@ -20,11 +20,12 @@ This trainer supports model-agonistic model initialization with huggingface
 
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
+import random
 import time
 import json
 import os
 import uuid
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -499,11 +500,36 @@ class RayPPOTrainer:
         }
         # self.artifact = 
 
+        self.replay_buffer = deque(maxlen=self.config.trainer.replay_buffer.time_step)
+    
+    def update_replay_buffer(self, batch: DataProto):
+        if len(self.replay_buffer) == self.config.trainer.replay_buffer.time_step:
+            self.replay_buffer.popleft()
+        self.replay_buffer.append(batch)
+
+    def sample_replay_buffer(self):
+        rtn = None
+        for batch in self.replay_buffer:
+            item_set = set(batch.non_tensor_batch["item"])
+            # sample self.config.trainer.replay_buffer.item_per_step items from item_set
+            item_choice = random.sample(list(item_set), self.config.trainer.replay_buffer.item_per_step)
+            valid_idx = [i for i in range(len(batch)) if batch.non_tensor_batch["item"][i] in item_choice]
+            batch = batch.select_idxs(valid_idx)
+            if rtn is None:
+                rtn = batch
+            else:
+                rtn = rtn.union(batch)
+        assert len(rtn) == self.config.trainer.replay_buffer.item_per_step * self.config.trainer.replay_buffer.time_step * self.config.actor_rollout_ref.rollout.n, "Replay buffer sample size is not correct"
+        return rtn
+
 
     def _validate_config(self):
         config = self.config
         # number of GPUs total
         n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
+
+        assert not config.reward_model.launch_reward_fn_async, "Reward function cannot be launched asynchronously"
+
         if config.actor_rollout_ref.actor.strategy == "megatron":
             model_parallel_size = (
                 config.actor_rollout_ref.actor.megatron.tensor_model_parallel_size
@@ -714,7 +740,7 @@ class RayPPOTrainer:
         else:
             self.train_dataloader = StatefulDataLoader(
                 dataset=self.train_dataset,
-                batch_size=self.config.data.get("gen_batch_size", self.config.data.train_batch_size),
+                batch_size=self.config.data.get("gen_batch_size", self.config.data.train_batch_size) - self.config.trainer.replay_buffer.item_per_step * self.config.trainer.replay_buffer.time_step,
                 num_workers=num_workers,
                 drop_last=True,
                 collate_fn=collate_fn,
@@ -1333,7 +1359,6 @@ class RayPPOTrainer:
                     self._start_profiling(do_profile)
 
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
-                # breakpoint()
 
                 # pop those keys for generation
                 batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
@@ -1538,6 +1563,13 @@ class RayPPOTrainer:
                                     "training/rollout_probs_diff_std": rollout_probs_diff_std.detach().item(),
                                 }
                             )
+                    
+                    batch_to_be_buffer = batch
+                    # concat replay buffer
+                    if self.global_steps >= self.config.trainer.replay_buffer.time_step:
+                        replay_batch = self.sample_replay_buffer()
+                        batch = replay_batch.union(batch)
+                    self.update_replay_buffer(batch_to_be_buffer)
 
                     if self.use_reference_policy:
                         # compute reference log_prob

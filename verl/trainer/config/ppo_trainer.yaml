@@ -200,6 +200,13 @@ algorithm:
 
   # Prioritized from KIMI 1.5
 
+
+  # replay buffer
+  replay_buffer:
+    enable: True
+    time_step: 1
+    item_per_step: 64
+
 # config for the trainer
 trainer:
 
