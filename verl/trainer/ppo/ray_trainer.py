@@ -1393,12 +1393,20 @@ class RayPPOTrainer:
                 with marked_timer("step", timing_raw):
                     # generate a batch
                     with marked_timer("gen", timing_raw, color="red"):
+                        # pad_size = self.config.algorithm.replay_buffer.item_per_step * self.config.algorithm.replay_buffer.time_step * self.config.actor_rollout_ref.rollout.n
+                        # padding_batch = gen_batch[:pad_size]
+                        # gen_batch_w_padding = DataProto.concat([gen_batch, padding_batch])
+                        # gen_batch_w_padding.non_tensor_batch['is_padding'] = np.concatenate([np.zeros(len(gen_batch), dtype=bool), np.ones(len(padding_batch), dtype=bool)])
+
                         if not self.async_rollout_mode:
                             gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
                         else:
                             gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
                         timing_raw.update(gen_batch_output.meta_info["timing"])
                         gen_batch_output.meta_info.pop("timing", None)
+
+                        # breakpoint()
+                        # gen_batch_output = gen_batch_output[:-pad_size]
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with marked_timer("gen_max", timing_raw, color="purple"):
@@ -1564,9 +1572,10 @@ class RayPPOTrainer:
                                 }
                             )
                     
-                    batch_to_be_buffer = batch
+                    batch_to_be_buffer = deepcopy(batch)
                     # concat replay buffer
                     if self.global_steps > self.config.algorithm.replay_buffer.time_step:
+                        # breakpoint()
                         replay_batch = self.sample_replay_buffer()
                         batch = DataProto.concat([replay_batch, batch])
                     self.update_replay_buffer(batch_to_be_buffer)

@@ -691,9 +691,13 @@ class SGLangRollout(BaseRollout):
                     }
                 )
         else:
-            if "partial_rollout_len" not in non_tensor_batch:
+            if "partial_rollout_len" not in non_tensor_batch and "is_padding" not in non_tensor_batch:
                 sglang_inputs = [
                     {"prompt_token_ids": raw_prompt_ids} for raw_prompt_ids in non_tensor_batch.pop("raw_prompt_ids")
+                ]
+            elif "is_padding" in non_tensor_batch:
+                sglang_inputs = [
+                    {"prompt_token_ids": raw_prompt_ids, "is_padding": is_padding} for raw_prompt_ids, is_padding in zip(non_tensor_batch.pop("raw_prompt_ids"), non_tensor_batch.pop("is_padding"))
                 ]
             else:
                 # breakpoint()
@@ -721,6 +725,8 @@ class SGLangRollout(BaseRollout):
         # Extract token IDs and image data for SGLang Engine
         idx_list = [input_data["prompt_token_ids"] for input_data in sglang_inputs]
         max_length_list = [self.config.response_length - input_data.get("partial_rollout_len", 0) for input_data in sglang_inputs]
+        if "is_padding" in non_tensor_batch:
+            max_length_list = [0 if input_data.get("is_padding", False) else max_length for input_data, max_length in zip(sglang_inputs, max_length_list)]
         image_list = [input_data.get("image_data", None) for input_data in sglang_inputs]
 
         do_sample = prompts.meta_info.get("do_sample", True)
@@ -761,7 +767,7 @@ class SGLangRollout(BaseRollout):
 
         if self._tp_rank == 0:
             loop = asyncio.get_event_loop()
-            if "partial_rollout_len" not in non_tensor_batch:
+            if "partial_rollout_len" not in non_tensor_batch and "is_padding" not in non_tensor_batch:
                 output = loop.run_until_complete(
                     self._engine.async_generate(
                         prompt=None,  # because we have already convert it to prompt token id
