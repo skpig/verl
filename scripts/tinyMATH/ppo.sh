@@ -1,4 +1,4 @@
-RUN_ID=105
+RUN_ID=49
 WANDB_VERSION=bwandb
 # one node
 FORWARD_RATIO=10
@@ -13,7 +13,7 @@ VAL_TOPK=20
 
 # Model settings
 USE_OVERLONG=True
-SAMPLER=tree # null, tree, mopps
+SAMPLER=None # null, tree, mopps
 DATA_WORKERS=0
 CRITIC_WARMUP=0
 PROMPT_ID=4
@@ -27,20 +27,14 @@ MAX_RESPONSE_LEN=$((1024 * 5 + OVERLONG_BUFFER_LEN))
 CLIP_HIGHER=0.28
 
 # Tree Sampler settings
-TREE_SAMPLER=pg # mcts pg
+TREE_SAMPLER=epsilon # mcts pg
 EPSILON=0.2
 
 # Tree Selector
-TREE_SELECTOR=mix2 # value entropy mix, mix2
+TREE_SELECTOR=value # entropy mix1
 ROLLOUT_RATIO=0.7
-INCORRECT_PROB=0.
-ROOT_ONLY=True
-DIV_THRESHOLD=3 # 0 by default
-NUM_GIBBS=20
-GIBBS_DISCOUNT=0.99
-USE_WARMUP=True # default is False
-GIBBS_SIGMA=0.5 #  null by default
-GIBBS_MU=0 # -0.5 by default
+
+
 
 # Performance tuning
 N_NODES=${ARNOLD_WORKER_NUM:-1}
@@ -74,7 +68,7 @@ TEST_FILES="${MY_DATA_DIR}merged_math_datasets/merged_test.parquet"
 PROJ_NAME="debug_hbz"
 MODEL_NAME=$(basename $BASE_MODEL)
 DATA_NAME=DAPOMATH
-EXPERIMENT_NAME="ID${RUN_ID}_${DATA_NAME}_ppo_sampler${SAMPLER}_clip${CLIP_HIGHER}_${MODEL_NAME}_prompt${PROMPT_ID}_n${ROLLOUT_N}_resplen${MAX_RESPONSE_LEN}_bsz${BATCH_SIZE}-${MINI_BSZ}"
+EXPERIMENT_NAME="ID${RUN_ID}_${DATA_NAME}_ppo_replaybuffer_clip${CLIP_HIGHER}_${MODEL_NAME}_prompt${PROMPT_ID}_n${ROLLOUT_N}_resplen${MAX_RESPONSE_LEN}_bsz${BATCH_SIZE}-${MINI_BSZ}"
 
 python3 examples/data_preprocess/custom.py \
     --resume
@@ -110,15 +104,7 @@ CMD="python3 -m verl.trainer.main_ppo \
     data.truncation='error' \
     data.sampler.tree_sampler.name=${TREE_SAMPLER} \
     data.sampler.tree_sampler.epsilon=${EPSILON} \
-    data.sampler.tree_sampler.diverse_threshold=${DIV_THRESHOLD} \
-    data.sampler.tree_sampler.gibbs_sweeps=${NUM_GIBBS} \
-    data.sampler.tree_sampler.gamma=${GIBBS_DISCOUNT} \
-    data.sampler.tree_sampler.use_warmup=${USE_WARMUP} \
-    data.sampler.tree_sampler.sigma0=${GIBBS_SIGMA} \
-    data.sampler.tree_sampler.mu0=${GIBBS_MU} \
     data.tree_data.partial_rollout_ratio=${ROLLOUT_RATIO} \
-    data.tree_data.keep_incorrect_prob=${INCORRECT_PROB} \
-    data.tree_data.root_only=${ROOT_ONLY} \
     data.tree_data.name=${TREE_SELECTOR} \
     actor_rollout_ref.model.path=$BASE_MODEL \
     actor_rollout_ref.model.use_remove_padding=True \
@@ -152,7 +138,6 @@ CMD="python3 -m verl.trainer.main_ppo \
     critic.forward_max_token_len_per_gpu=$FORWARD_MAX_TOKEN_LEN \
     algorithm.use_kl_in_reward=True \
     algorithm.kl_ctrl.kl_coef=0.0 \
-    reward_model.launch_reward_fn_async=True \
     reward_model.overlong_buffer.enable=${USE_OVERLONG} \
     reward_model.overlong_buffer.len=$OVERLONG_BUFFER_LEN \
     reward_model.overlong_buffer.penalty_factor=${OVERLONG_COEF} \
