@@ -135,11 +135,14 @@ class CacheManager:
         for query in waiting_queries:
             threshold = self.moving_avg_len // self.slot_block_size
             status = self._update_query(query, threshold=threshold)
+            while threshold > 0 and status == UpdateQueryStatus.ALLOC_INSUFFICIENT_SLOT:
+                status = self._update_query(query, threshold=threshold)
+                threshold -= 1
             while (status == UpdateQueryStatus.ALLOC_INSUFFICIENT_SLOT) and (
                     self.cur_bs_this_run
                     < len(allocated_paused_queries)) and self._release_one_paused_(allocated_paused_queries):
                 # If paused queries with kv cache is more than half, allow release them for waiting queries to run
-                status = self._update_query(query, threshold=threshold)
+                status = self._update_query(query, threshold=0)
 
             if status == UpdateQueryStatus.SUCCESS:
                 phase0_running.append(query)

@@ -382,6 +382,7 @@ class RLHFDatasetVL(RLHFDataset):
 
         index = row_dict.get("extra_info", {}).get("index", item)  ## important for grpo to group info
         row_dict_ret["index"] = index
+        row_dict_ret['max_new_tokens'] = self.max_response_length
         row_dict_ret['prompt_names'] = [""]
         row_dict_ret['prompt'] = prompt
 

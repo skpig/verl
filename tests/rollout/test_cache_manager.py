@@ -47,6 +47,8 @@ def test_scheduler(use_vllm, schedule_strategy: str):
             token_len = len(query.input_ids) + len(query.new_token_ids)
             kv_slot_num = len(query.kv_slot_ids)
             if use_vllm:
+                if (token_len + slot_block_size - 1) // slot_block_size > kv_slot_num:
+                    breakpoint()
                 assert (token_len + slot_block_size - 1) // slot_block_size <= kv_slot_num
             else:
                 assert kv_slot_num == 1
@@ -153,3 +155,7 @@ def test_scheduler(use_vllm, schedule_strategy: str):
     assert mgr.get_kv_cache_utils() == 0
     print(f"use_vllm={use_vllm}, schedule_strategy={schedule_strategy}, steps={step}, "
           f"swap_out_bs={page_swap_bs}, swap_out_tokens={page_swap_tokens}")
+
+
+if __name__ == '__main__':
+    test_scheduler(use_vllm=True, schedule_strategy='default')

@@ -668,7 +668,10 @@ class InferenceSession:
             top_k = [meta_info.get("top_k", None) for meta_info in prompt_meta_info]
             top_p = [meta_info.get("top_p", None) for meta_info in prompt_meta_info]
             temperature = [meta_info.get("temperature", None) for meta_info in prompt_meta_info]
-            max_new_tokens = [meta_info.get("max_new_tokens", self.max_new_tokens) for meta_info in prompt_meta_info]
+            max_new_tokens = [
+                min(meta_info.get("max_new_tokens", self.max_new_tokens),
+                    meta_info.get("max_new_tokens_this_turn", self.max_new_tokens)) for meta_info in prompt_meta_info
+            ]
             max_length = [meta_info.get("max_length", self.max_length) for meta_info in prompt_meta_info]
         for idx, input_ids in enumerate(input_ids_list):
             code_book = self._prepare_codebooks(input_ids, code_book=code_books[idx])

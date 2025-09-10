@@ -13,10 +13,13 @@ from mono_rl import DataProto
 
 
 def rmpad(item):
+    response_len = item.batch['attention_mask'][:, item.batch['prompts'].shape[1]:].sum(-1).item()
     start_idx = torch.nonzero(item.batch['attention_mask'].flatten())[0]
     end_idx = start_idx + item.batch['attention_mask'].sum(-1)
     item.batch['input_ids'] = item.batch['input_ids'][:, start_idx:end_idx]
     item.batch['attention_mask'] = item.batch['attention_mask'][:, start_idx:end_idx]
+    if 'max_new_tokens' in item.non_tensor_batch:
+        item.non_tensor_batch['max_new_tokens_this_turn'] = item.non_tensor_batch['max_new_tokens'] - response_len
     return item
 
 
@@ -84,6 +87,8 @@ def process_output(input_batch, output_batch, tokenizer, ready_batch, pending_ba
                                             -1 if gen_len >= max_response_length else gen_len] = tokenizer.eos_token_id
                     item.batch['attention_mask'][:, -1 if item.batch['prompts'].shape[1] +
                                                  gen_len >= total_len else item.batch['prompts'].shape[1] + gen_len] = 1
+                if 'max_new_tokens_this_turn' in item.non_tensor_batch.keys():
+                    item.pop(non_tensor_batch_keys=['max_new_tokens_this_turn'])
                 ready_batch.append(item)
             else:
                 pending_batch.append(rmpad(item))

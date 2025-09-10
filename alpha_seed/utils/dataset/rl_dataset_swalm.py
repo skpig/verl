@@ -60,6 +60,7 @@ class RLHFDatasetSwalm(RLHFDataset):
                     row_dict['raw_prompt'] = []
 
             row_dict["index"] = index
+            row_dict['max_new_tokens'] = self.max_response_length
             row_dict['prompt_names'] = [""]
 
             logging.info(

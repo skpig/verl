@@ -389,7 +389,7 @@ class RLHFDataset(Dataset):
         row_dict['attention_mask'] = row_dict['attention_mask'].to(torch.int8)
         row_dict['answer_input_ids'] = row_dict['answer_input_ids'].to(torch.int32)
         row_dict['answer_attention_mask'] = row_dict['answer_attention_mask'].to(torch.int8)
-
+        row_dict['max_new_tokens'] = self.max_response_length
         if self.use_grm:
             row_dict['grm_pre_ids'] = row_dict['grm_pre_ids'].to(torch.int32)
             row_dict['grm_post_ids'] = row_dict['grm_post_ids'].to(torch.int32)
