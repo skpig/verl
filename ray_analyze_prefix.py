@@ -29,6 +29,9 @@ class EmbedWorker:
     ):
         import torch
         from sentence_transformers import SentenceTransformer
+        from rouge_score import rouge_scorer
+
+        self.scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
 
         self.cache_dir = f"{output_dir}/.cache"
         os.makedirs(self.cache_dir, exist_ok=True)
@@ -58,6 +61,52 @@ class EmbedWorker:
             model_kwargs=model_kwargs,
             tokenizer_kwargs=tokenizer_kwargs,
         )
+    
+    def compute_rougel_score_for_ids(self, idx_an_texts: Tuple[int, int, List[str]]):
+        """
+        计算一组文本的 ROUGE-L 分数。
+        
+        :param idx_an_texts: Tuple[int, int, List[str]], 包含 (组索引, 长度, 文本列表)
+        :return: (idx, length, avg_rouge_l)
+        """
+        idx, length, texts = idx_an_texts
+
+        N = len(texts)
+        cnt = (N * (N - 1)) / 2
+
+        cache_path = f"{self.cache_dir}/rouge_l-{idx}_{length}.pkl"
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path, "rb") as f:
+                    rouge_scores = pickle.load(f)
+                print(f"Loaded cached rouge-l for {idx}_{length}")
+                return (idx, length, np.sum(rouge_scores) / cnt)
+            except Exception:
+                print(f"Failed to load cached rouge-l for {idx}_{length}")
+
+        rouge_scores = np.zeros((len(texts), len(texts)))
+        
+        # 计算每对文本之间的 ROUGE-L 分数
+        for i in range(len(texts)):
+            for j in range(i + 1, len(texts)):
+                # 计算 ROUGE-L 分数
+                scores = self.scorer.score(texts[i], texts[j])
+                rouge_l_score = scores['rougeL'].fmeasure  # 获取 F1 分数
+                rouge_scores[i, j] = rouge_l_score
+                
+        # 使用临时文件写入，然后移动到目标位置，避免程序突然退出时损坏缓存
+        with tempfile.NamedTemporaryFile(mode='wb', delete=False, dir=os.path.dirname(cache_path)) as temp_f:
+            pickle.dump(rouge_scores, temp_f)
+            temp_path = temp_f.name
+        
+        # 原子性地移动到目标位置
+        shutil.move(temp_path, cache_path)
+        # 计算平均值
+        avg_rouge_l = np.sum(rouge_scores) / cnt
+        
+        rouge_result = (idx, length, avg_rouge_l)
+        print(f"Finished computing rouge-l for {idx}_{length}")
+        return rouge_result
     
     def compute_self_bleu_and_edit_distance_for_ids(self, idx_and_texts: Tuple[int, int, list[list[int]]]):
         """
@@ -199,10 +248,12 @@ def ray_compute_group_means(
 
     # 轮转把任务分发给各个 Actor（64 条/组，负载很均衡，简单轮转即可）
     futures = []
+    rouge_futures = []
     for i, group in enumerate(groups):
         w = workers[i % shards]
         futures.append(w.compute_group_mean.remote(group))
-    
+        rouge_futures.append(w.compute_rougel_score_for_ids.remote(group))
+
     edit_futures = []
     for i, edit_group in enumerate(edit_groups):
         w = workers[i % shards]
@@ -211,8 +262,9 @@ def ray_compute_group_means(
 
     results = ray.get(futures)
     edit_results = ray.get(edit_futures)
+    rouge_results = ray.get(rouge_futures)
 
-    return results, edit_results
+    return results, edit_results, rouge_results
 
 
 def load_case(dir, args, output_dir, bon=64, num_groups=1000):
@@ -259,7 +311,7 @@ def load_case(dir, args, output_dir, bon=64, num_groups=1000):
     print(f"All groups: {len(groups)}")
 
 
-    results, edit_results = ray_compute_group_means(
+    results, edit_results, rouge_results = ray_compute_group_means(
         output_dir=output_dir,
         groups=groups,
         edit_groups=edit_groups,
@@ -271,6 +323,8 @@ def load_case(dir, args, output_dir, bon=64, num_groups=1000):
 
     with open(f"{output_dir}/case_emb_sim_mean.pkl", "wb") as f:
         pickle.dump(results, f)
+    with open(f"{output_dir}/case_rougel_results.pkl", "wb") as f:
+        pickle.dump(rouge_results, f)
     with open(f"{output_dir}/case_edit_results.pkl", "wb") as f:
         pickle.dump(edit_results, f)
 
@@ -318,25 +372,34 @@ def sim_at_m_bootstrap(S: np.ndarray, m: int = 32, B: int = 5000,
 def post_process(dir, args):
     import seaborn as sns
     import matplotlib.pyplot as plt
-    # with open(os.path.join(dir, "case_emb_sim_mean.pkl"), "rb") as f:
-    #     results = pickle.load(f)
-    # with open(os.path.join(dir, "case_edit_results.pkl"), "rb") as f:
-    #     edit_results = pickle.load(f)
+    with open(os.path.join(dir, "case_emb_sim_mean.pkl"), "rb") as f:
+        results = pickle.load(f)
+    with open(os.path.join(dir, "case_edit_results.pkl"), "rb") as f:
+        edit_results = pickle.load(f)
+    with open(f"{dir}/case_rougel_results.pkl", "rb") as f:
+        rouge_results = pickle.load(f)
+    
+    # listofdict_cossim = [{"idx": result[0], "length": result[1], "cossim": result[2]} for result in results]
+    listofdict_editdist = [{"idx": result[0], "length": result[1], "norm_editdist": result[3] / result[1]} for result in edit_results]
+    listofdict_rougel = [{"idx": result[0], "length": result[1], "rougel": result[2]} for result in rouge_results]
     
     # cossim_df = pd.DataFrame(listofdict_cossim)
-    # editdist_df = pd.DataFrame(listofdict_editdist)
-    # # selfbleu_df = pd.DataFrame(listofdict_selfbleu)
+    editdist_df = pd.DataFrame(listofdict_editdist)
+    rougel_df = pd.DataFrame(listofdict_rougel)
 
-    # sns.set_theme(style="whitegrid")
-    # # plt.figure(figsize=(10, 5))
-    # # sns.violinplot(x="length", y="cossim", data=cossim_df)
-    # # plt.savefig(f"case_emb_sim_mean.png")
-    # # plt.close()
-    # fig, (ax1, ax2) = plt.subplots(nrows=2, ncols=1, figsize=(10, 10), sharex=True)
-    # sns.violinplot(x="length", y="norm_editdist", data=editdist_df, ax=ax1)
-    # sns.violinplot(x="length", y="selfbleu", data=editdist_df, ax=ax2)
-    # plt.savefig(f"case_edit_dist_and_self_bleu_mean.png")
+    sns.set_theme(style="whitegrid")
+    # plt.figure(figsize=(10, 5))
+    # sns.violinplot(x="length", y="cossim", data=cossim_df)
+    # plt.savefig(f"case_emb_sim_mean.png")
     # plt.close()
+    fig, (ax1, ax2) = plt.subplots(nrows=2, ncols=1, figsize=(10, 10), sharex=True)
+    sns.violinplot(x="length", y="norm_editdist", data=editdist_df, ax=ax1)
+    # sns.violinplot(x="length", y="selfbleu", data=editdist_df, ax=ax2)
+    sns.violinplot(x="length", y="rougel", data=rougel_df, ax=ax2)
+    plt.savefig(f"case_edit_dist_and_rougel_mean.png")
+    plt.close()
+
+    exit(0)
 
     
 
@@ -385,15 +448,15 @@ if __name__ == '__main__':
     # Use id80 to calculate case similarity
     # ID80_LIMR = "/mnt/hdfs/huangbaizhou/tmp/ckpt/debug_hbz2/LIMR_ID80_bon64/"
     # load_case(ID80_LIMR, args, bon=64, output_dir=ID80_LIMR)
-    ID80_DAPO = "/mnt/hdfs/huangbaizhou/tmp/ckpt/debug_hbz2/DAPO_ID80_bon128/"
-    load_case(ID80_DAPO, args, bon=128, output_dir=ID80_DAPO, num_groups=args.num_groups)
+    # ID80_DAPO = "/mnt/hdfs/huangbaizhou/tmp/ckpt/debug_hbz2/DAPO_ID80_bon128/"
+    # load_case(ID80_DAPO, args, bon=128, output_dir=ID80_DAPO, num_groups=args.num_groups)
 
 
     """Post Processing"""
     # ID80_LIMR = "/mnt/hdfs/huangbaizhou/tmp/ckpt/debug_hbz2/LIMR_ID80_bon64/"
     # post_process(ID80_LIMR, args)
-    # ID80_DAPO = "/mnt/hdfs/huangbaizhou/tmp/ckpt/debug_hbz2/DAPO_ID80_bon128/"
-    # post_process(ID80_DAPO, args)
+    ID80_DAPO = "/mnt/hdfs/huangbaizhou/tmp/ckpt/debug_hbz2/DAPO_ID80_bon128/"
+    post_process(ID80_DAPO, args)
 
 
 
