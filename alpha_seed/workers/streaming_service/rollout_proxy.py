@@ -550,7 +550,7 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
         self.replicas = replicas
         self.actor_info = actor_info  # hybrid rollout actor info
         self.config = config  # .streaming_rollout
-        self._tracer = Tracer.get_instance(retention_hours=self.config.query_trace.retention_hours)
+        self._tracer: Optional[Tracer] = None  # dispatch loop thread专用tracer
         self._stop_server_ts = 0
         self._update_worker_start_ts = 0
         self._request_manager_name = request_manager_name
@@ -573,6 +573,7 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
         self._update_loop_thread.start()
 
     def _run_dispatch_loop(self):
+        self._tracer = Tracer.get_instance(retention_hours=self.config.query_trace.retention_hours)
         asyncio.run(self._dispatch_loop())
 
     def _update_loop(self):

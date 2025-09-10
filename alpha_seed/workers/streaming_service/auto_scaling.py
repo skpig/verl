@@ -4,7 +4,7 @@ import time
 import traceback
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 import ray
 from ray import ObjectRef
@@ -55,11 +55,12 @@ class HorizontalAutoScaling:
         self.config = config
         self.metric_source = metric_source
         self._is_local_ray_cluster = is_local_ray_instance()
-        self._tracer = Tracer.get_instance()
+        self._tracer: Optional[Tracer] = None  # _scaling_loop 专用tracer
 
         threading.Thread(target=self._scaling_loop, daemon=True, name=f'scaling-loop/{worker_pool_name}').start()
 
     def _scaling_loop(self):
+        self._tracer = Tracer.get_instance()
         check_interval = self.config.metrics_sampling_seconds
         loop_count = 0
         while True:
