@@ -500,10 +500,10 @@ class RayPPOTrainer:
         }
         # self.artifact = 
 
-        self.replay_buffer = deque(maxlen=self.config.trainer.replay_buffer.time_step)
+        self.replay_buffer = deque(maxlen=self.config.algorithm.replay_buffer.time_step)
     
     def update_replay_buffer(self, batch: DataProto):
-        if len(self.replay_buffer) == self.config.trainer.replay_buffer.time_step:
+        if len(self.replay_buffer) == self.config.algorithm.replay_buffer.time_step:
             self.replay_buffer.popleft()
         self.replay_buffer.append(batch)
 
@@ -511,15 +511,15 @@ class RayPPOTrainer:
         rtn = None
         for batch in self.replay_buffer:
             item_set = set(batch.non_tensor_batch["item"])
-            # sample self.config.trainer.replay_buffer.item_per_step items from item_set
-            item_choice = random.sample(list(item_set), self.config.trainer.replay_buffer.item_per_step)
+            # sample self.config.algorithm.replay_buffer.item_per_step items from item_set
+            item_choice = random.sample(list(item_set), self.config.algorithm.replay_buffer.item_per_step)
             valid_idx = [i for i in range(len(batch)) if batch.non_tensor_batch["item"][i] in item_choice]
             batch = batch.select_idxs(valid_idx)
             if rtn is None:
                 rtn = batch
             else:
                 rtn = rtn.union(batch)
-        assert len(rtn) == self.config.trainer.replay_buffer.item_per_step * self.config.trainer.replay_buffer.time_step * self.config.actor_rollout_ref.rollout.n, "Replay buffer sample size is not correct"
+        assert len(rtn) == self.config.algorithm.replay_buffer.item_per_step * self.config.algorithm.replay_buffer.time_step * self.config.actor_rollout_ref.rollout.n, "Replay buffer sample size is not correct"
         return rtn
 
 
@@ -740,7 +740,7 @@ class RayPPOTrainer:
         else:
             self.train_dataloader = StatefulDataLoader(
                 dataset=self.train_dataset,
-                batch_size=self.config.data.get("gen_batch_size", self.config.data.train_batch_size) - self.config.trainer.replay_buffer.item_per_step * self.config.trainer.replay_buffer.time_step,
+                batch_size=self.config.data.get("gen_batch_size", self.config.data.train_batch_size) - self.config.algorithm.replay_buffer.item_per_step * self.config.algorithm.replay_buffer.time_step,
                 num_workers=num_workers,
                 drop_last=True,
                 collate_fn=collate_fn,
@@ -1566,9 +1566,9 @@ class RayPPOTrainer:
                     
                     batch_to_be_buffer = batch
                     # concat replay buffer
-                    if self.global_steps >= self.config.trainer.replay_buffer.time_step:
+                    if self.global_steps > self.config.algorithm.replay_buffer.time_step:
                         replay_batch = self.sample_replay_buffer()
-                        batch = replay_batch.union(batch)
+                        batch = DataProto.concat([replay_batch, batch])
                     self.update_replay_buffer(batch_to_be_buffer)
 
                     if self.use_reference_policy:
