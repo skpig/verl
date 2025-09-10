@@ -279,7 +279,7 @@ class CriticWorker(Worker):
                 with Timer(name='update_critic', logger=None) as timer:
                     seq_vf, metrics = self.critic.update_critic(data=data)
                 delta_time = timer.last
-
+                metrics['timing/update_critic_trainer'] = delta_time
                 global_num_tokens = data.meta_info['global_token_num']
                 kwargs = {}
                 if 'global_img_token_num' in data.meta_info:

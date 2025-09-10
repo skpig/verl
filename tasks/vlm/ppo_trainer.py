@@ -75,7 +75,12 @@ class VLMRayPPOTrainer(RayPPOTrainer):
                         batch, critic_future = self._compute_values(batch, critic_future, input_batch, metrics)
 
                     batch = self._compute_adv(batch, metrics, use_async_gen)
-
+                    self.compute_metrics(batch, metrics)
+                    with Timer(name='save_output_batch', logger=None) as timer:
+                        save_simple_train_data_to_hdfs(batch, self.tokenizer, self.global_step,
+                                                       self.config.trainer.default_hdfs_dir,
+                                                       self.config.data.max_prompt_length)
+                    metrics['timing/save_output_batch'] = timer.last
                     if self.global_step == 1:
                         print('Debugging', batch.batch)
 
@@ -98,7 +103,7 @@ class VLMRayPPOTrainer(RayPPOTrainer):
 
                     self._update_actor(actor_future, batch, metrics)
 
-                    self._update_critic(batch, critic_future, metrics)
+                    self._update_critic(critic_future, batch, metrics)
 
                     # update ref ema
                     with Timer(name='update_ref_ema', logger=None) as timer:
@@ -111,14 +116,6 @@ class VLMRayPPOTrainer(RayPPOTrainer):
                             self.validation_manager.validate(is_async=self.use_standalone_validator,
                                                              global_step=self.global_step)
                         metrics['timing/testing'] = timer.last
-
-                    with Timer(name='save_output_batch', logger=None) as timer:
-                        save_simple_train_data_to_hdfs(batch, self.tokenizer, self.global_step,
-                                                       self.config.trainer.default_hdfs_dir,
-                                                       self.config.data.max_prompt_length)
-                    metrics['timing/save_output_batch'] = timer.last
-
-                    self.compute_metrics(batch, metrics)
 
                     self._save_checkpoint(metrics)
 

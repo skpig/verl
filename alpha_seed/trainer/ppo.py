@@ -1904,14 +1904,17 @@ class RayPPOTrainer(object):
                             input_batch = batch
                             if self.enable_actor_critic_spatial_mux:
                                 input_batch = input_batch.repeat(2, interleave=False)
-
                             # compute actor
-                            actor_future = self.actor_rollout_wg.old_log_probs(input_batch)
+                            with Timer(name='old_log_probs_future', logger=None) as timer:
+                                actor_future = self.actor_rollout_wg.old_log_probs(input_batch)
+                            metrics['timing/old_log_probs_future'] = timer.last
 
                             critic_future = None
                             # compute values
                             if self.use_critic and self.enable_actor_critic_spatial_mux:
-                                critic_future = self.critic_wg.compute_values(input_batch)
+                                with Timer(name='values_future', logger=None) as timer:
+                                    critic_future = self.critic_wg.compute_values(input_batch)
+                                metrics['timing/values_future'] = timer.last
 
                             batch = self._compute_old_log_probs(actor_future, batch, metrics)
                             if self.use_critic:
@@ -1926,10 +1929,13 @@ class RayPPOTrainer(object):
                             if self.enable_actor_critic_spatial_mux:
                                 input_batch = input_batch.repeat(2, interleave=False)
 
+                        self.compute_metrics(batch, metrics)
                         # update actor
                         # implement critic warmup
                         if self.config.trainer.critic_warmup <= self.global_step and self.global_step % self.config.trainer.actor_update_freq == 0:
-                            actor_future = self.actor_rollout_wg.update_actor(input_batch)
+                            with Timer(name='actor_future', logger=None) as timer:
+                                actor_future = self.actor_rollout_wg.update_actor(input_batch)
+                            metrics['timing/actor_future'] = timer.last
 
                         # remove old_experts after policy update
                         if "old_experts" in batch.batch:
@@ -1937,11 +1943,12 @@ class RayPPOTrainer(object):
 
                         # update critic
                         if self.use_critic:
-                            critic_future = self.critic_wg.update_critic(input_batch)
+                            with Timer(name='critic_future', logger=None) as timer:
+                                critic_future = self.critic_wg.update_critic(input_batch)
+                            metrics['timing/critic_future'] = timer.last
 
                         self._update_actor(actor_future, batch, metrics)
-
-                        self._update_critic(batch, critic_future, metrics)
+                        self._update_critic(critic_future, batch, metrics)
 
                         # update ref ema
                         with Timer(name='update_ref_ema', logger=None) as timer:
@@ -1954,8 +1961,6 @@ class RayPPOTrainer(object):
                                 self.validation_manager.validate(is_async=self.use_standalone_validator,
                                                                  global_step=self.global_step)
                             metrics['timing/testing'] = timer.last
-
-                        self.compute_metrics(batch, metrics)
 
                         self._save_checkpoint(metrics)
 
@@ -2008,6 +2013,12 @@ class RayPPOTrainer(object):
 
     @stage_logger.log_duration('policy_update')
     def _update_actor(self, actor_future, batch, metrics):
+        # remove unused keys for both actor and critic
+        actor_unused_keys = ['prompts', 'raw_scores', 'old_entropy', 'origin_advantages', 'token_level_rewards']
+        for key in actor_unused_keys:
+            if key in batch.batch:
+                batch.batch.pop(key)
+
         if self.config.trainer.critic_warmup <= self.global_step and self.global_step % self.config.trainer.actor_update_freq == 0:
             with Timer(name='update_actor', logger=None) as timer:
                 if os.environ.get("MINISTEPS_ON_DRIVER", "0") == "1":
@@ -2086,7 +2097,9 @@ class RayPPOTrainer(object):
     def _compute_values(self, batch, critic_future, input_batch, metrics):
         # get values
         if not self.enable_actor_critic_spatial_mux:
-            critic_future = self.critic_wg.compute_values(input_batch)
+            with Timer(name='critic_future', logger=None) as timer:
+                critic_future = self.critic_wg.compute_values(input_batch)
+            metrics['timing/critic_future'] = timer.last
         with Timer(name='values', logger=None) as timer:
             values = critic_future.get()
             values = values.chunk(2)[1] if self.enable_actor_critic_spatial_mux else values
@@ -2163,7 +2176,15 @@ class RayPPOTrainer(object):
         return batch
 
     @stage_logger.log_duration('critic')
-    def _update_critic(self, batch, critic_future, metrics):
+    def _update_critic(self, critic_future, batch, metrics):
+        critic_unused_keys = [
+            'prompts', 'advantages', 'old_log_probs', 'old_entropy', 'origin_advantages', 'raw_scores',
+            'rollout_behavior_log_probs', 'token_level_rewards', 'token_level_scores', 'upgo_advantages', 'eos_ids',
+            'off_policy_steps'
+        ]
+        for key in critic_unused_keys:
+            if key in batch.batch:
+                batch.batch.pop(key)
         # update critic
         if self.use_critic:
             with Timer(name='update_critic', logger=None) as timer:

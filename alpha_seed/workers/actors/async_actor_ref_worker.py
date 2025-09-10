@@ -597,6 +597,7 @@ class AsyncActorRolloutRefWorker(Worker):
             with Timer(name='update_policy', logger=None) as timer:
                 metrics = self.actor.update_policy(data=data)
             delta_time = timer.last
+            metrics['timing/update_policy_trainer'] = delta_time
             global_num_tokens = data.meta_info['global_token_num']
             kwargs = {}
             if 'global_img_token_num' in data.meta_info:
