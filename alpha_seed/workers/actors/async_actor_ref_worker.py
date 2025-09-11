@@ -178,6 +178,10 @@ class AsyncActorRolloutRefWorker(Worker):
     def _get_actor_mono_config(self):
         actor_mono_config = actor_config_to_mono_config(self.config.actor, self.config.model)
         if not self._is_actor:
+            actor_mono_config.engine.fsdp.fsdp_size = min(actor_mono_config.engine.fsdp.fsdp_size,
+                                                          torch.distributed.get_world_size())
+            actor_mono_config.engine.fsdp.oe_size = min(actor_mono_config.engine.fsdp.oe_size,
+                                                        torch.distributed.get_world_size())
             actor_mono_config.engine.fsdp.param_offload = True  # Set param offload to True for rollout in mono config
             actor_mono_config.engine.fsdp.model_type = "bf16"
         else:

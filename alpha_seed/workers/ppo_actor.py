@@ -66,14 +66,18 @@ class DataParallelPPOActor(BasePPOActor):
             if reuse_old_experts:
                 selected_experts_lst.append(output_proto.batch['old_experts'])
             for j in range(mtp_n_heads - 1):
-                acceptance_matrix_lst[j].append(output_proto.batch[f'acceptance_matrix_{j}'])
+                if output_proto.batch.get(f"acceptance_matrix_{j}", None) is not None:
+                    acceptance_matrix_lst[j].append(output_proto.batch[f'acceptance_matrix_{j}'])
         log_probs = torch.concat(log_prob_lst, dim=0)
         entropy = torch.concat(entropy_lst, dim=0)
         if reuse_old_experts:
             selected_experts = torch.concat(selected_experts_lst, dim=0)
         else:
             selected_experts = None
-        acceptance_matrix = [torch.concat(acceptance_matrix_lst[j], dim=0) for j in range(mtp_n_heads - 1)]
+        if len(acceptance_matrix_lst) and len(acceptance_matrix_lst[0]):
+            acceptance_matrix = [torch.concat(acceptance_matrix_lst[j], dim=0) for j in range(mtp_n_heads - 1)]
+        else:
+            acceptance_matrix = []
         return entropy, log_probs, tuple(acceptance_matrix), selected_experts
 
     def train_one_step(self, data: DataProto):

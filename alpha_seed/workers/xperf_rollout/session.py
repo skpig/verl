@@ -934,7 +934,7 @@ class InferenceSession:
             image_token_id = -100
             image_mask = input_ids == image_token_id
             # fill image tokens to padding tokens, to avoid negative token_ids for text embedding
-            input_ids[image_mask] = 1
+            input_ids[image_mask] = 0
             text_embeds = self._get_input_embeddings(input_ids, query, is_oe)
             image_mask = image_mask.unsqueeze(-1).expand_as(text_embeds).to(text_embeds.device)
             img_emb = img_emb.to(text_embeds.device)
@@ -1011,6 +1011,8 @@ class InferenceSession:
 
         if is_oe:
             raw_inputs_id = torch.tensor(query.input_ids, device="cuda").unsqueeze(0)
+            # fill image tokens to padding tokens
+            raw_inputs_id[raw_inputs_id == -100] = 0
             oe_history = raw_inputs_id[:, max(context_shift - self.oe_max_stride + 1, 0):context_shift]
             pad_len = (self.oe_max_stride - 1) - oe_history.shape[1]
             oe_history = F.pad(oe_history, (pad_len, 0), value=self.pad_token_id)
@@ -1045,7 +1047,7 @@ class InferenceSession:
         # for MTP
         max_draft_len = -1
         draft_list = []
-        draft_oe_histroy = []
+        draft_oe_history = []
         draft_total_length = []
         target_hidden_states = []
         # MTP is PD separate
@@ -1140,15 +1142,15 @@ class InferenceSession:
                     if len(query.new_token_ids) <= 1:
                         # prepare mtp layer kv cache
                         draft_list.append(query.input_ids[1:] + query.new_token_ids)
-                        draft_oe_histroy.append(query.input_ids[:1])
+                        draft_oe_history.append(query.input_ids[:1])
                     else:
                         draft_list.append(query.new_token_ids[-query.accepted_len[-1] - 1:])
                         if len(query.new_token_ids) - query.accepted_len[-1] >= self.oe_max_stride:
-                            draft_oe_histroy.append(
+                            draft_oe_history.append(
                                 query.new_token_ids[-self.oe_max_stride -
                                                     query.accepted_len[-1]:-query.accepted_len[-1] - 1])
                         else:
-                            draft_oe_histroy.append(query.input_ids[-(self.oe_max_stride - len(query.new_token_ids) +
+                            draft_oe_history.append(query.input_ids[-(self.oe_max_stride - len(query.new_token_ids) +
                                                                       query.accepted_len[-1]):] +
                                                     query.new_token_ids[:-query.accepted_len[-1] - 1])
                     max_draft_len = max(len(draft_list[-1]), max_draft_len)
@@ -1185,6 +1187,7 @@ class InferenceSession:
         if len(phase1_list) > 0:
             if self.oe_max_stride > 1:
                 for i, (query, oe_history) in enumerate(zip(phase1_list, phase1_oe_history)):
+                    oe_history = [0 if x == -100 else x for x in oe_history]
                     phase1_list[i] = [self.pad_token_id] * (self.oe_max_stride - 1 - len(oe_history)) + oe_history + [
                         query
                     ]
@@ -1198,10 +1201,11 @@ class InferenceSession:
             results['decode_input'] = None
 
         if len(draft_list) > 0:
-            for i, (query, oe_histroy) in enumerate(zip(draft_list, draft_oe_histroy)):
+            for i, (query, oe_history) in enumerate(zip(draft_list, draft_oe_history)):
                 if self.oe_max_stride > 1:
+                    oe_history = [0 if x == -100 else x for x in oe_history]
                     draft_list[i] = [self.pad_token_id] * (max_draft_len + self.oe_max_stride - 1 - len(query) -
-                                                           len(oe_histroy)) + oe_histroy + query
+                                                           len(oe_history)) + oe_history + query
                 else:
                     draft_list[i] = [self.pad_token_id] * (max_draft_len - len(query)) + query
             results['draft_input'] = torch.tensor(draft_list, dtype=torch.int64, device="cuda")

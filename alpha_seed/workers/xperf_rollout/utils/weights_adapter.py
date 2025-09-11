@@ -195,6 +195,8 @@ class WeightsAdapter:
                 assert src.shape == dst.shape or src.numel() == dst.numel(
                 ), f"Weight {name} shape mismatch: src {src.shape} vs dst {dst.shape}"
             assert not torch.isnan(src).any(), f"Weight {name} contains NaN values"
+            if not src.is_contiguous():
+                src = src.contiguous()
             torch.utils.swap_tensors(dst, src)
 
 
@@ -619,28 +621,10 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
                     assert mesh_size == 1, "Over Encoding Embedding weight can only support shard across all devices"
             oe_emb: torch.Tensor = oe_emb._local_tensor
 
-            full_mesh = create_mesh_with_names("cuda", shard=dist.get_world_size())
-            # [Shard(0)] -> [Shard(1)]
-            oe_emb = DTensor.from_local(oe_emb, full_mesh, [Shard(0)]).redistribute(placements=[Shard(1)])._local_tensor
-            # [Shard(1)] -> [Shard(1), Replicate()]
-            oe_mesh = create_mesh_with_names("cuda", shard=self.device_mesh.size(1), replicate=-1)
-            oe_emb = DTensor.from_local(oe_emb, oe_mesh["replicate"], [Shard(1)]).full_tensor()
-            # [Shard(1), Replicate()] -> [Replicate(), Shard(1)]
-            world_size = dist.get_world_size()
-            myrank = dist.get_rank()
-            devices = torch.arange(world_size).view(oe_mesh.shape).permute(1, 0).flatten().tolist()
-            send_rank, recv_rank = devices.index(myrank), devices[myrank]
-            out = torch.empty_like(oe_emb)
-            if myrank == send_rank:
-                assert send_rank == recv_rank, f"{devices=}, {myrank=}, {send_rank=}, {recv_rank=}"
-                out = oe_emb
-            elif myrank > send_rank:
-                dist.send(oe_emb, send_rank)
-                dist.recv(out, recv_rank)
-            else:
-                dist.recv(out, recv_rank)
-                dist.send(oe_emb, send_rank)
-            torch.cuda.synchronize()
+            oe_emb = DTensor.from_local(oe_emb, self.device_mesh['tp'],
+                                        [Shard(0)]).redistribute(placements=[Shard(1)])._local_tensor
+            out = DTensor.from_local(oe_emb, self.device_mesh['dp'],
+                                     [Shard(0)]).redistribute(placements=[Replicate()])._local_tensor
             oe_emb_weight = out[:sum(self.over_enc_vocab_size), :].cpu()
             torch.cuda.empty_cache()
 

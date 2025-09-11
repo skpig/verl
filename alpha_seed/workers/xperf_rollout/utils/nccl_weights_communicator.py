@@ -107,12 +107,44 @@ class NCCLWeightsCommunicator(WeightsCommunicator):
             comm_and_assign(vit_engine.seed_proj[2])
 
         def _update_xperf_model(comm_fn, comm_rank):
-            layernorm_weight = self.inference_engine.engine.module.layernorm_weight.cuda()
-            lm_head_weight = self.inference_engine.engine.module.lm_head_weight.cuda()
-            wte_weight = self.inference_engine.engine.module.wte_weight.cuda()
+            layernorm_weight = self.inference_engine.engine.module.layernorm_weight
+            lm_head_weight = self.inference_engine.engine.module.lm_head_weight
+            wte_weight = self.inference_engine.engine.module.wte_weight
             self.inference_engine.engine.module.layernorm_weight = comm_fn(layernorm_weight, comm_rank)
             self.inference_engine.engine.module.lm_head_weight = comm_fn(lm_head_weight, comm_rank)
             self.inference_engine.engine.module.wte_weight = comm_fn(wte_weight, comm_rank)
+
+            module_weights = self.inference_engine.engine.module.weights
+            if self.inference_engine.engine.module.config.has_over_encoding:
+                module_weights.over_enc_emb_weight = comm_fn(module_weights.over_enc_emb_weight.cuda(),
+                                                             comm_rank).cpu().pin_memory()
+                module_weights.over_enc_proj_weight = comm_fn(module_weights.over_enc_proj_weight, comm_rank)
+                for i, w in enumerate(module_weights.reduce_static_weight):
+                    module_weights.reduce_static_weight[i] = comm_fn(w, comm_rank)
+
+            if self.inference_engine.engine.module.config.mtp_n_heads > 1:
+                for i in range(self.inference_engine.engine.module.config.mtp_n_heads - 1):
+                    self.inference_engine.engine.module.draft_enorm_w[i] = comm_fn(
+                        self.inference_engine.engine.module.draft_enorm_w[i], comm_rank)
+                    self.inference_engine.engine.module.draft_hnorm_w[i] = comm_fn(
+                        self.inference_engine.engine.module.draft_hnorm_w[i], comm_rank)
+                    self.inference_engine.engine.module.draft_ln_f_w[i] = comm_fn(
+                        self.inference_engine.engine.module.draft_ln_f_w[i], comm_rank)
+                    if self.inference_engine.engine.module.config.has_over_encoding:
+                        module_weights.draft_vwn_static_alpha[i] = comm_fn(module_weights.draft_vwn_static_alpha[i],
+                                                                           comm_rank)
+                        module_weights.draft_vwn_static_beta[i] = comm_fn(module_weights.draft_vwn_static_beta[i],
+                                                                          comm_rank)
+                        module_weights.draft_vwn_dynamic_alpha[i] = comm_fn(module_weights.draft_vwn_dynamic_alpha[i],
+                                                                            comm_rank)
+                        module_weights.draft_vwn_dynamic_beta[i] = comm_fn(module_weights.draft_vwn_dynamic_beta[i],
+                                                                           comm_rank)
+                        module_weights.draft_vwn_dynamic_alpha_scale[i] = comm_fn(
+                            module_weights.draft_vwn_dynamic_alpha_scale[i], comm_rank)
+                        module_weights.draft_vwn_dynamic_beta_scale[i] = comm_fn(
+                            module_weights.draft_vwn_dynamic_beta_scale[i], comm_rank)
+                        module_weights.draft_vwn_layernorm_weight[i] = comm_fn(
+                            module_weights.draft_vwn_layernorm_weight[i], comm_rank)
 
             def __comm_weights(weight, comm_rank, layer, idx, lid=None):
                 if isinstance(weight, torch.Tensor):

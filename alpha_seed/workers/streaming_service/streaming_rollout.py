@@ -426,22 +426,21 @@ class AsyncXPerfGPTRollout(object):
 
     def _set_tuner_config(self):
         os.environ["USE_SESSION_CACHE"] = "0"
+        # set environment variables for tuner
+        os.environ["XGPT_TUNER_ENABLE"] = os.getenv("XGPT_TUNER_ENABLE", "1")
+        os.environ["XPERF_TUNER_ONLINE_PRIORITY"] = os.getenv("XPERF_TUNER_ONLINE_PRIORITY", "1")
         quant_mode = self.config.get("quant_mode", "NO_QUANT")
-        if quant_mode in ["WFP8", "W4A8", "W4A8C8"]:
-            # set environment variables for tuner
-            os.environ["XGPT_TUNER_ENABLE"] = os.getenv("XGPT_TUNER_ENABLE", "1")
-            os.environ["XPERF_TUNER_ONLINE_PRIORITY"] = os.getenv("XPERF_TUNER_ONLINE_PRIORITY", "1")
-            if quant_mode in ["W4A8", "W4A8C8"]:
-                os.environ["XPERF_TUNER_ONLINE_VERSION"] = "2.1.4+xgpt"
-                base_dir = os.path.normpath(os.path.dirname(os.path.dirname(__file__)))
-                tuning_path = os.path.join(base_dir, "xperf_rollout", "tuning", "w4a8")
-                os.environ["XPERF_TUNER_CONFIG_LOAD_PATH"] = tuning_path
-            else:
-                # TODO: config does not take effect
-                os.environ["XPERF_TUNER_ONLINE_VERSION"] = "2.0.0+xgpt"
-                base_dir = os.path.normpath(os.path.dirname(os.path.dirname(__file__)))
-                tuning_path = os.path.join(base_dir, "xperf_rollout", "tuning")
-                os.environ["XPERF_TUNER_CONFIG_LOAD_PATH"] = tuning_path
+        if quant_mode in ["W4A8", "W4A8C8"]:
+            os.environ["XPERF_TUNER_ONLINE_VERSION"] = "2.1.4+xgpt"
+            base_dir = os.path.normpath(os.path.dirname(os.path.dirname(__file__)))
+            tuning_path = os.path.join(base_dir, "xperf_rollout", "tuning", "w4a8")
+            os.environ["XPERF_TUNER_CONFIG_LOAD_PATH"] = tuning_path
+        else:
+            # TODO: config does not take effect
+            os.environ["XPERF_TUNER_ONLINE_VERSION"] = "2.0.0+xgpt"
+            base_dir = os.path.normpath(os.path.dirname(os.path.dirname(__file__)))
+            tuning_path = os.path.join(base_dir, "xperf_rollout", "tuning")
+            os.environ["XPERF_TUNER_CONFIG_LOAD_PATH"] = tuning_path
 
     def _set_multihost_env(self):
         os.environ["NCCL_SOCKET_IFNAME"] = os.getenv("NCCL_SOCKET_IFNAME", "eth0")
