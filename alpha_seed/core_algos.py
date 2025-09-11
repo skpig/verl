@@ -21,8 +21,11 @@ import numpy as np
 import torch
 from typing import Optional, List
 from collections import defaultdict
-
+from torch.nn.functional import pad
 import verl.utils.torch_functional as verl_F
+import torch.nn.functional as F
+from typing import Union, List
+from torch.nn.functional import pad
 
 
 class AdaptiveKLController:
@@ -77,7 +80,8 @@ def compute_gae_advantage_return(token_level_rewards: torch.Tensor,
                                  adv_whiten: bool,
                                  use_separate_critic_lam: bool,
                                  critic_lam: torch.Tensor,
-                                 step_level_scores: torch.Tensor = None):
+                                 step_level_scores: torch.Tensor = None,
+                                 adv_vectorize: bool = False):
     """Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py
 
     Args:
@@ -135,37 +139,150 @@ def compute_gae_advantage_return(token_level_rewards: torch.Tensor,
         seq_len_per_sample = torch.clamp(torch.sum(eos_mask, dim=1), min=1.0)
         lam = torch.clamp(1 - 1 / (variable_lambda_scalar * seq_len_per_sample), min=lam)
     with torch.no_grad():
-        lastgaelam = 0
-        advantages_reversed = []
-        if use_separate_critic_lam:
-            critic_lastgaelam = 0
-            critic_advantages_reversed = []
-
-        gen_len = token_level_rewards.shape[-1]
-        nextvalues = 0
-        for t in reversed(range(gen_len)):
-            cur_nextvalues = values[:, t + 1] if t < gen_len - 1 else 0.0
-            next_eos_mask = eos_mask[:, t + 1] if t < gen_len - 1 else 1.0
-            nextvalues = next_eos_mask * cur_nextvalues + (1 - next_eos_mask) * nextvalues
-            delta = token_level_rewards[:, t] + gamma * nextvalues - values[:, t]
-            lastgaelam = (delta + gamma * lam * lastgaelam) * eos_mask[:, t] + lastgaelam * (1 - eos_mask[:, t])
-            advantages_reversed.append(lastgaelam)
+        if not adv_vectorize:
+            lastgaelam = 0
+            advantages_reversed = []
             if use_separate_critic_lam:
-                critic_lastgaelam = (delta + gamma * critic_lam *
-                                     critic_lastgaelam) * eos_mask[:, t] + critic_lastgaelam * (1 - eos_mask[:, t])
-                critic_advantages_reversed.append(critic_lastgaelam)
-        advantages = torch.stack(advantages_reversed[::-1], dim=1)
-        if use_separate_critic_lam:
-            critic_advantages = torch.stack(critic_advantages_reversed[::-1], dim=1)
-            returns = critic_advantages + values
+                critic_lastgaelam = 0
+                critic_advantages_reversed = []
+
+            gen_len = token_level_rewards.shape[-1]
+            nextvalues = 0
+            for t in reversed(range(gen_len)):
+                cur_nextvalues = values[:, t + 1] if t < gen_len - 1 else 0.0
+                next_eos_mask = eos_mask[:, t + 1] if t < gen_len - 1 else 1.0
+                nextvalues = next_eos_mask * cur_nextvalues + (1 - next_eos_mask) * nextvalues
+                delta = token_level_rewards[:, t] + gamma * nextvalues - values[:, t]
+                lastgaelam = (delta + gamma * lam * lastgaelam) * eos_mask[:, t] + lastgaelam * (1 - eos_mask[:, t])
+                advantages_reversed.append(lastgaelam)
+                if use_separate_critic_lam:
+                    critic_lastgaelam = (delta + gamma * critic_lam *
+                                         critic_lastgaelam) * eos_mask[:, t] + critic_lastgaelam * (1 - eos_mask[:, t])
+                    critic_advantages_reversed.append(critic_lastgaelam)
+            advantages = torch.stack(advantages_reversed[::-1], dim=1)
+            if use_separate_critic_lam:
+                critic_advantages = torch.stack(critic_advantages_reversed[::-1], dim=1)
+                returns = critic_advantages + values
+            else:
+                returns = advantages + values
         else:
-            returns = advantages + values
+            if use_separate_critic_lam:
+                critic_advantages = gae_conv1d(token_level_rewards, values, eos_mask, gamma, critic_lam)
+                returns = critic_advantages + values
+            else:
+                advantages = gae_conv1d(token_level_rewards, values, eos_mask, gamma, lam)
+                returns = advantages + values
         origin_advantages = advantages
         if adv_whiten:
             advantages = verl_F.masked_whiten(origin_advantages, eos_mask)
         else:
             advantages = torch.clone(origin_advantages)
     return origin_advantages, advantages, returns
+
+
+def gae_conv1d(token_level_rewards, values, response_mask, gamma=0.99, lam=0.95):
+    """
+    GAE with internal masking (no end-of-pipe multiply).
+    Steps:
+      1) Pack response-only timesteps.
+      2) Compute deltas on the packed sequence: δ_k = r_k + γ V_{k+1} - V_k.
+      3) Causal conv with kernel [(γλ)^0, (γλ)^1, ...] to sum future deltas.
+      4) Scatter back: for every t, take advantage of the next response at or to the right.
+    """
+    assert token_level_rewards.shape == values.shape == response_mask.shape
+    B, T = token_level_rewards.shape
+    device, dtype = values.device, values.dtype
+    (token_level_rewards_align, values_align), invert_idx = left_align_tensor([token_level_rewards, values],
+                                                                              response_mask)
+    next_v = pad(values_align[:, 1:], (0, 1), mode="constant", value=0.0)
+    deltas = token_level_rewards_align + gamma * next_v - values_align  # [T]
+    # conv1d causal filter: A_k = sum_{j>=0} (γλ)^j * δ_{k+j}
+    kernel = (gamma * lam)**torch.arange(T, device=device, dtype=deltas.dtype)  # [T]
+    weight = kernel.view(1, 1, T)  # [1,1,T]
+    inp = deltas.view(B, 1, T)  # [1,1,T]
+    adv_resp = F.conv1d(F.pad(inp, (0, T - 1)), weight).squeeze()  # [B, T]
+    return invert_left_align(adv_resp, invert_idx)
+
+
+def left_align_tensor(values_list: Union[torch.Tensor, List[torch.Tensor]], mask: torch.Tensor):
+    """
+    Left-aligns a 2D tensor based on a mask and returns the aligned tensor
+    and the indices to invert the operation.
+
+    Args:
+        values (torch.Tensor): A 2D tensor of shape (bs, seq_len).
+        mask (torch.Tensor): A 2D tensor of shape (bs, seq_len) with 0s and 1s.
+
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor]:
+            - aligned_values (torch.Tensor): The left-aligned tensor with zero padding.
+            - inverse_indices (torch.Tensor): The indices to restore the original tensor structure.
+    """
+    if isinstance(values_list, torch.Tensor):
+        values_list = [values_list]
+    aligned_values_list = []
+    values = values_list[0]
+    bs, seq_len = values.shape
+    device = values.device
+
+    arange_row = torch.arange(seq_len, device=device).unsqueeze(0).expand(bs, -1)
+    # sorter will have small values for valid entries (mask=1) and large values for masked entries (mask=0).
+    # This will push masked elements to the right during sorting.
+    sorter = arange_row + (1 - mask.long()) * seq_len
+
+    # sorted_indices contains the original indices in an order that brings valid elements to the left.
+    sorted_indices = torch.argsort(sorter, dim=1)
+
+    # Create a mask for the aligned tensor to zero out the padded part on the right.
+    num_valid = mask.sum(dim=1)
+    aligned_mask = torch.arange(seq_len, device=device).unsqueeze(0) < num_valid.unsqueeze(1)
+
+    # Gather values according to sorted_indices to left-align them.
+    # The values from masked positions are moved to the right.
+
+    for values in values_list:
+        aligned_values = torch.gather(values, 1, sorted_indices)
+        aligned_values_list.append(aligned_values * aligned_mask.to(aligned_values.dtype))
+
+    # The inverse_indices will be used to restore the original tensor structure.
+    # It gives the original position for each element in the aligned tensor.
+    inverse_indices = torch.argsort(sorted_indices, dim=1)
+
+    return aligned_values_list, inverse_indices
+
+
+def invert_left_align(aligned_values: torch.Tensor, inverse_indices: torch.Tensor):
+    """
+    Restores the original structure of a tensor that was left-aligned.
+    The values that were originally masked will be filled with the next valid value.
+
+    Args:
+        aligned_values (torch.Tensor): A left-aligned 2D tensor.
+        inverse_indices (torch.Tensor): The indices for inverting the alignment.
+
+    Returns:
+        torch.Tensor: The tensor with its original structure restored and filled.
+    """
+    sparse_values = torch.gather(aligned_values, 1, inverse_indices)
+
+    # Backward fill
+    reversed_values = torch.flip(sparse_values, dims=[1])
+
+    mask = reversed_values != 0
+    indices = torch.arange(reversed_values.shape[1], device=reversed_values.device).expand_as(reversed_values)
+
+    masked_indices = torch.where(mask, indices, -1)
+
+    fwd_indices = torch.cummax(masked_indices, dim=1)[0]
+
+    # Clamp to handle -1 indices and gather
+    safe_fwd_indices = torch.clamp(fwd_indices, min=0)
+    filled_reversed = torch.gather(reversed_values, 1, safe_fwd_indices)
+
+    # Zero out positions that had no value to fill from (where fwd_indices is -1)
+    filled_reversed = filled_reversed * (fwd_indices != -1).to(filled_reversed.dtype)
+
+    return torch.flip(filled_reversed, dims=[1])
 
 
 def compute_upgo_advantage(token_level_rewards: torch.Tensor, values: torch.Tensor, eos_mask: torch.Tensor,

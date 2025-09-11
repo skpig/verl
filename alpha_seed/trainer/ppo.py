@@ -16,7 +16,8 @@ FSDP PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
 import itertools
-
+import re
+import verl.utils.torch_functional as verl_F
 from ray import ObjectRef
 
 from alpha_seed.logging import refine_log
@@ -231,6 +232,96 @@ def apply_kl_penalty(data: DataProto,
     return data, metrics
 
 
+class MetricElement:
+
+    def __init__(self, metric, reduce_map):
+        self.metric = metric
+        self.reduce_map = reduce_map
+
+    @staticmethod
+    def reduce(metrics: np.ndarray):
+        filtered_metrics = [metric for metric in metrics if metric is not None]
+        if len(filtered_metrics) == 0:
+            return {}
+        res = {}
+        reduce_map = filtered_metrics[0].reduce_map
+        for key in filtered_metrics[0].metric:
+            if reduce_map[key] == "mean":
+                res[key] = np.mean([metric[key] for metric in filtered_metrics])
+            elif reduce_map[key] == "sum":
+                res[key] = np.sum([metric[key] for metric in filtered_metrics])
+            elif reduce_map[key] == "max":
+                res[key] = np.max([metric[key] for metric in filtered_metrics])
+            elif reduce_map[key] == "min":
+                res[key] = np.min([metric[key] for metric in filtered_metrics])
+        return res
+
+
+def compute_advantage_distribute(wg,
+                                 data: DataProto,
+                                 gamma,
+                                 lam,
+                                 use_variable_lambda,
+                                 variable_lambda_scalar,
+                                 adv_estimator,
+                                 upgo_loss_version,
+                                 num_bon,
+                                 adv_whiten,
+                                 use_async_gen,
+                                 use_separate_critic_lam,
+                                 critic_lam,
+                                 group_mode,
+                                 use_model_output_mask,
+                                 fix_bad_positive_adv=False,
+                                 adv_vectorize=False):
+    comp_adv_kwargs = {
+        'gamma': gamma,
+        'lam': lam,
+        'use_variable_lambda': use_variable_lambda,
+        'variable_lambda_scalar': variable_lambda_scalar,
+        'adv_estimator': adv_estimator,
+        'upgo_loss_version': upgo_loss_version,
+        'num_bon': num_bon,
+        'adv_whiten': False if adv_estimator == 'gae' else adv_whiten,
+        'use_async_gen': use_async_gen,
+        'use_separate_critic_lam': use_separate_critic_lam,
+        'critic_lam': critic_lam,
+        'group_mode': group_mode,
+        'use_model_output_mask': use_model_output_mask,
+        'fix_bad_positive_adv': fix_bad_positive_adv,
+        'adv_vectorize': adv_vectorize
+    }
+    if adv_estimator == 'grpo':
+        return compute_advantage(data, **comp_adv_kwargs)
+    data.meta_info['adv_kwargs'] = np.array([comp_adv_kwargs] + [None] * (len(data.batch) - 1), dtype=object)
+    adv = wg.execute_with_func_generator(compute_advantage_self, data)
+    if adv_whiten:
+        response_length = adv.batch['responses'].size(1)
+        if use_model_output_mask:
+            loss_mask = data.batch['model_output_mask']
+            response_mask = loss_mask[:, -response_length:]
+        else:
+            attention_mask = data.batch['attention_mask']
+            response_mask = attention_mask[:, -response_length:]
+        adv.batch["advantages"] = verl_F.masked_whiten(adv.batch["origin_advantages"], response_mask)
+    metrics = adv.non_tensor_batch.pop('metrics', [])
+    global_metrics = MetricElement.reduce(metrics)
+    adv.meta_info.pop('adv_kwargs', None)
+    return adv, global_metrics
+
+
+def compute_advantage_self(self, data: DataProto):
+    comp_adv_kwargs = data.meta_info['adv_kwargs'][0]
+    data, adv_metrics = compute_advantage(data, **comp_adv_kwargs)
+    reduce_map = {}
+    for key in adv_metrics:
+        match = re.search(r"max|min|sum", key, re.IGNORECASE)
+        reduce_map[key] = match.group(0).lower() if match else "mean"
+    local_metrics = MetricElement(adv_metrics, reduce_map)
+    data.non_tensor_batch['metrics'] = np.array([local_metrics] + [None] * (len(data.batch) - 1), dtype=object)
+    return data
+
+
 def compute_advantage(data: DataProto,
                       gamma,
                       lam,
@@ -245,7 +336,8 @@ def compute_advantage(data: DataProto,
                       critic_lam,
                       group_mode,
                       use_model_output_mask,
-                      fix_bad_positive_adv=False):
+                      fix_bad_positive_adv=False,
+                      adv_vectorize=False):
     # TODO: add other ways to estimate advantages
     token_level_rewards = data.batch['token_level_rewards']
     raw_scores = data.batch['raw_scores']
@@ -275,7 +367,8 @@ def compute_advantage(data: DataProto,
             variable_lambda_scalar=variable_lambda_scalar,
             adv_whiten=adv_whiten,
             use_separate_critic_lam=use_separate_critic_lam,
-            critic_lam=critic_lam)
+            critic_lam=critic_lam,
+            adv_vectorize=adv_vectorize)
         data.batch['advantages'] = advantages
         data.batch['origin_advantages'] = origin_advantages
         data.batch['returns'] = returns
@@ -2230,7 +2323,8 @@ class RayPPOTrainer(object):
             metrics.update(kl_metrics)
 
             # compute advantages
-            batch, adv_metrics = compute_advantage(
+            batch, adv_metrics = compute_advantage_distribute(
+                self.actor_rollout_wg,
                 batch,
                 self.config.algorithm.gamma,
                 self.config.algorithm.lam,
@@ -2246,6 +2340,7 @@ class RayPPOTrainer(object):
                 critic_lam=self.config.algorithm.critic_lam,
                 use_model_output_mask=self.config.algorithm.use_model_output_mask,
                 fix_bad_positive_adv=self.config.algorithm.fix_bad_positive_adv,
+                adv_vectorize=self.config.algorithm.get('adv_vectorize', False),
             )
             metrics.update(adv_metrics)
         metrics['timing/adv'] = timer.last
