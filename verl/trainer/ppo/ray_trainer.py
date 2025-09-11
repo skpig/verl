@@ -1319,6 +1319,9 @@ class RayPPOTrainer:
         last_val_metrics = None
         self.max_steps_duration = 0
 
+        global_time = 0
+        global_gen_time = 0
+
         for epoch in range(self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
                 metrics = {"perf/total_dedup_num_response_tokens": 0, "perf/total_dedup_num_prompt_tokens": 0}
@@ -1374,6 +1377,8 @@ class RayPPOTrainer:
                             gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
                         timing_raw.update(gen_batch_output.meta_info["timing"])
                         gen_batch_output.meta_info.pop("timing", None)
+
+                    global_gen_time += timing_raw["gen"]
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with marked_timer("gen_max", timing_raw, color="purple"):
@@ -1637,19 +1642,19 @@ class RayPPOTrainer:
                             logger.log(data=prev_metric, step=prev_step)
                         self.ray_validate_task_list = []
 
-                    # validate
-                    if (
-                        self.val_reward_fn is not None
-                        and self.config.trainer.test_freq > 0
-                        and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0)
-                    ):
-                        with marked_timer("testing", timing_raw, color="green"):
-                            # hackin: log the data within the validation function as a ray task
-                            self.ray_validate_task_list.append(self._validate())
-                        #     val_metrics: dict = self._validate()
-                        #     if is_last_step:
-                        #         last_val_metrics = val_metrics
-                        # metrics.update(val_metrics)
+                    # # validate
+                    # if (
+                    #     self.val_reward_fn is not None
+                    #     and self.config.trainer.test_freq > 0
+                    #     and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0)
+                    # ):
+                    #     with marked_timer("testing", timing_raw, color="green"):
+                    #         # hackin: log the data within the validation function as a ray task
+                    #         self.ray_validate_task_list.append(self._validate())
+                    #     #     val_metrics: dict = self._validate()
+                    #     #     if is_last_step:
+                    #     #         last_val_metrics = val_metrics
+                    #     # metrics.update(val_metrics)
 
                     # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
                     esi_close_to_expiration = should_save_ckpt_esi(
@@ -1677,6 +1682,7 @@ class RayPPOTrainer:
                     self._stop_profiling(do_profile)
 
                 steps_duration = timing_raw["step"]
+                global_time += steps_duration
                 self.max_steps_duration = max(self.max_steps_duration, steps_duration)
 
                 # training metrics
@@ -1750,3 +1756,11 @@ class RayPPOTrainer:
 
                 progress_bar.update(1)
                 self.global_steps += 1
+
+                if self.global_steps >= 20:
+                    print(f"Max length: {self.config.data.max_response_length}, Global time: {global_time}, Global gen time: {global_gen_time}")
+                    if not os.path.exists(self.config.trainer.default_local_dir):
+                        os.makedirs(self.config.trainer.default_local_dir, exist_ok=True)
+                    with open(os.path.join(self.config.trainer.default_local_dir, f"global_time.txt"), "a+") as f:
+                        f.write(f"{self.config.data.max_response_length}length, {global_time} time, {global_gen_time} gen time\n")
+                    return
