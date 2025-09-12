@@ -197,7 +197,6 @@ class SearchCIAgent(AsyncAgent):
             # response_text = self.tokenizer.decode(response_message['raw_output_ids'])
             # response_text = """<escapeShell type="code" id="0">```python\nprint("hello world")\n```</escapeShell><|FunctionCallBegin|>[{"name": "DoubaoCodeInterpreter", "parameters": {"id": "0"}}]<|FunctionCallEnd|>"""
             # response_text = "<|FunctionCallBegin|>" + json.dumps([{"name": "JupyterCI", "parameters": {"code": "print('hello world')"}}], ensure_ascii=False) + "<|FunctionCallEnd|>"
-            # breakpoint()
 
             #Chen: Here is the implementation of exculding all function call within thinking cot
             #FIXME: need to fix the hard code od thinking token

@@ -2,7 +2,7 @@ set -x
 
 NUM_STEPS="${NUM_STEPS:-50000}"
 echo $NUM_STEPS
-
+ray stop --force
 EXP="Seed_9B_Search__64k_baseline"
 
 # ckpt和路径
@@ -23,7 +23,7 @@ max_response_length=512
 train_batch_size=32
 ppo_mini_batch_size=8
 total_epochs=100
-test_freq=2
+test_freq=100
 save_freq=-1
 # 算法相关的参数
 actor_lr=1e-6

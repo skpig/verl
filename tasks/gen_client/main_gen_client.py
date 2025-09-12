@@ -344,7 +344,6 @@ def compute_score(
     * v1: -0.1
     * v2: -0.2
     """
-    # breakpoint()
     corr_minerva, pred_minerva = is_correct_minerva(pred,
                                                     answer)  # To remove if math is also converted to interger format
     corr_integer, pred_integer = is_correct_integer(pred, answer)

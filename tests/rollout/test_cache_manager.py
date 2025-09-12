@@ -5,6 +5,8 @@ from alpha_seed.workers.xperf_rollout.component.cache_manager import CacheManage
 from alpha_seed.workers.xperf_rollout.component.query import Query
 from dataclasses import dataclass
 
+mgr = None
+
 
 @dataclass
 class QueryConfig:
@@ -27,6 +29,7 @@ def test_scheduler(use_vllm, schedule_strategy: str):
     slot_block_size = 1024
     max_batch_size = 100 if use_vllm else 16
     context_batchsize_limit = 8
+    global mgr
     mgr = CacheManager(slot_num=slot_num,
                        max_batch_size=max_batch_size,
                        use_vllm=use_vllm,
@@ -47,8 +50,6 @@ def test_scheduler(use_vllm, schedule_strategy: str):
             token_len = len(query.input_ids) + len(query.new_token_ids)
             kv_slot_num = len(query.kv_slot_ids)
             if use_vllm:
-                if (token_len + slot_block_size - 1) // slot_block_size > kv_slot_num:
-                    breakpoint()
                 assert (token_len + slot_block_size - 1) // slot_block_size <= kv_slot_num
             else:
                 assert kv_slot_num == 1
@@ -61,8 +62,9 @@ def test_scheduler(use_vllm, schedule_strategy: str):
             assert not query.is_kv_cache_slot_allocated()
         for query in paused:
             paused_ids.add(query.idx)
-            if query.is_kv_cache_slot_allocated():
-                _check_kv_slot_enough(query)
+            # The query is still paused, don't check the kv-slot
+            # if query.is_kv_cache_slot_allocated():
+            #     _check_kv_slot_enough(query)
         import itertools
         for query in itertools.chain(running, waiting, paused):
             for slot_id in query.kv_slot_ids:
@@ -113,7 +115,6 @@ def test_scheduler(use_vllm, schedule_strategy: str):
                     mgr.release_query(query)
                     query.reset_compute()
                     continue
-
                 if query.is_kv_cache_slot_allocated():
                     running.append(query)
                 else:

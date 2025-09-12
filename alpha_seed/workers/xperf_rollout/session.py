@@ -741,9 +741,11 @@ class InferenceSession:
             torch.classes.XGPT.ReorderKVCache().inference(kv_cache, cu_seqlens, src_idx, context_len + 1)
         return
 
-    def empty_cache(self):
-        self.cache_manager.empty_cache()
+    def empty_cache(self, only_clear_metrics=False):
         self.infer_scheduler.empty_cache()
+        if only_clear_metrics:
+            return
+        self.cache_manager.empty_cache()
         self.stop_signal_tensor = torch.tensor([0.0]).float().cuda()
         self.waiting = []
         self.running = []

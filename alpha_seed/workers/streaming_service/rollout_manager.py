@@ -567,12 +567,12 @@ class RolloutManager:
         if self.train_standalone_wg is not None:
             with Timer(name="update_rollout_server_queued", logger=None) as timer:
                 xperf_metrics = self.update_standalone_server_weights(is_train=True)
-                dummy_batch = DataProto(meta_info={"xperf_metrics": xperf_metrics[0]})
+                dummy_batch = DataProto(meta_info={"xperf_metrics": xperf_metrics})
                 record_xperf_metrics(dummy_batch, metrics, self.logger, step, prefix="standalone")
             print(f"[INFO] {step} train generate queued[update weights and restart] {timer.last}")
             metrics["timing/update_rollout_server_queued"] = timer.last
         with self.suppress_update_standalone(is_train=True):
-            xperf_metrics = []
+            xperf_metrics: dict = {}
             with self.enable_hybrid_server_gen_ctx(is_train=True, xperf_metrics=xperf_metrics):
                 while True:
                     if len(self.pending_batch) >= max_concurrency:
@@ -601,7 +601,7 @@ class RolloutManager:
                                                  is_warmup_step=True,
                                                  metrics=metrics)
 
-            dummy_batch = DataProto(meta_info={"xperf_metrics": xperf_metrics[0]})
+            dummy_batch = DataProto(meta_info={"xperf_metrics": xperf_metrics})
             record_xperf_metrics(dummy_batch, metrics, self.logger, step, prefix="hybrid")
         metrics['timing/dataloader'] = dataloader_time
         batch: DataProto = self.train_generate_fetch(step, is_warmup_step=False, metrics=metrics)
@@ -865,9 +865,8 @@ class RolloutManager:
             metrics["timing/update_rollout_server"] = timer.last
 
             if xperf_metrics is not None:
-                dummy_batch = DataProto(meta_info={"xperf_metrics": xperf_metrics[0]})
+                dummy_batch = DataProto(meta_info={"xperf_metrics": xperf_metrics})
                 record_xperf_metrics(dummy_batch, metrics, self.logger, step, prefix="standalone")
-
         global_handler = select_handler_fn(self.config.rollout_server.handler,
                                            external_lib=self.config.rollout_server.external_lib)
         context = TaskContext(
@@ -951,7 +950,7 @@ class RolloutManager:
             done, pending = list(done), list(pending)
             return done, pending
 
-        xperf_metrics: List = []
+        xperf_metrics: dict = {}
         with self.enable_hybrid_server_gen_ctx(is_train=True,
                                                xperf_metrics=xperf_metrics,
                                                need_hybrid_weights_update=self.train_standalone_wg is None):
@@ -960,10 +959,8 @@ class RolloutManager:
         ready_batch = self._normalize_done_tasks(done)
         finished_num = len(ready_batch)
 
-        if len(xperf_metrics) > 0:
-            dummy_batch = DataProto(
-                meta_info={"xperf_metrics": self._merge_xperf_metrics(ready_batch, xperf_metrics[0])})
-            record_xperf_metrics(dummy_batch, metrics, self.logger, step, prefix="hybrid")
+        dummy_batch = DataProto(meta_info={"xperf_metrics": self._merge_xperf_metrics(ready_batch, xperf_metrics)})
+        record_xperf_metrics(dummy_batch, metrics, self.logger, step, prefix="hybrid")
         metrics["rollout/standalone_completed_batch"] = finished_num
         metrics["rollout/standalone_incompleted_batch"] = len(pending_batch) + len(gen_batch) - finished_num
 
@@ -1070,7 +1067,7 @@ class RolloutManager:
             print(f"[INFO] {step} val gen server[as_completed], batch size: {len(gen_batch)}")
             return ready_batch
 
-        xperf_metrics: List[dict] = [{}]
+        xperf_metrics: dict = {}
         with nullcontext() if is_standalone else self.enable_hybrid_server_gen_ctx(is_train=False,
                                                                                    xperf_metrics=xperf_metrics):
             ready_batch = asyncio.run_coroutine_threadsafe(_submit_and_wait(), self.loop).result()
@@ -1112,7 +1109,7 @@ class RolloutManager:
 
         gen_out = DataProto.concat(ready_batch)
         # only use DP[0] for metrics presentation
-        gen_out.meta_info['xperf_metrics'] = self._merge_xperf_metrics(ready_batch, xperf_metrics[0])
+        gen_out.meta_info['xperf_metrics'] = self._merge_xperf_metrics(ready_batch, xperf_metrics)
         record_xperf_metrics(gen_out, metrics, self.logger, step, prefix="standalone" if is_standalone else "hybrid")
         return gen_out
 
@@ -1240,7 +1237,7 @@ class RolloutManager:
 
             logger.info(f"[INFO] {step} val gen server[as_completed], batch size: {len(val_gen_batch)}")
 
-        xperf_metrics: List[dict] = [{}]
+        xperf_metrics: dict = {}
         with nullcontext() if is_standalone else self.enable_hybrid_server_gen_ctx(is_train=False,
                                                                                    xperf_metrics=xperf_metrics):
             asyncio.run_coroutine_threadsafe(_submit_and_wait(), self.loop).result()
@@ -1394,7 +1391,7 @@ class RolloutManager:
     @contextmanager
     def enable_hybrid_server_gen_ctx(self,
                                      is_train: bool,
-                                     xperf_metrics: List = None,
+                                     xperf_metrics: dict = None,
                                      need_hybrid_weights_update: bool = True):
         """Set hybrid server to be ready for gen"""
         flag_key = f'_hybrid_server_enabled__is_train_{is_train}'
@@ -1412,9 +1409,10 @@ class RolloutManager:
                 yield
                 if has_standalone:
                     replicas.set_replica_ready_state(name='hybrid', ready=False)
-        ret_xperf_metrics = self.stop_hybrid_server_and_get_metrics() if has_standalone else self.get_metrics()
+        ret_xperf_metrics = self.get_metrics()
+        self.hybrid_wg.empty_engine_cache(only_clear_metrics=self.config.trainer.queued_rollout_config.enable)
         if xperf_metrics is not None:
-            xperf_metrics[:] = ret_xperf_metrics
+            xperf_metrics.update(ret_xperf_metrics)
         setattr(self, flag_key, False)
 
     @contextmanager
@@ -1428,14 +1426,12 @@ class RolloutManager:
         """After exiting ctx, collect metrics"""
         return self.hybrid_wg.get_metrics()
 
-    def stop_hybrid_server_and_get_metrics(self):
-        """After exiting ctx, collect metrics"""
-        return self.hybrid_wg.release_running_queries_and_return_metrics()
-
     def get_standalone_metrics(self, standalone_wg):
         if not self._rollout_elastic_enabled and standalone_wg is not None:
-            return standalone_wg.return_metrics()
-        return [{}]
+            metrics = standalone_wg.return_metrics()
+            standalone_wg.empty_engine_cache()
+            return metrics
+        return {}
 
     def update_standalone_server_weights(self, is_train: bool) -> Union[List, None]:
         flag_key = f"suppress_update_standalone__is_train_{is_train}"

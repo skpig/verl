@@ -28,8 +28,7 @@ import tempfile
 import json
 import queue
 import threading
-from typing import AsyncGenerator, List, Type, Optional
-import asyncio
+from typing import List, Type, Optional
 import xperf_gpt
 from mono_rl.single_controller import Execute
 
@@ -59,14 +58,11 @@ from alpha_seed.workers.xperf_rollout.utils.pooled_ucx_weights_communicator impo
     WeightsUpdatingInterrupt
 from alpha_seed.workers.xperf_rollout.utils.nccl_weights_communicator import NCCLWeightsCommunicator
 from alpha_seed.workers.streaming_service.xperf_model_prophet import XperfModelProphet
-from alpha_seed.workers.xperf_rollout.utils.logits_manipulate import logits_manipulate_fn_core, logits_manipulate_fn_eta, logits_manipulate_fn_minp, logits_manipulate_fn_clip
 from alpha_seed.utils.observility import get_profiler_context_wrapped, profile_step
 from mono_rl.models.seed_models.modeling_vlm import add_pixel_values_to_inflight_query
 from alpha_seed.workers.xperf_rollout.profiler.visualizer import visualize_metrics
 from mono_rl.utils.dataset.dist_data_util import get_dist_data_manager, get_local_inputs
-from functools import partial
 import omegaconf
-import dill
 
 import ray
 
@@ -671,10 +667,7 @@ class AsyncXPerfGPTRollout(object):
                 model_output_masks.append(v.model_output_mask)
                 query_metrics.append(v.metrics)
                 extra_data.append(v.extra_data)
-            metrics = {}
-            if hasattr(self.inference_engine.infer_scheduler,
-                       "init_metrics") and self.inference_engine.infer_scheduler.enable_metrics:
-                metrics = self.inference_engine.infer_scheduler.metrics
+            metrics = self.inference_engine.infer_scheduler.metrics
             query_metrics_dict = dict()
             for q_metrics in query_metrics:
                 for key, val in q_metrics.items():
@@ -921,12 +914,15 @@ class RemoteAsyncXPerfGPTRollout(Worker):
         # 需要实现的一个接口方法，但现在没什么要做的事情，所以先返回空
         return
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
+    @register(execute_mode=Execute.RANK_ZERO, blocking=True)
     def return_metrics(self):
         metrics = self.rollout_actor.inference_engine.infer_scheduler.metrics
         visualize_metrics(metrics)
-        self.rollout_actor.inference_engine.infer_scheduler.empty_cache()
         return metrics
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def empty_engine_cache(self):
+        self.rollout_actor.inference_engine.empty_cache()
 
 
 # for type annotation convenience

@@ -273,7 +273,7 @@ class SpecialCalculator(AsyncAgent):
         # for s, e in zip(run_starts.tolist(), run_ends.tolist()): sel = idx[s:e];runs.append(training_part[sel])
         # texts = [self.tokenizer.decode(run) for run in runs]
         # if num_tool_calls > 0:
-        #     breakpoint()
+        #     pass
 
         # self.tokenizer.decode(training_part[:out.batch['attention_mask'][0, -max_response_length:].sum()])
 
