@@ -65,6 +65,7 @@ from alpha_seed.utils.chat_template import CHATML, CHATML_TOOL, CHATML_TOOL_V2, 
 from alpha_seed.workers.streaming_service.rollout_request_manager import RequestManager, RequestManagerRegisterCenter
 from alpha_seed.utils.functional import import_from_string, SafeStageLogger
 from alpha_seed.utils.tracking_utils import async_save_cases_to_hdfs
+from alpha_seed.prompts.think_template_utils import get_special_tokens_dict_or_name, check_tokenizer_with_template
 from databus import collect_array
 
 stage_logger = SafeStageLogger()
@@ -949,6 +950,18 @@ def setup_resource_manager(config):
     return rm_reg, elastic_res_managers
 
 
+def set_special_tokens(config):
+    if config.data.think_template is None:
+        return
+    special_tokens_dict = get_special_tokens_dict_or_name(version=config.data.think_template)
+    config.data.special_tokens.think_begin = special_tokens_dict["think_start_token"]
+    config.data.special_tokens.think_end = special_tokens_dict["think_end_token"]
+    config.data.special_tokens.soi = special_tokens_dict["soi"]
+    config.data.special_tokens.eoi = special_tokens_dict["eoi"]
+    config.data.special_tokens.bos = special_tokens_dict["bos"]
+    config.data.special_tokens.eos = special_tokens_dict["eos"]
+
+
 @hydra.main(config_path='config', config_name='ppo_trainer', version_base=None)
 def main(config):
     # Check for duplicate command line arguments first
@@ -956,6 +969,7 @@ def main(config):
     check_duplicate_overrides()
     with stage_logger.log_duration_context("initilization"):
         config = auto_recipe(config)
+        set_special_tokens(config)
         config = init_ray_cluster(config)
         rm_reg, elastic_res_managers = setup_resource_manager(config)
 
@@ -1191,6 +1205,8 @@ def config_to_trainer_kwargs(config):
     if not os.path.exists(tokenizer_path):
         tokenizer_path = local_path
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+    if config.data.get('check_template', False):
+        check_tokenizer_with_template(tokenizer, config)
     if config.data.get('chat_template', None) == 'seed':
         from mono_rl.utils.seed import CHAT_TEMPLATE
         tokenizer.chat_template = CHAT_TEMPLATE

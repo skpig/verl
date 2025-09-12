@@ -23,10 +23,15 @@ data:
   data_auto_repeat: False # Set to true and automatically repeat the dataset by total_epochs times, mainly for no drop_last
   actor_training_batch_size: ${data.train_batch_size}
   num_workers: 0 # number of subprocess for dataloader, 0 for using main process
+  think_template: null
 
   special_tokens:
     think_begin: <think>
     think_end: </think>
+    soi: "[SOI]"
+    eoi: "[EOI]"
+    bos: "<[BOS_never_used_51bce0c785ca2f68081bfa7d91973934]>"
+    eos: "<[EOS_never_used_51bce0c785ca2f68081bfa7d91973934]>"
 
 actor_rollout_ref:
   remove_o_bias: False
@@ -715,7 +720,7 @@ mariana:
 
 triton_cache:
   type: redis
-  hdfs_remote_cache_dir: none
+  hdfs_remote_cache_dir: null
 
 tasks:
     reward_manager: tasks.main_ppo.RewardManager

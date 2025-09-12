@@ -163,7 +163,7 @@ python3 tasks/main_ppo.py \
     trainer.volc_ark_key=123 \
     trainer.volc_model_name=123 \
     tasks.reward_manager=tasks.vlm.reward_manager.VLMRewardManager \
-    +data.think_template=v1 \
+    data.think_template=v2 \
     +ext=vlm_ext
 
 

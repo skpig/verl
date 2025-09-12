@@ -79,7 +79,8 @@ class VLMRayPPOTrainer(RayPPOTrainer):
                     with Timer(name='save_output_batch', logger=None) as timer:
                         save_simple_train_data_to_hdfs(batch, self.tokenizer, self.global_step,
                                                        self.config.trainer.default_hdfs_dir,
-                                                       self.config.data.max_prompt_length)
+                                                       self.config.data.max_prompt_length,
+                                                       self.config.data.special_tokens)
                     metrics['timing/save_output_batch'] = timer.last
                     if self.global_step == 1:
                         print('Debugging', batch.batch)

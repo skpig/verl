@@ -40,7 +40,7 @@ def compute_score_client(solution_str, ground_truth, code_sandbox_psm: str, volc
         handler = ray.get_actor('remote_client')
         # retrieve the score directly
         score = ray.get(handler.get_results.remote(data_uid))
-    think_template = config.data.think_template if hasattr(config.data, 'think_template') else 'v2'
+    think_template = config.data.think_template if config.data.think_template is not None else 'v2'
 
     if score is None:
         score = compute_score(solution_str, ground_truth, code_sandbox_psm, volc_ark_key, volc_model_name,

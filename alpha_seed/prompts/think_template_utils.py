@@ -36,6 +36,15 @@ def get_special_tokens_dict_or_name(name=None, version=None):
             "soi": "[SOI]",
             "eoi": "[EOI]",
         }
+    elif think_template == 'v4':
+        special_tokens_dict = {
+            "bos": "<[BOS_never_used_51bce0c785ca2f68081bfa7d91973934]>",
+            "eos": "<[EOS_never_used_51bce0c785ca2f68081bfa7d91973934]>",
+            "think_start_token": "<think_never_used_51bce0c785ca2f68081bfa7d91973934>",
+            "think_end_token": "</think_never_used_51bce0c785ca2f68081bfa7d91973934>",
+            "soi": "<[SOI_never_used_51bce0c785ca2f68081bfa7d91973934]>",
+            "eoi": "<[EOI_never_used_51bce0c785ca2f68081bfa7d91973934]>",
+        }
     else:
         raise NotImplementedError
 
@@ -67,15 +76,21 @@ def align_special_tokens(text):
     return text
 
 
-def check_tokenizer_with_template(tokenizer):
-    think_template = os.getenv("THINK_TEMPLATE", "v3")
-    if think_template == "v3":
-        think_token = tokenizer.encode("<think_never_used_51bce0c785ca2f68081bfa7d91973934>")
-        assert len(
-            think_token
-        ) == 1, f"use v3 template, but tokenizer encode <think_never_used_51bce0c785ca2f68081bfa7d91973934> into {think_token}"
-    if think_template != "v3":
-        think_token = tokenizer.encode("<think_never_used_51bce0c785ca2f68081bfa7d91973934>")
-        assert len(
-            think_token
-        ) != 1, f"use {think_template} template, but tokenizer encode <think_never_used_51bce0c785ca2f68081bfa7d91973934> into {think_token}"
+def check_tokenizer_with_template(tokenizer, config):
+    think_template = config.data.think_template
+    is_vlm = config.data.get('image_key', None) is not None
+
+    def _check(key):
+        token = getattr(config.data.special_tokens, key)
+        key_map = {'think_begin': 'think_start_token', 'think_end': 'think_end_token'}
+        if think_template is not None:
+            # yaml config special_tokens should be same as special_tokens_dict
+            assert get_special_tokens_dict_or_name(key_map.get(key, key), think_template) == token
+        assert token in tokenizer.get_vocab(), f"use {think_template} template, but tokenizer not found {token}"
+
+    for key in ['think_begin', 'think_end', 'bos', 'eos']:
+        _check(key)
+    # check vlm related special keys
+    if is_vlm:
+        for key in ['soi', 'eoi']:
+            _check(key)

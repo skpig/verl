@@ -23,11 +23,13 @@ class RotateToolVerifier(BaseVerifier):
         ]  # It maps `imgidx` to the tool call generating the corresponding image, assuming a query has only 1 image.
         eos = get_special_tokens_dict_or_name("eos")
         bos = get_special_tokens_dict_or_name("bos")
+        soi = get_special_tokens_dict_or_name("soi")
+        eoi = get_special_tokens_dict_or_name("eoi")
         convs = ("assistant\n" + response).split(f'{eos}{bos}')
         for idx, conv in enumerate(convs):
             if '<|FunctionCallBegin|>' in conv:
                 tool_call_str = conv.split("<|FunctionCallBegin|>")[1].split("<|FunctionCallEnd|>")[0]
-                if (idx + 1 < len(convs)) and ('[SOI][EOI]' in convs[idx + 1]):
+                if (idx + 1 < len(convs)) and (f'{soi}{eoi}' in convs[idx + 1]):
                     last_call_valid = True
                     valid_tool_calls.append(json.loads(tool_call_str)[0])
                 else:

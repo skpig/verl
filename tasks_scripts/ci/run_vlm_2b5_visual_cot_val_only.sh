@@ -168,5 +168,5 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.rollout.max_ctx_batch_size=8 \
     +actor_rollout_ref.rollout.vocab_tp=True \
     actor_rollout_ref.rollout.vit_use_dp=True \
-    +data.think_template=v2
+    data.think_template=v2
 

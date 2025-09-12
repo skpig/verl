@@ -103,7 +103,9 @@ class BaseReasoningAgent(AsyncAgent):
                                                                tools=self.tool_schemas,
                                                                add_generation_prompt=True,
                                                                tokenize=False)
-        prompts = prompt_with_tools.replace("<image>", "[SOI]<ImageHere>[EOI]").split("<ImageHere>")
+        soi = context.config.data.special_tokens.soi
+        eoi = context.config.data.special_tokens.eoi
+        prompts = prompt_with_tools.replace("<image>", f"{soi}<ImageHere>{eoi}").split("<ImageHere>")
         if 'num_image_tokens' in item.non_tensor_batch:
             num_image_tokens = item.non_tensor_batch['num_image_tokens'][0]
         else:

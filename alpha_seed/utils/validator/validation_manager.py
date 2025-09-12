@@ -70,6 +70,8 @@ class ValidateManager(object):
             dataset_indexs = test_batch.non_tensor_batch['index']
         else:
             dataset_indexs = [None] * prompt_ids.shape[0]
+        soi = self.config.data.special_tokens.soi
+        eoi = self.config.data.special_tokens.eoi
         for reward, prompt, response, rollout_id, ori_prompt_index, raw_output, dataset_index in zip(
                 reward_tensor_before_select, prompts, responses, rollout_ids, ori_prompt_indexs, raw_outputs,
                 dataset_indexs):
@@ -82,7 +84,7 @@ class ValidateManager(object):
                 "rollout_id": rollout_id,
                 "reward": reward.item(),
                 "prompt": prompt,
-                "response": response.replace("[SOI][EOI]", "[SOI]<ImageHere>[EOI]"),
+                "response": response.replace(f"{soi}{eoi}", f"{soi}<ImageHere>{eoi}"),
                 "raw_output": raw_output
             }
             f.write(json.dumps(data, ensure_ascii=False) + "\n")

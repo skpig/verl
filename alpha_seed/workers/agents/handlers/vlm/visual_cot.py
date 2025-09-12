@@ -45,7 +45,8 @@ class VisualCotAgent(AsyncAgent):
         processor = kwargs['processor']
         self.visual_cot = create_from_env_str('visual_cot@',
                                               tokenizer=tokenizer,
-                                              image_processor=processor.image_processor)
+                                              image_processor=processor.image_processor,
+                                              config=kwargs['config'])
         self.processor = processor
         self.tools = {"visual_cot": self.visual_cot}
         self.tool_parser = VisualCotParser(tokenizer)

@@ -184,4 +184,4 @@ python3 tasks/main_ppo.py \
     critic.ppo_max_token_len=${critic_ppo_max_token_len} \
     trainer.offload_train_memory=True \
     actor_rollout_ref.model.use_ce_loss_fusion=True \
-    +data.think_template=v1
+    data.think_template=v1

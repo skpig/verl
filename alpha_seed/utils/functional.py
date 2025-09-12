@@ -123,7 +123,7 @@ def import_from_string(import_str: str) -> Any:
         return importlib.import_module(import_str)
 
 
-def save_simple_train_data_to_hdfs(batch, tokenizer, step, file_base_path, max_prompt_length):
+def save_simple_train_data_to_hdfs(batch, tokenizer, step, file_base_path, max_prompt_length, special_tokens):
     file_path = f"{file_base_path}/simple_train_data"
     local_file_path = f'train_simple_{step}.jsonl'
     makedirs(file_path, exist_ok=True)
@@ -155,20 +155,19 @@ def save_simple_train_data_to_hdfs(batch, tokenizer, step, file_base_path, max_p
         for score, token_level_reward, prompt, response, dataset_index in zip(raw_scores, token_level_rewards, prompts,
                                                                               responses, dataset_indexs):
             data = {
-                "index_id": dataset_index,
-                "raw_score": score.item(),
-                "token_level_reward": token_level_reward.item(),
-                "prompt": prompt,
-                "response": response.replace("[SOI][EOI]", "[SOI]<ImageHere>[EOI]"),
+                "index_id":
+                    dataset_index,
+                "raw_score":
+                    score.item(),
+                "token_level_reward":
+                    token_level_reward.item(),
+                "prompt":
+                    prompt,
+                "response":
+                    response.replace(f"{special_tokens.soi}{special_tokens.eoi}",
+                                     f"{special_tokens.soi}<ImageHere>{special_tokens.eoi}"),
             }
             f.write(json.dumps(data, ensure_ascii=False) + "\n")
             f.flush()
 
     hput(local_file_path, file_path)
-    # try:
-    #     os.remove(local_file_path)
-    # except Exception as e:
-    #     print(f'failed to remove {local_file_path}, exception {e} will be ignored')
-    # print(
-    #     f'Saving train output batch from {local_file_path} to {file_path}'
-    # )

@@ -23,14 +23,15 @@ class VLMEvalsAgent(AsyncAgent):
 
     def __init__(self, tokenizer: AsyncTokenizer | PreTrainedTokenizer, llm: AsyncLLMInterface, **kwargs):
         super().__init__(tokenizer, llm, **kwargs)
+        config = kwargs['config']
         processor = kwargs['processor']
         self.visual_cot = create_from_env_str('visual_cot@',
                                               tokenizer=tokenizer,
-                                              image_processor=processor.image_processor)
+                                              image_processor=processor.image_processor,
+                                              config=config)
         self.processor = processor
         self.tools = {"visual_cot": self.visual_cot}
         self.tool_parser = VisualCotParser(tokenizer)
-        config = kwargs['config']
         reward_manager_cls = import_from_string(config.tasks.reward_manager)
         self.val_reward_fn = reward_manager_cls(tokenizer=tokenizer,
                                                 config=config,

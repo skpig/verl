@@ -22,13 +22,12 @@ def get_batch(config, tokenizer, processor, model_path):
         tokenizer=tokenizer,
         prompt_key="prompt",
         answer_key="answer",
-        image_key="img",
         use_ref_answer=False,
         max_prompt_length=8192,
         multi_prompts="none",
         num_prompts_per_data=1,
         processor=processor,
-        tokenizer_file=model_path,
+        config=config,
     )
 
     sampler = SequentialSampler(data_source=dataset)
@@ -56,6 +55,7 @@ def test_vlm_gen(monkeypatch, gpu_allocator, ray_fixture):
         'data': {
             'max_prompt_length': 8192,
             'max_response_length': 8192,
+            'image_key': "img",
         },
         'actor_rollout_ref': {
             "model": {
@@ -75,6 +75,11 @@ def test_vlm_gen(monkeypatch, gpu_allocator, ray_fixture):
             "experiment_name": "hybrid_engine_vlm",
             "logger": ['console'],
             "default_hdfs_dir": "./"
+        },
+        "elastic": {
+            "resource_pools": {
+                "stable_pool_names": []
+            }
         }
     })
     config = get_config(override_config)

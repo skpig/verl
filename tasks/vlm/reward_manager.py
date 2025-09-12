@@ -124,7 +124,7 @@ class VLMRewardManager(RewardManager):
                 "int_verify is deprecated and needs attention. It selects the last integer and judges its correctness, which could lead to unexpected behaviour. Robust verification like \\boxed{} is recommended."
             )
         self.grm_remote_client = grm_remote_client
-        think_template = self.config.data.get('think_template', 'v2')
+        think_template = self.config.data.think_template if self.config.data.think_template is not None else 'v2'
         os.environ["THINK_TEMPLATE"] = think_template
 
     def update_len_ema(self, data: DataProto):

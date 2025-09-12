@@ -109,13 +109,13 @@ def postprocess_data(input_ids, attention_mask, max_length: int, pad_token_id: i
     return input_ids, attention_mask
 
 
-def convert_conversation_to_prompt(conversation):
+def convert_conversation_to_prompt(conversation, config):
     prompt = ""
     for turn in conversation:
         turn_prompt = ""
         for content in turn["content"]:
             if content["type"] == "image":
-                turn_prompt += "[SOI]<ImageHere>[EOI]"
+                turn_prompt += f"{config.data.special_tokens.soi}<ImageHere>{config.data.special_tokens.eoi}"
             elif content["type"] == "text":
                 turn_prompt += content["text"]
             else:
@@ -219,14 +219,14 @@ class RLHFDatasetVL(RLHFDataset):
 
     def __init__(self, *args, **kwargs):
         self.processor = kwargs.pop('processor', None)
-        self.num_limit = kwargs.pop('num_limit', None)
-        self.image_key = kwargs.pop('image_key', 'image')
-        self.tokenizer_file = kwargs.pop('tokenizer_file', None)
-        self.dist_image = kwargs.pop('dist_image', True)
-        self.stable_pool_names = kwargs.pop('stable_pool_names', [])
+        self.config = kwargs.pop('config')
+        self.image_key = self.config.data.image_key
+        self.tokenizer_file = self.config.actor_rollout_ref.model.path
+        self.dist_image = True
+        self.stable_pool_names = self.config.elastic.resource_pools.stable_pool_names
         stable_pool_name = self.stable_pool_names[0] if self.stable_pool_names else ''
         self.dist_data_manager = init_or_get_dist_data_manager(stable_pool_name)
-        self.use_vlm_verifier_router = kwargs.pop('use_vlm_verifier_router', False)
+        self.use_vlm_verifier_router = self.config.reward_model.get('use_vlm_verifier_router', False)
         super().__init__(*args, **kwargs)
 
     def _read_files_and_tokenize_dist(self):
@@ -364,7 +364,7 @@ class RLHFDatasetVL(RLHFDataset):
             })
         conversation.append({"role": "user", "content": user_contents})
 
-        prompt = convert_conversation_to_prompt(conversation)
+        prompt = convert_conversation_to_prompt(conversation, self.config)
 
         # reward_model is required
         row_dict_ret['reward_model'] = get_reward_model(row_dict, self.use_vlm_verifier_router)

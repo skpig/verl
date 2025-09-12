@@ -147,4 +147,4 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.actor.profile.filename=actor.tp${xperf_tp_size}.fsdp${fsdp_size} \
     trainer.total_steps=${NUM_STEPS} \
     trainer.save_cases_to_hdfs=False \
-    +data.think_template=v1
+    data.think_template=v1

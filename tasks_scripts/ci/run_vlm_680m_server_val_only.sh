@@ -161,9 +161,9 @@ python3 tasks/main_ppo.py \
     trainer.volc_ark_key=123 \
     trainer.volc_model_name=123 \
     tasks.reward_manager=tasks.vlm.reward_manager.VLMRewardManager \
-    +data.think_template=v2 \
     +ext=vlm_ext \
     actor_rollout_ref.rollout.eval_bon=${eval_bon} \
     trainer.val_epoch=2 \
     rollout_server.evals.ckpt_interval_seconds=5 \
-    rollout_server.evals.enable=True
+    rollout_server.evals.enable=True \
+    data.check_template=False

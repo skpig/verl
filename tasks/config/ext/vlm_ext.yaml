@@ -2,3 +2,5 @@
 reward_model:
   enable_resp_para: True
   use_vlm_verifier_router: True
+data:
+  check_template: True

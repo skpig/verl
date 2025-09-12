@@ -366,12 +366,14 @@ class VisualCotEnv(BaseTool):
     def __init__(self, **kwargs) -> None:
         tokenizer = kwargs.get('tokenizer', None)
         image_processor = kwargs.get('image_processor', None)
+        config = kwargs.get('config')
         assert tokenizer is not None and image_processor is not None, f"tokenizer or image_processor is None"
         self.tokenizer = tokenizer
         self.image_processor = image_processor
         self._metrics = defaultdict(list)
-
         self._is_finished = False
+        self.soi_token_id = self.tokenizer.encode(config.data.special_tokens.soi)
+        self.eoi_token_id = self.tokenizer.encode(config.data.special_tokens.eoi)
 
     @property
     def metrics(self) -> dict:
@@ -412,8 +414,8 @@ class VisualCotEnv(BaseTool):
                 image_inputs = self.image_processor(images=decode_bytes_to_rgb_image(base64.b64decode(image_base64)))
                 input_ids = [
                     self.tokenizer.bos_token_id
-                ] + self.tokenizer.encode("tool name=plugin\n" + raw_visual_cot_output["text"]) + self.tokenizer.encode(
-                    "[SOI]") + [-100] * image_inputs["num_image_tokens"][0] + self.tokenizer.encode("[EOI]") + [
+                ] + self.tokenizer.encode("tool name=plugin\n" + raw_visual_cot_output["text"]) + self.soi_token_id + \
+                [-100] * image_inputs["num_image_tokens"][0] + self.eoi_token_id + [
                         self.tokenizer.eos_token_id, self.tokenizer.bos_token_id
                     ] + self.tokenizer.encode("assistant\n")
                 pixel_values = image_inputs.pop("pixel_values")

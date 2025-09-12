@@ -176,6 +176,8 @@ class AuxlineVerifier(BaseVerifier):
                 response).split(f'{get_special_tokens_dict_or_name("eos")}{get_special_tokens_dict_or_name("bos")}')
             tool_str = ''
             valid_tool_call = [{}]
+            eoi = get_special_tokens_dict_or_name("eoi")
+            soi = get_special_tokens_dict_or_name("soi")
             # 选最后一次工具调用
             for idx, conv in enumerate(convs):
                 content = conv
@@ -184,7 +186,7 @@ class AuxlineVerifier(BaseVerifier):
                     cur_tools = json.loads(tool_str)
                     cur_tool_param = cur_tools[0]["parameters"]
                     cur_tool_name = cur_tools[0]["name"]
-                    if idx + 1 < len(convs) and '[SOI][EOI]' in convs[idx + 1]:
+                    if idx + 1 < len(convs) and f'{soi}{eoi}' in convs[idx + 1]:
                         valid_tool_call.append(cur_tools[0])
             if not tool_str:
                 return VerifyResult(score=SCORE_INVALID_FORMAT, extracted_answer=response)

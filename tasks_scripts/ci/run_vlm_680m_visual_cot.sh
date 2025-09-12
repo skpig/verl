@@ -174,7 +174,6 @@ python3 tasks/main_ppo.py \
     critic.ppo_max_token_len=${critic_ppo_max_token_len} \
     trainer.offload_train_memory=True \
     actor_rollout_ref.model.use_ce_loss_fusion=True \
-    +data.think_template=v1 \
     actor_rollout_ref.rollout.mode=server \
     rollout_server.handler="agent/tool/visual_cot" \
     +ext=vlm_ext \
@@ -183,4 +182,6 @@ python3 tasks/main_ppo.py \
     tasks.reward_manager=tasks.vlm.reward_manager.VLMRewardManager \
     tasks.trainer=tasks.vlm.ppo_trainer.VLMRayPPOTrainer \
     trainer.volc_ark_key=123 \
-    trainer.volc_model_name=123
+    trainer.volc_model_name=123 \
+    data.check_template=False
+
