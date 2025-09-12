@@ -19,6 +19,7 @@ class QueryConfig:
         prompt_len = random.randint(1, max_prompt_len)
         resp_len = random.randint(1, max_resp_len)
         model_output_mask = [bool(random.random() < 0.98) for _ in range(resp_len)]
+        model_output_mask[0] = True
         return QueryConfig(prompt_len=prompt_len, resp_len=resp_len, model_output_mask=model_output_mask)
 
 
