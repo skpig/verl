@@ -1,8 +1,7 @@
 import json
-from typing import List, Dict
+from typing import List, Dict, Any, Optional
 
 import regex as re
-import xml.etree.ElementTree as ET
 import json
 import ast
 
@@ -30,36 +29,21 @@ class ToolParser:
             re.escape(self.tool_call_start_token_xml) + r"(.*?)" + re.escape(self.tool_call_end_token_xml), re.DOTALL)
 
     def xlm_to_json(self, xlm_content):
-        # 预处理：为内容添加一个根标签，使XML格式完整
-        xlm_content = f"<root>{xlm_content}</root>"
-
-        # 预处理：将<function=xxx>格式转换为标准XML标签<function name="xxx">
-        xlm_content = re.sub(r'<function=(.*?)>', r'<function name="\1">', xlm_content)
-        xlm_content = re.sub(r'<parameter=(.*?)>', r'<parameter name="\1">', xlm_content)
-
-        # 解析XML内容
-        root = ET.fromstring(xlm_content)
-
-        # 初始化结果列表
         result = []
+        FN_REGEX_PATTERN = r"<function=([^>]+)>(.*?)</function>"
+        FN_PARAM_REGEX_PATTERN = r"<parameter=([^>]+)>(.*?)</parameter>"
+        function_matches = re.finditer(FN_REGEX_PATTERN, xlm_content, re.DOTALL)
+        for function_match in function_matches:
+            fn_name = function_match.group(1)
+            fn_body = function_match.group(2)
+            arguments = {}
 
-        # 遍历所有function节点
-        for function in root.findall('function'):
-            func_info = {"name": function.attrib.get('name'), "parameters": {}}
-
-            # 提取参数信息
-            for param in function.findall('parameter'):
-                param_name = param.attrib.get('name')
-                try:
-                    param_value = json.loads(param.text)
-                except:
-                    param_value = param.text
-                func_info["parameters"][param_name] = param_value
-
-            result.append(func_info)
-
-        # 转换为JSON字符串并返回
-        return json.dumps(result, ensure_ascii=False)
+            for arg_match in re.finditer(FN_PARAM_REGEX_PATTERN, fn_body, re.DOTALL):
+                arg_name = arg_match.group(1)
+                arg_value = arg_match.group(2)
+                arguments[arg_name] = arg_value
+            result.append({'name': fn_name, 'parameters': arguments})
+        return json.dumps(result, indent=4, ensure_ascii=False)
 
     async def extract_tool_calls(self, response_text: str) -> List[FunctionCall]:
         """Extract tool calls from response text"""
@@ -77,7 +61,10 @@ class ToolParser:
         for match in matches:
             try:
                 match = self.xlm_to_json(match)
-                function_call = json.loads(match)
+                try:
+                    function_call = json.loads(match)
+                except:
+                    function_call = eval(match)
                 if isinstance(function_call, list):
                     for f in function_call:
                         name, arguments = f["name"], f["arguments"] if "arguments" in f else f["parameters"]
@@ -121,7 +108,10 @@ class ToolParser:
                     FunctionCall(name=func_name, arguments=json.dumps(kwargs_dict, ensure_ascii=False)))
             except:
                 try:
-                    function_call = json.loads(match)
+                    try:
+                        function_call = json.loads(match)
+                    except:
+                        function_call = eval(match)
                     if isinstance(function_call, list):
                         for f in function_call:
                             name, arguments = f["name"], f["arguments"] if "arguments" in f else f["parameters"]
@@ -134,7 +124,6 @@ class ToolParser:
                             FunctionCall(name=name, arguments=json.dumps(arguments, ensure_ascii=False)))
                 except Exception as e:
                     print(f"Error parsing function call: {match}. Error: {e}")
-                    pass
         return function_calls
 
 
@@ -175,3 +164,115 @@ async def _extract_messages_from_dataproto(item, max_prompt_length, tokenizer, t
     messages = [{"role": "user", "content": prompt}]
 
     return messages
+
+
+if __name__ == "__main__":
+    from omegaconf import DictConfig
+    import hdfs_io
+    import asyncio
+    from transformers import AutoTokenizer
+    from alpha_seed.utils.chat_template import CHATML_TOOL_V5
+    config = {
+        "rollout_server": {
+            "tool_call_start_token": "<tool_call>",
+            "tool_call_end_token": "</tool_call>",
+            "tool_call_start_token_xml": "<seed:tool_call>",
+            "tool_call_end_token_xml": "</seed:tool_call>",
+            "tool_call_use_xml": True
+        }
+    }
+    config = DictConfig(config)
+    hdfs_io.copy(
+        src=
+        "hdfs://haruna/home/byte_data_seed/ssd_hldy/user/songyuqing/cot_sft/bbpe155k-v6.4.3-ml.pret_add_code_cot_webgpt_fc_o1search_0220",
+        dst="/opt/tiger")
+
+    tokenizer = AutoTokenizer.from_pretrained("/opt/tiger/bbpe155k-v6.4.3-ml.pret_add_code_cot_webgpt_fc_o1search_0220")
+    tokenizer.chat_template = CHATML_TOOL_V5
+    tool_parser = ToolParser(tokenizer, config)
+
+    tools = [{
+        'name':
+            'GlobalSearch',
+        'description':
+            '这是一个联网搜索工具，输入搜索问题，返回网页列表与对应的摘要信息。搜索问题应该简洁清晰，复杂问题应该拆解成多步并一步一步搜索。如果没有搜索到有用的页面，可以调整问题描述（如减少限定词、更换搜索思路）后再次搜索。搜索结果质量和语种有关，对于中文资源可以尝试输入中文问题，非中资源可以尝试使用英文或对应语种。',
+        'parameters': {
+            'type': 'object',
+            'properties': {
+                'query': {
+                    'type': 'string',
+                    'description': '搜索问题'
+                }
+            },
+            'required': ['query']
+        }
+    }, {
+        'name': 'complex_func',
+        'description': 'xxx',
+        'parameters': {
+            'type': 'object',
+            'properties': {
+                'complex_para': {
+                    'type': 'object',
+                    'description': 'yyy'
+                }
+            },
+            'required': ['complex_para']
+        }
+    }, {
+        'name': 'Search_Plugin_new',
+        'description': 'xxx',
+        'parameters': {
+            'type': 'object',
+            'properties': {
+                'query': {
+                    'type': 'str',
+                    'description': 'yyy'
+                },
+                'result_limits': {
+                    'type': 'int',
+                    'description': 'zzz'
+                }
+            },
+            'required': ['query', 'result_limits']
+        }
+    }]
+    s = """
+<seed:tool_call>
+<function=GlobalSearch>
+<parameter=query>2025 Freight Focus article DAT Freight & Analytics</parameter>
+</function>
+</seed:tool_call>
+
+调用单个工具：
+<seed:tool_call>
+<function=Search_Plugin_new>
+<parameter=query>2025年全球人工智能市场规模预测</parameter>
+<parameter=result_limits>15</parameter>
+</function>
+</seed:tool_call>
+
+调用多个工具：
+<seed:tool_call>
+<function=LinkReader>
+<parameter=description>总结这篇文章的核心观点</parameter>
+<parameter=url>http://example.com/ai-report</parameter>
+</function>
+<function=Search_Plugin_new>
+<parameter=query>文章作者的最新研究</parameter>
+<parameter=result_limits>12</parameter>
+</function>
+</seed:tool_call>
+
+调用复杂参数工具：
+<seed:tool_call>
+<function=complex_func>
+<parameter=complex_para>
+{"key1": "value1", "key2": "value2"}
+</parameter>
+</function>
+</seed:tool_call>
+    """
+    for f in asyncio.run(tool_parser.extract_tool_calls(s)):
+        print(f.name, f.arguments)
+        print("=" * 20)
