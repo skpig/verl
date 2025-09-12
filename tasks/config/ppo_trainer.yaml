@@ -352,15 +352,6 @@ reward_model:
   grm:
     use_grm_reverse: False
     score_merger: "v1"  # grm与verifier的融合方法
-    server:
-      llm_serving_psm: ''
-      llm_serving_idc: ''
-      llm_serving_cluster: ''
-      client_pool_size: 16
-      ray_actor_pool_size: 16
-      model_name: ''
-      max_retry: 3
-      retry_interval: 1
     max_prompt_length: ${data.max_prompt_length}
     max_response_length: ${data.max_response_length}
     # support multiple grm
@@ -370,7 +361,17 @@ reward_model:
     score_parser: [ "v2", "v2" ]  # 不同grm用不同的score parser
     score_weight: [ 0.6, 0.4 ] # 最终返回一个各grm score的weighed sum
     empty_response_default_score: [ 1.0, 0.0 ] # response为空给默认score不必请求grm
-
+  rm_server: # ORM, GRM, and QRM can all be configured
+    llm_serving_psm: ''
+    llm_serving_idc: ''
+    llm_serving_cluster: ''
+    client_pool_size: 16
+    ray_actor_pool_size: 16
+    model_name: ''
+    max_retry: 3
+    timeout: 60
+    retry_interval: 1
+    top_p: 1.0
   len_ema_json: null
   enable: False
   external_lib: null # [null, /opt/tiger/agents_extension/reward_fn]
@@ -466,9 +467,8 @@ algorithm:
 
 trainer:
   donot_resume_data: False
-
-  use_grm: false
-  use_remote_grm: false
+  remote_rm_type: null # ["orm", "grm", "qrm"]
+  use_remote_rm: false
   total_epochs: 30
   total_steps: null  # if total_steps is not None, it is prioritized over total_epochs
   project_name: verl_examples

@@ -132,3 +132,27 @@ def _select_rm_score_fn(reward_style, external_lib: str = None):
         return verifier_service_volc.compute_score_client
     else:
         raise NotImplementedError(f"{reward_style=} not implemented")
+
+
+def get_remote_rm_score(remote_rm_type):
+    if remote_rm_type == "qrm":
+        from alpha_seed.utils.reward_score.qrm_service import get_qrm_score
+        return get_qrm_score
+    elif remote_rm_type == "grm":
+        pass
+    elif remote_rm_type == "orm":
+        pass
+    else:
+        raise NotImplementedError(f"{remote_rm_type=} not implemented")
+
+
+def select_remote_rm_fn(config, **kwargs):
+    if config.trainer.remote_rm_type == "qrm":
+        from alpha_seed.utils.reward_score.qrm_service import init_qrm_server
+        return init_qrm_server
+    elif config.trainer.remote_rm_type == "grm":
+        pass
+    elif config.trainer.remote_rm_type == "orm":
+        pass
+    else:
+        raise NotImplementedError(f"{config.trainer.remote_rm_type=} not implemented")

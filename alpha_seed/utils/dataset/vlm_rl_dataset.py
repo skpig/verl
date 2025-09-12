@@ -391,7 +391,7 @@ class RLHFDatasetVL(RLHFDataset):
                 row_dict_ret[key] = row_dict_ret[key].to(dtype)
 
         # Add grm input on VLM dataset
-        if self.use_grm:
+        if self.remote_rm_type == 'grm':
             grm_input = self._prepare_grm_input(conversation,
                                                 answer,
                                                 max_prompt_len=self.max_prompt_length,

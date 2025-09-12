@@ -52,13 +52,14 @@ from alpha_seed.utils.server_client import is_local_ray_instance, validate_clien
     ClientTaskRunner, check_all_workers_alive, recreate_actor
 # rule-based reward score
 from alpha_seed.utils.reward_score.extra_reward import add_length_reward, punish_format_return_positions
-from alpha_seed.utils.reward_score import verifier_service, gaokao_verifier_service, aider_utils, swe_repair_verifier, oj_utils, deep_research_verifier, response_post_proc, _select_rm_score_fn
+from alpha_seed.utils.reward_score import verifier_service, gaokao_verifier_service, aider_utils, swe_repair_verifier, oj_utils, deep_research_verifier, response_post_proc, _select_rm_score_fn, select_remote_rm_fn, get_remote_rm_score
 from alpha_seed.utils.reward_score.vlm_verifiers import vlm_verifier_router
 from alpha_seed.utils.duplicate import para_dup
 from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRefWorker
 from alpha_seed.workers.actors.critic_worker import CriticWorker
 from alpha_seed.utils.alarm.lark_util import send_message_to_employee
 from alpha_seed.utils.reward_score.grm_service import GRMService, GRM_INVALID_SCORE
+from alpha_seed.utils.reward_score.qrm_service import QRM_INVALID_SCORE
 from alpha_seed.utils.server_client import validate_client_config, KVStore, ServerHealthCheck, TaskRunner, ClientTaskRunner, check_all_workers_alive, recreate_actor
 from alpha_seed.utils.ckpt import download_minimal_required_files
 from alpha_seed.utils.chat_template import CHATML, CHATML_TOOL, CHATML_TOOL_V2, CHATML_TOOL_V3, CHATML_TOOL_V4, CHATML_TOOL_V5
@@ -135,19 +136,32 @@ class RemoteClient:
         self.vlm_verifier_router = ray.remote(num_cpus=1)(vlm_verifier_router.compute_score)
         self.call_swe = ray.remote(num_cpus=1)(swe_repair_verifier.compute_score)
 
+        self.remote_rm_service = None
+        self.remote_rm_results = {}
+        if self.config.trainer.use_remote_rm:
+            self.remote_rm_service = select_remote_rm_fn(self.config)(self.config, tokenizer=self.tokenizer)
+
     def clear(self):
         # for some cases, the results won't be claimed. So we need to clear the results.
         self.results = {}
+        self.remote_rm_results = {}
+        self.callback_running_pool = {}
 
     def get_num_pending_outputs(self):
         """Return the number of outputs, whose result is not claimed"""
-        return len(self.results)
+        return len(self.results) + len(self.remote_rm_results)
 
-    async def add_requests(self, req_id, input_ids, ground_truth, reward_style):
+    async def add_requests(self,
+                           req_id,
+                           input_ids=None,
+                           ground_truth=None,
+                           reward_style=None,
+                           call_rm_service=False,
+                           **kwargs):
         # there maybe same uid callback in agent server mode
         if self.callback_running_pool.get(req_id, False):
             return
-        self.callback_running_pool[req_id] = True
+        self.callback_running_pool[req_id] = 0
         input_ids = np.array(input_ids)
         input_ids = input_ids[input_ids >= 0].tolist()
         solution_str = self.tokenizer.decode(input_ids, skip_special_tokens=False)
@@ -156,6 +170,13 @@ class RemoteClient:
                                                            solution_str,
                                                            reward_style,
                                                            eos_token=self.tokenizer.eos_token)
+
+        if call_rm_service:
+            assert self.remote_rm_service is not None, "remote_rm_service is None, when call_rm_service is True"
+            actor = random.choice(self.remote_rm_service)
+            remote_future = actor.call.remote(input_ids, ground_truth, reward_style, **kwargs)
+            self.remote_rm_results[req_id] = remote_future
+            self.callback_running_pool[req_id] += 1
 
         if reward_style == 'code-sandbox':
             result_future = self.call_oj.remote(solution_str_post_proc, ground_truth,
@@ -175,23 +196,40 @@ class RemoteClient:
                                                                 self.config.trainer.gaokao_verifier_service_psm)
         elif reward_style == 'swe_repair_verifier':
             result_future = self.call_swe.remote(solution_str_post_proc, ground_truth)
+        elif call_rm_service:
+            # maybe data has not reward_style, and dirctly call remote rm service
+            result_future = None
         else:
             raise NotImplementedError(f'Unsupported reward_style {reward_style}')
 
         assert req_id not in self.results, f"{req_id} already exists, reward_style: {reward_style}"
-        self.results[req_id] = result_future
+        if result_future is not None:
+            self.callback_running_pool[req_id] += 1
+            self.results[req_id] = result_future
 
     async def get_results(self, req_id):
         if req_id not in self.results:
             print(f"[get_results] {req_id} not found")
             return None
-
+        self.release_running_pool(req_id)
         assert req_id in self.results, f"{req_id} not found"
         result_future = self.results.pop(req_id)
         # call running should be removed
-        if req_id in self.callback_running_pool:
-            del self.callback_running_pool[req_id]
         return await result_future
+
+    async def get_remote_rm_results(self, req_id):
+        if req_id not in self.remote_rm_results:
+            return None
+        self.release_running_pool(req_id)
+        remote_rm_result_future = self.remote_rm_results.pop(req_id)
+        return await remote_rm_result_future
+
+    def release_running_pool(self, req_id):
+        """Control the running pool, return True if the req_id can be added"""
+        if req_id in self.callback_running_pool:
+            self.callback_running_pool[req_id] -= 1
+            if self.callback_running_pool[req_id] <= 0:
+                del self.callback_running_pool[req_id]
 
 
 try:
@@ -205,7 +243,7 @@ import math
 
 class RewardManager():
 
-    def __init__(self, tokenizer, config, logger: Tracking, grm_remote_client=None, rm_name="train") -> None:
+    def __init__(self, tokenizer, config, logger: Tracking, rm_remote_client=None, rm_name="train") -> None:
         self.tokenizer = tokenizer
         self.logger = logger
         self.log_table = []
@@ -247,7 +285,8 @@ class RewardManager():
             warnings.warn(
                 "int_verify is deprecated and needs attention. It selects the last integer and judges its correctness, which could lead to unexpected behaviour. Robust verification like \\boxed{} is recommended."
             )
-        self.grm_remote_client = grm_remote_client
+
+        self.rm_remote_client = rm_remote_client
 
     def update_len_ema(self, data: DataProto):
         index = data.non_tensor_batch['index']
@@ -389,8 +428,8 @@ class RewardManager():
 
             raw_score = 0
             score_msg = ''
-            grm_response = ""
-            grm_score = GRM_INVALID_SCORE
+            rm_response = ""
+            rm_score = GRM_INVALID_SCORE
             if isinstance(extra_data, dict) and (cached_score := extra_data.get('score', None)) is not None:
                 # score already calculated and is passed in extra_data
                 score = cached_score
@@ -407,29 +446,32 @@ class RewardManager():
                     score_msg = raw_score['msg']
                     raw_score = raw_score['score']
 
-                if (not is_validation
-                   ) and self.config.trainer.use_grm and self.config.trainer.use_remote_grm and self.rm_name == 'train':
-                    grm_response, grm_score = ray.get(self.grm_remote_client.get_results.remote(data_uid))
+                rm_response, rm_score = None, None
+                if (not is_validation) and (self.config.trainer.remote_rm_type
+                                            == "grm") and self.config.trainer.use_remote_rm and self.rm_name == 'train':
+                    rm_response, rm_score = ray.get(self.rm_remote_client.get_results.remote(data_uid))
                     if random.random() < 0.01:
                         print(
-                            f"[grm debug] service receive, grm_score: {grm_score}, raw_score: {raw_score}, response: {repr(grm_response)}"
+                            f"[grm debug] service receive, grm_score: {rm_score}, raw_score: {raw_score}, response: {repr(rm_response)}"
                         )
                     if self.score_merger == 'v1':  # verifier基础上线性融合一定权重grm score
-                        if grm_score == GRM_INVALID_SCORE:
+                        if rm_score == GRM_INVALID_SCORE:
                             score = raw_score
                         elif raw_score > 0:
-                            score = raw_score * 0.7 + grm_score * 0.3
+                            score = raw_score * 0.7 + rm_score * 0.3
                         else:
                             score = raw_score
                     elif self.score_merger == 'v2':  # 主要用grm分数，verifier raw_score只做兜底
-                        if grm_score == GRM_INVALID_SCORE:
+                        if rm_score == GRM_INVALID_SCORE:
                             score = raw_score
-                        elif grm_score > 0:
-                            score = 0.7 + grm_score * 0.3
+                        elif rm_score > 0:
+                            score = 0.7 + rm_score * 0.3
                         else:
                             score = -1
                     else:
                         raise NotImplementedError
+                elif self.config.trainer.use_remote_rm and (not is_validation) and self.rm_name == 'train':
+                    rm_response, rm_score = get_remote_rm_score(self.config.trainer.remote_rm_type)(data_uid)
                 else:
                     score = raw_score
 
@@ -447,8 +489,8 @@ class RewardManager():
                 "raw_score": raw_score,
                 "score": score,
                 "score_msg": score_msg,
-                "grm_score": grm_score,
-                "grm_response": grm_response,
+                "rm_score": rm_score,
+                "rm_response": rm_response,
                 "is_para_dup": is_para_dup,
                 "is_trunc": is_trunc,
                 "idx": idx,
@@ -474,9 +516,9 @@ class RewardManager():
         aider_fail_cnt = 0
         swe_total_cnt = 0
         swe_fail_cnt = 0
-        grm_total_cnt = 0
-        grm_fail_cnt = 0
-        grm_score_sum = 0
+        rm_total_cnt = 0
+        rm_fail_cnt = 0
+        rm_score_sum = 0
         dup_cnt = 0
         dup_lens = []
         timeout_cnt = 0
@@ -516,8 +558,8 @@ class RewardManager():
             score_msg = output_dict['score_msg']
 
             raw_score = output_dict['raw_score']
-            grm_score = output_dict['grm_score']
-            grm_response = output_dict['grm_response']
+            rm_score = output_dict['rm_score']
+            rm_response = output_dict['rm_response']
             is_para_dup = output_dict['is_para_dup']
             is_trunc = output_dict['is_trunc']
             idx = output_dict['idx']
@@ -568,12 +610,17 @@ class RewardManager():
             # eval的时候不做这个norm
             if need_norm:
                 score = (score - self.mean) / self.std
-            if self.config.trainer.use_grm and self.config.trainer.use_remote_grm:
-                grm_total_cnt += 1
-                if grm_score == GRM_INVALID_SCORE:
-                    grm_fail_cnt += 1
+            if self.config.trainer.use_remote_rm and rm_score:
+                invalid_score = -100
+                if self.config.trainer.remote_rm_type == "grm":
+                    invalid_score = GRM_INVALID_SCORE
+                elif self.config.trainer.remote_rm_type == "qrm":
+                    invalid_score = QRM_INVALID_SCORE
+                rm_total_cnt += 1
+                if rm_score == invalid_score:
+                    rm_fail_cnt += 1
                 else:
-                    grm_score_sum += grm_score
+                    rm_score_sum += rm_score
 
             raw_scores[idx, valid_response_length - 1] = raw_score
             raw_reward = score
@@ -645,7 +692,7 @@ class RewardManager():
 
                 self.log_table.append([
                     global_index, data[idx].non_tensor_batch.get("uid", ""), global_step, prompt_str, solution_str,
-                    ground_truth, raw_score, score, grm_score, grm_response, score_msg, solution_str_save, is_para_dup,
+                    ground_truth, raw_score, score, rm_score, rm_response, score_msg, solution_str_save, is_para_dup,
                     is_trunc, valid_response_length, data[idx].non_tensor_batch.get('extra_info',
                                                                                     {}).get("all_turns_sum", -1)
                 ])
@@ -658,8 +705,8 @@ class RewardManager():
                 "is_validation": is_validation
             })
             save_to_hdfs.append([
-                global_index, idx, global_step, prompt_str, solution_str, ground_truth, raw_score, score, grm_score,
-                grm_response, score_msg, solution_str_save, is_para_dup, is_trunc, valid_response_length
+                global_index, idx, global_step, prompt_str, solution_str, ground_truth, raw_score, score, rm_score,
+                rm_response, score_msg, solution_str_save, is_para_dup, is_trunc, valid_response_length
             ])
 
         raw_counter = Counter(counter_raw_scores)
@@ -695,11 +742,17 @@ class RewardManager():
                 current_mean_len,
             prefix + 'timeout_cnt':
                 timeout_cnt,
-            prefix + "grm/fail_rate":
-                grm_fail_cnt / grm_total_cnt if grm_total_cnt > 0 else -1,
-            prefix + "grm/mean_score":
-                grm_score_sum / (grm_total_cnt - grm_fail_cnt) if grm_total_cnt - grm_fail_cnt > 0 else -1,
         }
+
+        if self.config.trainer.use_remote_rm:
+            remote_rm_type = self.config.trainer.remote_rm_type
+            log_data.update({
+                prefix + f"remote_rm/{remote_rm_type}_fail_rate":
+                    rm_fail_cnt / rm_total_cnt if rm_total_cnt > 0 else -1,
+                prefix + f"remote_rm/{remote_rm_type}_mean_score":
+                    rm_score_sum / (rm_total_cnt - rm_fail_cnt) if rm_total_cnt - rm_fail_cnt > 0 else -1,
+            })
+
         log_counter = {prefix + f"score_counter/raw_{key}": value for key, value in raw_counter.items()}
         log_counter.update({prefix + f"score_counter/final_{key}": value for key, value in final_counter.items()})
         log_counter.update({prefix + f"score_counter/format_{key}": value for key, value in format_counter.items()})
@@ -764,7 +817,7 @@ class RewardManager():
                 f"gen&score_{self.rm_name}_{global_step}":
                     wandb.Table(columns=[
                         "Index", "Uid", "Step", "Prompt", "Gen Sequence", "GroundTruth", "Raw Score", "Score",
-                        "GRM Score", "GRM Response", "ScoreMsg", "Gen Sequence PostProc", "Is_Dup", "Is_Trunc", "Len",
+                        "RM Score", "RM Response", "ScoreMsg", "Gen Sequence PostProc", "Is_Dup", "Is_Trunc", "Len",
                         "Agent Turns"
                     ],
                                 data=self.log_table)
@@ -795,8 +848,8 @@ class RewardManager():
             print(f"[{time.ctime()}][save cases] Creating DataFrame and saving to local file: {file_name}")
             # Create DataFrame
             df = pd.DataFrame(columns=[
-                "global_index", "idx", "step", "prompt", "gen", "groundtruth", "raw_score", "score", "grm_score",
-                "grm_response", "score_msg", "gen_postproc", "is_dup", "is_trunc", 'len'
+                "global_index", "idx", "step", "prompt", "gen", "groundtruth", "raw_score", "score", "rm_score",
+                "rm_response", "score_msg", "gen_postproc", "is_dup", "is_trunc", 'len'
             ],
                               data=save_to_hdfs)
             # Save to local file first
@@ -1301,6 +1354,14 @@ def config_to_trainer_kwargs(config):
         "tokenizer": tokenizer,
         "remote_client": None,
     }
+
+    ### TODO remote RM need build at here
+    remote_rm_client = None
+    if config.trainer.use_remote_rm and config.trainer.remote_rm_type != "grm":
+        from alpha_seed.utils.reward_score import select_remote_rm_fn
+        remote_rm_cls = select_remote_rm_fn(config)
+        remote_rm_client = ray.remote(remote_rm_cls).options(name="remote_rm_client").remote(**kwargs)
+
     if config.data.image_key:
         kwargs['processor'] = processor
 
@@ -1326,8 +1387,7 @@ def config_to_trainer_kwargs(config):
                           default_backend=config.trainer.logger,
                           config=OmegaConf.to_container(config, resolve=True))
 
-        grm_remote_client = None
-        if config.trainer.use_grm and config.trainer.use_remote_grm:
+        if (config.trainer.remote_rm_type == "grm") and config.trainer.use_remote_rm:
             grm_resources = {}
             stable_pool_names = config.elastic.resource_pools.stable_pool_names
             stable_pool_name = stable_pool_names[0] if stable_pool_names else ''
@@ -1335,12 +1395,12 @@ def config_to_trainer_kwargs(config):
                 grm_resources = {stable_pool_name: 1}
             grm_remote_client = GRMService.options(name='grm_remote_client', resources=grm_resources).remote(
                 config=config, tokenizer_path=config.actor_rollout_ref.model.path)
-
+            remote_rm_client = grm_remote_client
         reward_manager_cls = import_from_string(config.tasks.reward_manager)
         reward_fn = reward_manager_cls(tokenizer=tokenizer,
                                        config=config,
                                        logger=logger,
-                                       grm_remote_client=grm_remote_client,
+                                       rm_remote_client=remote_rm_client,
                                        rm_name="train")
         # Note that we always use function-based RM for validation
         val_reward_fn = reward_manager_cls(tokenizer=tokenizer, config=config, logger=logger, rm_name="val")

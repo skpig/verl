@@ -261,7 +261,7 @@ class RolloutManager:
         use_remote_sandbox = self.config.trainer.use_remote_sandbox
         use_remote_verifier = self.config.trainer.use_remote_verifier
         use_remote_swe_sandbox = self.config.trainer.use_remote_swe_sandbox
-        use_remote_grm = self.config.trainer.use_remote_grm and self.config.trainer.use_grm
+        use_remote_grm = self.config.trainer.use_remote_rm and (self.config.trainer.remote_rm_type == "grm")
 
         def sandbox_callback_fn(query: Query):
             input_ids = query.input_ids + query.new_token_ids
@@ -1271,7 +1271,7 @@ class RolloutManager:
                                                           device=batch.batch['input_ids'].device)
             gen_batch_required_keys.append(key)
 
-        if self.config.trainer.use_grm:
+        if self.config.trainer.remote_rm_type == "grm":
             gen_batch_required_keys.extend(["grm_pre_ids", "grm_post_ids"])
 
         gen_batch = batch.pop(batch_keys=gen_batch_required_keys)

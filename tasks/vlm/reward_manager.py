@@ -13,10 +13,13 @@ from collections import Counter
 from concurrent.futures import as_completed
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from alpha_seed.utils.reward_score.grm_service import GRM_INVALID_SCORE
+import random
 import gc
 import os
 import time
 import traceback
+import ray
 from verl import DataProto
 import torch
 import wandb
@@ -79,7 +82,7 @@ def is_divisible_by_0_point_1(score):
 
 class VLMRewardManager(RewardManager):
 
-    def __init__(self, tokenizer, config, logger, grm_remote_client=None, rm_name="train", single_batch=False):
+    def __init__(self, tokenizer, config, logger, rm_remote_client=None, rm_name="train", single_batch=False):
         self.tokenizer = tokenizer
         self.logger = logger
         self.log_table = []
@@ -123,7 +126,7 @@ class VLMRewardManager(RewardManager):
             warnings.warn(
                 "int_verify is deprecated and needs attention. It selects the last integer and judges its correctness, which could lead to unexpected behaviour. Robust verification like \\boxed{} is recommended."
             )
-        self.grm_remote_client = grm_remote_client
+        self.rm_remote_client = rm_remote_client
         think_template = self.config.data.think_template if self.config.data.think_template is not None else 'v2'
         os.environ["THINK_TEMPLATE"] = think_template
 
@@ -233,7 +236,9 @@ class VLMRewardManager(RewardManager):
 
             # select rm_score
             reward_style = data_item.non_tensor_batch['reward_model']['style']
-            compute_score_fn = _select_rm_score_fn(reward_style)
+            compute_score_fn = None
+            if reward_style not in ['remote_qrm_service', 'remote_grm_service']:
+                compute_score_fn = _select_rm_score_fn(reward_style)
             ground_truth = data_item.non_tensor_batch['reward_model']['ground_truth']
             score_fn_inputs = {
                 "batch_info": data_item.batch,
@@ -273,9 +278,39 @@ class VLMRewardManager(RewardManager):
                     env_state_bytes, str) else env_state_bytes
 
             if format_reward == 0 or is_validation:
-                score = compute_score_fn(**score_fn_inputs)
+                verifier_score = 0
+                if compute_score_fn:
+                    verifier_score = compute_score_fn(**score_fn_inputs)
             else:
-                score = -1
+                verifier_score = -1
+
+            rm_response, rm_score = None, None
+            score_fn_inputs["verifier_score"] = verifier_score
+            if (not is_validation) and (self.config.trainer.remote_rm_type
+                                        == "grm") and self.config.trainer.use_remote_rm and self.rm_name == 'train':
+                rm_response, rm_score = ray.get(self.rm_remote_client.get_results.remote(data_uid))
+                if random.random() < 0.1:
+                    print(
+                        f"[GRM VLM RANDOM DEBUG] service receive, grm_score: {rm_score}, verifier_score: {verifier_score}, response: {repr(rm_response)}"
+                    )
+                if self.score_merger == 'v1':  # verifier基础上线性融合一定权重grm score
+                    if rm_score == GRM_INVALID_SCORE:
+                        score = verifier_score
+                    elif verifier_score > 0:
+                        score = verifier_score * 0.7 + rm_score * 0.3
+                    else:
+                        score = verifier_score
+                elif self.score_merger == 'v2':  # 主要用grm分数，verifier verifier_score只做兜底
+                    if rm_score == GRM_INVALID_SCORE:
+                        score = verifier_score
+                    elif rm_score > 0:
+                        score = 0.7 + rm_score * 0.3
+                    else:
+                        score = -1
+                else:
+                    raise NotImplementedError
+            else:
+                score = verifier_score
 
             is_para_dup = para_dup.find_single_turn_duplicate(
                 solution_str, enable_resp_para=self.config.reward_model.enable_resp_para)[0]
@@ -295,6 +330,9 @@ class VLMRewardManager(RewardManager):
                 "reward_style": reward_style,
                 "valid_response_length": valid_response_length,
                 "score": score,
+                "verifier_score": verifier_score,
+                "rm_score": rm_score,
+                "rm_response": rm_response,
                 "is_para_dup": is_para_dup,
                 "is_trunc": is_trunc,
                 "idx": idx,
@@ -320,6 +358,9 @@ class VLMRewardManager(RewardManager):
         verifier_total_cnt = 0
         aider_total_cnt = 0
         aider_fail_cnt = 0
+        rm_total_cnt = 0
+        rm_fail_cnt = 0
+        rm_score_sum = 0
         dup_cnt = 0
         dup_lens = []
         timeout_cnt = 0
@@ -358,6 +399,9 @@ class VLMRewardManager(RewardManager):
             reward_style = output_dict['reward_style']
             valid_response_length = output_dict['valid_response_length']
             score = output_dict['score']
+            verifier_score = output_dict['verifier_score']
+            rm_score = output_dict['rm_score']
+            rm_response = output_dict['rm_response']
             is_para_dup = output_dict['is_para_dup']
             is_trunc = output_dict['is_trunc']
             idx = output_dict['idx']
@@ -397,6 +441,13 @@ class VLMRewardManager(RewardManager):
             # eval的时候不做这个norm
             if need_norm:
                 score = (score - self.mean) / self.std
+            if (self.config.trainer.remote_rm_type == "grm") and self.config.trainer.use_remote_rm:
+                rm_total_cnt += 1
+                if rm_score == GRM_INVALID_SCORE:
+                    rm_fail_cnt += 1
+                else:
+                    rm_score_sum += rm_score
+
             raw_scores[idx, valid_response_length - 1] = score
             raw_reward = score
             all_raw_scores.append(score)
@@ -462,12 +513,13 @@ class VLMRewardManager(RewardManager):
                 else:
                     img = None
                 self.log_table.append([
-                    global_index, global_step, img, prompt_str, solution_str, ground_truth, score,
+                    global_index, global_step, img, prompt_str, solution_str, ground_truth, score, verifier_score,
+                    rm_score, rm_response,
                     solution_str_post_proc.split("boxed{")[-1][-80:], is_para_dup, is_trunc, valid_response_length
                 ])
             save_to_hdfs.append([
-                global_index, idx, global_step, prompt_str, solution_str, ground_truth, score,
-                solution_str_post_proc[-32:], is_para_dup, is_trunc, valid_response_length
+                global_index, idx, global_step, prompt_str, solution_str, ground_truth, score, verifier_score, rm_score,
+                rm_response, solution_str_post_proc[-32:], is_para_dup, is_trunc, valid_response_length
             ])
 
         raw_counter = Counter(counter_raw_scores)
@@ -491,6 +543,16 @@ class VLMRewardManager(RewardManager):
             prefix + 'current_mean_len': current_mean_len,
             prefix + 'timeout_cnt': timeout_cnt,
         }
+
+        if self.config.trainer.use_remote_rm:
+            remote_rm_type = self.config.trainer.remote_rm_type
+            log_data.update({
+                prefix + f"remote_rm/{remote_rm_type}_fail_rate":
+                    rm_fail_cnt / rm_total_cnt if rm_total_cnt > 0 else -1,
+                prefix + f"remote_rm/{remote_rm_type}_mean_score":
+                    rm_score_sum / (rm_total_cnt - rm_fail_cnt) if rm_total_cnt - rm_fail_cnt > 0 else -1,
+            })
+
         log_counter = {prefix + f"score_counter/raw_{key}": value for key, value in raw_counter.items()}
         log_counter.update({prefix + f"score_counter/final_{key}": value for key, value in final_counter.items()})
         log_counter.update({prefix + f"score_counter/format_{key}": value for key, value in format_counter.items()})
@@ -540,8 +602,8 @@ class VLMRewardManager(RewardManager):
             log_table = {
                 f"gen&score_{self.rm_name}_{global_step}":
                     wandb.Table(columns=[
-                        "Index", "Step", "Image", "Prompt", "Gen Sequence", "GroundTruth", "Score",
-                        "Gen Sequence PostProc", "Is_Dup", "Is_Trunc", "Len"
+                        "Index", "Step", "Prompt", "Gen Sequence", "GroundTruth", "Score", "Verifier Score", "RM Score",
+                        "RM Response", "ScoreMsg", "Gen Sequence PostProc", "Is_Dup", "Is_Trunc", "Len"
                     ],
                                 data=self.log_table)
             }
@@ -570,8 +632,8 @@ class VLMRewardManager(RewardManager):
             print(f"[{time.ctime()}][save cases] Creating DataFrame and saving to local file: {file_name}")
             # Create DataFrame
             df = pd.DataFrame(columns=[
-                "global_index", "idx", "step", "prompt", "gen", "groundtruth", "raw_score", "score", "grm_score",
-                "grm_response", "score_msg", "gen_postproc", "is_dup", "is_trunc", 'len'
+                "global_index", "idx", "step", "prompt", "gen", "groundtruth", "score", "verifier_score", "rm_score",
+                "rm_response", "score_msg", "gen_postproc", "is_dup", "is_trunc", 'len'
             ],
                               data=save_to_hdfs)
             # Save to local file first

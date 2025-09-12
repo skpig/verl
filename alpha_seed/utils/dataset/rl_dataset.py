@@ -76,7 +76,7 @@ class RLHFDataset(Dataset):
                  prompt_key='prompt',
                  answer_key='answer',
                  use_ref_answer=False,
-                 use_grm=False,
+                 remote_rm_type=None,
                  max_prompt_length=1024,
                  max_response_length=1024,
                  filter_prompts=True,
@@ -117,7 +117,7 @@ class RLHFDataset(Dataset):
         self.prompt_key = prompt_key
         self.answer_key = answer_key
         self.use_ref_answer = use_ref_answer
-        self.use_grm = use_grm
+        self.remote_rm_type = remote_rm_type
         self.max_prompt_length = max_prompt_length
         self.max_response_length = max_response_length
         self.filter_prompts = filter_prompts
@@ -365,7 +365,7 @@ class RLHFDataset(Dataset):
         row_dict['answer_input_ids'] = input_ids[0]
         row_dict['answer_attention_mask'] = attention_mask[0]
 
-        if self.use_grm:
+        if self.remote_rm_type == 'grm':
             grm_input = self._prepare_grm_input(chat,
                                                 answer,
                                                 max_prompt_len=self.max_prompt_length,
@@ -389,8 +389,9 @@ class RLHFDataset(Dataset):
         row_dict['attention_mask'] = row_dict['attention_mask'].to(torch.int8)
         row_dict['answer_input_ids'] = row_dict['answer_input_ids'].to(torch.int32)
         row_dict['answer_attention_mask'] = row_dict['answer_attention_mask'].to(torch.int8)
+
         row_dict['max_new_tokens'] = self.max_response_length
-        if self.use_grm:
+        if self.remote_rm_type == 'grm':
             row_dict['grm_pre_ids'] = row_dict['grm_pre_ids'].to(torch.int32)
             row_dict['grm_post_ids'] = row_dict['grm_post_ids'].to(torch.int32)
 
