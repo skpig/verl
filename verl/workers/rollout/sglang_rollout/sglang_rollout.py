@@ -781,14 +781,14 @@ class SGLangRollout(BaseRollout):
             output = None
 
         # Most naive implementation, can extract tensor and send via gloo if too slow
-        dist.barrier()
-        [output] = broadcast_pyobj(
-            data=[output],
-            rank=self._rank,
-            dist_group=self._device_mesh_cpu["tp"].get_group(),
-            src=self._device_mesh_cpu["tp"].mesh[0].item(),
-            force_cpu_device=False,
-        )
+        # dist.barrier()
+        # [output] = broadcast_pyobj(
+        #     data=[output],
+        #     rank=self._rank,
+        #     dist_group=self._device_mesh_cpu["tp"].get_group(),
+        #     src=self._device_mesh_cpu["tp"].mesh[0].item(),
+        #     force_cpu_device=False,
+        # )
         assert len(output) == len(idx_list), f"output: {len(output)}, idx_list: {len(idx_list)}"
         if partial_rollouts:
             assert len(output) == len(partial_rollouts), f"output: {len(output)}, partial_rollouts: {len(partial_rollouts)}, idx_list: {len(idx_list)}"
