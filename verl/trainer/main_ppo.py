@@ -291,7 +291,7 @@ def create_rl_dataset(data_paths, data_config, tokenizer, processor, is_train=Tr
         tokenizer=tokenizer,
         processor=processor,
         config=data_config,
-        is_thinking_tokenizer=is_thinking_tokenizer,
+        is_thinking_tokenizer=True,
         is_train=is_train,
     )
 

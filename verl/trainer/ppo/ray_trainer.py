@@ -1757,7 +1757,7 @@ class RayPPOTrainer:
                 progress_bar.update(1)
                 self.global_steps += 1
 
-                if self.global_steps >= 20:
+                if self.global_steps >= 10:
                     print(f"Max length: {self.config.data.max_response_length}, Global time: {global_time}, Global gen time: {global_gen_time}")
                     if not os.path.exists(self.config.trainer.default_local_dir):
                         os.makedirs(self.config.trainer.default_local_dir, exist_ok=True)
