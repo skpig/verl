@@ -642,7 +642,7 @@ class RolloutManager:
     async def _wait_max_off_policy_steps(self, step: int, metrics: Dict):
         max_off_policy_steps = self.config.actor_rollout_ref.rollout.get('max_off_policy_steps', None)
         if max_off_policy_steps is None:
-            self._task_id_to_task_and_step.clear()
+            self._task_id_to_task_and_step = {}
             return
         should_wait = []
         to_pop_ids = []

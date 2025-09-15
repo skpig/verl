@@ -310,6 +310,7 @@ class InferenceSession:
         self.update_weights_lock = Lock()
         self._accepted_queries_mutex = Lock()
         self.tp_group = None
+        self.tp_rank = 0
         self.prefix_cache: Optional[PrefixCacheInterface] = None
         self.prefix_cache_impl = prefix_cache_impl
         self.prefix_cache_slot_num = prefix_cache_slot_num
@@ -570,6 +571,7 @@ class InferenceSession:
 
     def set_tp_group(self, tp_group):
         self.tp_group = tp_group
+        self.tp_rank = torch.distributed.get_rank(group=self.tp_group)
 
     def set_generator_strategy(self, **kwargs):
         self.sampler.set_generator_strategy(**kwargs)
@@ -744,6 +746,8 @@ class InferenceSession:
     def empty_cache(self, only_clear_metrics=False):
         self.infer_scheduler.empty_cache()
         if only_clear_metrics:
+            if self.tp_rank > 0:
+                self.all_accepted_queries = {k: v for k, v in self.all_accepted_queries.items() if not v.is_finished}
             return
         self.cache_manager.empty_cache()
         self.stop_signal_tensor = torch.tensor([0.0]).float().cuda()
@@ -953,7 +957,6 @@ class InferenceSession:
         ]
         if image_queries:
             tp_size = self.engine.module.tp_size
-            tp_rank = torch.distributed.get_rank(group=self.tp_group)
             hidden_size = self.engine.config.model_config['hidden_size']
             assert tp_size >= len(image_queries), "context_limit_bs must smaller than tp_size when use dp vit"
             img_token_len = [0] * tp_size
@@ -961,8 +964,8 @@ class InferenceSession:
                 input_ids = torch.tensor(query.input_ids,
                                          device="cuda")[query.context_shift + query.prefix_already_computed_len:]
                 img_token_len[i] = (input_ids == -100).sum().item()
-            if tp_rank < len(image_queries):
-                query = image_queries[tp_rank]
+            if self.tp_rank < len(self.image_queries):
+                query = image_queries[self.tp_rank]
                 image_grid_hw = query.image_data['image_grid_hw'][query.image_shift:]
                 pixel_values = query.image_data['pixel_values'][-(image_grid_hw[:, 0] * image_grid_hw[:, 1]).sum():]
                 if isinstance(image_grid_hw, np.ndarray):
