@@ -146,7 +146,7 @@ class CriticWorker(Worker):
                 if model and self.critic_module:
                     self.critic_module.to(torch.cuda.current_device(), non_blocking=True)
                 if optimizer and self.critic_optimizer:
-                    load_fsdp_optimizer(self.critic_optimizer)
+                    load_fsdp_optimizer(self.critic_optimizer, torch.cuda.current_device())
             elif device == "cpu":
                 if model and self.critic_module:
                     self.critic_module.to('cpu', non_blocking=True)
@@ -265,9 +265,7 @@ class CriticWorker(Worker):
             # optimizer will be loaded just before the step to save
             # forward & backward memory
             if self.config.train_memory_offload:
-                self.to("cuda",
-                        model=True,
-                        optimizer=False if self.critic_strategy in ('fsdp', 'vescale-fsdp2') else True)
+                self.to("cuda", model=True, optimizer=False if self.critic_strategy == 'fsdp' else True)
 
             data.meta_info["role"] = Role.Critic
             data.meta_info['response_length'] = data.batch["responses"].shape[1]
