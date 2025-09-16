@@ -922,7 +922,7 @@ class RemoteAsyncXPerfGPTRollout(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def empty_engine_cache(self):
-        self.rollout_actor.inference_engine.empty_cache()
+        self.rollout_actor.inference_engine.empty_cache(only_clear_metrics=True)
 
 
 # for type annotation convenience
