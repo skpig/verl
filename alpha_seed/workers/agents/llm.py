@@ -40,7 +40,9 @@ def make_reqeust_data_and_metadata(item: DataProto, prompt: str, host, port):
             if isinstance(image_data_ref, np.ndarray):
                 image_data_ref = image_data_ref.tolist()
             data['image_data_ref'] = image_data_ref
-    meta_info = copy.copy(item.meta_info)
+
+    # required for rollout engine
+    meta_info = {k: item.meta_info[k] for k in ["step", "generation_kwargs"] if k in item.meta_info}
     # required for eos callback
     meta_info['uid'] = item.non_tensor_batch['uid'][0]
     meta_info['reward_model'] = item.non_tensor_batch['reward_model'][0]

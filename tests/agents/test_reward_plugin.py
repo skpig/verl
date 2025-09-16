@@ -120,7 +120,7 @@ def get_test_config():
             "logger": ['console'],
         },
         "rollout_server": {
-            "handler": "math/aiohttp"
+            "handler": "general/single_turn"
         }
     })
     return get_config(override_config)

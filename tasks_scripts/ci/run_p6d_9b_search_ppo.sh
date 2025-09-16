@@ -3,6 +3,8 @@ set -x
 NUM_STEPS="${NUM_STEPS:-50000}"
 echo $NUM_STEPS
 ray stop --force
+export AGENT_SEARCH_ENGINE=mix
+export NCCL_DEBUG=warn
 EXP="Seed_9B_Search__64k_baseline"
 
 # ckpt和路径

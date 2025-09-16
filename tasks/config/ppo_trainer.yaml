@@ -535,7 +535,7 @@ trainer:
     stable_pool_name: byted_stable_resource
 
 rollout_server:
-  handler: "math/aiohttp" # ["math/aiohttp"]
+  handler: "general/single_turn" # ["general/single_turn"]
   external_lib: null # [null, /opt/tiger/agents_extension/handlers]
   timeout: 9600
   handler_kwargs: {}
