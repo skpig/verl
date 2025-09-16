@@ -1,3 +1,6 @@
+from collections import defaultdict
+import seaborn as sns
+import matplotlib.pyplot as plt
 import wandb
 import os
 import json
@@ -6,7 +9,168 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from functools import partial
 import multiprocessing
 import traceback
+import numpy as np
+from typing import List
 
+
+class TrialGroup:
+    def __init__(self, proj_name, group_id: str, trial_id_lst: List[str]):
+        self.proj_name = proj_name
+        self.trial_id_lst = trial_id_lst
+        self.group_id = group_id
+        self.groups = [
+            Trial(proj_name, trial_id) for id, trial_id in enumerate(trial_id_lst)
+        ]
+    
+    def get_top_aime_mean(self, step_range=-1):
+        return np.mean([group.get_top_aime(step_range) for group in self.groups])
+    
+    def get_top_amc_mean(self, step_range=-1):
+        return np.mean([group.get_top_amc(step_range) for group in self.groups])
+    
+    def get_cumsum_response_tokens_mean(self, step_range=-1):
+        return np.mean([group.get_cumsum_response_tokens(step_range) for group in self.groups])
+    
+    def get_per_step_response_tokens_mean(self, step_range=-1):
+        return np.mean([group.get_per_step_response_tokens(step_range) for group in self.groups])
+    
+    def get_cumsum_timing_mean(self, step_range=-1):
+        return np.mean([group.get_cumsum_timing(step_range) for group in self.groups])
+    
+    def get_per_step_timing_mean(self, step_range=-1):
+        return np.mean([group.get_per_step_timing(step_range) for group in self.groups])
+    
+    def get_top_x_y_dataframe(self, x_col, y_col, step_range=-1):
+        all_df = []
+        max_value = -1
+        max_id = -1
+        for i, group in enumerate(self.groups):
+            if 'aime' in y_col:
+                y_df = group.get_top_aime_dataframe(step_range)
+                cur_max_value = y_df['val-core/aime24/acc/mean@32'].max()
+            elif 'amc' in y_col:
+                y_df = group.get_top_amc_dataframe(step_range)
+                cur_max_value = y_df['val-core/amc12/acc/mean@16'].max()
+            else:
+                raise ValueError(f'Invalid y_col: {y_col}')
+            
+            if cur_max_value > max_value:
+                max_value = cur_max_value
+                max_id = i
+            else:
+                all_df.append(y_df) # dummy df
+                continue
+            
+            print(f"max_id: {max_id}")
+            if 'tim' in x_col:
+                x_df = group.get_cumsum_timing_dataframe(step_range)
+            elif 'token' in x_col:
+                x_df = group.get_cumsum_response_tokens_dataframe(step_range)
+            else:
+                raise ValueError(f'Invalid x_col: {x_col}')
+            
+            df = pd.merge(x_df, y_df, on='step', how='inner')
+            df['seed'] = i
+
+            all_df.append(df)
+        return all_df[max_id]
+    
+    def get_top_amc_dataframe(self, step_range=-1):
+        return [group.get_top_amc_dataframe(step_range) for group in self.groups]
+    
+    def get_cumsum_response_tokens_dataframe(self, step_range=-1):
+        return pd.concat([group.get_cumsum_response_tokens_dataframe(step_range) for group in self.groups])
+    
+    def get_cumsum_timing_dataframe(self, step_range=-1):
+        return pd.concat([group.get_cumsum_timing_dataframe(step_range) for group in self.groups])
+
+class Trial:
+    def __init__(self, proj_name, trial_id):
+        if isinstance(trial_id, list):
+            self.trial_id = '&'.join(trial_id)
+        else:
+            self.trial_id = trial_id
+
+        self.proj_name = proj_name
+
+        self.cache_path = f'logs/{proj_name}_{trial_id}.csv'
+        if not os.path.exists(self.cache_path):
+        # if True:
+            api = wandb.TrackingApi()
+            if isinstance(trial_id, list):
+                df_lst = []
+                for trial_id in trial_id:
+                    run = api.run(project=proj_name, run_id=trial_id)
+                    df = extract_one_trial(run)
+                    df_lst.append(df)
+                df = pd.concat(df_lst)
+                # deduplicate
+                df = df.drop_duplicates(subset=['step'], keep='last')
+                df.to_csv(self.cache_path, index=False)
+            else:
+                run = api.run(project=proj_name, run_id=trial_id)
+                df = extract_one_trial(run)
+                df.to_csv(self.cache_path, index=False)
+        else:
+            df = pd.read_csv(self.cache_path)
+        
+        if proj_name == "debug_hbz":
+            step_range = 400
+        else:
+            step_range = 300
+        self.df = df[df['step'] <= step_range].reset_index(drop=True)
+    
+    def get_df(self, step_range=-1):
+        if step_range == -1:
+            return self.df
+        else:
+            return self.df[self.df['step'] <= step_range]
+    
+    def get_top_aime(self, step_range=-1):
+        df = self.get_df(step_range)
+        return df['val-core/aime24/acc/mean@32'].max()
+
+    def get_top_amc(self, step_range=-1):
+        df = self.get_df(step_range)
+        return df['val-core/amc12/acc/mean@16'].max()
+    
+    def get_cumsum_response_tokens(self, step_range=-1):
+        df = self.get_df(step_range)
+        return df['perf/global_cumsum_total_dedup_num_response_tokens'].max()
+    
+    def get_per_step_response_tokens(self, step_range=-1):
+        df = self.get_df(step_range)
+        last_step_row = df.loc[df['perf/global_cumsum_total_dedup_num_response_tokens'].idxmax()]
+        return last_step_row['perf/global_cumsum_total_dedup_num_response_tokens'] / last_step_row['step']
+    
+    def get_cumsum_timing(self, step_range=-1):
+        df = self.get_df(step_range)
+        return df['timing_s/step'].sum()
+    
+    def get_per_step_timing(self, step_range=-1):
+        df = self.get_df(step_range)
+        return df['timing_s/step'].mean()
+    
+    def get_top_aime_dataframe(self, step_range=-1):
+        df = self.get_df(step_range)
+        df = df[df['val-core/aime24/acc/mean@32'] > 0]
+        return df[['step', 'val-core/aime24/acc/mean@32']]
+    
+    def get_top_amc_dataframe(self, step_range=-1):
+        df = self.get_df(step_range)
+        df = df[df['val-core/amc12/acc/mean@16'] > 0]
+        return df[['step', 'val-core/amc12/acc/mean@16']]
+    
+    def get_cumsum_response_tokens_dataframe(self, step_range=-1):
+        df = self.get_df(step_range)
+        return df[['step', 'perf/global_cumsum_total_dedup_num_response_tokens']]
+    
+    def get_cumsum_timing_dataframe(self, step_range=-1):
+        df = self.get_df(step_range)
+        df['timing_s/cumsum_step'] = df['timing_s/step'].cumsum()
+        return df[['step', 'timing_s/cumsum_step']]
+    
+    
 def extract_one_trial(run):
 
     USEFUL_COLS = [
@@ -15,9 +179,12 @@ def extract_one_trial(run):
         'val-core/amc12/acc/mean@16', 
         'perf/global_cumsum_total_dedup_num_response_tokens',
         'perf/global_cumsum_total_dedup_num_prompt_tokens',
+        'response_length/mean',
+        'actor/entropy',
         'timing_s/step',
         'timing_s/testing',
         'timing_s/generate_sequences',
+        # 'perf/global_time',
     ]
 
     h = run.history()
@@ -68,61 +235,253 @@ def debug(project_name, trial_name, trial_ids, baselines_dict):
         return error_msg
 
 
+def table_main_result():
+    # init related groups
+    all_trial_groups = defaultdict(dict)
+    for idx, alg, proj in zip(all_ids["id"], all_ids["alg"], all_ids["proj"]):
+        all_trial_groups[proj][alg] = TrialGroup(proj, idx, id2trialid[proj][idx])
+    
+    for proj in all_trial_groups:
+        all_results = []
+        for alg in all_trial_groups[proj]:
+            aime_mean = f"{all_trial_groups[proj][alg].get_top_aime_mean() * 100:.2f}"
+            amc_mean = f"{all_trial_groups[proj][alg].get_top_amc_mean() * 100:.2f}"
+            cumsum_response_tokens_mean = f"{all_trial_groups[proj][alg].get_cumsum_response_tokens_mean() / 1e9:.2f}"
+            cumsum_timing_mean = f"{all_trial_groups[proj][alg].get_cumsum_timing_mean() / 3600:.2f}"
+            per_step_response_tokens_mean = f"{all_trial_groups[proj][alg].get_per_step_response_tokens_mean() / 1e6:.2f}"
+            per_step_timing_mean = f"{all_trial_groups[proj][alg].get_per_step_timing_mean() / 60 :.2f}"
+            all_results.append({
+                "alg": alg,
+                # "project_name": proj,
+                "AIME24": aime_mean,
+                "AMC23": amc_mean,
+                # "cumsum_response_tokens": cumsum_response_tokens_mean,
+                # "cumsum_timing": cumsum_timing_mean,
+                "per_step_response_tokens": per_step_response_tokens_mean,
+                "per_step_timing": per_step_timing_mean,
+            })
+
+        df = pd.DataFrame(all_results)
+
+        latex_code = df.to_latex(
+            index=False,           # 不要输出 DataFrame 的索引
+            float_format="%.2f",   # 浮点数保留 3 位小数
+            column_format="lcccc", # 每列对齐方式：l=左对齐, c=居中, r=右对齐
+            # caption="实验结果表", 
+            label=f"tab:main_results_{proj}"
+        )
+        print(f"=== {proj} ===")
+        print(latex_code)
 
 
-all_runs = {
+
+def figure_token_acc():
+    # init related groups
+    all_trial_groups = defaultdict(dict)
+    for idx, alg, proj in zip(all_ids["id"], all_ids["alg"], all_ids["proj"]):
+        if id2trialid[proj][idx]:
+            all_trial_groups[proj][alg] = TrialGroup(proj, idx, id2trialid[proj][idx])
+    
+    def _subfigure(proj,base_alg='ppo'):
+        x_time_y_aime_lst = []
+        x_time_y_amc_lst = []
+        x_numtokens_y_aime_lst = []
+        x_numtokens_y_amc_lst = []
+        for alg in all_trial_groups[proj]:
+            if base_alg not in alg or "mopps" in alg:
+                print("skip", alg)
+                continue
+            x_time_y_aime = all_trial_groups[proj][alg].get_top_x_y_dataframe(x_col='tim', y_col='aime')
+            x_time_y_amc = all_trial_groups[proj][alg].get_top_x_y_dataframe(x_col='tim', y_col='amc')
+            x_numtokens_y_aime = all_trial_groups[proj][alg].get_top_x_y_dataframe(x_col='token', y_col='aime')
+            x_numtokens_y_amc = all_trial_groups[proj][alg].get_top_x_y_dataframe(x_col='token', y_col='amc')
+
+            x_time_y_aime['alg'] = alg
+            x_time_y_amc['alg'] = alg
+            x_numtokens_y_aime['alg'] = alg
+            x_numtokens_y_amc['alg'] = alg
+
+            x_time_y_aime_lst.append(x_time_y_aime)
+            x_time_y_amc_lst.append(x_time_y_amc)
+            x_numtokens_y_aime_lst.append(x_numtokens_y_aime)
+            x_numtokens_y_amc_lst.append(x_numtokens_y_amc)
+
+        x_time_y_aime = pd.concat(x_time_y_aime_lst)
+        x_time_y_amc = pd.concat(x_time_y_amc_lst)
+        x_numtokens_y_aime = pd.concat(x_numtokens_y_aime_lst)
+        x_numtokens_y_amc = pd.concat(x_numtokens_y_amc_lst)
+        return x_time_y_aime, x_time_y_amc, x_numtokens_y_aime, x_numtokens_y_amc
+
+    # draw figure
+    fig, ax = plt.subplots(2, 2, figsize=(20, 10))
+    # sns.lineplot(data=x_time_y_aime, x='timing_s/cumsum_step', y='val-core/aime24/acc/mean@32', hue='alg', ax=ax[0, 0])
+    # ax[0,0].set()
+    # sns.lineplot(data=x_time_y_amc, x='timing_s/cumsum_step', y='val-core/amc12/acc/mean@16', hue='alg', ax=ax[0, 1])
+    # sns.lineplot(data=x_numtokens_y_aime, x='perf/global_cumsum_total_dedup_num_response_tokens', y='val-core/aime24/acc/mean@32', hue='alg', ax=ax[1, 0])
+    # sns.lineplot(data=x_numtokens_y_amc, x='perf/global_cumsum_total_dedup_num_response_tokens', y='val-core/amc12/acc/mean@16', hue='alg', ax=ax[1, 1])
+    # plt.savefig(f'logs/{proj}_{base_alg}_curve.png', dpi=600, bbox_inches='tight')
+    # plt.close()
+
+    _, df, _, _ = _subfigure("debug_hbz", 'ppo')
+    sns.lineplot(data=df, x='timing_s/cumsum_step', y='val-core/amc12/acc/mean@16', hue='alg', ax=ax[0, 0])
+    ax[0,0].set(xlim=(0, 300000), ylim=(0.55, 0.8))
+    ax[0,0].set_title("ppo on DAPO-Train")
+
+    _, df, _, _ = _subfigure("debug_hbz", 'grpo')
+    sns.lineplot(data=df, x='timing_s/cumsum_step', y='val-core/amc12/acc/mean@16', hue='alg', ax=ax[0, 1])
+    ax[0,1].set(xlim=(0, 250000), ylim=(0.6, 0.8))
+    ax[0,1].set_title("grpo on DAPO-Train")
+
+    _, df, _, _ = _subfigure("debug_hbz3", 'ppo')
+    sns.lineplot(data=df, x='timing_s/cumsum_step', y='val-core/amc12/acc/mean@16', hue='alg', ax=ax[1, 0])
+    ax[1,0].set(xlim=(0, 200000), ylim=(0.45, 0.7))
+    ax[1,0].set_title("ppo on AIME-Old")
+    
+    _, df, _, _ = _subfigure("debug_hbz3", 'grpo')
+    sns.lineplot(data=df, x='timing_s/cumsum_step', y='val-core/amc12/acc/mean@16', hue='alg', ax=ax[1, 1])
+    ax[1,1].set(xlim=(0, 150000), ylim=(0.45, 0.7))
+    ax[1,1].set_title("grpo on AIME-Old")
+
+    plt.savefig(f'logs/main_figure.png', dpi=600, bbox_inches='tight')
+    plt.close()
+    
+
+
+
+    
+def figure_prelim1():
+    # data =  [
+    #     {"max_length": 2048, "global_time": 2296.503740604967, "global_gen_time": 1338.4544192207977},
+    #     {"max_length": 4096, "global_time": 5725.167300617322, "global_gen_time": 3701.101067681797},
+    #     {"max_length": 6144, "global_time": 9088.044254933484, "global_gen_time": 6313.591441338882},
+    #     {"max_length": 8192, "global_time": 14610.272450559773, "global_gen_time": 10530.684233290143},
+    #     {"max_length": 10240, "global_time": 20099.040543206036, "global_gen_time": 15168.782776040025},
+    # ]
+    # df = pd.DataFrame(data)
+    # df['gen_share_fraction'] = df['global_gen_time'] / df['global_time']
+    # fig, ax = plt.subplots(figsize=(10, 5))
+    # sns.lineplot(data=df, x='max_length', y='gen_share_fraction', ax=ax)
+    # plt.savefig('logs/prelim1.png', dpi=600, bbox_inches='tight')
+    # plt.savefig('logs/prelim1.pdf', dpi=600, bbox_inches='tight')
+    # plt.close()
+    scale2run = {
+        10:"run_20250913_85ceddfd",
+        8:"run_20250914_6b0c2db7",
+        6:"run_20250914_ba1958ac",
+        4:"run_20250914_bfc47a7c",
+        2:"run_20250913_c48c7ff2"
+    }
+
+    api = wandb.TrackingApi()
+    all_data = []
+    for scale, run_id in scale2run.items():
+        if os.path.exists(f'logs/prelim1_{run_id}.csv'):
+            df = pd.read_csv(f'logs/prelim1_{run_id}.csv')
+        else:
+            run = api.run(project="debug_hbz2", run_id=run_id)
+            h = run.history()
+            df = pd.DataFrame(h)
+            df.to_csv(f'logs/prelim1_{run_id}.csv', index=False)
+        records = df.to_dict(orient="records")
+        for record in records:
+            all_data.append({
+                "scale": scale,
+                "global_time": record["timing_s/step"],
+                "gen_time": record["timing_s/generate_sequences"],
+                "gen_fraction": record["timing_s/generate_sequences"] / record["timing_s/step"],
+            })
+    df = pd.DataFrame(all_data)
+    fig, ax = plt.subplots(figsize=(5, 5))
+    sns.violinplot(data=df, x='scale', y='gen_fraction', ax=ax)
+    plt.savefig('logs/prelim1.png', dpi=600, bbox_inches='tight')
+    plt.savefig('logs/prelim1.pdf', dpi=600, bbox_inches='tight')
+    plt.close()
+
+
+
+
+
+id2trialid = {
     "debug_hbz": {
-        "ppo": ["run_20250825_d75ba81c"], # 43
-        "ppo-mopps": ["run_20250825_9c6f7135", "run_20250827_47b5a0c3"], # 44
-        "grpo": ["run_20250826_46ba6f99"], # 45
-        "grpo-mopps": ["run_20250826_c5e64a3d", "run_20250829_9cd95b6b", "run_20250830_4a833759", "run_20250830_5c8f2b35", "run_20250830_41059af8", "run_20250831_32ba5824"],  # 46
-        "84": ["run_20250827_ba477878", "run_20250830_ade4d7b4"],
-        "87": ['run_20250829_96f50319'],
-        "91": ['run_20250901_4e26f30a'],
+        "43": ["run_20250825_d75ba81c", "run_20250910_2b916b5d"], # ppo
+        "44": ["run_20250901_d4ee6ed5", ["run_20250825_9c6f7135", "run_20250827_47b5a0c3"]], # ppo-mopps  ,
+        "47": ["run_20250909_49bb1ae6"], # ppo-dynamic, another run left
+        "49": ["run_20250912_de88cc71"], # ppo-replay, another run left
+        "53": ["run_20250914_2b3af110"], # ppo-prior
+        "51": ["run_20250911_8956cc9f"], # ppo-ablation
+        "109": ["run_20250911_5f1b1bc5", "run_20250911_5c97fa50"], # ppo-prost
+        "45": ["run_20250902_086dc19c", "run_20250910_53457396"], # grpo
+        "46": ["run_20250826_c5e64a3d", "run_20250901_1f64b57e"],  # grpo-mopps
+        "48": ["run_20250910_d1ebb807"], # ["run_20250910_d1ebb807"] # grpo-dynamic, not finished
+        "50": ["run_20250911_500dd081"], # grpo-replay
+        "54": ["run_20250914_d4cdde86"], # grpo-prior
+        "52": ["run_20250911_b45b98e3"], # grpo-ablation
+        "110": ["run_20250908_7f6a8186", "run_20250910_5523b7f5"],
+        # "84": ["run_20250827_ba477878", "run_20250830_ade4d7b4"],
+        # "87": ['run_20250829_96f50319'],
+        # "91": ['run_20250901_4e26f30a'],
+    },
+    "debug_hbz3": {
+        "4": ["run_20250908_2a95553f", "run_20250910_d26b10d8"], # ppo
+        "5": ["run_20250909_c2ede604", "run_20250914_44220a21"], # ppo-mopps
+        "8": ["run_20250911_a6b42635"], # ppo-dynamic, ["run_20250911_a6b42635"] not finished
+        "10": ["run_20250911_76482ee4"], #ppo-replay, ["run_20250911_76482ee4"] not finished
+        "14": ["run_20250913_85374dab"], # ppo-prior, ["run_20250913_85374dab"] not finished
+        "12": ["run_20250913_18e79f96"], #ppo-ablation ["run_20250913_18e79f96"] not finished
+        "25": ["run_20250908_9baae94d", "run_20250909_6bf8a0f8", "run_20250909_f1264f19"], # ppo-prost
+        "6": ["run_20250910_199b7e6f", "run_20250912_6605481d"], # grpo, "run_20250908_9d2d86b8"
+        "7": ["run_20250909_050f6407", "run_20250910_3845177e"], # grpo-mopps
+        "9": ["run_20250911_21082c38"], # grpo-dynamic, ["run_20250911_21082c38"] not finished
+        "11": ["run_20250911_9e1f5222", "run_20250912_3d20de87"], # grpo-replay
+        "15": ["run_20250913_c8c23d45", "run_20250915_2ba7a109"], # grpo-prior
+        "13": ["run_20250913_76ad6fa3"], # grpo-ablation
+        "26": ["run_20250908_0d850204", "run_20250909_98c5b567", "run_20250909_47695421"] # grpo-prost
     },
 }
-baselines = {
-    "debug_hbz": ["ppo", "ppo-mopps", "grpo", "grpo-mopps"],
-    "debug_hbz2": []
+# baselines = {
+#     "debug_hbz": ["ppo", "ppo-mopps", "grpo", "grpo-mopps"],
+#     "debug_hbz2": []
+# }
+all_ids = {
+    "id": ["43", "44", "47", "49", "53", "51", "109", "45", "46", "48", "50", "54", "52", "110"] + ["4", "5", "8", "10", "14", "12", "25", "6", "7", "9", "11", "15", "13", "26"],
+    "alg": ["ppo", "ppo-mopps", "ppo-dynamic", "ppo-replay", "ppo-prior", "ppo-ablation", "ppo-ours", "grpo", "grpo-mopps", "grpo-dynamic", "grpo-replay", "grpo-prior", "grpo-ablation", "grpo-ours"] * 2,
+    "proj": ['debug_hbz'] * 14 + ['debug_hbz3'] * 14,
 }
+_ = pd.DataFrame(all_ids)
+assert(len(_) == 28)
+all_ids = pd.DataFrame(all_ids)
+# all_ids.to_csv("logs/all_ids.csv", index=False)
 
-def process_all_runs_multiprocess(all_runs, baselines, max_workers=4):
+def process_all_runs_multiprocess(max_workers=4):
     """使用多进程处理所有runs"""
-    # 创建任务列表
-    tasks = []
-    for project_name, trials in all_runs.items():
-        for trial_name, trial_ids in trials.items():
-            tasks.append((project_name, trial_name, trial_ids, baselines))
-    
-    print(f"总共需要处理 {len(tasks)} 个任务")
     print(f"使用 {max_workers} 个进程并行处理")
     
     # 使用ProcessPoolExecutor进行多进程处理
     # 在spawn模式下，每个进程都会重新导入模块，所以不需要额外的初始化
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        # 提交所有任务
-        future_to_task = {
-            executor.submit(debug, project_name, trial_name, trial_ids, baselines): (project_name, trial_name)
-            for project_name, trial_name, trial_ids, baselines in tasks
-        }
+        future_to_task = []
+
+        # all trial_groups
+        for idx, alg, proj in zip(all_ids["id"], all_ids["alg"], all_ids["proj"]):
+            # TrialGroup(proj, id2trialid[proj][id])
+            future_to_task.append(executor.submit(TrialGroup, proj, idx, id2trialid[proj][idx]))
         
         # 处理完成的任务
         completed = 0
         for future in as_completed(future_to_task):
-            project_name, trial_name = future_to_task[future]
             completed += 1
-            try:
-                result = future.result()
-                print(f"[{completed}/{len(tasks)}] {result}")
-            except Exception as e:
-                print(f"[{completed}/{len(tasks)}] 任务 {project_name}_{trial_name} 失败: {str(e)}")
-    
+            trial_group = future.result()
+            print(f"[{completed}/{len(future_to_task)}] {trial_group.proj_name}_{trial_group.group_id}")
     print("所有任务处理完成！")
 
 if __name__ == "__main__":
     # 设置多进程启动方式为spawn，确保wandb API的线程安全
-    multiprocessing.set_start_method('spawn', force=True)
-    process_all_runs_multiprocess(all_runs, baselines, max_workers=10)
+    # multiprocessing.set_start_method('spawn', force=True)
+    # process_all_runs_multiprocess(max_workers=10)
+
+    # table_main_result()
+    figure_token_acc()
+    figure_prelim1()
 
     """Single"""
     # for project_name, trial_name in all_runs.items():
