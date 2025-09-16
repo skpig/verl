@@ -1392,6 +1392,9 @@ class RayPPOTrainer(object):
         else:
             critic_upload_future = None
 
+        if critic_upload_future is not None:
+            ray.get(critic_upload_future)
+
         if use_ref_ema:
             ref_uploader_future = self.actor_rollout_wg.save_checkpoint(
                 ref_local_path, ref_remote_path,
@@ -1399,9 +1402,6 @@ class RayPPOTrainer(object):
                 self.global_step, self.ckpt_global_uploader, self.config.trainer.ckpt_enable_shm, 'ref')
         else:
             ref_uploader_future = None
-
-        if critic_upload_future is not None:
-            ray.get(critic_upload_future)
 
         if ref_uploader_future is not None:
             ray.get(ref_uploader_future)
