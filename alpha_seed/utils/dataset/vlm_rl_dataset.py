@@ -392,14 +392,15 @@ class RLHFDatasetVL(RLHFDataset):
 
         # Add grm input on VLM dataset
         if self.remote_rm_type == 'grm':
-            grm_input = self._prepare_grm_input(conversation,
-                                                answer,
-                                                max_prompt_len=self.max_prompt_length,
-                                                max_resp_len=self.max_response_length)
-            row_dict_ret.update(grm_input)
-            # type cast for grm input
-            cast_type('grm_input_ids', torch.int32)
-            cast_type('grm_attention_mask', torch.int8)
+            from alpha_seed.utils.reward_score.grm_service import prepare_grm_input
+            grm_input = prepare_grm_input(chat,
+                                          row_dict['reward_model']['ground_truth'],
+                                          self.tokenizer,
+                                          max_prompt_len=self.max_prompt_length,
+                                          max_resp_len=self.max_response_length)
+
+            row_dict['reward_model']['grm_pre_ids'] = grm_input['grm_pre_ids'].to(torch.int32).tolist()
+            row_dict['reward_model']['grm_post_ids'] = grm_input['grm_post_ids'].to(torch.int32).tolist()
 
         row_dict_ret['data_source'] = row_dict['data_source']
         row_dict_ret['off_policy_steps'] = torch.zeros([1]).to(torch.int8)

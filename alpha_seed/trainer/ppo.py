@@ -1968,7 +1968,6 @@ class RayPPOTrainer(object):
                         with stage_logger.log_duration_context("scoring_evaluation"):
                             batch = self._rm_score(batch, metrics)
                             raw_scores_log = self._reward_fn(batch, metrics)
-
                             if self.config.algorithm.priority_sample:
                                 self.sample_pool.update_priority_dict(batch)
 

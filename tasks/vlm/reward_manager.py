@@ -13,7 +13,7 @@ from collections import Counter
 from concurrent.futures import as_completed
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-from alpha_seed.utils.reward_score.grm_service import GRM_INVALID_SCORE
+from alpha_seed.utils.reward_score.grm_service import RM_INVALID_SCORE
 import random
 import gc
 import os
@@ -33,7 +33,7 @@ except ImportError:
 
 # rule-based reward score
 from alpha_seed.utils.reward_score.vlm_verifiers.extra_reward import add_length_reward, punish_format_return_positions
-from alpha_seed.utils.reward_score import response_post_proc, _select_rm_score_fn
+from alpha_seed.utils.reward_score import response_post_proc, _select_rm_score_fn, select_remote_rm_fn, get_remote_rm_score, merge_rm_scores
 from alpha_seed.utils.duplicate import para_dup
 from alpha_seed.utils.alarm.lark_util import send_message_to_employee
 from alpha_seed.utils.tracking_utils import async_save_cases_to_hdfs
@@ -82,7 +82,7 @@ def is_divisible_by_0_point_1(score):
 
 class VLMRewardManager(RewardManager):
 
-    def __init__(self, tokenizer, config, logger, rm_remote_client=None, rm_name="train", single_batch=False):
+    def __init__(self, tokenizer, config, logger, rm_name="train", single_batch=False):
         self.tokenizer = tokenizer
         self.logger = logger
         self.log_table = []
@@ -126,7 +126,6 @@ class VLMRewardManager(RewardManager):
             warnings.warn(
                 "int_verify is deprecated and needs attention. It selects the last integer and judges its correctness, which could lead to unexpected behaviour. Robust verification like \\boxed{} is recommended."
             )
-        self.rm_remote_client = rm_remote_client
         think_template = self.config.data.think_template if self.config.data.think_template is not None else 'v2'
         os.environ["THINK_TEMPLATE"] = think_template
 
@@ -236,9 +235,7 @@ class VLMRewardManager(RewardManager):
 
             # select rm_score
             reward_style = data_item.non_tensor_batch['reward_model']['style']
-            compute_score_fn = None
-            if reward_style not in ['remote_qrm_service', 'remote_grm_service']:
-                compute_score_fn = _select_rm_score_fn(reward_style)
+            compute_score_fn = _select_rm_score_fn(reward_style)
             ground_truth = data_item.non_tensor_batch['reward_model']['ground_truth']
             score_fn_inputs = {
                 "batch_info": data_item.batch,
@@ -284,31 +281,13 @@ class VLMRewardManager(RewardManager):
             else:
                 verifier_score = -1
 
-            rm_response, rm_score = None, None
+            rm_prompt, rm_response, rm_score = None, None, None
             score_fn_inputs["verifier_score"] = verifier_score
-            if (not is_validation) and (self.config.trainer.remote_rm_type
-                                        == "grm") and self.config.trainer.use_remote_rm and self.rm_name == 'train':
-                rm_response, rm_score = ray.get(self.rm_remote_client.get_results.remote(data_uid))
-                if random.random() < 0.1:
-                    print(
-                        f"[GRM VLM RANDOM DEBUG] service receive, grm_score: {rm_score}, verifier_score: {verifier_score}, response: {repr(rm_response)}"
-                    )
-                if self.score_merger == 'v1':  # verifier基础上线性融合一定权重grm score
-                    if rm_score == GRM_INVALID_SCORE:
-                        score = verifier_score
-                    elif verifier_score > 0:
-                        score = verifier_score * 0.7 + rm_score * 0.3
-                    else:
-                        score = verifier_score
-                elif self.score_merger == 'v2':  # 主要用grm分数，verifier verifier_score只做兜底
-                    if rm_score == GRM_INVALID_SCORE:
-                        score = verifier_score
-                    elif rm_score > 0:
-                        score = 0.7 + rm_score * 0.3
-                    else:
-                        score = -1
-                else:
-                    raise NotImplementedError
+            if (not is_validation) and self.config.trainer.use_remote_rm and self.rm_name == 'train':
+                remote_rm_type = self.config.trainer.remote_rm_type
+                rm_prompt, rm_response, rm_score = get_remote_rm_score(remote_rm_type)(data_uid)
+                score_lst = [rm_score, verifier_score]
+                score = merge_rm_scores(remote_rm_type)(score_lst, self.score_merger)
             else:
                 score = verifier_score
 
@@ -329,9 +308,10 @@ class VLMRewardManager(RewardManager):
                 "ground_truth": ground_truth,
                 "reward_style": reward_style,
                 "valid_response_length": valid_response_length,
-                "score": score,
                 "verifier_score": verifier_score,
+                "score": score,
                 "rm_score": rm_score,
+                "rm_prompt": rm_prompt,
                 "rm_response": rm_response,
                 "is_para_dup": is_para_dup,
                 "is_trunc": is_trunc,
@@ -441,9 +421,9 @@ class VLMRewardManager(RewardManager):
             # eval的时候不做这个norm
             if need_norm:
                 score = (score - self.mean) / self.std
-            if (self.config.trainer.remote_rm_type == "grm") and self.config.trainer.use_remote_rm:
+            if self.config.trainer.use_remote_rm and rm_score is not None:
                 rm_total_cnt += 1
-                if rm_score == GRM_INVALID_SCORE:
+                if rm_score == RM_INVALID_SCORE:
                     rm_fail_cnt += 1
                 else:
                     rm_score_sum += rm_score
@@ -547,6 +527,8 @@ class VLMRewardManager(RewardManager):
         if self.config.trainer.use_remote_rm:
             remote_rm_type = self.config.trainer.remote_rm_type
             log_data.update({
+                prefix + f"remote_rm/{remote_rm_type}_call_cnt":
+                    rm_total_cnt,
                 prefix + f"remote_rm/{remote_rm_type}_fail_rate":
                     rm_fail_cnt / rm_total_cnt if rm_total_cnt > 0 else -1,
                 prefix + f"remote_rm/{remote_rm_type}_mean_score":

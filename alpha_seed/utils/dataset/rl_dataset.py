@@ -215,86 +215,6 @@ class RLHFDataset(Dataset):
     def __len__(self):
         return len(self.dataframe)
 
-    def _prepare_grm_input(
-        self,
-        prompts,
-        answer,
-        max_prompt_len=4096,
-        max_resp_len=24576,
-    ):
-        """
-        Args:
-            prompts: [{"role": "user", "content": "..."}, ...]
-            answer: 正确答案
-            max_prompt_len: 输入最大长度
-            max_resp_len: 响应最大长度
-        """
-        assert not pd.isna(answer)
-
-        # system prompt
-        system_prompt = next((prompt["content"] for prompt in prompts if prompt["role"] == "system"), "")
-        pre_context = ""
-        if system_prompt != "":
-            pre_context = f"<场景设定>\n{system_prompt}\n</场景设定>\n\n"
-        pre_context = self._tokenize(pre_context)
-
-        # history
-        history, final_question = self._extract_conversation(prompts)
-
-        # context
-        context = self._tokenize(
-            f"<问题>\n{final_question}\n</问题>\n\n"
-            f"<标准答案>\n{answer}\n<标准答案>\n\n"
-            f"<回答>\n",
-        )
-        post_context = self._tokenize("\n</回答>")
-
-        # 历史对话
-        history_ids = self._process_history(history,
-                                            base_length=len(pre_context) + len(context) + len(post_context),
-                                            max_total=max_prompt_len)
-
-        return {
-            "grm_pre_ids": self._pad_sequence(pre_context + history_ids + context, max_prompt_len),
-            "grm_post_ids": torch.tensor(post_context)
-        }
-
-    @staticmethod
-    def _extract_conversation(prompts):
-        conversation = [p["content"] for p in prompts if p["role"] in ("user", "assistant")]
-        assert len(conversation) % 2 == 1, f"invalid conversation: {prompts}"
-        return conversation[:-1], conversation[-1]
-
-    def _process_history(self, history, base_length, max_total):
-        available = (max_total - base_length - len(self._tokenize("<对话历史>\n")) - len(self._tokenize("\n</对话历史>\n\n")))
-        buffer = []
-        current_len = 0
-
-        # 逆向处理历史对话
-        for message in reversed(history):
-            role = message["role"]
-            content = message["content"]
-            new_content = f"{role}\n{content}\n"
-            new_tokens = self._tokenize(new_content)
-
-            if current_len + len(new_tokens) > available:
-                break
-
-            buffer.append(new_tokens)
-            current_len += len(new_tokens)
-
-        if buffer:
-            history_tokens = sum(reversed(buffer), [])
-            return (self._tokenize("<对话历史>\n") + history_tokens + self._tokenize("\n</对话历史>\n\n"))
-        else:
-            return []
-
-    def _tokenize(self, text):
-        return self.tokenizer(text)["input_ids"]
-
-    def _pad_sequence(self, seq, target_len):
-        return torch.tensor([self.tokenizer.pad_token_id] * (target_len - len(seq)) + seq[:target_len])
-
     def __getitem__(self, item):
         """
         Note that we also return the raw_input_ids so that it can be combined with other chat template
@@ -366,11 +286,14 @@ class RLHFDataset(Dataset):
         row_dict['answer_attention_mask'] = attention_mask[0]
 
         if self.remote_rm_type == 'grm':
-            grm_input = self._prepare_grm_input(chat,
-                                                answer,
-                                                max_prompt_len=self.max_prompt_length,
-                                                max_resp_len=self.max_response_length)
-            row_dict.update(grm_input)
+            from alpha_seed.utils.reward_score.grm_service import prepare_grm_input
+            grm_input = prepare_grm_input(chat,
+                                          answer,
+                                          self.tokenizer,
+                                          max_prompt_len=self.max_prompt_length,
+                                          max_resp_len=self.max_response_length)
+            row_dict['reward_model']['rm_pre_ids'] = grm_input['rm_pre_ids'].to(torch.int32).tolist()
+            row_dict['reward_model']['rm_post_ids'] = grm_input['rm_post_ids'].to(torch.int32).tolist()
 
         # encode prompts without chat template
         if self.return_raw_chat:
@@ -391,9 +314,6 @@ class RLHFDataset(Dataset):
         row_dict['answer_attention_mask'] = row_dict['answer_attention_mask'].to(torch.int8)
 
         row_dict['max_new_tokens'] = self.max_response_length
-        if self.remote_rm_type == 'grm':
-            row_dict['grm_pre_ids'] = row_dict['grm_pre_ids'].to(torch.int32)
-            row_dict['grm_post_ids'] = row_dict['grm_post_ids'].to(torch.int32)
 
         return row_dict
 

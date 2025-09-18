@@ -136,10 +136,24 @@ def _select_rm_score_fn(reward_style, external_lib: str = None):
 
 def get_remote_rm_score(remote_rm_type):
     if remote_rm_type == "qrm":
-        from alpha_seed.utils.reward_score.qrm_service import get_qrm_score
-        return get_qrm_score
+        from alpha_seed.utils.reward_score.qrm_service import get_qrm_result
+        return get_qrm_result
     elif remote_rm_type == "grm":
+        from alpha_seed.utils.reward_score.grm_service import get_grm_result
+        return get_grm_result
+    elif remote_rm_type == "orm":
         pass
+    else:
+        raise NotImplementedError(f"{remote_rm_type=} not implemented")
+
+
+def merge_rm_scores(remote_rm_type):
+    if remote_rm_type == "qrm":
+        from alpha_seed.utils.reward_score.qrm_service import merge_qrm_score
+        return merge_qrm_score
+    elif remote_rm_type == "grm":
+        from alpha_seed.utils.reward_score.grm_service import merge_grm_score
+        return merge_grm_score
     elif remote_rm_type == "orm":
         pass
     else:
@@ -151,7 +165,8 @@ def select_remote_rm_fn(config, **kwargs):
         from alpha_seed.utils.reward_score.qrm_service import init_qrm_server
         return init_qrm_server
     elif config.trainer.remote_rm_type == "grm":
-        pass
+        from alpha_seed.utils.reward_score.grm_service import init_grm_server
+        return init_grm_server
     elif config.trainer.remote_rm_type == "orm":
         pass
     else:

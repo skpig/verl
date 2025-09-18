@@ -52,14 +52,13 @@ from alpha_seed.utils.server_client import is_local_ray_instance, validate_clien
     ClientTaskRunner, check_all_workers_alive, recreate_actor
 # rule-based reward score
 from alpha_seed.utils.reward_score.extra_reward import add_length_reward, punish_format_return_positions
-from alpha_seed.utils.reward_score import verifier_service, gaokao_verifier_service, aider_utils, swe_repair_verifier, oj_utils, deep_research_verifier, response_post_proc, _select_rm_score_fn, select_remote_rm_fn, get_remote_rm_score
+from alpha_seed.utils.reward_score import verifier_service, gaokao_verifier_service, aider_utils, swe_repair_verifier, oj_utils, deep_research_verifier, response_post_proc, _select_rm_score_fn, select_remote_rm_fn, get_remote_rm_score, merge_rm_scores
 from alpha_seed.utils.reward_score.vlm_verifiers import vlm_verifier_router
 from alpha_seed.utils.duplicate import para_dup
 from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRefWorker
 from alpha_seed.workers.actors.critic_worker import CriticWorker
 from alpha_seed.utils.alarm.lark_util import send_message_to_employee
-from alpha_seed.utils.reward_score.grm_service import GRMService, GRM_INVALID_SCORE
-from alpha_seed.utils.reward_score.qrm_service import QRM_INVALID_SCORE
+from alpha_seed.utils.reward_score.grm_service import RM_INVALID_SCORE
 from alpha_seed.utils.server_client import validate_client_config, KVStore, ServerHealthCheck, TaskRunner, ClientTaskRunner, check_all_workers_alive, recreate_actor
 from alpha_seed.utils.ckpt import download_minimal_required_files
 from alpha_seed.utils.chat_template import CHATML, CHATML_TOOL, CHATML_TOOL_V2, CHATML_TOOL_V3, CHATML_TOOL_V4, CHATML_TOOL_V5
@@ -174,7 +173,7 @@ class RemoteClient:
         if call_rm_service:
             assert self.remote_rm_service is not None, "remote_rm_service is None, when call_rm_service is True"
             actor = random.choice(self.remote_rm_service)
-            remote_future = actor.call.remote(input_ids, ground_truth, reward_style, **kwargs)
+            remote_future = actor.call.remote(**kwargs)
             self.remote_rm_results[req_id] = remote_future
             self.callback_running_pool[req_id] += 1
 
@@ -243,7 +242,7 @@ import math
 
 class RewardManager():
 
-    def __init__(self, tokenizer, config, logger: Tracking, rm_remote_client=None, rm_name="train") -> None:
+    def __init__(self, tokenizer, config, logger: Tracking, rm_name="train") -> None:
         self.tokenizer = tokenizer
         self.logger = logger
         self.log_table = []
@@ -285,8 +284,6 @@ class RewardManager():
             warnings.warn(
                 "int_verify is deprecated and needs attention. It selects the last integer and judges its correctness, which could lead to unexpected behaviour. Robust verification like \\boxed{} is recommended."
             )
-
-        self.rm_remote_client = rm_remote_client
 
     def update_len_ema(self, data: DataProto):
         index = data.non_tensor_batch['index']
@@ -428,8 +425,7 @@ class RewardManager():
 
             raw_score = 0
             score_msg = ''
-            rm_response = ""
-            rm_score = GRM_INVALID_SCORE
+            rm_prompt, rm_response, rm_score = None, None, None
             if isinstance(extra_data, dict) and (cached_score := extra_data.get('score', None)) is not None:
                 # score already calculated and is passed in extra_data
                 score = cached_score
@@ -446,32 +442,11 @@ class RewardManager():
                     score_msg = raw_score['msg']
                     raw_score = raw_score['score']
 
-                rm_response, rm_score = None, None
-                if (not is_validation) and (self.config.trainer.remote_rm_type
-                                            == "grm") and self.config.trainer.use_remote_rm and self.rm_name == 'train':
-                    rm_response, rm_score = ray.get(self.rm_remote_client.get_results.remote(data_uid))
-                    if random.random() < 0.01:
-                        print(
-                            f"[grm debug] service receive, grm_score: {rm_score}, raw_score: {raw_score}, response: {repr(rm_response)}"
-                        )
-                    if self.score_merger == 'v1':  # verifier基础上线性融合一定权重grm score
-                        if rm_score == GRM_INVALID_SCORE:
-                            score = raw_score
-                        elif raw_score > 0:
-                            score = raw_score * 0.7 + rm_score * 0.3
-                        else:
-                            score = raw_score
-                    elif self.score_merger == 'v2':  # 主要用grm分数，verifier raw_score只做兜底
-                        if rm_score == GRM_INVALID_SCORE:
-                            score = raw_score
-                        elif rm_score > 0:
-                            score = 0.7 + rm_score * 0.3
-                        else:
-                            score = -1
-                    else:
-                        raise NotImplementedError
-                elif self.config.trainer.use_remote_rm and (not is_validation) and self.rm_name == 'train':
-                    rm_response, rm_score = get_remote_rm_score(self.config.trainer.remote_rm_type)(data_uid)
+                if (not is_validation) and self.config.trainer.use_remote_rm and self.rm_name == 'train':
+                    remote_rm_type = self.config.trainer.remote_rm_type
+                    rm_prompt, rm_response, rm_score = get_remote_rm_score(remote_rm_type)(data_uid)
+                    score_lst = [rm_score, raw_score]
+                    score = merge_rm_scores(remote_rm_type)(score_lst, self.score_merger)
                 else:
                     score = raw_score
 
@@ -490,6 +465,7 @@ class RewardManager():
                 "score": score,
                 "score_msg": score_msg,
                 "rm_score": rm_score,
+                "rm_prompt": rm_prompt,
                 "rm_response": rm_response,
                 "is_para_dup": is_para_dup,
                 "is_trunc": is_trunc,
@@ -547,6 +523,7 @@ class RewardManager():
 
         static_conf = make_static_omegaconf(self.config)
         i_to_idx = []
+
         for i, res in tqdm(enumerate(as_completed(rm_res_future_list)), total=len(data), desc="get_rm_score"):
             output_dict = res.result()
             prompt_str = output_dict["prompt_str"]
@@ -610,14 +587,9 @@ class RewardManager():
             # eval的时候不做这个norm
             if need_norm:
                 score = (score - self.mean) / self.std
-            if self.config.trainer.use_remote_rm and rm_score:
-                invalid_score = -100
-                if self.config.trainer.remote_rm_type == "grm":
-                    invalid_score = GRM_INVALID_SCORE
-                elif self.config.trainer.remote_rm_type == "qrm":
-                    invalid_score = QRM_INVALID_SCORE
+            if self.config.trainer.use_remote_rm and rm_score is not None:
                 rm_total_cnt += 1
-                if rm_score == invalid_score:
+                if rm_score == RM_INVALID_SCORE:
                     rm_fail_cnt += 1
                 else:
                     rm_score_sum += rm_score
@@ -747,6 +719,8 @@ class RewardManager():
         if self.config.trainer.use_remote_rm:
             remote_rm_type = self.config.trainer.remote_rm_type
             log_data.update({
+                prefix + f"remote_rm/{remote_rm_type}_call_cnt":
+                    rm_total_cnt,
                 prefix + f"remote_rm/{remote_rm_type}_fail_rate":
                     rm_fail_cnt / rm_total_cnt if rm_total_cnt > 0 else -1,
                 prefix + f"remote_rm/{remote_rm_type}_mean_score":
@@ -869,7 +843,6 @@ class RewardManager():
             )
             self.async_case_running_tasks.add(task)
             print(f"[{time.ctime()}][save cases] reward_fn end")
-
         if not is_validation:
             return reward_tensor, raw_scores, len_scores, idx_tensor
         else:
@@ -1355,13 +1328,6 @@ def config_to_trainer_kwargs(config):
         "remote_client": None,
     }
 
-    ### TODO remote RM need build at here
-    remote_rm_client = None
-    if config.trainer.use_remote_rm and config.trainer.remote_rm_type != "grm":
-        from alpha_seed.utils.reward_score import select_remote_rm_fn
-        remote_rm_cls = select_remote_rm_fn(config)
-        remote_rm_client = ray.remote(remote_rm_cls).options(name="remote_rm_client").remote(**kwargs)
-
     if config.data.image_key:
         kwargs['processor'] = processor
 
@@ -1387,21 +1353,8 @@ def config_to_trainer_kwargs(config):
                           default_backend=config.trainer.logger,
                           config=OmegaConf.to_container(config, resolve=True))
 
-        if (config.trainer.remote_rm_type == "grm") and config.trainer.use_remote_rm:
-            grm_resources = {}
-            stable_pool_names = config.elastic.resource_pools.stable_pool_names
-            stable_pool_name = stable_pool_names[0] if stable_pool_names else ''
-            if stable_pool_name and not is_local_ray_instance():
-                grm_resources = {stable_pool_name: 1}
-            grm_remote_client = GRMService.options(name='grm_remote_client', resources=grm_resources).remote(
-                config=config, tokenizer_path=config.actor_rollout_ref.model.path)
-            remote_rm_client = grm_remote_client
         reward_manager_cls = import_from_string(config.tasks.reward_manager)
-        reward_fn = reward_manager_cls(tokenizer=tokenizer,
-                                       config=config,
-                                       logger=logger,
-                                       rm_remote_client=remote_rm_client,
-                                       rm_name="train")
+        reward_fn = reward_manager_cls(tokenizer=tokenizer, config=config, logger=logger, rm_name="train")
         # Note that we always use function-based RM for validation
         val_reward_fn = reward_manager_cls(tokenizer=tokenizer, config=config, logger=logger, rm_name="val")
 

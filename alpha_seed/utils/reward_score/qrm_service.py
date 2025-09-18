@@ -7,18 +7,19 @@ import math
 import torch
 import random
 import ray
+import logging
 from transformers import AutoTokenizer
 from alpha_seed.workers.xperf_rollout.component.query import Query
+from alpha_seed.utils.reward_score.grm_service import decode_with_image_tag, replace_image_tag, get_query_imgs, RM_INVALID_SCORE
 from mono_rl.utils.infer.client import QRMServingClient
 from mono_rl.utils.infer.cli.base_infer_cli import InferCli
+from mono_rl.utils.dataset.dist_data_util import get_dist_data_manager
 
 from bytedagi.model_io import InferenceRequest, ModelIO
 from bytedagi.schema.param import LLMServerParamMixin
 from langchain.schema import HumanMessage
 from bytedance import servicediscovery
 from servicediscovery import ServiceDiscoveryError
-
-QRM_INVALID_SCORE = -100.0
 
 
 def wait_remote_server_ready(psm: str):
@@ -35,15 +36,15 @@ def wait_remote_server_ready(psm: str):
     raise ServiceDiscoveryError(f"psm {psm} not ready after 30 times retry, please check remote rm log")
 
 
-def get_qrm_score(data_uid):
+def get_qrm_result(data_uid):
     handler = ray.get_actor('remote_client')
     score_dict = ray.get(handler.get_remote_rm_results.remote(data_uid))
     if score_dict is None:
-        return None, None
-    return score_dict['response']
+        return None, None, None
+    return score_dict['qrm_prompt'], "", score_dict['score']
 
 
-def qrm_merge_score(scores_lst, merge_type="mean", **kwargs):
+def merge_qrm_score(scores_lst, merge_type="mean", **kwargs):
     if merge_type == "mean":
         return sum(scores_lst) / len(scores_lst)
     else:
@@ -67,6 +68,20 @@ def init_qrm_server(config, **kwargs):
     )
     print("[QRM INFO] build qrm server success in RemoteClient")
     return vlm_qrm_clients
+
+
+def prepare_qrm_input(prompts, answer, tokenizer):
+    text_before_resp1 = "\n针对上述问题，已有回复：\n"
+    text_before_resp2 = "\n相比之下，请回答下面的回复是否更好：\n"
+    text_after_instruct = "回答是或否。[EOS]assistant\n"
+    bos = tokenizer.bos_token
+    eos = tokenizer.eos_token
+    qrm_pre_prompt = f"{bos}{prompts}{eos}{text_before_resp1}{answer}{text_before_resp2}"
+    qrm_post_prompt = f"{text_after_instruct}"
+    qrm_pre_ids = tokenizer(qrm_pre_prompt)["input_ids"]
+    qrm_post_ids = tokenizer(qrm_post_prompt)["input_ids"]
+
+    return {"rm_pre_ids": qrm_pre_ids, "rm_post_ids": qrm_post_ids}
 
 
 class VLMQRMServingClient(QRMServingClient):
@@ -96,79 +111,26 @@ class VLMQRMServingClient(QRMServingClient):
                          retry_interval=retry_interval,
                          pool_size=pool_size,
                          random_rsp=False)
-        self.dist_data_manager = kwargs.get("dist_data_manager", None)
         self.tokenizer = tokenizer
         self.timeout = timeout
         self.logprob_tokens = tokenizer.encode("是")
-        self.bos = "<[BOS_never_used_51bce0c785ca2f68081bfa7d91973934]>"
-        self.eos = "<[EOS_never_used_51bce0c785ca2f68081bfa7d91973934]>"
+        self.dist_data_manager = get_dist_data_manager()
+        self.bos = self.tokenizer.bos_token
+        self.eos = self.tokenizer.eos_token
         self.text_before_resp1 = "\n针对上述问题，已有回复：\n"
         self.text_before_resp2 = "\n相比之下，请回答下面的回复是否更好：\n"
         self.text_after_instruct = "回答是或否。[EOS]assistant\n"
         self.img_tag = "<image>"
         wait_remote_server_ready(psm)
 
-    def decode_with_image_tag(self, ids, skip_special_tokens=True, image_tag=None):
-        if image_tag is None:
-            image_tag = self.img_tag
-        seq = torch.as_tensor(ids, dtype=torch.long, device="cpu").tolist()
-        if -100 not in seq:  # pure text
-            return self.tokenizer.decode(seq, skip_special_tokens=skip_special_tokens)
-        out, i, n = [], 0, len(seq)
-        while i < n:
-            if seq[i] == -100:
-                while i < n and seq[i] == -100:
-                    i += 1
-                out.append(image_tag)
-            else:
-                j = i
-                while j < n and seq[j] != -100:
-                    j += 1
-                out.append(self.tokenizer.decode(seq[i:j], skip_special_tokens=skip_special_tokens))
-                i = j
+    def _preprocess_qrm_data(self, rollout_ids, rm_pre_ids, rm_post_ids, **kwargs):
+        images_bytes_lst = get_query_imgs(self.dist_data_manager, **kwargs)
+        qrm_pre_text = decode_with_image_tag(self.tokenizer, rm_pre_ids)
+        qrm_post_text = decode_with_image_tag(self.tokenizer, rm_post_ids)
+        response_text = decode_with_image_tag(self.tokenizer, rollout_ids)
 
-        return "".join(out)
-
-    def select_qrm_data(self, data):
-        if isinstance(data, Query):
-            # only support eos callback
-            user_prompt = data.meta_info['chat'].item()
-            ground_truth_ans = data.meta_info['reward_model']['ground_truth']
-            rollout_ans = self.decode_with_image_tag(data.new_token_ids)
-            images_bytes_lst = data.meta_info.get('images_bytes')
-            if images_bytes_lst is None:
-                images_bytes_lst = []
-            return user_prompt, ground_truth_ans, rollout_ans, images_bytes_lst
-        else:
-            raise ValueError(f"unsupported data type {type(data)}")
-
-    def replace_image_tag(self, prompt, images_bytes_lst=None):
-        pattern = rf"({re.escape(self.img_tag)})"
-        prompt_chunks = re.split(pattern, prompt)
-        image_tag_count = sum(1 for chunk in prompt_chunks if chunk == self.img_tag)
-        assert image_tag_count == len(images_bytes_lst), (
-            f"Mismatch between image tags ({image_tag_count}) and provided images ({len(images_bytes_lst)})")
-
-        content = []
-        image_idx = 0
-        for chunk in prompt_chunks:
-            if len(chunk) == 0:
-                continue
-            if chunk == "<image>":
-                content.append({"type": "image_binary", "image_binary": {"binary": images_bytes_lst[image_idx]}})
-                image_idx += 1
-            else:
-                content.append({"type": "text", "text": chunk})
-        return content
-
-    def _preprocess_qrm_data(self, data):
-
-        user_prompt, ground_truth_ans, rollout_ans, images_bytes_lst = self.select_qrm_data(data)
-
-        # QRM conversation concat
-        qrm_prompt = self.bos + user_prompt + self.eos + self.text_before_resp1 + ground_truth_ans + self.text_before_resp2 + rollout_ans + self.text_after_instruct + self.eos
-
-        content = self.replace_image_tag(qrm_prompt, images_bytes_lst)
+        qrm_prompt = f"{qrm_pre_text}{response_text}{qrm_post_text}"
+        content = replace_image_tag(qrm_prompt, images_bytes_lst, img_tag=self.img_tag)
 
         return content
 
@@ -193,11 +155,13 @@ class VLMQRMServingClient(QRMServingClient):
         assert length == 1, "in qrl mode, only output one token 是/否， something must be wrong"
         return math.exp(values)
 
-    async def call(self, input_ids, ground_truth, reward_style, processed=False, **kwargs):
+    async def call(self, reward_model=None, rollout_ids="", **kwargs):
         # 理解为每次处理单条数据
-        if not processed:
-            data = kwargs.get("query", None)
-            data = self._preprocess_qrm_data(data)
+        logging.disable(logging.INFO)
+        cur_time = time.time()
+        rm_pre_ids = reward_model.get("rm_pre_ids", None)
+        rm_post_ids = reward_model.get("rm_post_ids", None)
+        data = self._preprocess_qrm_data(rollout_ids, rm_pre_ids, rm_post_ids, **kwargs)
 
         for attempt in range(self.retry + 1):
             try:
@@ -216,7 +180,13 @@ class VLMQRMServingClient(QRMServingClient):
                 astream_task = asyncio.create_task(self.get_qrm_logprob(predict_output))
 
                 probability = await asyncio.wait_for(asyncio.shield(astream_task), self.timeout)
-                return {"response": probability, "status": "success", "qrm_prompt": data}
+                return {
+                    "score": probability,
+                    "status": "success",
+                    "qrm_prompt": data,
+                    "retry_cnt": attempt,
+                    "time_cost": time.time() - cur_time
+                }
 
             except Exception as e:
                 if astream_task:
@@ -225,10 +195,22 @@ class VLMQRMServingClient(QRMServingClient):
                     predict_output.response_iterator.cancel()
                 if isinstance(e, (TimeoutError, asyncio.TimeoutError)):
                     print(f"[QRM Request Timeout] prompt: {data}")
-                    return {"response": QRM_INVALID_SCORE, "status": "timeout fail", "qrm_prompt": data}  # 超时不重试
+                    return {
+                        "score": RM_INVALID_SCORE,
+                        "status": "timeout fail",
+                        "qrm_prompt": data,
+                        "retry_cnt": attempt,
+                        "time_cost": time.time() - cur_time
+                    }  # 超时不重试
                 else:
                     print(f"[QRM Request] Attempt {attempt+1} failed: {e}")
                     if attempt < self.retry:
                         await asyncio.sleep(self.retry_interval)
 
-        return {"response": QRM_INVALID_SCORE, "status": "retry_max fail", "qrm_prompt": data}
+        return {
+            "score": RM_INVALID_SCORE,
+            "status": "retry_max fail",
+            "qrm_prompt": data,
+            "retry_cnt": attempt,
+            "time_cost": time.time() - cur_time
+        }
