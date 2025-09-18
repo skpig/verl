@@ -970,7 +970,7 @@ class InferenceSession:
                 input_ids = torch.tensor(query.input_ids,
                                          device="cuda")[query.context_shift + query.prefix_already_computed_len:]
                 img_token_len[i] = (input_ids == -100).sum().item()
-            if self.tp_rank < len(self.image_queries):
+            if self.tp_rank < len(image_queries):
                 query = image_queries[self.tp_rank]
                 image_grid_hw = query.image_data['image_grid_hw'][query.image_shift:]
                 pixel_values = query.image_data['pixel_values'][-(image_grid_hw[:, 0] * image_grid_hw[:, 1]).sum():]
