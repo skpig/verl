@@ -9,13 +9,9 @@ import pytest
 from omegaconf import OmegaConf
 from verl import DataProto
 
-from alpha_seed.workers.streaming_service.rollout_proxy import RolloutWorkerGroupProxy
 from tests.rollout.test_rollout_manager import decode_output
-from tests.test_utils import gpu_allocator, ray_fixture, set_common_envs, get_config, get_tokenizer, create_rollout_manager
-
-
-def mock_save_dataproto(data: DataProto, prefix: str = ''):
-    print(f"mock savedataproto prefix={prefix}")
+from tests.test_utils import gpu_allocator, ray_fixture, set_common_envs, get_config, get_tokenizer, \
+    mock_save_dataproto, create_rollout_manager_with_wgs, create_rollout_manager
 
 
 def get_dataproto(config, tokenizer):
@@ -144,37 +140,34 @@ def test_train_elastic_generate(set_common_envs, gpu_allocator, ray_fixture, com
     try:
         # step 1
         batch = copy.deepcopy(input_batch)
-        batch = rollout_manager.train_generate(batch,
-                                               step=0,
-                                               save_dataproto_fn=mock_save_dataproto,
-                                               is_warmup_step=complete_ratio == 0.)
-        # scale up
-        elastic_replica = rollout_manager.train_standalone_wg.replicas
+        batch, _ = ray.get(
+            rollout_manager.train_generate.remote(batch,
+                                                  step=0,
+                                                  save_dataproto_fn=mock_save_dataproto,
+                                                  is_warmup_step=complete_ratio == 0.))
 
         # step 2
         batch = copy.deepcopy(input_batch)
-        batch = rollout_manager.train_generate(batch,
-                                               step=1,
-                                               save_dataproto_fn=mock_save_dataproto,
-                                               is_warmup_step=False)
+        batch, _ = ray.get(
+            rollout_manager.train_generate.remote(batch,
+                                                  step=1,
+                                                  save_dataproto_fn=mock_save_dataproto,
+                                                  is_warmup_step=False))
 
         # wait for gen a bit
-        time.sleep(4)
-
-        # scale down
-        ray.get(elastic_replica.scale_down(1))
-        time.sleep(4)
+        time.sleep(8)
 
         # step 3
         batch = copy.deepcopy(input_batch)
-        batch = rollout_manager.train_generate(batch,
-                                               step=2,
-                                               save_dataproto_fn=mock_save_dataproto,
-                                               is_warmup_step=False)
+        batch, _ = ray.get(
+            rollout_manager.train_generate.remote(batch,
+                                                  step=2,
+                                                  save_dataproto_fn=mock_save_dataproto,
+                                                  is_warmup_step=False))
         out_text = decode_output(batch, tokenizer)
         print(out_text)
         _check_score(out_text, batch)
     except:
         raise
     finally:
-        rollout_manager.stop_servers()
+        ray.get(rollout_manager.stop_servers.remote())

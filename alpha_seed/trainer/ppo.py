@@ -21,6 +21,7 @@ import verl.utils.torch_functional as verl_F
 from ray import ObjectRef
 
 from alpha_seed.logging import refine_log
+from alpha_seed.workers.streaming_service.remote_queue import RemoteQueue
 from alpha_seed.workers.streaming_service.rollout_query_timeline import RolloutQueryTimeline
 from alpha_seed.workers.streaming_service.rollout_request_manager import get_all_request_manager_actors
 from alpha_seed.utils.reward_score import NON_AGENT_PLACE_HOLDER_SCORE
@@ -947,6 +948,10 @@ class RayPPOTrainer(object):
         self.rollout_counter = 0
         self.rollout_pool_metrics = {}
 
+        # queued rollout related
+        self.remote_queue = RemoteQueue()  # 用来塞ppo里预处理完的batch，然后给RolloutManager消费
+        self.dataloader_consumer = None
+
     @stage_logger.log_duration('create_dataloader')
     def _create_dataloader(self):
         self.dataloader_mgr = DataLoaderMgr(self.config, self.tokenizer, self.is_vlm, self.processor)
@@ -976,21 +981,30 @@ class RayPPOTrainer(object):
     @stage_logger.log_duration('create_rollout_manager')
     def _create_rollout_manager(self):
         from alpha_seed.workers.streaming_service.rollout_manager import RolloutManager
-        self.rollout_manager = RolloutManager(config=self.config,
-                                              logger=self.logger,
-                                              tokenizer=self.tokenizer,
-                                              processor=self.processor)
+        RolloutManagerActor = ray.remote(RolloutManager)
+        scheduling_strategy = ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
+            node_id=ray.get_runtime_context().get_node_id(),
+            soft=False,
+        )
+        self.rollout_manager = (RolloutManagerActor.options(name="RolloutManager",
+                                                            max_concurrency=256,
+                                                            scheduling_strategy=scheduling_strategy).remote(
+                                                                config=self.config,
+                                                                logger=self.logger,
+                                                                tokenizer=self.tokenizer,
+                                                                processor=self.processor))
         hybrid_wg = self.actor_rollout_wg
-        self.rollout_manager.initialize(hybrid_wg=hybrid_wg,
-                                        rollout_pool=self.rollout_pool,
-                                        train_standalone_wg=self.standalone_rollout_wg,
-                                        val_standalone_wg=self.standalone_validator_wg)
+        ray.get(
+            self.rollout_manager.initialize.remote(hybrid_wg=hybrid_wg,
+                                                   rollout_pool=self.rollout_pool,
+                                                   train_standalone_wg=self.standalone_rollout_wg,
+                                                   val_standalone_wg=self.standalone_validator_wg))
 
     @stage_logger.log_duration('create_validation_manager')
     def _create_validation_manager(self):
         self.validation_manager = ValidateManager(self.config, self.logger, self.val_dataloader, self.tokenizer,
-                                                  self.use_rm, self.val_reward_fn, self.rollout_manager,
-                                                  self.dist_data_manager)
+                                                  self.use_rm, self.val_reward_fn, self.actor_rollout_wg,
+                                                  self.rollout_manager, self.dist_data_manager)
 
     def init_workers(self, kv_store=None, ckpt_global_uploader=None, from_step=0, resume_folder=None):
         """Init resource pool and worker group"""
@@ -1078,7 +1092,7 @@ class RayPPOTrainer(object):
             self.resource_pool_to_cls[resource_pool]['rm'] = rm_cls
             worker_configs['rm'] = self.config.reward_model
 
-        self.rollout_pool = RolloutPool.get_or_create_actor(self.config)
+        self.rollout_pool = RolloutPool.get_or_create_actor(self.config, mode="ray")
         self.rollout_pool_warmup_step = self.config.actor_rollout_ref.rollout.rollout_pool.get("warmup_step", 0)
 
         server_client_split = self.config.server_client.role in ["server", "client"]
@@ -1543,7 +1557,7 @@ class RayPPOTrainer(object):
                 self.acc_per_query = pkl.load(fin)
                 print("acc_per_query RESUMED!!!!!!")
         load_dataproto_fn = partial(load_dataproto, dist_data_manager=self.dist_data_manager)
-        self.rollout_manager.resume(remote_global_step_folder, load_dataproto_fn=load_dataproto_fn)
+        ray.get(self.rollout_manager.resume.remote(remote_global_step_folder, load_dataproto_fn=load_dataproto_fn))
 
     def _balance_batch(self, batch, metrics, logging_prefix='global_seqlen'):
         # Note that the reorder is in place
@@ -1813,11 +1827,17 @@ class RayPPOTrainer(object):
                         batch = image_preprocess(batch, metrics)
                         yield batch
 
-                train_batch_generator_with_preprocess = train_batch_generator_with_preprocess_fn()
+                # queued rollout里，dataloader的generator是全局的，第一次初始化之后后面直接不断消费即可
+                if self.dataloader_consumer is None:
+                    self.remote_queue.produce(train_batch_generator_with_preprocess_fn())
+                    self.dataloader_consumer = self.remote_queue.consumer()
+
                 with Timer(name='generate', logger=None) as timer:
-                    batch = self.rollout_manager.train_generate_queued(train_batch_generator_with_preprocess,
-                                                                       step=self.global_step,
-                                                                       metrics=metrics)
+                    batch, metrics_from_gen = ray.get(
+                        self.rollout_manager.train_generate_queued.remote(self.dataloader_consumer,
+                                                                          step=self.global_step))
+
+                metrics.update(metrics_from_gen)
                 metrics['timing/generate'] = timer.last
             else:
                 batch: DataProto = next(train_batch_generator)
@@ -1840,11 +1860,12 @@ class RayPPOTrainer(object):
                     save_dataproto_fn = partial(save_dataproto,
                                                 path=save_path,
                                                 dist_data_manager=self.dist_data_manager)
-                    batch = self.rollout_manager.train_generate(batch,
-                                                                step=self.global_step,
-                                                                save_dataproto_fn=save_dataproto_fn,
-                                                                is_warmup_step=is_warmup_step,
-                                                                metrics=metrics)
+                    batch, metrics_from_gen = ray.get(
+                        self.rollout_manager.train_generate.remote(batch,
+                                                                   step=self.global_step,
+                                                                   save_dataproto_fn=save_dataproto_fn,
+                                                                   is_warmup_step=is_warmup_step))
+                metrics.update(metrics_from_gen)
                 metrics['timing/generate'] = timer.last
                 if batch is None or len(batch) == 0 or is_warmup_step:
                     if not self.config.data.get("enable_swalm_agent", False):

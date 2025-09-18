@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import pytest
+import ray
 from omegaconf import OmegaConf
 from mono_rl import DataProto
 import copy
@@ -8,7 +9,8 @@ import pandas as pd
 import numpy as np
 import uuid
 import base64
-from tests.test_utils import ray_fixture, gpu_allocator, set_common_envs, get_config, get_tokenizer, create_rollout_manager
+from tests.test_utils import ray_fixture, gpu_allocator, set_common_envs, get_config, get_tokenizer, \
+    create_rollout_manager, mock_save_dataproto
 
 
 def get_dataproto(config, tokenizer):
@@ -126,17 +128,13 @@ def test_plugin_val_gen(set_common_envs, gpu_allocator, ray_fixture, mode, is_st
     rollout_manager = create_rollout_manager(config)
     metrics = {}
     try:
-        batch = rollout_manager.val_generate(batch, metrics=metrics, is_async=is_standalone)
+        batch, metrics = ray.get(rollout_manager.val_generate_async.remote(batch, is_async=is_standalone))
     finally:
-        rollout_manager.stop_servers()
+        ray.get(rollout_manager.stop_servers.remote())
     assert metrics[f'rollout/{"standalone" if is_standalone else "hybrid"}/plugin/example_plugin_success'] > 0
     responses = batch.batch['input_ids'][:, config.data.max_prompt_length:]
-    text_out = rollout_manager.tokenizer.batch_decode(responses, skip_special_tokens=True)
+    text_out = tokenizer.batch_decode(responses, skip_special_tokens=True)
     print(text_out)
-
-
-def mock_save_dataproto(data: DataProto, prefix: str = ''):
-    print(f"mock savedataproto prefix={prefix}")
 
 
 @pytest.mark.parametrize("mode", ["server", "batch"])
@@ -159,11 +157,12 @@ def test_plugin_train_gen(set_common_envs, gpu_allocator, ray_fixture, mode):
             batch = copy.deepcopy(input_batch)
             if last_extra_data is not None:
                 batch.non_tensor_batch['extra_data'] = last_extra_data
-            batch = rollout_manager.train_generate(batch,
-                                                   step=i,
-                                                   save_dataproto_fn=mock_save_dataproto,
-                                                   is_warmup_step=False,
-                                                   metrics=metrics)
+            batch, gen_metrics = ray.get(
+                rollout_manager.train_generate.remote(batch,
+                                                      step=i,
+                                                      save_dataproto_fn=mock_save_dataproto,
+                                                      is_warmup_step=False))
+            metrics.update(gen_metrics)
             assert batch.batch['model_output_mask'].shape == batch.batch['responses'].shape
             import dill
             from alpha_seed.workers.xperf_rollout.component.query_plugin import EnvStates
@@ -177,10 +176,9 @@ def test_plugin_train_gen(set_common_envs, gpu_allocator, ray_fixture, mode):
                 assert isinstance(env_state[0], EnvStates)
                 assert 'resume_state' not in extra_data_item, f"finished items shouldn't contain resume_state"
     finally:
-        rollout_manager.stop_servers()
+        ray.get(rollout_manager.stop_servers.remote())
 
 
 if __name__ == "__main__":
-    import ray
     ray.init()
     test_plugin_val_gen(set_common_envs, [4], ray_fixture, "batch", True)

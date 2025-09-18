@@ -2,7 +2,7 @@ import copy
 import time
 from enum import Enum, auto
 from typing import *
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 import uuid
 import torch
 from threading import Lock
@@ -44,16 +44,47 @@ class QueryProcessEvent:
 
 
 @dataclass
+class QueryCheckpoint:
+    saved_length: int = 0  # request pool里已经保存了多少长度的new token_ids
+    updated_at: float = 0  # 上次update时间戳
+
+
+@dataclass
+class QueryUpdate:
+    # 用于全量更新的一些字段，非None的字段需要覆盖到request pool里
+    query_primitive: 'Query'
+
+    # 下面都是增量部分
+    accepted_len: List[int]  # speculative decoding 对应的长度，跟new_token_ids一一对应 (单调递增)
+    log_probs: List[float]  # 跟new_token_ids一一对应 (单调递增)
+    new_token_ids: List[int]  # 增量decode出来的token部分，无论engine内是否reset过
+    prefill_len: int  # 保存原Query的len(input_ids)，算指标用到
+    saved_length: int  # 加上此增量后，保存到了第多少个token
+
+    @property
+    def id(self) -> str:
+        return self.query_primitive.id
+
+    @property
+    def is_finished(self) -> bool:
+        return False
+
+    def __getattr__(self, item):
+        qp = object.__getattribute__(self, "query_primitive")
+        return getattr(qp, item)
+
+
+@dataclass
 class Query:
     id: str
     idx: int
-    original_input_ids: Optional[List[int]]
-    input_ids: Optional[List[int]]
+    original_input_ids: Optional[List[int]]  # 最开始输入进来的prompt部分 (不会变)
+    input_ids: Optional[List[int]]  # decode一半中断再继续时，需要prefill的所有token id (单调递增)
     code_book: Optional[List[int]]
-    accepted_len: Optional[List[int]]
-    input_prompt: Union[str, List[str]]
-    new_token_ids: Optional[List[int]]
-    log_probs: Optional[List[float]]
+    accepted_len: Optional[List[int]]  # speculative decoding 对应的长度，跟new_token_ids一一对应 (单调递增)
+    input_prompt: Optional[Union[str, List[str]]]  # 同original_input_ids (不变)
+    new_token_ids: Optional[List[int]]  # (会reset，不一定单调)
+    log_probs: Optional[List[float]]  # 跟new_token_ids一一对应 (单调递增)
     kv_slot_ids: Optional[List[int]]
     is_context_computing: bool
     new_token_len: int
@@ -91,6 +122,8 @@ class Query:
     image_data_ref: Optional[str]
     images_bytes_ref: Optional[str]
 
+    update_checkpoint: QueryCheckpoint
+
     def __init__(self,
                  input_ids,
                  input_prompt,
@@ -111,7 +144,7 @@ class Query:
         self.prefix_already_computed_len = prefix_already_computed_len
         self.is_context_computing = True
         self.new_token_ids = []
-        self.log_probs: List[float] = []
+        self.log_probs = []
         self.kv_slot_ids = []
         self.new_token_len = 0
         self.output_prompt = ""
@@ -147,6 +180,7 @@ class Query:
         self.image_data_ref = image_data_ref
         self.images_bytes_ref = images_bytes_ref
         self.action = True
+        self.update_checkpoint = QueryCheckpoint()
 
     @property
     def cache_id(self) -> str:
@@ -235,6 +269,10 @@ class Query:
     @property
     def original_input_len(self):
         return len(self.original_input_ids)
+
+    @property
+    def prefill_len(self):
+        return len(self.input_ids)
 
     @property
     def output_tokens(self) -> List[int]:
@@ -386,6 +424,74 @@ class Query:
 
         if self.image_data_ref is not None:
             self.image_data = None
+
+    def clear_volatile(self):
+        # 更新到request pool之前需要忽略掉的跟engine local相关的易变变量
+        # 不用存这些用不上的值
+        if self.plugin_query:
+            self.plugin_query = copy.copy(self.plugin_query)
+            self.plugin_query.detach()
+        self.input_embedding = None
+        self.hidden_states = None
+        self.kv_slot_ids = None
+        self.logits = None
+        self.nll_loss = None
+        self.image_data = None
+
+    def to_incremental(self) -> QueryUpdate:
+        # 0. 去掉易变部分
+        # 1. 计算增量部分
+        # 2. 去掉不变的字段
+
+        q = self.clone()
+        q.clear_volatile()
+
+        saved_length = q.update_checkpoint.saved_length
+        accepted_len = q.accepted_len[saved_length:]
+        log_probs = q.log_probs[saved_length:]
+        incremental_new_token_len = saved_length - (len(q.input_ids) - q.original_input_len)
+
+        # 这部分取值有点复杂
+        # [ original input ][ decoded ids ][ new token ids ]
+        #                           |            |
+        #                       分这两种情况计算增量的部分
+        if incremental_new_token_len >= 0:
+            new_token_ids = q.new_token_ids[incremental_new_token_len:]
+        else:
+            new_token_ids = q.input_ids[incremental_new_token_len:] + q.new_token_ids
+        prefill_len = len(q.input_ids)
+
+        # 不变量
+        q.original_input_ids = None
+        q.input_prompt = None
+        q.meta_info = None
+
+        # 增量部分已经包含了
+        q.accepted_len = None
+        q.log_probs = None
+        q.new_token_ids = None
+        q.input_ids = None
+
+        return QueryUpdate(
+            query_primitive=q,
+            accepted_len=accepted_len,
+            log_probs=log_probs,
+            new_token_ids=new_token_ids,
+            prefill_len=prefill_len,
+            saved_length=q.new_token_len,
+        )
+
+    def apply_update(self, update: QueryUpdate):
+        self.accepted_len.extend(update.accepted_len)
+        self.log_probs.extend(update.log_probs)
+        self.new_token_ids.extend(update.new_token_ids)
+
+        # 覆盖更新其他非None的字段
+        for f in fields(update.query_primitive):
+            v = getattr(update.query_primitive, f.name)
+            if v is not None:
+                setattr(self, f.name, v)
+        self.update_checkpoint.saved_length = self.new_token_len
 
 
 class AsyncQuery:

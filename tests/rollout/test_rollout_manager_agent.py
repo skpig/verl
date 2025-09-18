@@ -3,13 +3,15 @@ import pytest
 import copy
 import time
 
+import ray
 from omegaconf import OmegaConf
 
 from mono_rl import DataProto
 import pandas as pd
 import numpy as np
 import uuid
-from tests.test_utils import gpu_allocator, ray_fixture, set_common_envs, get_config, get_tokenizer, create_rollout_manager, PytestXdistEnv
+from tests.test_utils import gpu_allocator, ray_fixture, set_common_envs, get_config, get_tokenizer, \
+    create_rollout_manager, PytestXdistEnv, mock_save_dataproto
 
 
 def get_dataproto(config, tokenizer):
@@ -127,10 +129,6 @@ def _check_score(out_text, batch):
         f"allow only 1 wrong answer, full score: {len(out_text)}, got: {total_score}"
 
 
-def mock_save_dataproto(data: DataProto, prefix: str = ''):
-    print(f"mock savedataproto prefix={prefix}")
-
-
 # python3 -m pytest /opt/tiger/alpha-seed/tests/rollout/test_rollout_manager_agent.py::test_train_generate\[4-False-ucx-True-1.0\] -x --pdb -s --pdbcls=IPython.terminal.debugger:TerminalPdb
 
 
@@ -196,10 +194,11 @@ def test_train_generate(set_common_envs, gpu_allocator, ray_fixture, complete_ra
             start = time.time()
             batch = copy.deepcopy(input_batch)
             is_warmup_step = False
-            batch = rollout_manager.train_generate(batch,
-                                                   step=i,
-                                                   save_dataproto_fn=mock_save_dataproto,
-                                                   is_warmup_step=is_warmup_step)
+            batch, _ = ray.get(
+                rollout_manager.train_generate.remote(batch,
+                                                      step=i,
+                                                      save_dataproto_fn=mock_save_dataproto,
+                                                      is_warmup_step=is_warmup_step))
             if is_warmup_step:
                 warmup_elapsed = time.time() - start
                 assert batch is None
@@ -213,7 +212,7 @@ def test_train_generate(set_common_envs, gpu_allocator, ray_fixture, complete_ra
     except:
         raise
     finally:
-        rollout_manager.stop_servers()
+        ray.get(rollout_manager.stop_servers.remote())
 
 
 @pytest.mark.parametrize("is_standalone", [True, False])
@@ -234,14 +233,14 @@ def test_val_generate(set_common_envs, gpu_allocator, ray_fixture, is_standalone
     batch = get_dataproto(config, tokenizer)
     rollout_manager = create_rollout_manager(config)
     try:
-        batch = rollout_manager.val_generate(batch, is_async=is_standalone)
+        batch, _ = ray.get(rollout_manager.val_generate_async.remote(batch, is_async=is_standalone))
         out_text = decode_output(batch, tokenizer)
         print(out_text)
         _check_score(out_text, batch)
     except:
         raise
     finally:
-        rollout_manager.stop_servers()
+        ray.get(rollout_manager.stop_servers.remote())
 
 
 @pytest.mark.parametrize("is_server", [True, False])
@@ -267,17 +266,18 @@ def test_streaming_train_val(set_common_envs, gpu_allocator, ray_fixture, is_ser
     # run warmup step
     start = time.time()
     input_batch = get_dataproto(config, tokenizer)
-    _ = rollout_manager.train_generate(copy.deepcopy(input_batch),
-                                       step=0,
-                                       save_dataproto_fn=mock_save_dataproto,
-                                       is_warmup_step=True)
+    ray.get(
+        rollout_manager.train_generate.remote(copy.deepcopy(input_batch),
+                                              step=0,
+                                              save_dataproto_fn=mock_save_dataproto,
+                                              is_warmup_step=True))
     warmup_time = time.time() - start
 
     def val_thread_fn():
         val_step = 0
         while not val_stop.is_set():
             input_batch = copy.deepcopy(val_batch)
-            batch = rollout_manager.val_generate(input_batch, is_async=val_standalone)
+            batch, _ = ray.get(rollout_manager.val_generate_async.remote(input_batch, is_async=val_standalone))
             out_text = decode_output(batch, tokenizer)
             print("val:", out_text)
             _check_score(out_text, batch)
@@ -292,10 +292,11 @@ def test_streaming_train_val(set_common_envs, gpu_allocator, ray_fixture, is_ser
         for i in range(1, 3):
             start = time.time()
             batch = copy.deepcopy(input_batch)
-            batch = rollout_manager.train_generate(batch,
-                                                   step=i,
-                                                   save_dataproto_fn=mock_save_dataproto,
-                                                   is_warmup_step=False)
+            batch, _ = ray.get(
+                rollout_manager.train_generate.remote(batch,
+                                                      step=i,
+                                                      save_dataproto_fn=mock_save_dataproto,
+                                                      is_warmup_step=False))
             out_text = decode_output(batch, tokenizer)
             print("train:", out_text)
             _check_score(out_text, batch)
@@ -306,4 +307,4 @@ def test_streaming_train_val(set_common_envs, gpu_allocator, ray_fixture, is_ser
     finally:
         val_stop.set()
         val_fut.result()
-        rollout_manager.stop_servers()
+        ray.get(rollout_manager.stop_servers.remote())

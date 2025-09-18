@@ -1,5 +1,6 @@
 # pytest -vvv -s tests/hybrid_engine/test_vlm.py
 import pytest
+import ray
 from omegaconf import OmegaConf
 from tests.test_utils import ray_fixture, gpu_allocator, get_config, get_tokenizer, create_rollout_manager
 from alpha_seed.utils.dataset.vlm_rl_dataset import load_and_transform_save_image
@@ -92,7 +93,7 @@ def test_vlm_gen(monkeypatch, gpu_allocator, ray_fixture):
 
     rollout_manager = create_rollout_manager(config)
     batch = load_and_transform_save_image(batch, tokenizer, processor, dist_data_manager, max_prompt_length=8192)
-    batch = rollout_manager.val_generate(batch)
+    batch, _ = ray.get(rollout_manager.val_generate_async.remote(batch))
     prompt0_len = batch.batch['attention_mask'][0].sum()
     input_ids = batch.batch['input_ids'][batch.batch['input_ids'] != tokenizer.pad_token_id]
     input_ids = input_ids[input_ids > 0]

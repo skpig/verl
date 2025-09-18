@@ -22,7 +22,7 @@ from alpha_seed.workers.xperf_rollout.utils.custom_xperf_convert_helper import X
 from xperf_gpt.multi_models.visual.inferencer import VITInferencer
 from xperf_gpt.multi_models.visual.eva_vit import EVA_VIT_CONFIGS
 from alpha_seed.workers.xperf_rollout.component.query import Query, AsyncQuery, InflightQueue, batch_sync_tp_queries, \
-    ProcessEventType
+    ProcessEventType, QueryUpdate
 from alpha_seed.utils.observility import get_profiler_context_wrapped
 from xperf_gpt.utils import (logging_rank, logging_rank_only)
 from typing import List, Dict
@@ -769,27 +769,33 @@ class InferenceSession:
             history_ids.extend(self.prefix_cache.get_cache_ids())
         return history_ids
 
-    def get_all_queries(self, query_type: str, retain_finished: bool = True) -> List[Query]:
+    def get_all_queries(self, query_type: str) -> List[Query | QueryUpdate]:
         """
         在async streaming模式下，读取所有query的状态和生成结果(包括中间结果)，并把完成的剔除掉
         注意：跟get_inorder_responses互斥，两者不可同时调用，用这个方法后，其他地方都不能再调用get_inorder_responses
         :param query_type: 区分一下validation/hybrid_rollout/standalone_rollout等，避免一个engine实例同时gen多个来源的时候，
                            来源侧不知道怎么取回之前add过来的。
-        :param retain_finished: 取走后，如果已经finished，就不会再留在engine里
         """
-        ret = []
+        ret: List[Query | QueryUpdate] = []
+        now = time.time()
         with self._accepted_queries_mutex:
             for q in self.all_accepted_queries.values():
                 qt = q.meta_info.get('query_type')
                 if qt == query_type:
-                    ret_q = q.clone()
-                    ret_q.detach()
-                    ret.append(ret_q)
-
-            if not retain_finished:
-                for q in ret:
                     if q.is_finished:
-                        self.all_accepted_queries.pop(q.id)
+                        ret_q = q.clone()
+                        ret_q.clear_volatile()
+                        ret.append(ret_q)
+                    elif q.new_token_len > q.update_checkpoint.saved_length or now - q.update_checkpoint.updated_at > 180:
+                        # 忽略没有更新的
+                        ret_q = q.to_incremental()
+                        q.update_checkpoint.saved_length = ret_q.saved_length
+                        q.update_checkpoint.updated_at = now
+                        ret.append(ret_q)
+
+            for q in ret:
+                if q.is_finished:
+                    self.all_accepted_queries.pop(q.id)
         return ret
 
     def abort(self, query_ids: List[str], not_after: float):

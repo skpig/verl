@@ -396,19 +396,26 @@ class RolloutPool:
 
     @staticmethod
     def get_or_create_actor(config, mode="local"):
-        # TODO: support distributed-ray mode
         if mode == "local":
             return RolloutPool(config, mode)
         rollout_pool = None
         try:
             rollout_pool = ray.get_actor(name=RolloutPool.name)
         except Exception as e:
-            rollout_pool = ray.remote(RolloutPool).options(name=RolloutPool.name).remote(config, mode)
+            scheduling_strategy = ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
+                node_id=ray.get_runtime_context().get_node_id(),
+                soft=False,
+            )
+            options = {
+                'name': RolloutPool.name,
+                'scheduling_strategy': scheduling_strategy,
+            }
+            rollout_pool = ray.remote(RolloutPool).options(**options).remote(config, mode)
         return rollout_pool
 
     @staticmethod
     def dynamic_call(obj, method_name, *args, **kwargs):
-        if obj.mode == "ray":
+        if not isinstance(obj, RolloutPool):
             method_ref = getattr(obj, method_name).remote(*args, **kwargs)
             return ray.get(method_ref)
         else:

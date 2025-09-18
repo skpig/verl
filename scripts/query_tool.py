@@ -122,12 +122,21 @@ def handle_client(conn, server):
             elif cmd == "dump-trace":
                 # dump
                 spans = []
+
+                # task runner
                 task_runner = ray.get_actor("task_runner")
                 task_runner_spans = ray.get(task_runner.dump_trace_spans.remote())
                 spans.extend(task_runner_spans)
+
+                # request manager
                 for _, rm in rms:
                     request_spans = ray.get(rm.dump_request_trace.remote())
                     spans.extend(request_spans)
+
+                # rollout manager
+                rollout_mgr = ray.get_actor("RolloutManager")
+                rollout_spans = ray.get(rollout_mgr.dump_trace_spans.remote())
+                spans.extend(rollout_spans)
 
                 # export
                 from alpha_seed.utils.profile.timeline import export_chrome_trace

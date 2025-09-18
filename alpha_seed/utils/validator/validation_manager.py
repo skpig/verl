@@ -28,7 +28,7 @@ class ValidateManager(object):
     The workergroup fetches latest weights from main task when it finishes the last iteration of validation
     """
 
-    def __init__(self, config, logger, val_dataloader, tokenizer, use_rm, val_reward_fn, rollout_manager,
+    def __init__(self, config, logger, val_dataloader, tokenizer, use_rm, val_reward_fn, hybrid_wg, rollout_manager,
                  dist_data_manager) -> None:
         self.config = config
         self.is_vlm = self.config.data['image_key'] is not None
@@ -44,6 +44,7 @@ class ValidateManager(object):
         if self.fast_result:
             print('Using fast result on wandb mode.')
         assert len(self.val_dataloader) == 1, "for bon metrics computation"
+        self.hybrid_wg = hybrid_wg
         self.rollout_manager = rollout_manager
         self.dist_data_manager = dist_data_manager
 
@@ -116,7 +117,7 @@ class ValidateManager(object):
         self.val_thread = threading.Thread(target=self._validate,
                                            args=(val_epoch, need_log, log_file, is_async, global_step))
         self.val_thread.start()
-        self.rollout_manager.wait_nccl_comm_threadsafe()
+        ray.get(self.rollout_manager.wait_nccl_comm_threadsafe.remote())
 
         if is_async:
             return
@@ -155,9 +156,9 @@ class ValidateManager(object):
             for val_idx, test_data in enumerate(self.val_dataloader):
                 test_batch = DataProto.from_single_dict(test_data)
                 if 'images_bytes_ref' in test_batch.non_tensor_batch:
-                    test_batch_padded, pad_size = pad_dataproto_to_divisor(
-                        test_batch, size_divisor=self.rollout_manager.hybrid_wg.world_size)
-                    test_batch_padded = self.rollout_manager.hybrid_wg.load_and_transform_save_image(test_batch_padded)
+                    test_batch_padded, pad_size = pad_dataproto_to_divisor(test_batch,
+                                                                           size_divisor=self.hybrid_wg.world_size)
+                    test_batch_padded = self.hybrid_wg.load_and_transform_save_image(test_batch_padded)
                     if pad_size > 0:
                         test_batch = test_batch_padded.slice(end=-pad_size)
                     else:
@@ -183,7 +184,8 @@ class ValidateManager(object):
                 test_batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(test_batch))],
                                                               dtype=object)
                 input_batch = test_batch
-                test_batch = self.rollout_manager.val_generate(test_batch, step=global_step, is_async=is_async)
+                test_batch, _ = ray.get(
+                    self.rollout_manager.val_generate_async.remote(test_batch, step=global_step, is_async=is_async))
 
                 print(
                     f'{val_epoch_idx + 1}-th/{val_epoch} {val_idx + 1}-th/{len(self.val_dataloader)} validation generation end'

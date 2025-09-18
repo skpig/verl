@@ -3,6 +3,7 @@ import os
 import subprocess
 from pathlib import Path
 from omegaconf import OmegaConf
+from verl import DataProto
 
 from alpha_seed.workers.streaming_service.rollout_request_manager import RequestManager, RequestManagerRegisterCenter
 from verl.utils.tracking import Tracking
@@ -157,7 +158,7 @@ def create_streaming_validator_wg(config):
 
 
 def create_rollout_pool(config):
-    rollout_pool = RolloutPool.get_or_create_actor(config)
+    rollout_pool = RolloutPool.get_or_create_actor(config, mode="ray")
     return rollout_pool
 
 
@@ -165,7 +166,7 @@ def create_rollout_pool(config):
 rm_reg = None
 
 
-def create_rollout_manager(config):
+def create_rollout_manager_with_wgs(config):
     global rm_reg
     rm_reg = RequestManagerRegisterCenter.init(config)
 
@@ -191,13 +192,24 @@ def create_rollout_manager(config):
     processor = get_processor(config)
 
     rollout_pool = create_rollout_pool(config)
-    rollout_manager = RolloutManager(config, logger=logger, tokenizer=tokenizer, processor=processor)
+    RolloutManagerActor = ray.remote(RolloutManager)
+    rollout_manager = RolloutManagerActor.remote(config, logger=logger, tokenizer=tokenizer, processor=processor)
     hybrid_wg = create_hybrid_wg(config)
     streaming_rollout_wg = create_streaming_rollout_wg(config)
     streaming_validator_wg = create_streaming_validator_wg(config)
 
-    rollout_manager.initialize(hybrid_wg,
-                               rollout_pool=rollout_pool,
-                               train_standalone_wg=streaming_rollout_wg,
-                               val_standalone_wg=streaming_validator_wg)
+    ray.get(
+        rollout_manager.initialize.remote(hybrid_wg,
+                                          rollout_pool=rollout_pool,
+                                          train_standalone_wg=streaming_rollout_wg,
+                                          val_standalone_wg=streaming_validator_wg))
+    return rollout_manager, (hybrid_wg, streaming_rollout_wg, streaming_validator_wg)
+
+
+def create_rollout_manager(config):
+    rollout_manager, _ = create_rollout_manager_with_wgs(config)
     return rollout_manager
+
+
+def mock_save_dataproto(data: DataProto, prefix: str = ''):
+    print(f"mock savedataproto prefix={prefix}")

@@ -34,6 +34,7 @@ from mono_rl.single_controller import Execute
 
 from alpha_seed.workers.xperf_rollout.session import InferenceSession, StepProfiler, LoadMetric
 from alpha_seed.workers.xperf_rollout.component.query import Query, AsyncQuery
+from alpha_seed.workers.streaming_service.rollout_request_manager import RequestManagerRegisterCenter
 from mono_rl.single_controller.base.worker import WorkerHelper, Worker
 
 from pathlib import Path
@@ -114,6 +115,8 @@ class AsyncXPerfGPTRollout(object):
         self.process_thread = None
         self._process_thread_last_error = None
         self._process_thread_last_tb = None
+        self._request_managers = {}
+        self._update_ref = None
 
         # 初始状态下不在loop里，先set
         self.gen_loop_exited.set()
@@ -408,11 +411,19 @@ class AsyncXPerfGPTRollout(object):
              f"{self._process_thread_last_tb}")
         return self.inference_engine.get_valid_history_ids()
 
-    def get_all_queries(self, query_type: str) -> List[Query]:
+    def update_queries(self, query_type: str, engine_id: str, wg_name: str):
         assert self._process_thread_last_error is None, \
             (f"process thread has error({self._process_thread_last_error}), please check the traceback in log.\n"
              f"{self._process_thread_last_tb}")
-        return self.inference_engine.get_all_queries(query_type=query_type, retain_finished=False)
+        queries = self.inference_engine.get_all_queries(query_type=query_type)
+        if len(queries) > 0:
+            if self._update_ref is not None:
+                ray.wait([self._update_ref])  # 等上一轮的更新完
+            if query_type not in self._request_managers:
+                self._request_managers[query_type] = RequestManagerRegisterCenter.get(query_type)
+            request_manager = self._request_managers[query_type]
+            self._update_ref = request_manager.update_intermediate_queries.remote(queries, engine_id, wg_name,
+                                                                                  time.time())
 
     def get_load_metrics(self) -> LoadMetric:
         return self.inference_engine.get_load_metrics()
@@ -800,8 +811,8 @@ class RemoteAsyncXPerfGPTRollout(Worker):
 
     # 只在dp_size=1的情况下调用，所以这里rank0执行即可
     @register(execute_mode=Execute.RANK_ZERO, blocking=True)
-    def get_all_queries(self, query_type: str):
-        return self.rollout_actor.get_all_queries(query_type)
+    def update_queries(self, query_type: str, engine_id: str, wg_name: str):
+        self.rollout_actor.update_queries(query_type, engine_id, wg_name)
 
     @register(execute_mode=Execute.RANK_ZERO, blocking=True)
     def get_load_metrics(self) -> LoadMetric:

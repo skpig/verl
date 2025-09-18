@@ -11,8 +11,8 @@ from alpha_seed.utils.server_client import is_local_ray_instance
 from alpha_seed.workers.streaming_service.rollout_query_trace import QueryTracer
 from alpha_seed.workers.streaming_service.rollout_request import StaleHistory, AbortHistory, Request
 from alpha_seed.workers.streaming_service.rollout_request_manager_diagnosis import FinishedEventStats, RequestDigest, \
-    FiniteDict, ProgressStat, RequestStatCollector
-from alpha_seed.workers.xperf_rollout.component.query import Query
+    FiniteDict, ProgressStat, RequestStatCollector, RequestPoolInternalDiagnosis
+from alpha_seed.workers.xperf_rollout.component.query import Query, QueryUpdate
 from alpha_seed.utils.profile.timeline import CounterEvent
 
 
@@ -120,6 +120,7 @@ class RequestPool:
         # ts_bucket(?s) -> engine_id -> step -> count
         self._accumulated_token_counts = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
         self._accumulated_prefill_token_counts = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+        self._internal_metrics = RequestPoolInternalDiagnosis()
 
     def __len__(self) -> int:
         return len(self.requests)
@@ -260,6 +261,8 @@ class RequestPool:
                 continue
             if this_req.updated_at > r.updated_at and not r.finished:
                 # (out of order) in coming request is out of date, skip
+                # 开了增量更新后，这个乱序很危险，数据会丢失，先监控
+                self._internal_metrics.out_of_order_count += 1
                 continue
 
             # compute prefilling/decoding throughput
@@ -278,7 +281,10 @@ class RequestPool:
                 if evt is not None:
                     evt.set()
             else:
-                # 匹配的request，暂时全量更新
+                if isinstance(r.query, QueryUpdate):
+                    # 增量更新Query对象后，让r更新成最新状态覆盖到原来的request
+                    this_req.query.apply_update(r.query)
+                    r.query = this_req.query
                 self.requests[r.request_id] = r
 
     # mark stale queries as pending in request pool
@@ -359,7 +365,7 @@ class RequestPool:
     def accumulate_prefilling_throughput(self, new_req: Request, prev_req: Request):
         if new_req.query.recent_first_token_time > prev_req.query.recent_first_token_time:
             prefill_dur = (new_req.query.recent_first_token_time - new_req.query.recent_scheduled_time) / 1e3  # unit: s
-            input_token_len = len(new_req.query.input_ids)
+            input_token_len = new_req.query.prefill_len
             # 因为是实时数据，只算最近30s的interval，超过的部分不用算了，并按等比例折算
             if prefill_dur > 30:
                 input_token_len *= 30 / prefill_dur
@@ -445,6 +451,9 @@ class RequestPool:
             for _, req in self.requests.items():
                 ret[req.assigned_engine_id] += 1
         return ret
+
+    def get_internal_metrics(self) -> dict:
+        return self._internal_metrics.to_dict()
 
 
 @ray.remote
@@ -572,7 +581,7 @@ class RequestManager:
         self.query_tracer.trace(req)
         return req.query
 
-    def update_intermediate_queries(self, queries: List[Query], engine_id: str, wg_name: str, ts: float):
+    def update_intermediate_queries(self, queries: List[Query | QueryUpdate], engine_id: str, wg_name: str, ts: float):
         finished = len(list(None for q in queries if q.is_finished))
         self._progress_bar.update(len(queries), len(self.req_pool), finished, engine_id)
         # 从engine取出的结果，更新到request pool里
@@ -669,7 +678,10 @@ class RequestManager:
         return self.query_tracer.dump_request_trace(extra_events, after_ts)
 
     def get_step_metrics(self, step) -> Dict[str, float]:
-        return self.req_stat.get_step_metrics(step)
+        internal_metrics = self.req_pool.get_internal_metrics()
+        step_metrics = self.req_stat.get_step_metrics(step)
+        step_metrics.update(internal_metrics)
+        return step_metrics
 
     ## query_tool util function ##
 

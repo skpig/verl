@@ -1,5 +1,6 @@
 import random
 import threading
+from collections import deque
 from dataclasses import dataclass, field
 from typing import List, Dict
 
@@ -52,6 +53,16 @@ class ProgressStat:
     latest_query_time: float  # 目前最新的query开始的时间戳
 
 
+@dataclass
+class RequestPoolInternalDiagnosis:
+    out_of_order_count: int = 0  # update接收乱序计数
+
+    def to_dict(self):
+        return {
+            'rollout/query/update_out_of_order_count': self.out_of_order_count,
+        }
+
+
 class FiniteDict:
     """
     有限大小的dict，有个FIFO队列记录key，所以key重复了可能会被提前pop掉
@@ -60,7 +71,7 @@ class FiniteDict:
     def __init__(self, max_size):
         self.max_size = max_size
         self._map = {}
-        self._queue = []
+        self._queue = deque()  # 只存key，不要设定最大长度，手动判断pop
         self._mutex = threading.Lock()
 
     def add(self, key, data):
@@ -68,7 +79,7 @@ class FiniteDict:
             self._map[key] = data
             self._queue.append(key)
             if len(self._queue) > self.max_size:
-                pop_key = self._queue.pop(0)
+                pop_key = self._queue.popleft()
                 # add进来的key可能重复，所以这里pop要判None
                 self._map.pop(pop_key, None)
 

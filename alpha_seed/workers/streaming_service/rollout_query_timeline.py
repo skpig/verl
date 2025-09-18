@@ -35,6 +35,13 @@ class RolloutQueryTimeline:
             request_spans = ray.get(req_mgr.dump_request_trace.remote(after_ts))
             spans.extend(request_spans)
 
+        try:
+            rollout_mgr = ray.get_actor("RolloutManager")
+            rollout_spans = ray.get(rollout_mgr.dump_trace_spans.remote(after_ts))
+            spans.extend(rollout_spans)
+        except ValueError as e:
+            pass
+
         # step是即将开始的next step，所以之类-1表示结束到上一个step为止
         self.save_path = export_chrome_trace(f'query_trace_step{start_step}-{step - 1}.json.gz', spans)
         # delay upload to make sure file be flushed properly and visible to subprocess call

@@ -1032,8 +1032,8 @@ class AsyncActorRolloutRefWorker(Worker):
 
     # 只在dp_size=1的情况下调用，所以这里rank0执行即可，DP_COMPUTE与此参数暂不兼容
     @register(execute_mode=Execute.RANK_ZERO, blocking=True)
-    def get_all_queries(self, query_type: str):
-        return self.rollout.get_all_queries(query_type)
+    def update_queries(self, query_type: str, engine_id: str, wg_name: str):
+        self.rollout.update_queries(query_type, engine_id, wg_name)
 
     @register(execute_mode=Execute.RANK_ZERO, blocking=True)
     def get_metrics(self):

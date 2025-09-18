@@ -594,11 +594,7 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
             for engine_id, wg in ready_wg_items:
                 wg: RayWorkerGroup | RemoteAsyncXPerfGPTRollout | AsyncActorRolloutRefWorker
                 try:
-                    wg_name = wg.group_name
-                    queries: List[Query] = wg.get_all_queries(self._request_manager_name)
-                    if len(queries) > 0:
-                        self.request_manager.update_intermediate_queries.remote(queries, engine_id, wg_name,
-                                                                                time.time())
+                    wg.update_queries(self._request_manager_name, engine_id, wg.group_name)
                 except (ActorDiedError, RayTaskError) as e:
                     self._finalize(wg, e)
 

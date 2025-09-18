@@ -1,5 +1,6 @@
 from typing import *
 import pytest
+import ray
 
 from omegaconf import OmegaConf
 
@@ -15,7 +16,8 @@ from transformers import AutoTokenizer
 from alpha_seed.workers.agents.plugins import BasePlugin, PluginResponse, PluginRequireMetaInfo
 from alpha_seed.workers.agents.envs import BaseEnv
 
-from tests.test_utils import gpu_allocator, ray_fixture, set_common_envs, get_config, get_tokenizer, create_rollout_manager, PytestXdistEnv
+from tests.test_utils import gpu_allocator, ray_fixture, set_common_envs, get_config, get_tokenizer, \
+    create_rollout_manager, PytestXdistEnv, create_rollout_manager_with_wgs
 from .utils import get_math_test_dataproto
 
 
@@ -169,13 +171,13 @@ def test_reward_with_plugin(monkeypatch, set_common_envs, gpu_allocator, ray_fix
     batch = get_math_test_dataproto(config, tokenizer)
     batch.non_tensor_batch['agent_env'] = np.array([['reward_env@{}'] for _ in range(len(batch))], dtype=object)
 
-    rollout_manager = create_rollout_manager(config)
+    rollout_manager, (hybrid_wg, _, _) = create_rollout_manager_with_wgs(config)
     apply_patch(None)
-    rollout_manager.hybrid_wg.execute_with_func_generator(apply_patch)
+    hybrid_wg.execute_with_func_generator(apply_patch)
     from tasks.main_ppo import _select_rm_score_fn
 
     try:
-        batch = rollout_manager.val_generate(batch, is_async=False)
+        batch, _ = ray.get(rollout_manager.val_generate_async.remote(batch, is_async=False))
         for item in batch.chunk(len(batch)):
             reward_model = item.non_tensor_batch['reward_model'][0]
             extra_data = item.non_tensor_batch['extra_data'][0]
@@ -190,4 +192,4 @@ def test_reward_with_plugin(monkeypatch, set_common_envs, gpu_allocator, ray_fix
     except:
         raise
     finally:
-        rollout_manager.stop_servers()
+        ray.get(rollout_manager.stop_servers.remote())

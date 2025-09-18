@@ -3,6 +3,7 @@ Adapted from tests/hybrid_engine/test_vlm.py for pure text M8 680m model
 """
 
 import pytest
+import ray
 from omegaconf import OmegaConf
 from tests.test_utils import ray_fixture, gpu_allocator, get_config, get_tokenizer, create_rollout_manager
 from verl.utils.fs import copy_local_path_from_hdfs
@@ -87,7 +88,7 @@ def test_text_gen(monkeypatch, gpu_allocator, ray_fixture):
     batch = get_batch(config, tokenizer)
 
     rollout_manager = create_rollout_manager(config)
-    batch = rollout_manager.val_generate(batch)
+    batch, _ = ray.get(rollout_manager.val_generate_async.remote(batch))
     prompt0_len = batch.batch['attention_mask'][0].sum()
     input_ids = batch.batch['input_ids'][batch.batch['input_ids'] != tokenizer.pad_token_id]
     input_ids = input_ids[input_ids > 0]

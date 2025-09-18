@@ -74,9 +74,9 @@ def render_rollout_progress(stats: List[dict], task_complete_stats: Dict[str, di
         else:
             least_recent_update = int(now - stat['oldest_updated_time'])
 
-        bar = _render_progress_bar(stat['finished'], stat['total'], width=40)
         step_completion = task_complete_stats.get(str(stat['step']), {"running": 0, "completed": 0})
         step_total_tasks = step_completion["running"] + step_completion["completed"]
+        bar = _render_progress_bar(step_completion['completed'], step_total_tasks, width=40)
         line = (f"{stat['pool_name']:13s} | "
                 f"Step {stat['step']}: {bar} | "
                 f"{step_completion['completed']} / {step_total_tasks} | "

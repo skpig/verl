@@ -4,6 +4,7 @@ import pytest
 import copy
 import time
 
+import ray
 from omegaconf import OmegaConf
 
 from mono_rl import DataProto
@@ -15,7 +16,8 @@ from alpha_seed.workers.agents.plugins import BasePlugin, PluginResponse, Plugin
 from alpha_seed.workers.agents.envs import BaseEnv
 from alpha_seed.workers.streaming_service.streaming_utils import chat_completions
 
-from tests.test_utils import gpu_allocator, ray_fixture, set_common_envs, get_config, get_tokenizer, create_rollout_manager, PytestXdistEnv
+from tests.test_utils import gpu_allocator, ray_fixture, set_common_envs, get_config, get_tokenizer, \
+    create_rollout_manager, PytestXdistEnv, create_rollout_manager_with_wgs
 from .utils import get_math_test_dataproto
 
 
@@ -112,14 +114,14 @@ def test_summarize(monkeypatch, set_common_envs, gpu_allocator, ray_fixture):
     tokenizer = get_tokenizer(config)
     batch = get_math_test_dataproto(config, tokenizer)
 
-    rollout_manager = create_rollout_manager(config)
-    rollout_manager.hybrid_wg.execute_with_func_generator(apply_patch)
+    rollout_manager, (hybrid_wg, _, _) = create_rollout_manager_with_wgs(config)
+    hybrid_wg.execute_with_func_generator(apply_patch)
 
     try:
-        batch = rollout_manager.val_generate(batch, is_async=False)
+        batch, _ = ray.get(rollout_manager.val_generate_async.remote(batch, is_async=False))
         out_text = tokenizer.batch_decode(batch.batch['input_ids'], skip_special_tokens=True)
         print(out_text)
     except:
         raise
     finally:
-        rollout_manager.stop_servers()
+        ray.get(rollout_manager.stop_servers.remote())

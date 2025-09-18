@@ -14,6 +14,7 @@ import logging
 
 from concurrent.futures import ThreadPoolExecutor, wait, ALL_COMPLETED
 from alpha_seed.utils.debug.aiomonitor import get_aiomonitor_cls
+from alpha_seed.utils.profile.timeline import Tracer
 from alpha_seed.workers.actors.rollout_pool import RolloutPool
 from contextlib import suppress, contextmanager, nullcontext
 from codetiming import Timer
@@ -331,10 +332,10 @@ class RolloutManager:
         self._init_client_executor()
         self._initialized = True
 
-    def wait_nccl_comm_threadsafe(self):
+    async def wait_nccl_comm_threadsafe(self):
         if self.val_standalone_wg is not None:
             # wait for standalone validator weights updated before proceeding
-            self.threadsafe_nccl_comm.wait()
+            await asyncio.to_thread(self.threadsafe_nccl_comm.wait)
             self.threadsafe_nccl_comm.clear()
 
     def resume(self, remote_global_step_folder: str, load_dataproto_fn: Callable):
@@ -501,8 +502,7 @@ class RolloutManager:
         step: int,
         save_dataproto_fn: SaveDataProtoFunc,
         is_warmup_step: bool,
-        metrics: Dict = None,
-    ) -> DataProto:
+    ) -> Tuple[DataProto, dict]:
         """
         :param batch: current training input batch
         :param step: current training step
@@ -511,7 +511,7 @@ class RolloutManager:
         :param metrics: metrics dict
         :return: batch to be train after generation
         """
-
+        metrics = {}
         if self.config.actor_rollout_ref.rollout.get("complete_ratio", 1.0) == 0.0:
             assert self.rollout_pool_warmup_step >= 1, "fully async must have warmup_step>0"
 
@@ -519,17 +519,15 @@ class RolloutManager:
         self.train_generate_fill(batch, step, save_dataproto_fn, is_warmup_step, metrics)
         batch = self.train_generate_fetch(step, is_warmup_step, metrics)
         print(f"[INFO] gen step #{step}, elapsed: {time.time() - step_start}")
-        return batch
+        return batch, metrics
 
-    def train_generate_queued(self, train_batch_iter, step: int, metrics: Dict = None) -> DataProto:
+    def train_generate_queued(self, train_batch_iter: Iterator[DataProto], step: int) -> Tuple[DataProto, dict]:
         """Train generation in queued style
         :param train_batch_iter: generator to get gen input batch
         :param step: current training step
-        :param metrics: metrics dict
-        :return: batch to be train after generation
+        :return: batch to be trained after generation
         """
-        if metrics is None:
-            metrics = {}
+        metrics = {}
 
         queued_rollout_config = self.config.trainer.queued_rollout_config
         assert self._use_server, "train_generate_queued only valid for server mode"
@@ -599,9 +597,15 @@ class RolloutManager:
             record_xperf_metrics(dummy_batch, metrics, self.logger, step, prefix="hybrid")
         metrics['timing/dataloader'] = dataloader_time
         batch: DataProto = self.train_generate_fetch(step, is_warmup_step=False, metrics=metrics)
-        return batch
+        return batch, metrics
 
-    def val_generate(self, batch: DataProto, step: int = 0, is_async: bool = False, metrics: Dict = None) -> DataProto:
+    async def val_generate_async(self,
+                                 batch: DataProto,
+                                 step: int = 0,
+                                 is_async: bool = False) -> Tuple[DataProto, dict]:
+        return await asyncio.to_thread(self.val_generate, batch, step, is_async)
+
+    def val_generate(self, batch: DataProto, step: int = 0, is_async: bool = False) -> Tuple[DataProto, dict]:
         """
         :param batch: current training input batch
         :param step: current training step
@@ -609,7 +613,7 @@ class RolloutManager:
         """
         assert self._initialized
         gen_batch, batch = self._prepare_gen_batch(batch, step, is_train=False)
-        metrics = {} if metrics is None else metrics
+        metrics = {}
 
         if self._use_server:
             gen_batch.union(batch)
@@ -631,7 +635,7 @@ class RolloutManager:
             batch.batch["responses"] = batch.batch["input_ids"][:, self.config.data.max_prompt_length:]
             batch.pop(batch_keys=['is_finished'])
 
-        return batch
+        return batch, metrics
 
     async def _wait_max_off_policy_steps(self, step: int, metrics: Dict):
         max_off_policy_steps = self.config.actor_rollout_ref.rollout.get('max_off_policy_steps', None)
@@ -1424,7 +1428,7 @@ class RolloutManager:
             return metrics
         return {}
 
-    def update_standalone_server_weights(self, is_train: bool) -> Union[List, None]:
+    def update_standalone_server_weights(self, is_train: bool) -> Optional[dict]:
         flag_key = f"suppress_update_standalone__is_train_{is_train}"
         if getattr(self, flag_key, False):
             # suppressed update, do nothing
@@ -1441,3 +1445,6 @@ class RolloutManager:
                                            self.threadsafe_nccl_comm if not is_train else None, True, False)
                 standalone_metric = self.get_standalone_metrics(standalone_wg)
         return standalone_metric
+
+    def dump_trace_spans(self, after_ts: float = 0.):
+        return Tracer.merge_all(after_ts=after_ts)
