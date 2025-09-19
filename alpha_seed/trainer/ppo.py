@@ -2248,7 +2248,6 @@ class RayPPOTrainer(object):
             with Timer(name='rollout_log_probs', logger=None) as timer:
                 batch = self.actor_rollout_wg.compute_rollout_log_probs(batch)
             metrics['timing/rollout_log_probs'] = timer.last
-        print("after rollout log probs computation!!!")
         return batch
 
     @stage_logger.log_duration('compute_reward')

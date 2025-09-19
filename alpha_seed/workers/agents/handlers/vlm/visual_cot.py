@@ -153,7 +153,7 @@ class VisualCotAgent(AsyncAgent):
 
             model_out_mask_list.append((False, incremental_input_length))
             model_out_mask_list.append((True, response_length))
-            log_probs_list.append([-1] * incremental_input_length)
+            log_probs_list.append([1] * incremental_input_length)
             assert len(response_message['response_log_probs']) == response_length
             log_probs_list.append(response_message['response_log_probs'])
             last_turn_prompt_model_output_length = prompt_length + response_length
@@ -203,7 +203,6 @@ class VisualCotAgent(AsyncAgent):
         assert len(log_probs) == len(total_output_ids)
         # log_probs = log_probs[len(initial_input_ids):]
         item.batch['raw_output_ids'] = torch.tensor([total_output_ids], dtype=torch.int32)
-        item.batch['rollout_log_probs'] = torch.tensor([log_probs], dtype=torch.bfloat16)
         assert len(total_output_ids) <= max_response_length
 
         # left pad and adjust original input

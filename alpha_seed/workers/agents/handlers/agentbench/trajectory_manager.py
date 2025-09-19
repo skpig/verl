@@ -222,7 +222,7 @@ def openhands_training_samples(build_record_fn, task: Task, score, trajectory, c
                 sum(data_pack.response_model_output_mask[0]) = {sum(data_pack.response_model_output_mask[0])}, len(cur_response) = {len(cur_response)}"
 
             response_model_output_mask.extend([0] * len(cur_prompt) + data_pack.response_model_output_mask[0])
-            response_log_probs.extend([-1] * len(cur_prompt) + data_pack.response_log_probs[0])
+            response_log_probs.extend([1] * len(cur_prompt) + data_pack.response_log_probs[0])
             response_off_policy.extend([-1] * len(cur_prompt) + data_pack.this_turn_off_policy_steps[0])
             is_finished = data_pack.is_finished[0]
 

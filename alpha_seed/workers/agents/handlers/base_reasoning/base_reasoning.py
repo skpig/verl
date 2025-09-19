@@ -60,9 +60,8 @@ class BaseReasoningAgent(AsyncAgent):
         latest_output_ids = completion['choices'][0]['message']['raw_output_ids']
         entire_seq_list = item.batch['input_ids'][0].tolist() + latest_output_ids
         total_output_ids = entire_seq_list[len(initial_input_ids):][:max_response_length]
-        log_probs = reduce(lambda x, y: x + y, log_probs_list)[len(initial_input_ids):][:max_response_length]
+        log_probs = reduce(lambda x, y: x + y, log_probs_list)[:max_response_length]
         item.batch['raw_output_ids'] = torch.tensor([total_output_ids], dtype=torch.int32)
-        item.batch['rollout_log_probs'] = torch.tensor([log_probs], dtype=torch.bfloat16)
 
         # left pad and adjust original input
         left_pad_size = max_prompt_length - len(initial_input_ids)

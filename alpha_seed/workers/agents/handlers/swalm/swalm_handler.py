@@ -157,7 +157,7 @@ def pack_to_dataproto_multi_turn(prompts,
             if (not is_truncated) and (not is_right_truncated):
                 response_input_ids.extend((cur_prompt + cur_response))
                 response_model_output_mask.extend(([False] * len(cur_prompt) + data_pack.response_model_output_mask[0]))
-                response_log_probs.extend(([-1.] * len(cur_prompt) + data_pack.response_log_probs[0]))
+                response_log_probs.extend(([1.] * len(cur_prompt) + data_pack.response_log_probs[0]))
                 response_off_policy.extend([-1] * len(cur_prompt) + data_pack.this_turn_off_policy_steps[0])
         if (is_truncated) or (split_conversation_turn_in_train):
             single_prompt_input_ids = data_pack.extra_data[0]['input_ids']
@@ -172,7 +172,7 @@ def pack_to_dataproto_multi_turn(prompts,
                     single_attention_mask.to(torch.int8),
                 'rollout_behavior_log_probs':
                     torch.Tensor([_pad_to_max_len(data_pack.response_log_probs[0], max_new_tokens,
-                                                  pad_token=-1)]).to(torch.bfloat16),
+                                                  pad_token=1)]).to(torch.bfloat16),
                 'off_policy_steps':
                     torch.Tensor(
                         [_pad_to_max_len(data_pack.this_turn_off_policy_steps[0], max_new_tokens,
@@ -209,7 +209,7 @@ def pack_to_dataproto_multi_turn(prompts,
             'attention_mask':
                 attention_mask.to(torch.int8),
             'rollout_behavior_log_probs':
-                torch.Tensor([_pad_to_max_len(response_log_probs, max_new_tokens, pad_token=-1)]).to(torch.bfloat16),
+                torch.Tensor([_pad_to_max_len(response_log_probs, max_new_tokens, pad_token=1)]).to(torch.bfloat16),
             'off_policy_steps':
                 torch.Tensor([_pad_to_max_len(response_off_policy, max_new_tokens, pad_token=-1)]).to(torch.int8),
             'model_output_mask':

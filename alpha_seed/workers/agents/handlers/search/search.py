@@ -121,7 +121,7 @@ class SearchAgent(AsyncAgent):
 
             model_out_mask_list.append((False, incremental_input_length))
             model_out_mask_list.append((True, response_length))
-            log_probs_list.append([-1] * incremental_input_length)
+            log_probs_list.append([1] * incremental_input_length)
             log_probs_list.append(response_message['response_log_probs'])
             last_turn_prompt_model_output_length = prompt_length + response_length
 
@@ -186,9 +186,9 @@ class SearchAgent(AsyncAgent):
         latest_output_ids = completion['choices'][0]['message']['raw_output_ids']
         entire_seq_list = item.batch['input_ids'][0].tolist() + latest_output_ids
         total_output_ids = entire_seq_list[len(initial_input_ids):][:max_response_length]
-        log_probs = reduce(lambda x, y: x + y, log_probs_list)[len(initial_input_ids):][:max_response_length]
+        log_probs = reduce(lambda x, y: x + y, log_probs_list)[:max_response_length]
         item.batch['raw_output_ids'] = torch.tensor([total_output_ids], dtype=torch.int32)
-        item.batch['rollout_behavior_log_probs'] = torch.tensor([log_probs], dtype=torch.bfloat16)
+        # item.batch['rollout_behavior_log_probs'] = torch.tensor([log_probs], dtype=torch.bfloat16)
 
         # left pad and adjust original input
         left_pad_size = max_prompt_length - len(initial_input_ids)
