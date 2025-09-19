@@ -1,10 +1,11 @@
-RUN_ID=4
+RUN_ID=26
 WANDB_VERSION=bwandb
 # one node
 FORWARD_RATIO=16
 BACKWARD_RATIO=6
 
 resume=disable
+max_data_len=1024
 
 # for qwen3
 VAL_TEMP=0.6
@@ -13,7 +14,7 @@ VAL_TOPK=20
 
 # Model settings
 USE_OVERLONG=True
-SAMPLER=None # null, tree, mopps
+SAMPLER=tree # null, tree, mopps
 DATA_WORKERS=0
 CRITIC_WARMUP=0
 PROMPT_ID=4
@@ -27,14 +28,18 @@ MAX_RESPONSE_LEN=$((1024 * 5 + OVERLONG_BUFFER_LEN))
 CLIP_HIGHER=0.28
 
 # Tree Sampler settings
-TREE_SAMPLER=epsilon # mcts pg
+TREE_SAMPLER=pg # mcts pg
 EPSILON=0.2
 
 # Tree Selector
-TREE_SELECTOR=value # entropy mix1
+TREE_SELECTOR=entropy # value entropy mix, mix2
 ROLLOUT_RATIO=0.7
-
-
+ROLLOUT_BEGIN_RATIO=0.2
+INCORRECT_PROB=0.
+ROOT_ONLY=True
+DIV_THRESHOLD=3 # 0 by default
+NUM_GIBBS=100
+GIBBS_DISCOUNT=0.99
 
 # Performance tuning
 N_NODES=${ARNOLD_WORKER_NUM:-1}
@@ -56,7 +61,8 @@ CRITIC_MODEL=${MY_CKPT_DIR}debug_hbz/Qwen3-4B-critic/0810_v1_critic
 
 TEMPLATE_TYPE=chat
 # TRAIN_FILE="${MY_DATA_DIR}DAPO-Math-17k/train.parquet"
-TRAIN_FILE="${MY_DATA_DIR}LIMR/train.parquet"
+TRAIN_FILE="${MY_DATA_DIR}OLDAIME/train.parquet"
+# TRAIN_FILE="${MY_DATA_DIR}LIMR/train.parquet"
 TEST_FILES="${MY_DATA_DIR}merged_math_datasets/merged_test.parquet"
 
 # BASE_MODEL=/tmp/pretrain/Qwen/Qwen2.5-3B-Instruct
@@ -68,9 +74,9 @@ TEST_FILES="${MY_DATA_DIR}merged_math_datasets/merged_test.parquet"
 
 PROJ_NAME="debug_hbz2"
 MODEL_NAME=$(basename $BASE_MODEL)
-# DATA_NAME=DAPOMATH
-DATA_NAME=LIMR
-EXPERIMENT_NAME="ID${RUN_ID}_${DATA_NAME}_ppo_sampler${SAMPLER}_clip${CLIP_HIGHER}_${MODEL_NAME}_prompt${PROMPT_ID}_n${ROLLOUT_N}_resplen${MAX_RESPONSE_LEN}_bsz${BATCH_SIZE}-${MINI_BSZ}"
+DATA_NAME=OLDAIME
+# DATA_NAME=LIMR
+EXPERIMENT_NAME="ID${RUN_ID}_${DATA_NAME}_grpo_sampler${SAMPLER}_clip${CLIP_HIGHER}_${MODEL_NAME}_prompt${PROMPT_ID}_n${ROLLOUT_N}_resplen${MAX_RESPONSE_LEN}_bsz${BATCH_SIZE}-${MINI_BSZ}"
 
 python3 examples/data_preprocess/custom.py \
     --resume
@@ -90,12 +96,7 @@ CMD="python3 -m verl.trainer.main_ppo \
     +actor_rollout_ref.model.override_config.attention_dropout=0. \
     +actor_rollout_ref.model.override_config.embd_pdrop=0. \
     +actor_rollout_ref.model.override_config.resid_pdrop=0. \
-    +critic.model.override_config.attention_dropout=0. \
-    +critic.model.override_config.embd_pdrop=0. \
-    +critic.model.override_config.resid_pdrop=0. \
-    algorithm.adv_estimator=gae \
-    algorithm.variable_lambda_scalar=0.05 \
-    algorithm.critic_lam=1.0 \
+    algorithm.adv_estimator=grpo \
     data.prompt_id=$PROMPT_ID \
     data.train_files=$TRAIN_FILE \
     data.val_files=\"$TEST_FILES\" \
@@ -106,7 +107,13 @@ CMD="python3 -m verl.trainer.main_ppo \
     data.truncation='error' \
     data.sampler.tree_sampler.name=${TREE_SAMPLER} \
     data.sampler.tree_sampler.epsilon=${EPSILON} \
+    data.sampler.tree_sampler.diverse_threshold=${DIV_THRESHOLD} \
+    data.sampler.tree_sampler.gibbs_sweeps=${NUM_GIBBS} \
+    data.sampler.tree_sampler.gamma=${GIBBS_DISCOUNT} \
     data.tree_data.partial_rollout_ratio=${ROLLOUT_RATIO} \
+    data.tree_data.partial_rollout_begin_ratio=${ROLLOUT_BEGIN_RATIO} \
+    data.tree_data.keep_incorrect_prob=${INCORRECT_PROB} \
+    data.tree_data.root_only=${ROOT_ONLY} \
     data.tree_data.name=${TREE_SELECTOR} \
     actor_rollout_ref.model.path=$BASE_MODEL \
     actor_rollout_ref.model.use_remove_padding=True \
@@ -116,6 +123,7 @@ CMD="python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=$BACKWARD_MAX_TOKEN_LEN \
     actor_rollout_ref.actor.use_kl_loss=False \
+    actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=$OFFLOAD \
     actor_rollout_ref.actor.fsdp_config.param_offload=$OFFLOAD \
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
@@ -125,26 +133,17 @@ CMD="python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=$FORWARD_MAX_TOKEN_LEN \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP_SIZE \
     actor_rollout_ref.rollout.name=sglang \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.65 \
     actor_rollout_ref.rollout.n=$ROLLOUT_N \
     actor_rollout_ref.rollout.val_kwargs.temperature=${VAL_TEMP} \
     actor_rollout_ref.rollout.val_kwargs.top_k=${VAL_TOPK} \
     actor_rollout_ref.rollout.val_kwargs.top_p=${VAL_TOPP} \
-    critic.optim.lr=1e-5 \
-    critic.model.use_remove_padding=True \
-    critic.model.path=$CRITIC_MODEL \
-    critic.model.fsdp_config.param_offload=$OFFLOAD \
-    critic.model.fsdp_config.optimizer_offload=$OFFLOAD \
-    critic.use_dynamic_bsz=True \
-    critic.ppo_max_token_len_per_gpu=$BACKWARD_MAX_TOKEN_LEN \
-    critic.forward_max_token_len_per_gpu=$FORWARD_MAX_TOKEN_LEN \
     algorithm.use_kl_in_reward=True \
     algorithm.kl_ctrl.kl_coef=0.0 \
     reward_model.launch_reward_fn_async=True \
     reward_model.overlong_buffer.enable=${USE_OVERLONG} \
     reward_model.overlong_buffer.len=$OVERLONG_BUFFER_LEN \
     reward_model.overlong_buffer.penalty_factor=${OVERLONG_COEF} \
-    trainer.critic_warmup=${CRITIC_WARMUP} \
     trainer.logger=['console','$WANDB_VERSION'] \
     trainer.val_before_train=False \
     trainer.n_gpus_per_node=$N_GPUS \
