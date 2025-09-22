@@ -67,9 +67,10 @@ class RLHFDatasetSwalm(RLHFDataset):
                 f"agent task {index} ->  task_type: {task_type}, dataset_id: {dataset_id}, instance_id: {instance_id}")
 
             # fake input_ids as placeholder
-            row_dict['input_ids'] = torch.zeros(self.max_prompt_length, dtype=torch.int32)
+            row_dict['input_ids'] = torch.ones(self.max_prompt_length, dtype=torch.int32) * self.tokenizer.pad_token_id
             row_dict['attention_mask'] = torch.zeros(self.max_prompt_length, dtype=torch.int32)
-            row_dict['answer_input_ids'] = torch.zeros(self.max_prompt_length, dtype=torch.int32)
+            row_dict['answer_input_ids'] = torch.ones(self.max_prompt_length,
+                                                      dtype=torch.int32) * self.tokenizer.pad_token_id
             row_dict['answer_attention_mask'] = torch.zeros(self.max_prompt_length, dtype=torch.int32)
             extra_info.update({"is_eval": self.is_eval})
             row_dict['extra_info'] = extra_info

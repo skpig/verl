@@ -80,8 +80,9 @@ def compute_gae_advantage_return(token_level_rewards: torch.Tensor,
                                  adv_whiten: bool,
                                  use_separate_critic_lam: bool,
                                  critic_lam: torch.Tensor,
+                                 adv_vectorize: bool = False,
                                  step_level_scores: torch.Tensor = None,
-                                 adv_vectorize: bool = False):
+                                 step_level_split_scores: torch.Tensor = None):
     """Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py
 
     Args:
@@ -122,17 +123,24 @@ def compute_gae_advantage_return(token_level_rewards: torch.Tensor,
         return torch.stack([starts, ends], dim=1)
 
     token_level_rewards = token_level_rewards * eos_mask
+    if step_level_split_scores is not None:
+        step_token_level_rewards = torch.zeros_like(token_level_rewards)
+    else:
+        step_token_level_rewards = None
 
     response_intervals = []
     for _idx in range(eos_mask.size(0)):
         response_intervals += [find_consecutive_ones(eos_mask[_idx])]
 
     # update
-    if step_level_scores is not None:
+    if (step_level_scores is not None) or (step_level_split_scores is not None):
         for _idx, _intervals in enumerate(response_intervals):
             for _ii in range(_intervals.size(0) - 1):
                 e = int(_intervals[_ii, 1].item())
-                token_level_rewards[_idx, e] += step_level_scores[_idx, _ii]
+                if step_level_scores is not None:
+                    token_level_rewards[_idx, e] += step_level_scores[_idx, _ii]
+                if step_level_split_scores is not None:
+                    step_token_level_rewards[_idx, e] += step_level_split_scores[_idx, _ii]
 
     values = values * eos_mask
     if use_variable_lambda:
@@ -146,6 +154,11 @@ def compute_gae_advantage_return(token_level_rewards: torch.Tensor,
                 critic_lastgaelam = 0
                 critic_advantages_reversed = []
 
+            if step_token_level_rewards is not None:
+                step_lastgaelam = 0
+                if use_separate_critic_lam:
+                    critic_step_lastgaelam = 0
+
             gen_len = token_level_rewards.shape[-1]
             nextvalues = 0
             for t in reversed(range(gen_len)):
@@ -154,11 +167,21 @@ def compute_gae_advantage_return(token_level_rewards: torch.Tensor,
                 nextvalues = next_eos_mask * cur_nextvalues + (1 - next_eos_mask) * nextvalues
                 delta = token_level_rewards[:, t] + gamma * nextvalues - values[:, t]
                 lastgaelam = (delta + gamma * lam * lastgaelam) * eos_mask[:, t] + lastgaelam * (1 - eos_mask[:, t])
-                advantages_reversed.append(lastgaelam)
+                if step_token_level_rewards is not None:
+                    step_delta = step_token_level_rewards[:, t]
+                    step_lastgaelam = (step_delta + gamma * lam * step_lastgaelam) * eos_mask[:, t]
+                    advantages_reversed.append(lastgaelam + step_lastgaelam)
+                else:
+                    advantages_reversed.append(lastgaelam)
                 if use_separate_critic_lam:
                     critic_lastgaelam = (delta + gamma * critic_lam *
                                          critic_lastgaelam) * eos_mask[:, t] + critic_lastgaelam * (1 - eos_mask[:, t])
-                    critic_advantages_reversed.append(critic_lastgaelam)
+                    if step_token_level_rewards is not None:
+                        critic_step_lastgaelam = (step_delta +
+                                                  gamma * critic_lam * critic_step_lastgaelam) * eos_mask[:, t]
+                        critic_advantages_reversed.append(critic_lastgaelam + critic_step_lastgaelam)
+                    else:
+                        critic_advantages_reversed.append(critic_lastgaelam)
             advantages = torch.stack(advantages_reversed[::-1], dim=1)
             if use_separate_critic_lam:
                 critic_advantages = torch.stack(critic_advantages_reversed[::-1], dim=1)

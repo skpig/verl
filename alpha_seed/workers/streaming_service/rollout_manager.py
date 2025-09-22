@@ -1,3 +1,5 @@
+import os
+import itertools
 from typing import *
 import asyncio
 import copy
@@ -496,6 +498,41 @@ class RolloutManager:
         pprint(f"training batches {len(batch)}.")
         return batch
 
+    def update_swalm_rollout_agent_metrics(self, metrics: Dict, rollout_agent_tmp_metrics: List = None):
+        if rollout_agent_tmp_metrics:
+            finish_reason_dict = {
+                "finish": 0,
+                "finish_with_early_stop_learn": 0,
+                "finish_with_prompt_truncated_learn": 0,
+                "finish_with_response_truncated_learn": 0,
+                "finish_with_max_turn_learn": 0,
+                "stop_wtih_early_stop_drop": 0,
+                "stop_wtih_prompt_truncated_drop": 0,
+                "stop_wtih_response_truncated_drop": 0,
+                "stop_wtih_max_turn_drop": 0,
+                "stop_with_no_valid_response": 0,
+                "stop_with_offpolicy_drop": 0,
+                "stop_with_error_stop": 0,
+            }
+            all_iterations = []
+            all_success_iterations = []
+            for agent_metrics in rollout_agent_tmp_metrics:
+                iterations = agent_metrics.get("all_turns_sum", 0)
+                all_iterations.append(iterations)
+                finish_reason = agent_metrics.get("finish_reason", "")
+                if finish_reason:
+                    assert finish_reason in finish_reason_dict, f"Unsupported finish_reason: {finish_reason} in {list(finish_reason_dict.keys())}"
+                    finish_reason_dict[finish_reason] += 1
+                    if "finish" in finish_reason:
+                        all_success_iterations.append(iterations)
+            metrics["rollout/agent/all_swalm_task"] = len(all_iterations)
+            metrics["rollout/agent/all_iterations"] = sum(all_iterations) / max(1, len(all_iterations))
+            metrics["rollout/agent/all_success_iterations"] = sum(all_success_iterations) / max(
+                1, len(all_success_iterations))
+            for finish_reason in finish_reason_dict:
+                metrics[f"rollout/agent/{finish_reason}_ratio"] = finish_reason_dict[finish_reason] / max(
+                    1, len(all_iterations))
+
     def train_generate(
         self,
         batch: DataProto,
@@ -517,6 +554,8 @@ class RolloutManager:
 
         step_start = time.time()
         self.train_generate_fill(batch, step, save_dataproto_fn, is_warmup_step, metrics)
+        rollout_agent_tmp_metrics = metrics.pop("rollout/agent/tmp_agent_metrics", None)
+        self.update_swalm_rollout_agent_metrics(metrics, rollout_agent_tmp_metrics)
         batch = self.train_generate_fetch(step, is_warmup_step, metrics)
         print(f"[INFO] gen step #{step}, elapsed: {time.time() - step_start}")
         return batch, metrics
@@ -556,6 +595,7 @@ class RolloutManager:
         max_buffer_size = queued_rollout_config.max_buffer_size
 
         dataloader_time = 0
+        rollout_agent_tmp_metrics = []
         if self.train_standalone_wg is not None:
             with Timer(name="update_rollout_server_queued", logger=None) as timer:
                 xperf_metrics = self.update_standalone_server_weights(is_train=True)
@@ -572,6 +612,11 @@ class RolloutManager:
                         if check_condition():
                             break
                         ready_batch = asyncio.run_coroutine_threadsafe(wait_for_pending(), self.loop).result()
+                        if self.config.data.get("enable_swalm_agent", False):
+                            for batch in ready_batch:
+                                agent_metrics = batch.meta_info.get("agent_metrics", {})
+                                if agent_metrics:
+                                    rollout_agent_tmp_metrics.append(agent_metrics)
                         RolloutPool.dynamic_call(self.rollout_pool, "fill_rollout_pool", ready_batch, step)
                     else:
                         # if ready count in the pool is greater than max_buffer_size, stop adding new gen batch
@@ -592,10 +637,14 @@ class RolloutManager:
                                                  save_dataproto_fn=None,
                                                  is_warmup_step=True,
                                                  metrics=metrics)
+                        rollout_agent_tmp_metric = metrics.pop("rollout/agent/tmp_agent_metrics", None)
+                        if rollout_agent_tmp_metric:
+                            rollout_agent_tmp_metrics.extend(rollout_agent_tmp_metric)
 
             dummy_batch = DataProto(meta_info={"xperf_metrics": xperf_metrics})
             record_xperf_metrics(dummy_batch, metrics, self.logger, step, prefix="hybrid")
         metrics['timing/dataloader'] = dataloader_time
+        self.update_swalm_rollout_agent_metrics(metrics, rollout_agent_tmp_metrics)
         batch: DataProto = self.train_generate_fetch(step, is_warmup_step=False, metrics=metrics)
         return batch, metrics
 
@@ -963,38 +1012,13 @@ class RolloutManager:
         metrics["rollout/standalone_incompleted_batch"] = len(pending_batch) + len(gen_batch) - finished_num
 
         if self.config.data.get("enable_swalm_agent", False):
-            finish_reason_dict = {
-                "finish": 0,
-                "finish_with_early_stop_learn": 0,
-                "finish_with_prompt_truncated_learn": 0,
-                "finish_with_response_truncated_learn": 0,
-                "finish_with_max_turn_learn": 0,
-                "stop_wtih_early_stop_drop": 0,
-                "stop_wtih_prompt_truncated_drop": 0,
-                "stop_wtih_response_truncated_drop": 0,
-                "stop_wtih_max_turn_drop": 0,
-                "stop_with_no_valid_response": 0,
-                "stop_with_offpolicy_drop": 0,
-                "stop_with_error_stop": 0,
-            }
-            all_iterations = []
-            all_success_iterations = []
+            all_agent_metrics = []
             for batch in ready_batch:
                 agent_metrics = batch.meta_info.get("agent_metrics", {})
-                iterations = agent_metrics.get("all_turns_sum", 0)
-                all_iterations.append(iterations)
-                finish_reason = agent_metrics.get("finish_reason", "")
-                if finish_reason:
-                    assert finish_reason in finish_reason_dict, f"Unsupported finish_reason: {finish_reason} in {list(finish_reason_dict.keys())}"
-                    finish_reason_dict[finish_reason] += 1
-                    if "finish" in finish_reason:
-                        all_success_iterations.append(iterations)
-            metrics["rollout/agent/all_iterations"] = sum(all_iterations) / max(1, len(all_iterations))
-            metrics["rollout/agent/all_success_iterations"] = sum(all_success_iterations) / max(
-                1, len(all_success_iterations))
-            for finish_reason in finish_reason_dict:
-                metrics[f"rollout/agent/{finish_reason}_ratio"] = finish_reason_dict[finish_reason] / max(
-                    1, len(ready_batch))
+                if agent_metrics:
+                    all_agent_metrics.append(agent_metrics)
+            if all_agent_metrics:
+                metrics.update({"rollout/agent/tmp_agent_metrics": all_agent_metrics})
 
         return ready_batch, pending
 
@@ -1100,6 +1124,8 @@ class RolloutManager:
             for res in fake_success_ready_batch:
                 res.batch['swalm_agent_score'] = torch.tensor(-1.).repeat(len(res))
                 res.non_tensor_batch["extra_info"][0]['all_turns_sum'] = -99  # -99 as the env failure flag
+                if os.getenv("ENABLE_SWALM_LOG", False):
+                    res.non_tensor_batch["extra_info"][0]['agent_traj_url'] = ""
                 success_ready_batch.append(res)
             ready_batch = success_ready_batch
         else:

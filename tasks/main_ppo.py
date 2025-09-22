@@ -517,6 +517,9 @@ class RewardManager():
 
         all_final_scores_to_lens = defaultdict(list)
 
+        if self.config.data.get("enable_swalm_agent", False):
+            swalm_agent_env_failure_num = 0
+
         log_table_interval = 1
         if self.config.trainer.num_cases_to_wandb > 0:
             log_table_interval = max(1, len(data) // self.config.trainer.num_cases_to_wandb)
@@ -638,6 +641,10 @@ class RewardManager():
             all_overlong_rewards.append(overlong_reward)
             all_dup_punish_scores.append(dup_punish_reward)
 
+            if self.config.data.get("enable_swalm_agent", False) and (data[idx].non_tensor_batch.get(
+                    'extra_info', {}).get("all_turns_sum", -1) == -99):  # -99 as the env failure flag
+                swalm_agent_env_failure_num += 1
+
             if reward_style not in already_print_data_sources:
                 already_print_data_sources[reward_style] = 0
 
@@ -666,7 +673,8 @@ class RewardManager():
                     global_index, data[idx].non_tensor_batch.get("uid", ""), global_step, prompt_str, solution_str,
                     ground_truth, raw_score, score, rm_score, rm_response, score_msg, solution_str_save, is_para_dup,
                     is_trunc, valid_response_length, data[idx].non_tensor_batch.get('extra_info',
-                                                                                    {}).get("all_turns_sum", -1)
+                                                                                    {}).get("agent_traj_url", ""),
+                    data[idx].non_tensor_batch.get('extra_info', {}).get("all_turns_sum", -1)
                 ])
             send_to_kafka({
                 "global_index": global_index,
@@ -715,6 +723,8 @@ class RewardManager():
             prefix + 'timeout_cnt':
                 timeout_cnt,
         }
+        if self.config.data.get("enable_swalm_agent", False):
+            log_data.update({f"{prefix}/swalm_agent_env_failure_num": swalm_agent_env_failure_num})
 
         if self.config.trainer.use_remote_rm:
             remote_rm_type = self.config.trainer.remote_rm_type
@@ -792,7 +802,7 @@ class RewardManager():
                     wandb.Table(columns=[
                         "Index", "Uid", "Step", "Prompt", "Gen Sequence", "GroundTruth", "Raw Score", "Score",
                         "RM Score", "RM Response", "ScoreMsg", "Gen Sequence PostProc", "Is_Dup", "Is_Trunc", "Len",
-                        "Agent Turns"
+                        "Agent Trajs", "Agent Turns"
                     ],
                                 data=self.log_table)
             }

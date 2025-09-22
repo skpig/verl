@@ -357,10 +357,12 @@ def compute_advantage(data: DataProto,
         step_level_scores = None
         if 'step_level_scores' in data.batch:
             step_level_scores = data.batch['step_level_scores']
+        step_level_split_scores = None
+        if 'step_level_split_scores' in data.batch:
+            step_level_split_scores = data.batch['step_level_split_scores']
         origin_advantages, advantages, returns = core_algos.compute_gae_advantage_return(
             token_level_rewards=token_level_rewards,
             values=values,
-            step_level_scores=step_level_scores,
             eos_mask=response_mask,
             gamma=gamma,
             lam=lam,
@@ -369,7 +371,10 @@ def compute_advantage(data: DataProto,
             adv_whiten=adv_whiten,
             use_separate_critic_lam=use_separate_critic_lam,
             critic_lam=critic_lam,
-            adv_vectorize=adv_vectorize)
+            adv_vectorize=adv_vectorize,
+            step_level_scores=step_level_scores,
+            step_level_split_scores=step_level_split_scores,
+        )
         data.batch['advantages'] = advantages
         data.batch['origin_advantages'] = origin_advantages
         data.batch['returns'] = returns

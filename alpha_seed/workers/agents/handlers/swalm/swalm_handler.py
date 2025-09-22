@@ -39,12 +39,10 @@ try:
         from swalm.core.trace.processors.fornax import FornaxSpanProcessor
 
     SUPPORTTED_AGNET_TYPES = [
-        "swalm.core.agent.cline::ClineAgent",
-        "swalm.core.agent.code_act::CodeActAgent",
-        "swalm.core.agent.swe_agent::SWEAgent",
-        "swalm.core.agent.swalm_math::SwalmMathAgent",
-        "swalm.core.agent.super_doubao::SuperDoubaoAgent",
-        "swalm.core.agent.mcp::MCPAgent",
+        "swalm.core.agent.cline::ClineAgent", "swalm.core.agent.code_act::CodeActAgent",
+        "swalm.core.agent.swe_agent::SWEAgent", "swalm.core.agent.swalm_math::SwalmMathAgent",
+        "swalm.core.agent.super_doubao::SuperDoubaoAgent", "swalm.core.agent.mcp::MCPAgent",
+        "swalm.core.agent.swe_trae_agent::SWETraeAgent"
     ]
 
     SWALM_ENV_FAIL_SCORE = -98.
@@ -316,20 +314,24 @@ class SwalmAgent(AsyncAgent):
             }
         elif ("CodeActAgent" in agent_class) or ("MCPAgent" in agent_class):
             think_token_type = self.config.trainer.get("think_token_type", "")
+            if think_token_type == "code_think":
+                remove_pattern = r'<code_think>[\s\S]*?</code_think>'
+            elif think_token_type == "36b_think":
+                remove_pattern = r'<think_never_used_51bce0c785ca2f68081bfa7d91973934>[\s\S]*?</think_never_used_51bce0c785ca2f68081bfa7d91973934>'
+            elif think_token_type == "36b_oss_think":
+                remove_pattern = r'<seed:think>[\s\S]*?</seed:think>'
+            else:
+                remove_pattern = r'<think>[\s\S]*?</think>'
             agent_init_params_template = {
-                'remove_pattern':
-                    r'<code_think>[\s\S]*?</code_think>'
-                    if think_token_type == "code_think" else r'<think>[\s\S]*?</think>',
-                'keep_removed_content':
-                    False,
-                'observation_truncate_name':
-                    "openhands_truncate_content",
+                'remove_pattern': remove_pattern,
+                'keep_removed_content': False,
+                'observation_truncate_name': "openhands_truncate_content",
             }
         elif "SWEAgent" in agent_class:
             agent_init_params_template = {
                 'config_type': "default",
             }
-        elif "SuperDoubaoAgent" in agent_class:
+        elif ("SuperDoubaoAgent" in agent_class) or ("SWETraeAgent" in agent_class):
             agent_init_params_template = {}
         else:
             raise NotImplementedError
@@ -364,9 +366,8 @@ class SwalmAgent(AsyncAgent):
                 agent_run_params['max_iterations'] = self.config.trainer.get("agent_max_iterations")
 
         # eval_params
-        if ("ClineAgent" in agent_class) or ("SwalmMathAgent" in agent_class) or ("CodeActAgent"
-                                                                                  in agent_class) or ("MCPAgent"
-                                                                                                      in agent_class):
+        if ("ClineAgent" in agent_class) or ("SwalmMathAgent" in agent_class) or ("CodeActAgent" in agent_class) or (
+                "MCPAgent" in agent_class) or ("SWETraeAgent" in agent_class):
             eval_params_template = {
                 "request_id": task_uuid,
                 "eval_timeout": 900,
@@ -427,7 +428,7 @@ class SwalmAgent(AsyncAgent):
             agent_run_spec_kwargs.update({"reward_model": extra_info["reward_model"]})
         if extra_info.get("ground_truth", None) is not None:
             agent_run_spec_kwargs.update({"ground_truth": extra_info["ground_truth"]})
-        if self.config.trainer.get("enable_step_level_scores", False):
+        if self.config.trainer.get("enable_step_level_scores", False) and (not is_eval):
             eval_interval = self.config.trainer.get("step_level_eval_interval", None)
             eval_step_list = []
             if eval_interval is not None:
@@ -436,7 +437,7 @@ class SwalmAgent(AsyncAgent):
             eval_on_change = self.config.trainer.get("step_level_eval_on_change", None)
             if eval_on_change is not None:
                 agent_run_spec_kwargs.update({"eval_on_change": eval_on_change})
-        if self.config.trainer.get("raise_on_agent_error", False):
+        if self.config.trainer.get("raise_on_agent_error", True):
             agent_run_spec_kwargs.update({"raise_on_agent_error": True})
         if extra_info.get("other_run_params", None):
             # hack for tbench
@@ -453,6 +454,15 @@ class SwalmAgent(AsyncAgent):
         if 'step_result' in task_res:
             for k, v in task_res['step_result'].items():
                 steps_level_res[int(k) - 1] = float(v.accepted)
+        return steps_level_res
+
+    def _get_step_level_format_eval_res(self, task_res, agent_max_iterations):
+        format_score_penalty = self.config.trainer.get("format_score_penalty", 0.1)
+        steps_level_res = [0.] * agent_max_iterations
+        if 'format_result' in task_res:
+            for format_key in ["illegal_thinking", 'invalid_fn_call', 'repeat_fn_call', 'no_fn_call']:
+                for k, v in enumerate(task_res['format_result'][format_key]):
+                    steps_level_res[k] -= float(v) * format_score_penalty
         return steps_level_res
 
     def _post_process_step_level_eval_res(self, step_level_eval_res, final_score):
@@ -624,8 +634,9 @@ class SwalmAgent(AsyncAgent):
         try:
             processors = []
             if enable_swalm_fornax:
-                agent_fornax_ak = self.config.trainer.get("agent_fornax_ak", None)
-                agent_fornax_sk = self.config.trainer.get("agent_fornax_sk", None)
+                agent_fornax_ak = self.config.trainer.get("agent_fornax_ak", "dd7bcff57e734a9a94dd231e17b90dd3")
+                agent_fornax_sk = self.config.trainer.get("agent_fornax_sk", "6b7c2bff23504d60bd010e772fe0c183")
+                agent_fornax_space_id = self.config.trainer.get("agent_fornax_space_id", "7524328458281811970")
                 if (agent_fornax_ak is not None) and (agent_fornax_sk is not None):
                     processors.append(FornaxSpanProcessor(agent_fornax_ak, agent_fornax_sk))
                 else:
@@ -635,6 +646,18 @@ class SwalmAgent(AsyncAgent):
             with processor_context(processors):
                 agent_run_spec_kwargs.update({"tracker": InstanceTracker(instance_id=task_uuid)})
                 task_res = await agent_task_type_fn(agent_run_spec(**agent_run_spec_kwargs))
+
+            if enable_swalm_fornax:
+                fornax_urls = []
+                for processor in processors:
+                    if isinstance(processor, FornaxSpanProcessor):
+                        for trace_id in processor.trace_ids:
+                            fornax_urls.append(
+                                f"https://fornax.bytedance.net/space/{agent_fornax_space_id}/analytics/trace/{trace_id}"
+                            )
+                        print(
+                            f"[Task Fornax] === uid: {task_uuid}, instance_id: {instance_id}, fornax_urls: {fornax_urls}"
+                        )
 
             enable_float_reward_score = self.config.trainer.get("enable_float_reward_score", False)
             if enable_float_reward_score:
@@ -651,6 +674,8 @@ class SwalmAgent(AsyncAgent):
                 step_level_eval_res = self._get_step_level_eval_res(dict(task_res), agent_max_iterations)
                 step_level_eval_res, is_success_to_fail = self._post_process_step_level_eval_res(
                     step_level_eval_res, final_score)
+            if self.config.trainer.get("enable_step_level_format_score_penalty", False):
+                step_level_split_scores = self._get_step_level_format_eval_res(dict(task_res), agent_max_iterations)
 
             outs = []
             is_truncated = False
@@ -697,10 +722,17 @@ class SwalmAgent(AsyncAgent):
                 final_outs.non_tensor_batch['agent_num_turns'] = np.array([all_turns_sum])
                 final_outs.non_tensor_batch['agent_num_tool_calls'] = np.array([all_turns_sum])
                 final_outs.meta_info['agent_metrics'] = {"finish_reason": finish_reason, "all_turns_sum": all_turns_sum}
+                final_outs.non_tensor_batch["extra_info"][0]['all_turns_sum'] = all_turns_sum
+                if enable_swalm_fornax:
+                    final_outs.non_tensor_batch["extra_info"][0]['agent_traj_url'] = "\n".join(fornax_urls)
                 return final_outs
             outs = DataProto.concat(outs)
             outs.meta_info['agent_metrics'] = {"finish_reason": finish_reason, "all_turns_sum": all_turns_sum}
             outs.meta_info['cur_step'] = cur_step
+            for _idx in range(len(outs)):
+                outs.non_tensor_batch["extra_info"][_idx]['all_turns_sum'] = all_turns_sum
+                if enable_swalm_fornax:
+                    outs.non_tensor_batch["extra_info"][_idx]['agent_traj_url'] = "\n".join(fornax_urls)
             outs.batch['swalm_agent_score'] = torch.Tensor([final_score]).to(torch.float32).repeat(len(outs))
             if self.config.trainer.get("enable_step_level_scores", False):
                 step_level_eval_res = step_level_eval_res[:all_turns_sum]
@@ -709,6 +741,12 @@ class SwalmAgent(AsyncAgent):
                 outs.batch['step_level_scores'] = torch.Tensor(step_level_eval_res).to(
                     torch.float32).unsqueeze(0).repeat(len(outs), 1)
                 outs.non_tensor_batch["extra_info"][0]['is_success_to_fail'] = is_success_to_fail
+            if self.config.trainer.get("enable_step_level_format_score_penalty", False):
+                step_level_split_scores = step_level_split_scores[:all_turns_sum]
+                if len(step_level_split_scores) < agent_max_iterations:
+                    step_level_split_scores += ([0.] * (agent_max_iterations - len(step_level_split_scores)))
+                outs.batch['step_level_split_scores'] = torch.Tensor(step_level_split_scores).to(
+                    torch.float32).unsqueeze(0).repeat(len(outs), 1)
             for _idx in range(len(outs)):
                 outs.non_tensor_batch["extra_info"][_idx]['all_turns_sum'] = all_turns_sum
             outs.non_tensor_batch['agent_num_turns'] = np.array([all_turns_sum] * len(outs))

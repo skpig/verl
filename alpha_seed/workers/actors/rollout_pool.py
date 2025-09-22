@@ -163,13 +163,13 @@ class RolloutPool:
                         self.uid2score[uid] = swalm_agent_score
                         keep_batch_lst.append(batch)
                         total_raw_score.append(swalm_agent_score)
+                        if batch.non_tensor_batch["extra_info"][0].get('is_success_to_fail', False):
+                            success_to_fail_traj_num += 1
                     else:
                         dropped_env_failure_traj_num += 1  # agent metric: dropped_env_failure_traj_num
                         continue
                 else:
                     batch.batch["swalm_agent_score"] = torch.tensor(NON_AGENT_PLACE_HOLDER_SCORE).repeat(len(batch))
-                    if batch.non_tensor_batch["extra_info"][0].get('is_success_to_fail', False):
-                        success_to_fail_traj_num += 1
                     keep_batch_lst.append(batch)
 
                 self.rollout_id2uid[rollout_id].add(uid)
@@ -194,7 +194,7 @@ class RolloutPool:
                     mean_score = torch.mean(swalm_agent_scores)
                     std_score = torch.std(swalm_agent_scores)
                     if (agent_bon_strategy != "bon_filter") or ((agent_bon_strategy == "bon_filter") and
-                                                                (std_score == 0)):
+                                                                (std_score != 0)):
                         self.rid2score_mean[rollout_id] = mean_score
                         self.rid2score_std[rollout_id] = std_score
                     else:
