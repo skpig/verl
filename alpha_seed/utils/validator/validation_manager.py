@@ -335,8 +335,13 @@ class ValidateManager(object):
         prompt2source = {}
         source2rwd = defaultdict(list)
         for i, item in enumerate(test_batch.non_tensor_batch['raw_prompt']):
-            prompt2rwd[item[0]['content']].append(reward_tensor[i].item())
-            prompt2source[item[0]['content']] = data_sources[i]
+            try:
+                item_prompt = item[0]['content']
+            except:
+                idx = test_batch.non_tensor_batch['index'][i]
+                item_prompt = f'Placeholder_prompt_{idx}'
+            prompt2rwd[item_prompt].append(reward_tensor[i].item())
+            prompt2source[item_prompt] = data_sources[i]
         for prompt, rwd in prompt2rwd.items():
             source2rwd[prompt2source[prompt]].append(rwd)
         for source, rwds in source2rwd.items():
