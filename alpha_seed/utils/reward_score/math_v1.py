@@ -15,6 +15,22 @@
 Copied from https://github.com/EleutherAI/lm-evaluation-harness/blob/main/lm_eval/tasks/hendrycks_math/utils.py
 """
 
+from .utils import Verifier
+
+
+class MathV1Verifier(Verifier, reward_style="rule-lighteval/MATH"):
+
+    @staticmethod
+    def compute_score(*args, **kwargs) -> float:
+        return compute_score(*args, **kwargs)
+
+
+class MathV1Verifier(Verifier, reward_style="lighteval/MATH"):
+
+    @staticmethod
+    def compute_score(*args, **kwargs) -> float:
+        return compute_score(*args, **kwargs)
+
 
 def compute_score(solution_str, ground_truth, **argv) -> float:
     if argv['config']['reward_model']['last_characters'] != -1:

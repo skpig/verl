@@ -2,7 +2,6 @@ from typing import *
 import os
 import json
 import dill
-from alpha_seed.utils.reward_score import _select_rm_score_fn
 from alpha_seed.workers.xperf_rollout.component.query_plugin import EnvStates
 
 
@@ -28,6 +27,15 @@ class ci_math_verifier:
 
 
 import re
+
+from .utils import Verifier
+
+
+class EulerVerifier(Verifier, reward_style="euler_verifier"):
+
+    @staticmethod
+    def compute_score(*args, **kwargs) -> float:
+        return compute_score(*args, **kwargs)
 
 
 def compute_score(solution_str, ground_truth, **kwargs):

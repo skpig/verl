@@ -1,5 +1,13 @@
 import json
 from collections import defaultdict
+from .utils import Verifier
+
+
+class LogicPuzzleVerifier(Verifier, reward_style="rule-logic_puzzle"):
+
+    @staticmethod
+    def compute_score(*args, **kwargs) -> float:
+        return compute_score(*args, **kwargs)
 
 
 def dummy_verify(solution_str, answer, meta):

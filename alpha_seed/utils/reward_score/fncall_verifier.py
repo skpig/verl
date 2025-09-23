@@ -1,4 +1,12 @@
 import math
+from .utils import Verifier
+
+
+class FnCallPenalize(Verifier, reward_style="verifier_penalize_fc_times"):
+
+    @staticmethod
+    def compute_score(*args, **kwargs) -> float:
+        return compute_score(*args, **kwargs)
 
 
 def compute_score(solution_str, ground_truth, **kwargs) -> float:

@@ -26,6 +26,14 @@ except ImportError:
 import sympy
 from sympy.parsing import sympy_parser
 from typing import Optional
+from .utils import Verifier
+
+
+class MathDeepscaleVerifier(Verifier, reward_style="rule/deepscale"):
+
+    @staticmethod
+    def compute_score(*args, **kwargs) -> float:
+        return deepscaler_reward_fn(*args, **kwargs)
 
 
 # Dan Hendrycks' code

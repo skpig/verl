@@ -21,7 +21,7 @@ from alpha_seed.utils.tokenizer.async_tokenizer import AsyncTokenizer
 from alpha_seed.workers.agents.handlers import register_handler, TaskContext
 from alpha_seed.workers.agents.handlers.base import AsyncAgent, AsyncLLMInterface
 from alpha_seed.utils.reward_score.response_post_proc import last_codeblock_postprocess
-from alpha_seed.utils.reward_score.oj_utils import compute_score_client, compute_score
+from alpha_seed.utils.reward_score.oj_utils import OJVerifier, compute_score
 from alpha_seed.workers.streaming_service.streaming_utils import DataPack, pack_to_dataproto, rmpad
 from alpha_seed.workers.agents.handlers.tool.parser import _extract_messages_from_dataproto
 
@@ -43,6 +43,7 @@ class SandboxFeedback:
     def __init__(self, tokenizer):
         # psm placeholder for futher use
         self.code_parser = CodeParser(tokenizer)
+        self.verifier = OJVerifier()
 
     async def __call__(self, input_text, ground_truth, data_uid, config):
         code = self.code_parser.extract_code(input_text, config.reward_model.last_response_strict)
@@ -53,6 +54,7 @@ class SandboxFeedback:
             "data_uid": data_uid,
             "config": config,
         }
+        compute_score_client = self.verifier.compute_score_client
         # use remote sandbox result
         if inspect.iscoroutinefunction(compute_score_client):
             score = await compute_score_client(**params)

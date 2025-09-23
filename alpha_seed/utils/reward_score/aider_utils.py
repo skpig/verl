@@ -9,6 +9,8 @@ from tenacity import retry, stop_after_attempt
 
 import requests
 from tenacity import retry, stop_after_attempt, wait_incrementing
+from .utils import Verifier
+import numpy as np
 
 OJ_MAX_ATTEMPTS = 3
 CLIENT_TIMEOUT = 120
@@ -22,23 +24,22 @@ def get_sandbox_endpoint(aider_service_psm):
     return endpoint
 
 
-def compute_score_client(solution_str, ground_truth, aider_service_psm, data_uid, config, **argv) -> float:
-    """Directly retrieve the scores from SandboxClient"""
-    score = None
-    if config.trainer.use_remote_sandbox:
-        # get the sandbox client endpoint
-        handler = ray.get_actor('remote_client')
-        # retrieve the score directly
-        score = ray.get(handler.get_results.remote(data_uid))
+class AiderVerifier(Verifier, reward_style="aider"):
 
-    if score is None:
-        score = compute_score(solution_str, ground_truth, aider_service_psm, **argv)
+    def is_remote(self):
+        return self.config.trainer.use_remote_sandbox
 
-    # optionally, compute the score with original code to compare the results
-    # score_original = compute_score(solution_str, ground_truth, code_sandbox_psm, **argv)
-    # assert score == score_original
+    def preprocess(self, input_ids, ground_truth):
+        input_ids = np.array(input_ids)
+        input_ids = input_ids[input_ids >= 0].tolist()
+        solution_str = self.tokenizer.decode(input_ids, skip_special_tokens=False)
+        solution_str = solution_str.split("assistant\n")[-1]
+        solution_str_post_proc = solution_str.rsplit(self.tokenizer.eos_token, 1)[0]
+        return solution_str_post_proc, ground_truth, self.config.trainer.code_sandbox_psm
 
-    return score
+    @staticmethod
+    def compute_score(solution_str, ground_truth, code_sandbox_psm, **argv) -> float:
+        return compute_score(solution_str, ground_truth, code_sandbox_psm)
 
 
 class AiderV2Result(BaseModel):

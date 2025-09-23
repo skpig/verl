@@ -5,6 +5,7 @@ import ray
 import requests
 from typing import Optional
 from tenacity import retry, stop_after_attempt, wait_exponential
+from .utils import Verifier
 
 PE_EN = """Now you are a large model evaluator. For each evaluation, I will give you a prompt, reference answer, model response, and current time. You need to strictly judge whether the model response is correct based on the reference answer I give you.
 Scoring criteria: Evaluate whether the model response is correct for the main requirements of the question; 1 point for correctness, 0 points for incorrectness.
@@ -251,18 +252,14 @@ def verify(pred, answer, question, pe):
     return score
 
 
-def compute_score_client(solution_str, ground_truth, config, data_uid, **kwargs):
-    score = None
-    if config.trainer.use_remote_search:
-        # get the sandbox client endpoint
-        handler = ray.get_actor('remote_client')
-        # retrieve the score directly
-        score = ray.get(handler.get_results.remote(data_uid))
+class DeepResearchVerifier(Verifier, reward_style="deep_research_verifier"):
 
-    if score is None:
-        score = compute_score(solution_str, ground_truth)
+    def is_remote(self):
+        return self.config.trainer.use_remote_search
 
-    return score
+    @staticmethod
+    def compute_score(solution_str, ground_truth, **kwargs) -> float:
+        return compute_score(solution_str, ground_truth)
 
 
 def compute_score(solution_str, ground_truth, **kwargs):

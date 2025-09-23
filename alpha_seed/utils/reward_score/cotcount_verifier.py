@@ -1,7 +1,16 @@
-from alpha_seed.utils.reward_score.verifier.tools import extract_and_convert_number
+from alpha_seed.utils.reward_score.vlm_verifiers.tools import extract_and_convert_number
 from alpha_seed.utils.reward_score import point_verifier
 from alpha_seed.utils.reward_score import bbox_verifier
 import json
+from functools import partial
+from .utils import Verifier
+
+
+class CotCountVerifier(Verifier, reward_style="verifier_countbypoint"):
+
+    @staticmethod
+    def compute_score(*args, **kwargs) -> float:
+        return partial(compute_score, delta=0.6)(*args, **kwargs)
 
 
 def compute_score(solution_str, ground_truth, delta, **kwargs):

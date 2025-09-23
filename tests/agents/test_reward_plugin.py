@@ -19,10 +19,11 @@ from alpha_seed.workers.agents.envs import BaseEnv
 from tests.test_utils import gpu_allocator, ray_fixture, set_common_envs, get_config, get_tokenizer, \
     create_rollout_manager, PytestXdistEnv, create_rollout_manager_with_wgs
 from .utils import get_math_test_dataproto
+from alpha_seed.utils.reward_score.utils import Verifier
 
 
 async def reward_fn(response: str, reward_model: Dict, config: Dict, tokenizer: AutoTokenizer):
-    from tasks.main_ppo import _select_rm_score_fn, post_process_solution_str
+    from tasks.main_ppo import post_process_solution_str
     ground_truth = reward_model['ground_truth']
     reward_style = reward_model['style']
     config = OmegaConf.create(config)
@@ -30,7 +31,7 @@ async def reward_fn(response: str, reward_model: Dict, config: Dict, tokenizer: 
                                                        solution_str=response,
                                                        eos_token=tokenizer.eos_token)
     data_uid = str(uuid.uuid4())
-    compute_score_fn = _select_rm_score_fn(reward_style, with_external=False)
+    compute_score_fn = Verifier.get_verifier(reward_style, config=config, with_external=False).compute_score_client
 
     score_fn_inputs = {
         "solution_str": solution_str_post_proc,
@@ -152,6 +153,22 @@ def custom_select_rm_score_fn(reward_style, with_external=True):
         return math_v1.compute_score
 
 
+class CustomVerifier(Verifier, reward_style="custom"):
+
+    def __init__(self, config=None, tokenizer=None, reward_style="rule-lighteval/MATH", with_external=True) -> None:
+        super().__init__(config=config, tokenizer=tokenizer)
+        assert reward_style == 'rule-lighteval/MATH', f"{reward_style}"
+        self.reward_style = reward_style
+        self.with_external = with_external
+
+    def compute_score(self, *args, **kwargs) -> float:
+        if self.with_external:
+            return compute_score_with_env(*args, **kwargs)
+        else:
+            from alpha_seed.utils.reward_score import math_v1
+            return math_v1.compute_score(*args, **kwargs)
+
+
 def apply_patch(actor):
     import torch
     import alpha_seed.workers.agents.plugins.plugin_manager
@@ -159,7 +176,6 @@ def apply_patch(actor):
     import tasks.main_ppo
     alpha_seed.workers.agents.plugins.plugin_manager.create_plugin_from_name = custom_create_plugin_from_name
     alpha_seed.workers.xperf_rollout.component.query_plugin.create_agent_envs_from_str = custom_create_agent_envs_from_str
-    tasks.main_ppo._select_rm_score_fn = custom_select_rm_score_fn
 
     return DataProto.from_dict({'dummy': torch.tensor([1])})
 
@@ -174,7 +190,6 @@ def test_reward_with_plugin(monkeypatch, set_common_envs, gpu_allocator, ray_fix
     rollout_manager, (hybrid_wg, _, _) = create_rollout_manager_with_wgs(config)
     apply_patch(None)
     hybrid_wg.execute_with_func_generator(apply_patch)
-    from tasks.main_ppo import _select_rm_score_fn
 
     try:
         batch, _ = ray.get(rollout_manager.val_generate_async.remote(batch, is_async=False))
@@ -183,7 +198,7 @@ def test_reward_with_plugin(monkeypatch, set_common_envs, gpu_allocator, ray_fix
             extra_data = item.non_tensor_batch['extra_data'][0]
             import base64
             env_state_bytes = base64.b64decode(extra_data['env_states'])
-            rm_fn = _select_rm_score_fn(reward_model['style'])
+            rm_fn = CustomVerifier(config=config, tokenizer=tokenizer).compute_score_client
             score = rm_fn(ground_truth=reward_model['ground_truth'], env_state_bytes=env_state_bytes)
             response = tokenizer.decode(batch.batch['input_ids'][0], skip_special_tokens=True)
             print("response:", response)

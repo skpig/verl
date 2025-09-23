@@ -49,6 +49,7 @@ from alpha_seed.workers.agents.handlers import select_handler_fn
 from alpha_seed.workers.agents.handlers import TaskContext
 from alpha_seed.workers.streaming_service.streaming_utils import pad, process_output, create_response_tensor
 from alpha_seed.utils.reward_score import NON_AGENT_PLACE_HOLDER_SCORE
+from alpha_seed.utils.reward_score.utils import Verifier
 
 logger = logging.getLogger(__name__)
 
@@ -246,52 +247,34 @@ class RolloutManager:
                                        role='standalone_validator')
 
     def _init_eos_callback(self):
-        remote_reward_style = []
-        if self.config.trainer.use_remote_sandbox:
-            remote_reward_style.append('code-sandbox')
-        if self.config.trainer.use_remote_sandbox:
-            remote_reward_style.append('aider')
-        if self.config.trainer.use_remote_verifier:
-            remote_reward_style.append('verifier_service')
-            remote_reward_style.append('gaokao_verifier_service')
-            remote_reward_style.append('vlm_verifier_router')
-        if self.config.trainer.use_remote_swe_sandbox:
-            remote_reward_style.append('swe_repair_verifier')
-        # add more reward style here that are going to be pipelined inside generation
-
         # set the eos_callback_fn of actor_rollout
         from alpha_seed.workers.xperf_rollout.component.query import Query
-        use_remote_sandbox = self.config.trainer.use_remote_sandbox
-        use_remote_verifier = self.config.trainer.use_remote_verifier
-        use_remote_swe_sandbox = self.config.trainer.use_remote_swe_sandbox
         use_remote_rm = self.config.trainer.use_remote_rm
-        use_remote_grm = self.config.trainer.use_remote_rm and (self.config.trainer.remote_rm_type == "grm")
+        raw_config = self.config
 
         def sandbox_callback_fn(query: Query):
-            input_ids = query.input_ids + query.new_token_ids
+            reward_model = query.meta_info.get('reward_model')
+            has_remote_verifier = True
+            if reward_model is not None and 'style' in reward_model:
+                verifier = Verifier.get_verifier(reward_model['style'], raw_config)
+                if verifier is None or not verifier.is_remote():
+                    has_remote_verifier = False
+            else:
+                has_remote_verifier = False
             req_id = query.meta_info['uid']
-            reward_model = query.meta_info['reward_model']
-            reward_style = reward_model['style']
-            ground_truth = reward_model['ground_truth']
+            if has_remote_verifier:
+                input_ids = query.input_ids + query.new_token_ids
+                reward_style = reward_model['style']
+                ground_truth = reward_model['ground_truth']
 
-            if (reward_style in remote_reward_style or use_remote_rm) and req_id is not None:
-                # get the sandbox ray handler
-                handler = ray.get_actor('remote_client')
-                # breakpoint()
-                # this is non-blocking
-                req_dict = {
-                    'req_id': req_id,
-                    'input_ids': input_ids,
-                    'ground_truth': ground_truth,
-                    'reward_style': reward_style,
-                    'call_rm_service': use_remote_rm,
-                    'reward_model': reward_model,
-                    'rollout_ids': query.new_token_ids,
-                }
+                if verifier.is_remote() and req_id is not None:
+                    # this is non-blocking
+                    verifier.add_requests(req_id=req_id,
+                                          input_ids=input_ids,
+                                          ground_truth=ground_truth,
+                                          reward_style=reward_style)
 
-                handler.add_requests.remote(**req_dict)
-
-        if len(remote_reward_style) > 0 or use_remote_rm:
+        if self.config.reward_model.enable_eos_callback:
             self.hybrid_wg.set_eos_callback_fn(sandbox_callback_fn)
             if self.train_standalone_wg is not None:
                 self.train_standalone_wg.set_eos_callback_fn(sandbox_callback_fn)

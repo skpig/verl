@@ -223,24 +223,21 @@ VERIFY_TEMPLATE = """你是一位资深的大模型阅卷专家，你的核心�
 
 仅输出"是/否"，不允许包含其他多余内容。"""
 
+from .utils import Verifier
 
-def compute_score_client(solution_str, ground_truth, volc_ark_key, volc_model_name, data_uid, config, **argv) -> float:
-    """Directly retrieve the scores from SandboxClient"""
-    score = None
-    if config.trainer.use_remote_verifier:
-        # get the sandbox client endpoint
-        handler = ray.get_actor('remote_client')
-        # retrieve the score directly
-        score = ray.get(handler.get_results.remote(data_uid))
 
-    if score is None:
-        score = compute_score(solution_str, ground_truth, volc_ark_key, volc_model_name, **argv)
+class VerifierServiceVolc(Verifier, reward_style="verifier_service_volc"):
 
-    # optionally, compute the score with original code to compare the results
-    # score_original = compute_score(solution_str, ground_truth, code_sandbox_psm, **argv)
-    # assert score == score_original
+    def is_remote(self):
+        return self.config.trainer.use_remote_verifier
 
-    return score
+    def preprocess(self, input_ids, ground_truth):
+        solution_str, ground_truth = super().preprocess(input_ids, ground_truth)
+        return solution_str, ground_truth, self.config.trainer.volc_ark_key, self.config.trainer.volc_model_name
+
+    @staticmethod
+    def compute_score(solution_str, ground_truth, volc_ark_key, volc_model_name) -> float:
+        return compute_score(solution_str, ground_truth, volc_ark_key, volc_model_name)
 
 
 def compute_score(solution_str, ground_truth, volc_ark_key, volc_model_name, **argv) -> float:

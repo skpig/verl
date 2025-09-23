@@ -4,6 +4,14 @@ from alpha_seed.utils.reward_score.extra_reward import filter_thinking_part, ext
 import os
 import logging
 import re
+from .utils import Verifier
+
+
+class MatchingGameVerifier(Verifier, reward_style="verifier_matching_game"):
+
+    @staticmethod
+    def compute_score(*args, **kwargs) -> float:
+        return compute_score(*args, **kwargs)
 
 
 def transfer_points_to_xy(response, row, col):

@@ -1,6 +1,16 @@
+from functools import partial
+
 from alpha_seed.utils.reward_score.extra_reward import filter_thinking_part, extract_answer_failed_reward
-from alpha_seed.utils.reward_score.verifier.tools import extract_and_convert_number
+from alpha_seed.utils.reward_score.vlm_verifiers.tools import extract_and_convert_number
 import json
+from .utils import Verifier
+
+
+class CountVerifier(Verifier, reward_style="verifier_count"):
+
+    @staticmethod
+    def compute_score(*args, **kwargs) -> float:
+        return partial(compute_score, delta=0.8)(*args, **kwargs)
 
 
 def compute_score(solution_str, ground_truth, delta, **kwargs):

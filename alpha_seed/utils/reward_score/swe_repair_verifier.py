@@ -17,6 +17,7 @@ from typing import TypedDict
 from unidiff import PatchedFile, PatchSet
 from unidiff.errors import UnidiffParseError
 from alpha_seed.utils.reward_score.tcc_v3 import TccV3
+from .utils import Verifier
 
 THINK_START = "<think>"
 THINK_END = "</think>"
@@ -28,6 +29,16 @@ SEARCH_REPLACE_REGEX = r"```.*?\n### (.*)\n<<<<<<< SEARCH\n([\s\S]*?)\n=======\n
 cfg = TccV3().get_agent_config()
 registered_bench_hosts = cfg.get("swe", {}).get("bench_hosts", [])
 registered_bench_repo2hosts = cfg.get("swe", {}).get("bench_repo2hosts", {})
+
+
+class SWERepairVerifier(Verifier, reward_style="swe_repair_verifier"):
+
+    def is_remote(self):
+        return self.config.trainer.use_remote_swe_sandbox
+
+    @staticmethod
+    def compute_score(solution_str, ground_truth) -> float:
+        return compute_score(solution_str, ground_truth)
 
 
 def retry(max_retries=3, retry_delay=2):
@@ -518,28 +529,6 @@ def compute_score(solution_str, ground_truth, **argv):
 
     return calculate_search_replace_reward(code_context, oracle_patch, result_text, repo=repo,
                                            instance_id=instance_id)[0]
-
-
-def compute_score_client(solution_str, ground_truth, data_uid, config, **argv) -> float:
-    """Directly retrieve the scores from SandboxClient"""
-    import ray
-    score = None
-    if config.trainer.use_remote_swe_sandbox:
-        # get the sandbox client endpoint
-        handler = ray.get_actor('remote_client')
-        # retrieve the score directly
-        score = ray.get(handler.get_results.remote(data_uid))
-        print(f"[swe_repair_verifier] compute score from remote client: {score}")
-
-    if score is None:
-        print("[swe_repair_verifier] compute score locally")
-        score = compute_score(solution_str, ground_truth, **argv)
-
-    # optionally, compute the score with original code to compare the results
-    # score_original = compute_score(solution_str, ground_truth, code_sandbox_psm, **argv)
-    # assert score == score_original
-
-    return score
 
 
 def test_record():

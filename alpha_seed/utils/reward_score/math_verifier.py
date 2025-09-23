@@ -1,5 +1,13 @@
 import re
 from typing import Optional
+from .utils import Verifier
+
+
+class MathVerifier(Verifier, reward_style="rule-math_verifier"):
+
+    @staticmethod
+    def compute_score(*args, **kwargs) -> float:
+        return compute_score(*args, **kwargs)
 
 
 def last_boxed_only_string(string: str) -> Optional[str]:

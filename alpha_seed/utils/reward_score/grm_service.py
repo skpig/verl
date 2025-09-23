@@ -17,11 +17,58 @@ from bytedagi.model_io import InferenceRequest, ModelIO
 from langchain.schema import HumanMessage
 from bytedance import servicediscovery
 from servicediscovery import ServiceDiscoveryError
+from alpha_seed.utils.reward_score.utils import Verifier
 
 # NOTE: GRM,QRM,ORM has same invalid score
 RM_INVALID_SCORE = -100.0
 MAX_RETRIES = 3
 REQUEST_DELAY = 1.0
+
+
+class GrmVerifier(Verifier, reward_style="grm"):
+
+    def __init__(self, config=None, tokenizer=None):
+        super().__init__(config=config, tokenizer=tokenizer)
+
+    def is_remote(self):
+        return True
+
+    def get_remote_score(self, data_uid):
+        score_dict = super().get_remote_score(data_uid)
+        return score_dict['grm_prompt'], score_dict['grm_resp'], score_dict['score']
+
+    def compute_score_client(self, data_uid, *args, **kwargs) -> float:
+        result = None
+        if self.is_remote():
+            result = self.get_remote_score(data_uid)
+        if result is None:
+            return None, None, None
+        return result
+
+    def compute_score_remote(self, *args, **kwargs) -> float:
+        remote_service = kwargs['remote_service']
+        actor = random.choice(remote_service)
+        return actor.call.remote(*args, **kwargs)
+
+    def merge_score(self, scores_lst, merge_type="v1", **kwargs):
+        rm_score, raw_score = scores_lst[0], scores_lst[1]
+        if merge_type == 'v1':  # verifier基础上线性融合一定权重grm score
+            if rm_score == RM_INVALID_SCORE:
+                score = raw_score
+            elif raw_score > 0:
+                score = raw_score * 0.7 + rm_score * 0.3
+            else:
+                score = raw_score
+        elif merge_type == 'v2':  # 主要用grm分数，verifier raw_score只做兜底
+            if rm_score == RM_INVALID_SCORE:
+                score = raw_score
+            elif rm_score > 0:
+                score = 0.7 + rm_score * 0.3
+            else:
+                score = -1
+        else:
+            raise NotImplementedError
+        return score
 
 
 def wait_remote_server_ready(psm: str):
@@ -119,35 +166,6 @@ def _process_history(tokenizer, history, base_length, max_total):
         return (history_tag_ids + history_tokens + history_end_tag_ids)
     else:
         return []
-
-
-def get_grm_result(data_uid):
-    handler = ray.get_actor('remote_client')
-    score_dict = ray.get(handler.get_remote_rm_results.remote(data_uid))
-    if score_dict is None:
-        return None, None, None
-    return score_dict['grm_prompt'], score_dict['grm_resp'], score_dict['score']
-
-
-def merge_grm_score(scores_lst, merge_type="v1", **kwargs):
-    rm_score, raw_score = scores_lst[0], scores_lst[1]
-    if merge_type == 'v1':  # verifier基础上线性融合一定权重grm score
-        if rm_score == RM_INVALID_SCORE:
-            score = raw_score
-        elif raw_score > 0:
-            score = raw_score * 0.7 + rm_score * 0.3
-        else:
-            score = raw_score
-    elif merge_type == 'v2':  # 主要用grm分数，verifier raw_score只做兜底
-        if rm_score == RM_INVALID_SCORE:
-            score = raw_score
-        elif rm_score > 0:
-            score = 0.7 + rm_score * 0.3
-        else:
-            score = -1
-    else:
-        raise NotImplementedError
-    return score
 
 
 def init_grm_server(config, **kwargs):
@@ -249,7 +267,7 @@ class RemoteGRMServingClient(GRMServingClient):
                          retry_interval=retry_interval,
                          pool_size=pool_size,
                          random_rsp=False)
-        wait_remote_server_ready(psm)
+        # wait_remote_server_ready(psm)
         self.config = kwargs.get("config", None)
         self.tokenizer = tokenizer
         self.timeout = timeout
@@ -311,13 +329,13 @@ class RemoteGRMServingClient(GRMServingClient):
         weight_score = score * self.score_weight[rm_method]
         return response, weight_score
 
-    async def call(self, reward_model=None, rollout_ids="", rm_method=0, **kwargs):
+    async def call(self, reward_model=None, response_ids="", rm_method=0, **kwargs):
         cur_time = time.time()
         logging.disable(logging.INFO)
         rm_pre_ids = reward_model.get("rm_pre_ids", None)
         rm_post_ids = reward_model.get("rm_post_ids", None)
         images_bytes_lst = get_query_imgs(self.dist_data_manager, **kwargs)
-        system_prompt, prompt, response_empty_flag = self._preprocess_grm_data(rm_pre_ids, rollout_ids, rm_post_ids,
+        system_prompt, prompt, response_empty_flag = self._preprocess_grm_data(rm_pre_ids, response_ids, rm_post_ids,
                                                                                images_bytes_lst, rm_method)
         if response_empty_flag:
             default_score = self.empty_response_default_score[rm_method]
@@ -375,7 +393,7 @@ class RemoteGRMServingClient(GRMServingClient):
                         await asyncio.sleep(self.retry_interval)
 
         return {
-            "response": RM_INVALID_SCORE,
+            "score": RM_INVALID_SCORE,
             "status": "retry_max fail",
             "grm_prompt": prompt,
             "grm_resp": "",

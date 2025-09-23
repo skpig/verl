@@ -1,5 +1,13 @@
 from alpha_seed.utils.reward_score.extra_reward import filter_thinking_part, extract_answer_failed_reward
 import json
+from .utils import Verifier
+
+
+class PlainStrVerifier(Verifier, reward_style="verifier_plain_str"):
+
+    @staticmethod
+    def compute_score(*args, **kwargs) -> float:
+        return compute_score(*args, **kwargs)
 
 
 def compute_score(solution_str, ground_truth, **kwargs):

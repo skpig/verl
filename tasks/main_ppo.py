@@ -52,8 +52,7 @@ from alpha_seed.utils.server_client import is_local_ray_instance, validate_clien
     ClientTaskRunner, check_all_workers_alive, recreate_actor
 # rule-based reward score
 from alpha_seed.utils.reward_score.extra_reward import add_length_reward, punish_format_return_positions
-from alpha_seed.utils.reward_score import verifier_service, gaokao_verifier_service, aider_utils, swe_repair_verifier, oj_utils, deep_research_verifier, response_post_proc, _select_rm_score_fn, select_remote_rm_fn, get_remote_rm_score, merge_rm_scores
-from alpha_seed.utils.reward_score.vlm_verifiers import vlm_verifier_router
+from alpha_seed.utils.reward_score.utils import post_process_solution_str
 from alpha_seed.utils.duplicate import para_dup
 from alpha_seed.workers.actors.async_actor_ref_worker import AsyncActorRolloutRefWorker
 from alpha_seed.workers.actors.critic_worker import CriticWorker
@@ -67,6 +66,8 @@ from alpha_seed.utils.functional import import_from_string, SafeStageLogger
 from alpha_seed.utils.tracking_utils import async_save_cases_to_hdfs
 from alpha_seed.prompts.think_template_utils import get_special_tokens_dict_or_name, check_tokenizer_with_template
 from databus import collect_array
+from alpha_seed.utils.reward_score.utils import Verifier
+from alpha_seed.utils.reward_score import select_remote_rm_fn
 
 stage_logger = SafeStageLogger()
 
@@ -82,36 +83,14 @@ if os.getenv("RUNTIME_IDC_NAME", "") == "wlby":
     CHANNEL = "llm_channel_wl"
 
 
-def post_process_solution_str(config, solution_str, reward_style, eos_token):
-    if solution_str.endswith(eos_token):
-        solution_str = solution_str[:-len(eos_token)]
-    solution_str = solution_str.split(eos_token, 1)[-1]
-    if reward_style == "code-sandbox" and config.reward_model.use_last_response == 'lastcodeblock':
-        solution_str_post_proc = response_post_proc.last_codeblock_postprocess(
-            solution_str,
-            codeblock_seps=config.reward_model.last_response_sep,
-            last_response_strict=config.reward_model.last_response_strict)
-    else:
-        solution_str_post_proc = solution_str
-    # if config.reward_model.use_last_response == 'summarize':
-    #     solution_str_post_proc = response_post_proc.summary_postprocess(
-    #         solution_str,
-    #         last_response_sep=config.reward_model.last_response_sep,
-    #         last_response_strict=config.reward_model.last_response_strict)
-    # elif config.reward_model.use_last_response == 'lastcodeblock':
-    #     solution_str_post_proc = response_post_proc.last_codeblock_postprocess(
-    #         solution_str,
-    #         codeblock_seps=config.reward_model.last_response_sep,
-    #         last_response_strict=config.reward_model.last_response_strict)
-    # else:
-    #     solution_str_post_proc = solution_str
-    return solution_str_post_proc
-
-
 def send_to_kafka(message):
     message["ARNOLD_TRIAL_ID"] = ARNOLD_TRIAL_ID
     message["ARNOLD_TRIAL_OWNER"] = ARNOLD_TRIAL_OWNER
     collect_array(CHANNEL, [json.dumps(message, ensure_ascii=False).encode("utf-8")])
+
+
+def is_awaitable(obj):
+    return hasattr(obj, '__await__') and callable(obj.__await__)
 
 
 @ray.remote(num_cpus=1)
@@ -120,115 +99,58 @@ class RemoteClient:
     A centralized remote client that pipelines any function with generation at [EOS]
     """
 
-    def __init__(self, config, tokenizer_path) -> None:
+    def __init__(self, config, tokenizer_path, remote_service=None) -> None:
         self.config = config
         local_path = download_minimal_required_files(tokenizer_path, from_scratch=False, rank=0, world_size=1)
         self.tokenizer = AutoTokenizer.from_pretrained(local_path)
-        self.callback_running_pool = {}
-        self.results = {}
-
-        self.call_oj = ray.remote(num_cpus=1)(oj_utils.compute_score)
-        self.aider_service = ray.remote(num_cpus=1)(aider_utils.compute_score)
-        self.verifier_service = ray.remote(num_cpus=1)(verifier_service.compute_score)
-        self.deep_research_verifier = ray.remote(num_cpus=1)(deep_research_verifier.compute_score)
-        self.gaokao_verifier_service = ray.remote(num_cpus=1)(gaokao_verifier_service.compute_score)
-        self.vlm_verifier_router = ray.remote(num_cpus=1)(vlm_verifier_router.compute_score)
-        self.call_swe = ray.remote(num_cpus=1)(swe_repair_verifier.compute_score)
-
-        self.remote_rm_service = None
-        self.remote_rm_results = {}
-        if self.config.trainer.use_remote_rm:
-            self.remote_rm_service = select_remote_rm_fn(self.config)(self.config, tokenizer=self.tokenizer)
+        self.callback_running_pool = defaultdict(dict)
+        self.results = defaultdict(dict)
+        self.remote_service = remote_service
 
     def clear(self):
         # for some cases, the results won't be claimed. So we need to clear the results.
-        self.results = {}
-        self.remote_rm_results = {}
-        self.callback_running_pool = {}
+        self.results = defaultdict(dict)
+        self.callback_running_pool = defaultdict(dict)
 
     def get_num_pending_outputs(self):
         """Return the number of outputs, whose result is not claimed"""
-        return len(self.results) + len(self.remote_rm_results)
+        return sum([len(req_rewards) for req_rewards in self.results.values()])
 
-    async def add_requests(self,
-                           req_id,
-                           input_ids=None,
-                           ground_truth=None,
-                           reward_style=None,
-                           call_rm_service=False,
-                           **kwargs):
-        # there maybe same uid callback in agent server mode
-        if self.callback_running_pool.get(req_id, False):
-            return
-        self.callback_running_pool[req_id] = 0
-        input_ids = np.array(input_ids)
-        input_ids = input_ids[input_ids >= 0].tolist()
-        solution_str = self.tokenizer.decode(input_ids, skip_special_tokens=False)
-        solution_str = solution_str.split("assistant\n")[-1]
-        solution_str_post_proc = post_process_solution_str(self.config,
-                                                           solution_str,
-                                                           reward_style,
-                                                           eos_token=self.tokenizer.eos_token)
+    async def add_requests(self, req_id, reward_style=None, **kwargs):
+        verifier = Verifier.get_verifier(reward_style, self.config, self.tokenizer)
+        if verifier is not None and not self.callback_running_pool[req_id].get(reward_style, False):
+            self.callback_running_pool[req_id][reward_style] = True
+            kwargs['remote_service'] = self.remote_service
+            result_future = verifier.compute_score_remote(**kwargs)
+            assert req_id not in self.results, f"{req_id} already exists, reward_style: {reward_style}"
+            self.results[req_id][reward_style] = result_future
+            return result_future
 
-        if call_rm_service:
-            assert self.remote_rm_service is not None, "remote_rm_service is None, when call_rm_service is True"
-            actor = random.choice(self.remote_rm_service)
-            remote_future = actor.call.remote(**kwargs)
-            self.remote_rm_results[req_id] = remote_future
-            self.callback_running_pool[req_id] += 1
-
-        if reward_style == 'code-sandbox':
-            result_future = self.call_oj.remote(solution_str_post_proc, ground_truth,
-                                                self.config.trainer.code_sandbox_psm)
-        elif reward_style == 'aider':
-            solution_str_post_proc = solution_str.rsplit(self.tokenizer.eos_token, 1)[0]
-            result_future = self.aider_service.remote(solution_str_post_proc, ground_truth,
-                                                      self.config.trainer.code_sandbox_psm)
-
-        elif reward_style == 'verifier_service':
-            result_future = self.verifier_service.remote(solution_str_post_proc, ground_truth,
-                                                         self.config.trainer.verifier_service_psm)
-        elif reward_style == 'deep_research_verifier':
-            result_future = self.deep_research_verifier.remote(solution_str_post_proc, ground_truth)
-        elif reward_style == 'gaokao_verifier_service':
-            result_future = self.gaokao_verifier_service.remote(solution_str_post_proc, ground_truth,
-                                                                self.config.trainer.gaokao_verifier_service_psm)
-        elif reward_style == 'swe_repair_verifier':
-            result_future = self.call_swe.remote(solution_str_post_proc, ground_truth)
-        elif call_rm_service:
-            # maybe data has not reward_style, and dirctly call remote rm service
-            result_future = None
-        else:
-            raise NotImplementedError(f'Unsupported reward_style {reward_style}')
-
-        assert req_id not in self.results, f"{req_id} already exists, reward_style: {reward_style}"
-        if result_future is not None:
-            self.callback_running_pool[req_id] += 1
-            self.results[req_id] = result_future
-
-    async def get_results(self, req_id):
-        if req_id not in self.results:
+    async def get_results(self, req_id, reward_style):
+        if req_id not in self.results or reward_style not in self.results[req_id]:
             print(f"[get_results] {req_id} not found")
             return None
-        self.release_running_pool(req_id)
+
         assert req_id in self.results, f"{req_id} not found"
-        result_future = self.results.pop(req_id)
+        result_future = self.results[req_id].pop(reward_style)
+        self.release(req_id, reward_style)
+        if is_awaitable(result_future):
+            return await result_future
+        return result_future
+
+    def get_all_results(self):
+        return self.results
+
+    def release(self, req_id, reward_style):
         # call running should be removed
-        return await result_future
-
-    async def get_remote_rm_results(self, req_id):
-        if req_id not in self.remote_rm_results:
-            return None
-        self.release_running_pool(req_id)
-        remote_rm_result_future = self.remote_rm_results.pop(req_id)
-        return await remote_rm_result_future
-
-    def release_running_pool(self, req_id):
-        """Control the running pool, return True if the req_id can be added"""
-        if req_id in self.callback_running_pool:
-            self.callback_running_pool[req_id] -= 1
-            if self.callback_running_pool[req_id] <= 0:
-                del self.callback_running_pool[req_id]
+        if reward_style in self.callback_running_pool.get(req_id):
+            del self.callback_running_pool[req_id][reward_style]
+        if len(self.callback_running_pool[req_id]) == 0:
+            del self.callback_running_pool[req_id]
+        if reward_style in self.results.get(req_id):
+            del self.results[req_id][reward_style]
+        if len(self.results[req_id]) == 0:
+            del self.results[req_id]
 
 
 try:
@@ -388,8 +310,7 @@ class RewardManager():
 
             # select rm_score
             reward_style = data_item.non_tensor_batch['reward_model']['style']
-            reward_fn_external_lib = self.config.reward_model.external_lib
-            compute_score_fn = _select_rm_score_fn(reward_style, external_lib=reward_fn_external_lib)
+            verifier = Verifier.get_verifier(reward_style, tokenizer=self.tokenizer, config=self.config)
             ground_truth = data_item.non_tensor_batch['reward_model']['ground_truth']
             score_fn_inputs = {
                 "batch_info": data_item.batch,
@@ -404,18 +325,6 @@ class RewardManager():
                 'rm_name': self.rm_name,
                 'pause_tokens_index': pause_tokens_index
             }
-            if reward_style in ("code-sandbox", "vlm_verifier_router"):
-                score_fn_inputs["code_sandbox_psm"] = self.config.trainer.code_sandbox_psm
-            if reward_style == "aider":
-                score_fn_inputs['solution_str'] = solution_str.rsplit(self.tokenizer.eos_token, 1)[0]
-                score_fn_inputs["aider_service_psm"] = self.config.trainer.code_sandbox_psm
-            if reward_style == "verifier_service":
-                score_fn_inputs["verifier_service_psm"] = self.config.trainer.verifier_service_psm
-            if reward_style in ("verifier_service_volc", "vlm_verifier_router"):
-                score_fn_inputs["volc_ark_key"] = self.config.trainer.volc_ark_key
-                score_fn_inputs["volc_model_name"] = self.config.trainer.volc_model_name
-            if reward_style == "gaokao_verifier_service":
-                score_fn_inputs["gaokao_verifier_service_psm"] = self.config.trainer.gaokao_verifier_service_psm
 
             extra_data = data_item.non_tensor_batch.get('extra_data', None)
             if isinstance(extra_data, dict) and ((env_state_bytes := extra_data.get('env_states', None)) is not None):
@@ -435,7 +344,7 @@ class RewardManager():
             elif self.config.data.image_key is not None and format_reward != 0:
                 score = 0
             else:
-                raw_score = compute_score_fn(**score_fn_inputs)
+                raw_score = verifier.compute_score_client(**score_fn_inputs)
                 score_fn_inputs["raw_score"] = raw_score
 
                 if isinstance(raw_score, dict) and all([key in raw_score for key in ['score', 'msg']]):
@@ -444,9 +353,11 @@ class RewardManager():
 
                 if (not is_validation) and self.config.trainer.use_remote_rm and self.rm_name == 'train':
                     remote_rm_type = self.config.trainer.remote_rm_type
-                    rm_prompt, rm_response, rm_score = get_remote_rm_score(remote_rm_type)(data_uid)
+                    rm_verifier = Verifier.get_verifier(remote_rm_type, tokenizer=self.tokenizer, config=self.config)
+                    rm_prompt, rm_response, rm_score = rm_verifier.compute_score_client(data_uid)
+                    print('remote grm ================', rm_prompt, rm_response, rm_score, flush=True)
                     score_lst = [rm_score, raw_score]
-                    score = merge_rm_scores(remote_rm_type)(score_lst, self.score_merger)
+                    score = rm_verifier.merge_score(score_lst, self.score_merger)
                 else:
                     score = raw_score
 
@@ -1200,6 +1111,17 @@ def validate_config(config):
     # override each role mariana config with global mariana config
     config.actor_rollout_ref.mariana = config.mariana
     config.critic.mariana = config.mariana
+    if config.actor_rollout_ref.rollout.mode == 'server':
+        config.reward_model.enable_eos_callback = False
+    else:
+        # 兼容之前的batch mode用法
+        if config.trainer.use_remote_rm or \
+            config.trainer.use_remote_aider_sandbox or \
+            config.trainer.use_remote_swe_sandbox or \
+            config.trainer.use_remote_sandbox or \
+            config.trainer.use_remote_verifier or \
+            config.trainer.use_remote_search:
+            config.reward_model.enable_eos_callback = True
 
 
 class StaticOmegaconfNamespace(SimpleNamespace):
@@ -1368,9 +1290,18 @@ def config_to_trainer_kwargs(config):
         # Note that we always use function-based RM for validation
         val_reward_fn = reward_manager_cls(tokenizer=tokenizer, config=config, logger=logger, rm_name="val")
 
+        remote_rm_service = None
+        if config.trainer.use_remote_rm:
+            remote_rm_service = select_remote_rm_fn(config)(config, tokenizer=tokenizer)
+
         # we will always start a remote client
-        kwargs['remote_client'] = RemoteClient.options(name='remote_client').remote(
-            config=config, tokenizer_path=config.actor_rollout_ref.model.path)
+        concurrency = config.reward_model.num_remote_client
+        kwargs['remote_client'] = [
+            RemoteClient.options(name=f'remote_client_{idx}').remote(config=config,
+                                                                     tokenizer_path=config.actor_rollout_ref.model.path,
+                                                                     remote_service=remote_rm_service)
+            for idx in range(concurrency)
+        ]
 
         kwargs['tokenizer'] = tokenizer
         kwargs['logger'] = logger

@@ -17,6 +17,15 @@ ANSWER_END = "</solution>"
 
 SEARCH_REPLACE_REGEX = r"```.*?\n### (.*)\n<<<<<<< SEARCH\n([\s\S]*?)\n=======\n([\s\S]*?)\n>>>>>>> REPLACE\n```"
 
+from .utils import Verifier
+
+
+class SweRepairVerifier(Verifier, reward_style="swe_repair"):
+
+    @staticmethod
+    def compute_score(*args, **kwargs) -> float:
+        return compute_score(*args, **kwargs)
+
 
 class FormatError(Exception):
     pass

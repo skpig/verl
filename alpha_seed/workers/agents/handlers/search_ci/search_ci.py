@@ -21,6 +21,7 @@ from uuid import uuid4
 import numpy as np
 import ray
 from alpha_seed.workers.agents.handlers.ci.tool import JupyterCI, JupyterCI_stateful
+from alpha_seed.utils.reward_score.utils import Verifier
 
 CODING_SNIPET_REGEX = (r'<escapeShell\s+type=["\']code["\']\s*,?\s*id=["\'](?P<id>\d+)["\']\s*,?\s*'
                        r'(name=["\'](?P<name>[^"\']+)["\']\s*)?>'
@@ -296,6 +297,7 @@ class SearchCIAgent(AsyncAgent):
         })
         reward_model = item.non_tensor_batch['reward_model'][0]
         reward_style = reward_model['style']
+        verifier = Verifier.get_verifier(reward_style, self.config, self.tokenizer)
         if context.config.trainer.use_remote_search and reward_style in [
                 'code-sandbox', 'aider', 'verifier_service', 'deep_research_verifier', 'gaokao_verifier_service',
                 'swe_repair_verifier'
@@ -306,13 +308,11 @@ class SearchCIAgent(AsyncAgent):
 
             # note that the uid of padding dataproto should be None
             if req_id is not None:
-                # get the sandbox ray handler
-                handler = ray.get_actor('remote_client')
                 # this is non-blocking
-                handler.add_requests.remote(req_id=req_id,
-                                            input_ids=input_ids,
-                                            ground_truth=ground_truth,
-                                            reward_style=reward_style)
+                verifier.add_requests(req_id=req_id,
+                                      input_ids=input_ids,
+                                      ground_truth=ground_truth,
+                                      reward_style=reward_style)
 
         # 将completion转换为DataProto格式，与其他agent保持一致
         from alpha_seed.workers.streaming_service.streaming_utils import DataPack, pack_to_dataproto

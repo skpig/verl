@@ -26,6 +26,7 @@ from alpha_seed.workers.agents.envs.visual_cot import create_from_env_str
 from alpha_seed.workers.agents.handlers.vlm import post_process_eval_result
 from alpha_seed.utils.functional import import_from_string
 from mono_rl.utils.dataset.dist_data_util import get_dist_data_manager
+from alpha_seed.utils.reward_score.utils import Verifier
 import ray
 
 logger = logging.getLogger(__name__)
@@ -58,10 +59,21 @@ class VisualCotAgent(AsyncAgent):
                                                 rm_name="val",
                                                 single_batch=True)
 
+    def _reward_fn(self, item: DataProto, out: DataProto):
+        reward_style = item.non_tensor_batch['reward_model'][0]['style']
+        verifier = Verifier.get_verifier(reward_style, self.config, self.tokenizer)
+        req_id = item.non_tensor_batch['uid'][0]
+        input_ids = out.batch['input_ids'][0]
+        ground_truth = item.non_tensor_batch['reward_model'][0]['ground_truth']
+        verifier.add_requests(req_id=req_id, input_ids=input_ids, ground_truth=ground_truth, reward_style=reward_style)
+
     async def __call__(self, item: DataProto, context: TaskContext, **kwargs):
         out = await self.__call_internal__(item, context, **kwargs)
         if self.config.rollout_server.evals.enable:
             out = await post_process_eval_result(item, out, self.executor, self.val_reward_fn)
+        else:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(self.executor, self._reward_fn, item, out)
         return out
 
     async def __call_internal__(self, item: DataProto, context: TaskContext, **kwargs):

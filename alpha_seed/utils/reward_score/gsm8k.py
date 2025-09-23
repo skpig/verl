@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import re
+from .utils import Verifier
 
 
 def extract_solution(solution_str, method='strict'):
@@ -39,6 +40,13 @@ def extract_solution(solution_str, method='strict'):
                 if final_answer not in invalid_str:
                     break
     return final_answer
+
+
+class GSMM8kVerifier(Verifier, reward_style="rule-openai/gsm8k"):
+
+    @staticmethod
+    def compute_score(*args, **kwargs) -> float:
+        return compute_score(*args, **kwargs)
 
 
 def compute_score(solution_str, ground_truth, method='strict', format_score=0., score=1., **argv):

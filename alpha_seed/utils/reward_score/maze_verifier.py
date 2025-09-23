@@ -5,6 +5,14 @@ import re
 from typing import List
 
 import numpy as np
+from .utils import Verifier
+
+
+class MazeVerifier(Verifier, reward_style="verifier_maze"):
+
+    @staticmethod
+    def compute_score(*args, **kwargs) -> float:
+        return compute_score(*args, **kwargs)
 
 
 def l2_distance(p1, p2):

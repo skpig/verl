@@ -6,6 +6,14 @@ import json
 from transformers import PreTrainedTokenizer
 
 from alpha_seed.utils.reward_score.remote_verify import OpenAIConfig, ThreadPoolOpenAIClient, judge_template_v1, judge_template_v2, judge_template_v2_1
+from .utils import Verifier
+
+
+class WebsearchVerifier(Verifier, reward_style="tool_use_verifier"):
+
+    @staticmethod
+    def compute_score(*args, **kwargs) -> float:
+        return agent_env_score(*args, **kwargs)
 
 
 def _get_last_ans(text: str) -> Optional[str]:

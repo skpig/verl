@@ -11,6 +11,14 @@ except ModuleNotFoundError:
         "`sympy` is required for generating translation task prompt templates. \
 please install sympy via pip install lm-eval[math] or pip install -e .[math]",
     )
+from .utils import Verifier
+
+
+class MathV2Verifier(Verifier, reward_style="rule-lighteval/MATH_v2"):
+
+    @staticmethod
+    def compute_score(*args, **kwargs) -> float:
+        return compute_score(*args, **kwargs)
 
 
 def list_fewshot_samples() -> list[dict]:

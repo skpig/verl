@@ -20,23 +20,21 @@ def get_endpoint(gaokao_verifier_psm):
     return endpoint
 
 
-def compute_score_client(solution_str, ground_truth, verifier_service_psm, data_uid, config, **argv) -> float:
-    """Directly retrieve the scores from SandboxClient"""
-    score = None
-    if config.trainer.use_remote_verifier:
-        # get the sandbox client endpoint
-        handler = ray.get_actor('remote_client')
-        # retrieve the score directly
-        score = ray.get(handler.get_results.remote(data_uid))
+from .utils import Verifier
 
-    if score is None:
-        score = compute_score(solution_str, ground_truth, verifier_service_psm, **argv)
 
-    # optionally, compute the score with original code to compare the results
-    # score_original = compute_score(solution_str, ground_truth, code_sandbox_psm, **argv)
-    # assert score == score_original
+class VerifierService(Verifier, reward_style="verifier_service"):
 
-    return score
+    def is_remote(self):
+        return self.config.trainer.use_remote_verifier
+
+    def preprocess(self, input_ids, ground_truth):
+        solution_str, ground_truth = super().preprocess(input_ids, ground_truth)
+        return solution_str, ground_truth, self.config.trainer.verifier_service_psm
+
+    @staticmethod
+    def compute_score(solution_str, ground_truth, verifier_service_psm) -> float:
+        return compute_score(solution_str, ground_truth, verifier_service_psm)
 
 
 def compute_score(solution_str, ground_truth, verifier_service_psm, **argv) -> float:

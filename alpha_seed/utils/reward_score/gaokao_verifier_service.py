@@ -6,6 +6,7 @@ import requests
 
 from bytedance import servicediscovery
 from tenacity import retry, stop_after_attempt
+from .utils import Verifier
 
 
 @retry(stop=stop_after_attempt(40))
@@ -20,23 +21,18 @@ def get_endpoint(gaokao_verifier_service_psm):
     return endpoint
 
 
-def compute_score_client(solution_str, ground_truth, gaokao_verifier_service_psm, data_uid, config, **argv) -> float:
-    """Directly retrieve the scores from SandboxClient"""
-    score = None
-    if config.trainer.use_remote_verifier:
-        # get the sandbox client endpoint
-        handler = ray.get_actor('remote_client')
-        # retrieve the score directly
-        score = ray.get(handler.get_results.remote(data_uid))
+class GaokaoVerifier(Verifier, reward_style="gaokao_verifier_service"):
 
-    if score is None:
-        score = compute_score(solution_str, ground_truth, gaokao_verifier_service_psm, **argv)
+    def is_remote(self):
+        return self.config.trainer.use_remote_verifier
 
-    # optionally, compute the score with original code to compare the results
-    # score_original = compute_score(solution_str, ground_truth, code_sandbox_psm, **argv)
-    # assert score == score_original
+    def preprocess(self, input_ids, ground_truth):
+        solution_str, ground_truth = super().preprocess(input_ids, ground_truth)
+        return solution_str, ground_truth, self.config.trainer.gaokao_verifier_service_psm
 
-    return score
+    @staticmethod
+    def compute_score(solution_str, ground_truth, gaokao_verifier_service_psm, **kwargs) -> float:
+        return compute_score(solution_str, ground_truth, gaokao_verifier_service_psm)
 
 
 VERIFIER_PROMPT = """

@@ -6,8 +6,62 @@ import ray
 
 from alpha_seed.utils.reward_score.vlm_verifiers.extra_reward import filter_thinking_part, match_visual_cot_format
 from alpha_seed.utils.reward_score.vlm_verifiers.base_verifier import ExtractAnswerFailed, VerifierFailed
+from alpha_seed.utils.reward_score.utils import Verifier
+from alpha_seed.utils.reward_score import response_post_proc
 
 logger = logging.getLogger(__file__)
+
+
+def post_process_solution_str(config, solution_str, eos_token):
+    last_eos_idx = solution_str.rfind(eos_token)
+    if last_eos_idx >= 0:
+        eos_then_assistant = f'{eos_token}<[BOS_never_used_51bce0c785ca2f68081bfa7d91973934]>assistant\n'
+        # When use_remote_verifier=True, the solution_str here hasn't been forcibly appended EOS yet.
+        # This if-statement is for avoiding accidentally rsplit the EOS **before** the assistant response:
+        if solution_str[last_eos_idx:last_eos_idx + len(eos_then_assistant)] != eos_then_assistant:
+            solution_str = solution_str.rsplit(eos_token, 1)[0]  # Remove the EOS **after** the assistant response.
+
+    if config.reward_model.use_last_response == 'summarize':
+        solution_str_post_proc = response_post_proc.summary_postprocess(
+            solution_str,
+            last_response_sep=config.reward_model.last_response_sep,
+            last_response_strict=config.reward_model.last_response_strict)
+    elif config.reward_model.use_last_response == 'lastcodeblock':
+        solution_str_post_proc = response_post_proc.last_codeblock_postprocess(
+            solution_str,
+            codeblock_seps=config.reward_model.last_response_sep,
+            last_response_strict=config.reward_model.last_response_strict)
+    else:
+        solution_str_post_proc = solution_str
+    return solution_str_post_proc
+
+
+class VLMRouter(Verifier, reward_style="vlm_verifier_router"):
+
+    def is_remote(self):
+        return True
+
+    def preprocess(self, input_ids, ground_truth):
+        input_ids = [x for x in input_ids if x != -100]
+        solution_str = self.tokenizer.decode(input_ids)
+        solution_str_post_proc = post_process_solution_str(self.config,
+                                                           solution_str,
+                                                           eos_token=self.tokenizer.eos_token)
+        ## we need only the response part for vlm_verifier_router
+        marker_user = '<[BOS_never_used_51bce0c785ca2f68081bfa7d91973934]>user\n'
+        marker_assistant = '<[BOS_never_used_51bce0c785ca2f68081bfa7d91973934]>assistant\n'
+
+        assert marker_assistant in solution_str_post_proc and marker_user in solution_str_post_proc, f"marker_assistant {marker_assistant} or marker_user {marker_user} not in solution_str_post_proc {solution_str_post_proc}"
+        solution_str_post_proc_anwswer = solution_str_post_proc.rsplit(marker_user, 1)[1]
+        solution_str_post_proc_anwswer = solution_str_post_proc_anwswer.split(marker_assistant, 1)[1]
+        think_template = self.config.data.think_template if self.config.data.think_template is not None else 'v2'
+        return solution_str_post_proc_anwswer, ground_truth, think_template, self.config.trainer.code_sandbox_psm, self.config.trainer.volc_ark_key, self.config.trainer.volc_model_name
+
+    @staticmethod
+    def compute_score(solution_str, ground_truth, think_template, code_sandbox_psm, volc_ark_key, volc_model_name,
+                      **argv) -> float:
+        return compute_score(solution_str, ground_truth, code_sandbox_psm, volc_ark_key, volc_model_name,
+                             think_template)
 
 
 # Note: AlphaSeed uses [-1, +1] for reward scores and -2 for error handling, which is different from SeedRL's [0, 1].
@@ -32,24 +86,7 @@ def compute_score(solution_str, ground_truth, code_sandbox_psm: str, volc_ark_ke
     return score
 
 
-def compute_score_client(solution_str, ground_truth, code_sandbox_psm: str, volc_ark_key: str, volc_model_name: str,
-                         data_uid, config, **kwargs) -> float:
-    score = None
-    if config.trainer.use_remote_verifier:
-        # get the remote client endpoint
-        handler = ray.get_actor('remote_client')
-        # retrieve the score directly
-        score = ray.get(handler.get_results.remote(data_uid))
-    think_template = config.data.think_template if config.data.think_template is not None else 'v2'
-
-    if score is None:
-        score = compute_score(solution_str, ground_truth, code_sandbox_psm, volc_ark_key, volc_model_name,
-                              think_template)
-
-    return score
-
-
-@ray.remote(num_cpus=1)
+@ray.remote
 def submit_verifier(response: str, verifier_feature: str, code_sandbox_psm: str, volc_ark_key: str,
                     volc_model_name: str, think_template: str):
     os.environ['THINK_TEMPLATE'] = think_template

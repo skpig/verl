@@ -13,6 +13,8 @@ from alpha_seed.workers.agents.envs.textbrowser import create_from_env_str as cr
     TextBrowserEnv
 from alpha_seed.workers.agents.envs.search import create_from_env_str as create_search_env_from_env_str, SearchEnv
 from alpha_seed.workers.agents.handlers.tool.parser import FunctionCall, ToolParser, _extract_messages_from_dataproto
+from alpha_seed.utils.reward_score.utils import Verifier
+
 from mono_rl import DataProto
 from typing import List, Dict
 import json
@@ -218,13 +220,12 @@ class SearchAgent(AsyncAgent):
 
             # note that the uid of padding dataproto should be None
             if req_id is not None:
-                # get the sandbox ray handler
-                handler = ray.get_actor('remote_client')
+                verifier = Verifier.get_verifier(reward_style, self.config, self.tokenizer)
                 # this is non-blocking
-                handler.add_requests.remote(req_id=req_id,
-                                            input_ids=input_ids,
-                                            ground_truth=ground_truth,
-                                            reward_style=reward_style)
+                verifier.add_requests(req_id=req_id,
+                                      input_ids=input_ids,
+                                      ground_truth=ground_truth,
+                                      reward_style=reward_style)
 
         # 将completion转换为DataProto格式，与其他agent保持一致
         from alpha_seed.workers.streaming_service.streaming_utils import DataPack, pack_to_dataproto

@@ -4,6 +4,15 @@ from alpha_seed.utils.reward_score.extra_reward import filter_thinking_part, ext
 from shapely import Polygon, Point
 import re
 
+from .utils import Verifier
+
+
+class PointVerifier(Verifier, reward_style="verifier_pointing"):
+
+    @staticmethod
+    def compute_score(*args, **kwargs) -> float:
+        return compute_score(*args, **kwargs)
+
 
 def compute_score(solution_str, ground_truth, **kwargs):
     solution_str, success = filter_thinking_part(solution_str, kwargs['config'])

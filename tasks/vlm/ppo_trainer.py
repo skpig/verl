@@ -122,7 +122,7 @@ class VLMRayPPOTrainer(RayPPOTrainer):
 
                     # collect sandbox client remaining results
                     if self.config.trainer.use_remote_sandbox:
-                        remote_client = ray.get_actor('remote_client')
+                        remote_client = ray.get_actor('remote_client_0')
                         num_remaining_results = ray.get(remote_client.get_num_pending_outputs.remote())
                         metrics['remote_client/remaining_results'] = num_remaining_results
                 metrics['timing/train'] = train_timer.last

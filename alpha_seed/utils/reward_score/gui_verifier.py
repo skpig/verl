@@ -3,6 +3,14 @@ import ast
 from rouge_chinese import Rouge
 import jieba
 import numpy as np
+from .utils import Verifier
+
+
+class GuiVerifier(Verifier, reward_style="verifier_gui"):
+
+    @staticmethod
+    def compute_score(*args, **kwargs) -> float:
+        return compute_score(*args, **kwargs)
 
 
 def get_truth_action_type_value(content):

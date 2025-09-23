@@ -400,6 +400,7 @@ reward_model:
   use_last_response: False
   last_response_strict: False
   reward_executor_maxnum: 128
+  num_remote_client: 1
   last_response_sep: ['<summarize>', '</summarize>']
   reward_0_for_overlong_rsp: False
   len_ema_lambda: 1.0
@@ -415,6 +416,7 @@ reward_model:
   use_cuda_timer: False # doesn't take effect; only for backward-compatibility
   length_ema_method: mean
   last_characters: -1 # number of last characters
+  enable_eos_callback: False
 
 algorithm:
   group_shuffle: False

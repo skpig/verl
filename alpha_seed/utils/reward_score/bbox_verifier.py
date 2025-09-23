@@ -1,8 +1,16 @@
 from alpha_seed.utils.reward_score.extra_reward import filter_thinking_part, extract_answer_failed_reward
-from alpha_seed.utils.reward_score.verifier.tools import calculate_iou
+from alpha_seed.utils.reward_score.vlm_verifiers.tools import calculate_iou
 import re
 import copy
 import json
+from .utils import Verifier
+
+
+class BboxVerifier(Verifier, reward_style="verifier_bbox"):
+
+    @staticmethod
+    def compute_score(*args, **kwargs) -> float:
+        return compute_score(*args, **kwargs)
 
 
 def compute_score(solution_str, ground_truth, **kwargs):

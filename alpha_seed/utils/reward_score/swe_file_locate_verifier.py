@@ -1,6 +1,15 @@
 import re
 import json
 
+from .utils import Verifier
+
+
+class SweFileLocateVerifier(Verifier, reward_style="swe_file_locate"):
+
+    @staticmethod
+    def compute_score(*args, **kwargs) -> float:
+        return compute_score(*args, **kwargs)
+
 
 def _rm(text, key_pair):
     result_text = []  # 存储去除标签后的文本

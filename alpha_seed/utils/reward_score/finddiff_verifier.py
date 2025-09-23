@@ -4,6 +4,14 @@ from scipy.optimize import linear_sum_assignment
 import re
 import copy
 import json
+from .utils import Verifier
+
+
+class FindDiffVerifier(Verifier, reward_style="verifier_findiff"):
+
+    @staticmethod
+    def compute_score(*args, **kwargs) -> float:
+        return compute_score(*args, **kwargs)
 
 
 def calculate_iou(box1, box2):

@@ -33,7 +33,8 @@ except ImportError:
 
 # rule-based reward score
 from alpha_seed.utils.reward_score.vlm_verifiers.extra_reward import add_length_reward, punish_format_return_positions
-from alpha_seed.utils.reward_score import response_post_proc, _select_rm_score_fn, select_remote_rm_fn, get_remote_rm_score, merge_rm_scores
+from alpha_seed.utils.reward_score import response_post_proc
+from alpha_seed.utils.reward_score.utils import Verifier
 from alpha_seed.utils.duplicate import para_dup
 from alpha_seed.utils.alarm.lark_util import send_message_to_employee
 from alpha_seed.utils.tracking_utils import async_save_cases_to_hdfs
@@ -235,7 +236,7 @@ class VLMRewardManager(RewardManager):
 
             # select rm_score
             reward_style = data_item.non_tensor_batch['reward_model']['style']
-            compute_score_fn = _select_rm_score_fn(reward_style)
+            verifier = Verifier.get_verifier(reward_style, tokenizer=self.tokenizer, config=self.config)
             ground_truth = data_item.non_tensor_batch['reward_model']['ground_truth']
             score_fn_inputs = {
                 "batch_info": data_item.batch,
@@ -249,21 +250,6 @@ class VLMRewardManager(RewardManager):
                 'rm_name': self.rm_name,
                 'pause_tokens_index': pause_tokens_index
             }
-            if reward_style in ("code-sandbox", "vlm_verifier_router"):
-                score_fn_inputs["code_sandbox_psm"] = self.config.trainer.code_sandbox_psm
-            if reward_style == "verifier_service":
-                score_fn_inputs["verifier_service_psm"] = self.config.trainer.verifier_service_psm
-            if reward_style in ("verifier_service_volc", "vlm_verifier_router"):
-                if not self.config.trainer.volc_ark_key:
-                    raise ValueError("volc_ark_key is not set")
-                if not self.config.trainer.volc_model_name:
-                    raise ValueError("volc_model_name is not set")
-                score_fn_inputs["volc_ark_key"] = self.config.trainer.volc_ark_key
-                score_fn_inputs["volc_model_name"] = self.config.trainer.volc_model_name
-            if reward_style == "gaokao_verifier_service":
-                score_fn_inputs["gaokao_verifier_service_psm"] = self.config.trainer.gaokao_verifier_psm
-            if reward_style == "aider":
-                score_fn_inputs["aider_service_psm"] = self.config.trainer.aider_service_psm
             env_state_bytes = data_item.non_tensor_batch.get('env_states', None)
             if env_state_bytes is not None:
                 score_fn_inputs['env_state_bytes'] = env_state_bytes
@@ -276,8 +262,8 @@ class VLMRewardManager(RewardManager):
 
             if format_reward == 0 or is_validation:
                 verifier_score = 0
-                if compute_score_fn:
-                    verifier_score = compute_score_fn(**score_fn_inputs)
+                if verifier is not None:
+                    verifier_score = verifier.compute_score_client(**score_fn_inputs)
             else:
                 verifier_score = -1
 
@@ -285,9 +271,10 @@ class VLMRewardManager(RewardManager):
             score_fn_inputs["verifier_score"] = verifier_score
             if (not is_validation) and self.config.trainer.use_remote_rm and self.rm_name == 'train':
                 remote_rm_type = self.config.trainer.remote_rm_type
-                rm_prompt, rm_response, rm_score = get_remote_rm_score(remote_rm_type)(data_uid)
+                rm_verifier = Verifier.get_verifier(remote_rm_type, tokenizer=self.tokenizer, config=self.config)
+                rm_prompt, rm_response, rm_score = rm_verifier.compute_score_client(data_uid)
                 score_lst = [rm_score, verifier_score]
-                score = merge_rm_scores(remote_rm_type)(score_lst, self.score_merger)
+                score = rm_verifier.merge_score(score_lst, self.score_merger)
             else:
                 score = verifier_score
 

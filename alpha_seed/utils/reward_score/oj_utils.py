@@ -5,6 +5,7 @@ import time
 from sandbox_fusion import submit, SubmitRequest, TestConfig
 from bytedance import servicediscovery
 from tenacity import retry, stop_after_attempt
+from alpha_seed.utils.reward_score.utils import Verifier
 
 OJ_MAX_ATTEMPTS = 3
 CLIENT_TIMEOUT = 30
@@ -22,23 +23,18 @@ def get_sandbox_endpoint(code_sandbox_psm):
     return endpoint
 
 
-def compute_score_client(solution_str, ground_truth, code_sandbox_psm, data_uid, config, **argv) -> float:
-    """Directly retrieve the scores from SandboxClient"""
-    score = None
-    if config.trainer.use_remote_sandbox:
-        # get the sandbox client endpoint
-        handler = ray.get_actor('remote_client')
-        # retrieve the score directly
-        score = ray.get(handler.get_results.remote(data_uid))
+class OJVerifier(Verifier, reward_style="code-sandbox"):
 
-    if score is None:
-        score = compute_score(solution_str, ground_truth, code_sandbox_psm, **argv)
+    def is_remote(self):
+        return self.config.trainer.use_remote_sandbox
 
-    # optionally, compute the score with original code to compare the results
-    # score_original = compute_score(solution_str, ground_truth, code_sandbox_psm, **argv)
-    # assert score == score_original
+    def preprocess(self, input_ids, ground_truth):
+        solution_str, ground_truth = super().preprocess(input_ids, ground_truth)
+        return solution_str, ground_truth, self.config.trainer.code_sandbox_psm
 
-    return score
+    @staticmethod
+    def compute_score(solution_str, ground_truth, code_sandbox_psm) -> float:
+        return compute_score(solution_str, ground_truth, code_sandbox_psm)
 
 
 def parse_sandbox_error_msg(req_res):

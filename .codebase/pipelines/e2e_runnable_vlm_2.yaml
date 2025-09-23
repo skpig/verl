@@ -39,17 +39,7 @@ jobs:
           - sudo pip3 install bytedagi==0.0.37a7
           - sudo pip3 install bytedance.trainingmetrics
 
-      - name: vlm hybrid engine tests
-        commands:
-          - export NCCL_SHM_DISABLE=1
-          - export PYTHONPATH=/opt/tiger/mono_rl:/opt/tiger/seed_models:$PYTHONPATH
-          - wandb offline
-          - ray stop --force
-          - ray start --num-cpus=100 --head
-          - pytest -v tests/hybrid_engine/test_vlm.py
-          - ray stop --force
-
-      - name: vlm sync tests
+      - name: vlm e2e tests
         commands:
           - cd /home/code
           - export NUM_STEPS=2
@@ -61,6 +51,7 @@ jobs:
           - wandb offline
           - ray stop --force
           - ray start --num-cpus=100 --head
-          - bash tasks_scripts/ci/run_vlm_680m.sh
-          - bash tasks_scripts/ci/run_vlm_680m_rollout_server.sh
+          - bash tasks_scripts/ci/run_vlm_680m_async.sh
+          - bash tasks_scripts/ci/run_vlm_680m_visual_cot.sh
+          - bash tasks_scripts/ci/run_vlm_680m_auto.sh
           - ray stop --force

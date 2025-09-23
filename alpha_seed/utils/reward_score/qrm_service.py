@@ -20,6 +20,37 @@ from bytedagi.schema.param import LLMServerParamMixin
 from langchain.schema import HumanMessage
 from bytedance import servicediscovery
 from servicediscovery import ServiceDiscoveryError
+from .utils import Verifier
+
+
+class QrmVerifier(Verifier, reward_style="qrm"):
+
+    def __init__(self, config=None, tokenizer=None):
+        super().__init__(config=config, tokenizer=tokenizer)
+        self.config = config
+        self.tokenizer = tokenizer
+
+    def is_remote(self):
+        return True
+
+    def compute_score_client(self, data_uid, *args, **kwargs) -> float:
+        score_dict = None
+        if self.is_remote():
+            score_dict = self.get_remote_score(data_uid)
+        if score_dict is None:
+            return None, None, None
+        return score_dict['qrm_prompt'], "", score_dict['score']
+
+    def compute_score_remote(self, *args, **kwargs) -> float:
+        remote_service = kwargs['remote_service']
+        actor = random.choice(remote_service)
+        return actor.call.remote(*args, **kwargs)
+
+    def merge_score(self, scores_lst, merge_type="mean", **kwargs):
+        if merge_type == "mean":
+            return sum(scores_lst) / len(scores_lst)
+        else:
+            raise NotImplementedError(f"{merge_type=} not implemented")
 
 
 def wait_remote_server_ready(psm: str):
@@ -34,21 +65,6 @@ def wait_remote_server_ready(psm: str):
             time.sleep(60)
             fail_time += 1
     raise ServiceDiscoveryError(f"psm {psm} not ready after 30 times retry, please check remote rm log")
-
-
-def get_qrm_result(data_uid):
-    handler = ray.get_actor('remote_client')
-    score_dict = ray.get(handler.get_remote_rm_results.remote(data_uid))
-    if score_dict is None:
-        return None, None, None
-    return score_dict['qrm_prompt'], "", score_dict['score']
-
-
-def merge_qrm_score(scores_lst, merge_type="mean", **kwargs):
-    if merge_type == "mean":
-        return sum(scores_lst) / len(scores_lst)
-    else:
-        raise NotImplementedError(f"{merge_type=} not implemented")
 
 
 def init_qrm_server(config, **kwargs):

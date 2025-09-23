@@ -4,6 +4,7 @@ import pandas as pd
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from alpha_seed.utils.reward_score.code_local_execution import check_correctness
+from .utils import Verifier
 
 EXEC_POOL_WORKERS = 32
 EXEC_POOL = None
@@ -26,6 +27,13 @@ def extract_python_code(generation: str):
     else:
         codelist = re.split("\ndef|\nclass|\nif|\n#|\nprint", generation)
         return codelist[0]
+
+
+class CodeLocalVerifier(Verifier, reward_style="code-localexec"):
+
+    @staticmethod
+    def compute_score(*args, **kwargs) -> float:
+        return compute_score(*args, **kwargs)
 
 
 def compute_score(solution_str, ground_truth, **argv) -> float:

@@ -12,12 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import torch
+from .utils import Verifier
 
 
 def extract_rm_score(batch_info, rm_scores):
     prompt_length = batch_info['prompts'].shape[-1]
     eos_mask_idx = torch.clamp(torch.sum(batch_info['attention_mask'][prompt_length:]) - 1, min=0)
     return rm_scores[eos_mask_idx]
+
+
+class RawScore(Verifier, reward_style="model-raw_score"):
+
+    @staticmethod
+    def compute_score(*args, **kwargs) -> float:
+        return raw_score(*args, **kwargs)
 
 
 def raw_score(batch_info, **argv):
@@ -45,6 +53,12 @@ def count_subsequences(sequence, subsequence):
             i += 4
             count += 1
     return count
+
+
+class RawScoreReflectionPenalty(Verifier, reward_style="model-raw_score_reflection_penalty"):
+
+    def compute_score(self, *args, **kwargs) -> float:
+        return raw_score_reflection_penalty(*args, **kwargs)
 
 
 def raw_score_reflection_penalty(batch_info, tokenizer, **argv):

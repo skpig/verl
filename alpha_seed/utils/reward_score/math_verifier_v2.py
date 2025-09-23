@@ -7,8 +7,16 @@ from alpha_seed.utils.reward_score.vlm_verifiers.parser import extract_answer
 from alpha_seed.utils.reward_score.vlm_verifiers.grader import math_equal
 from alpha_seed.utils.reward_score.extra_reward import filter_thinking_part
 import ray
+from .utils import Verifier
 
 logger = logging.getLogger(__file__)
+
+
+class MathV2Verifier(Verifier, reward_style="verifier_math"):
+
+    @staticmethod
+    def compute_score(*args, **kwargs) -> float:
+        return compute_score(*args, **kwargs)
 
 
 def compute_score(solution_str, ground_truth, **kwargs) -> float:
