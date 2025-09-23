@@ -261,6 +261,13 @@ class SwalmAgent(AsyncAgent):
     def __init__(self, tokenizer: AsyncTokenizer | PreTrainedTokenizer, llm: AsyncLLMInterface, **kwargs):
         super().__init__(tokenizer, llm, **kwargs)
 
+    def _agent_init_params_validate(self, agent_class, agent_params):
+        if "CodeAct" in agent_class:
+            assert agent_params.get('shell_timeout', 180) is not None
+            assert agent_params.get('system_prompt_version', 'v1') is not None
+            assert agent_params.get('finish_tool', 'default') is not None
+            assert agent_params.get('tool_call_format', 'CodeActXML') is not None
+
     def _get_agent_run_spec_args(self, host, port, meta_info, extra_info, task_uuid, tokenizer, dataset_id, instance_id,
                                  is_eval):
         # request_args
@@ -357,9 +364,15 @@ class SwalmAgent(AsyncAgent):
             agent_init_params['observation_truncate_args'] = {
                 "max_chars": self.config.trainer.get("observation_max_chars", 5000)
             }
+        if ob_truncate_args := agent_init_params.get('observation_truncate_args', {}):
+            for k in ob_truncate_args:
+                if isinstance(ob_truncate_args[k], float):
+                    ob_truncate_args[k] = int(ob_truncate_args[k])
+            agent_init_params['observation_truncate_args'] = ob_truncate_args
         if self.config.trainer.get("swalm_shell_timeout", None):
-            agent_init_params['shell_timeout'] = self.config.trainer.get("shell_timeout")
+            agent_init_params['shell_timeout'] = self.config.trainer.get("swalm_shell_timeout")
 
+        self._agent_init_params_validate(agent_class, agent_init_params)
         # agent_run_params
         agent_run_params_template = {
             'max_iterations': 20,
@@ -403,6 +416,8 @@ class SwalmAgent(AsyncAgent):
 
         # agent_run_spec_kwargs
         agent_run_spec_kwargs = {
+            "task_type_id":
+                extra_info.get("task_type_id", 'issue_resolving'),
             "agent_class":
                 self._get_swalm_module(agent_class),
             "llm_config":
