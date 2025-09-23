@@ -198,7 +198,7 @@ class AutoTuner:
             if text_config.num_hidden_layers > num_layers:
                 setattr(text_config, 'num_hidden_layers', num_layers)
                 if hasattr(text_config, "sliding_window"):
-                    if isinstance(config.sliding_window, (tuple, list)):
+                    if isinstance(text_config.sliding_window, (tuple, list)):
                         text_config.sliding_window = text_config.sliding_window[:num_layers]
                 if text_config.model_type == "seed_m8":
                     mirror_layers = int(num_layers * 0.2)
