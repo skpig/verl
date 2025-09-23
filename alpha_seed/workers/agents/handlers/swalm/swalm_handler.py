@@ -320,6 +320,8 @@ class SwalmAgent(AsyncAgent):
                 remove_pattern = r'<think_never_used_51bce0c785ca2f68081bfa7d91973934>[\s\S]*?</think_never_used_51bce0c785ca2f68081bfa7d91973934>'
             elif think_token_type == "36b_oss_think":
                 remove_pattern = r'<seed:think>[\s\S]*?</seed:think>'
+            elif think_token_type == "think_never_used":
+                remove_pattern = r'<think_never_used_51bce0c785ca2f68081bfa7d91973934>[\s\S]*?</think_never_used_51bce0c785ca2f68081bfa7d91973934>'
             else:
                 remove_pattern = r'<think>[\s\S]*?</think>'
             agent_init_params_template = {
@@ -331,8 +333,17 @@ class SwalmAgent(AsyncAgent):
             agent_init_params_template = {
                 'config_type': "default",
             }
-        elif ("SuperDoubaoAgent" in agent_class) or ("SWETraeAgent" in agent_class):
+        elif "SuperDoubaoAgent" in agent_class:
             agent_init_params_template = {}
+        elif "SWETraeAgent" in agent_class:
+            think_token_type = self.config.trainer.get("think_token_type", "")
+            if think_token_type == "think_never_used":
+                think_end_tag = "</think_never_used_51bce0c785ca2f68081bfa7d91973934>"
+            else:
+                think_end_tag = "</think>"
+            agent_init_params_template = {
+                'think_end_tag': think_end_tag,
+            }
         else:
             raise NotImplementedError
         agent_init_params = agent_init_params_template.copy()

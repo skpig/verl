@@ -32,6 +32,7 @@ class BaseReasoningAgent(AsyncAgent):
         """Main agent loop with tool calling capability"""
         max_prompt_length = context.config.data.max_prompt_length
         max_response_length = context.config.data.max_response_length
+        cur_step = context.global_step
         item.meta_info = copy.deepcopy(item.meta_info)
 
         # Extract initial messages from DataProto
@@ -91,6 +92,7 @@ class BaseReasoningAgent(AsyncAgent):
         out = pack_to_dataproto(item, self.tokenizer, data_pack, context.config.actor_rollout_ref.rollout)
         out.non_tensor_batch['agent_num_turns'] = np.array([0])
         out.non_tensor_batch['agent_num_tool_calls'] = np.array([0])
+        out.meta_info["cur_step"] = cur_step
 
         return out
 
