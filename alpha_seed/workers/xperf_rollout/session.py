@@ -521,7 +521,7 @@ class InferenceSession:
                                           moving_avg_length=self.max_length,
                                           schedule_strategy=self.schedule_strategy)
         # prefix cache
-        num_kv_heads = self.engine.module.config.tp_kv_heads
+        num_kv_heads = self.engine.module.config.tp_kv_heads if self.prefix_cache_impl != "disabled" else 0
         # TODO: FP8 attention kv_cache
         if "C8" in self.engine.module.quant_mode or self.engine.module.quant_mode == "W8A8":
             kv_cache_dtype = torch.int8
@@ -531,10 +531,13 @@ class InferenceSession:
         if hasattr(self.engine.module.config, "kv_mirror_layers"):
             kv_mirror_layers = len(getattr(self.engine.module.config, "kv_mirror_layers"))
         valid_num_layers = self.engine.module.num_layers - kv_mirror_layers
-        self.prefix_cache = get_prefix_cache_impl(num_kv_heads, self.engine.module.head_dim, valid_num_layers,
-                                                  kv_cache_dtype, self.prefix_cache_impl, self.prefix_cache_slot_num,
-                                                  self.prefix_cache_max_length, self.enable_paged_attn,
-                                                  self.slot_block_size)
+        if self.prefix_cache_impl == "disabled":
+            self.prefix_cache = None
+        else:
+            self.prefix_cache = get_prefix_cache_impl(num_kv_heads, self.engine.module.head_dim, valid_num_layers,
+                                                      kv_cache_dtype, self.prefix_cache_impl,
+                                                      self.prefix_cache_slot_num, self.prefix_cache_max_length,
+                                                      self.enable_paged_attn, self.slot_block_size)
         self.cache_manager.set_prefix_cache_save_callback(lambda query: self._save_to_prefix_cache(query))
         self.infer_scheduler = InferScheduler(
             cache_manager=self.cache_manager,

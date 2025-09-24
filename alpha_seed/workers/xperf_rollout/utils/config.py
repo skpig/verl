@@ -249,6 +249,35 @@ def _get_p7_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
     return xperf_config
 
 
+def _get_m8_nsa_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
+    from seed_models import M8Config
+    assert isinstance(model_config, M8Config)
+    config = model_config
+    nsa_xperf_config = {
+        "num_q_heads": config.num_attention_heads * config.query_head_scale_factor,
+        "head_dim": config.hidden_size // model_config.num_attention_heads,
+        "qk_head_dim": config.hidden_size // model_config.num_attention_heads,
+        "v_head_dim": config.hidden_size // model_config.num_attention_heads,
+        "nsa": config.nsa,
+        "nsa_full_attention_layers": config.nsa_full_attention_layers,
+        "nsa_key_compress_type": config.nsa_key_compress_type,
+        "nsa_value_compress_type": config.nsa_value_compress_type,
+        "nsa_residual_compress": config.nsa_residual_compress,
+        "nsa_init_range": config.nsa_init_range,
+        "nsa_kernel_size": config.nsa_kernel_size,
+        "nsa_kernel_stride": config.nsa_kernel_stride,
+        "nsa_pe_dim": config.nsa_pe_dim,
+        "nsa_init_blocks": config.nsa_init_blocks,
+        "nsa_local_blocks": config.nsa_local_blocks,
+        "nsa_block_size": config.nsa_block_size,
+        "nsa_topk": config.nsa_topk,
+        "nsa_window_size": config.nsa_window_size,
+        "nsa_softmax_gate": config.nsa_softmax_gate,
+    }
+
+    return nsa_xperf_config
+
+
 def _get_m8_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
     from seed_models import M8Config
     assert isinstance(model_config, M8Config)
@@ -322,6 +351,9 @@ def _get_m8_xperf_gpt_config(model_config, tokenizer: PreTrainedTokenizer):
         "kv_mirror_imitated_layers": [layer_idx + 1 for layer_idx in config.kv_mirror_imitated_layers],
         "kv_mirror_layers": [layer_idx + 1 for layer_idx in config.kv_mirror_layers],
     }
+
+    if getattr(config, "nsa", False):
+        xperf_config.update(_get_m8_nsa_xperf_gpt_config(model_config, tokenizer))
 
     return xperf_config
 

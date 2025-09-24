@@ -1,9 +1,9 @@
 """
 Adapted from tests/hybrid_engine/test_vlm.py
+NCCL_DEBUG=WARN python3 tests/hybrid_engine/test_vlm_m8_nsa.py
 """
 
 import pytest
-import ray
 from omegaconf import OmegaConf
 from tests.test_utils import ray_fixture, gpu_allocator, get_config, get_tokenizer, create_rollout_manager
 from alpha_seed.utils.dataset.vlm_rl_dataset import load_and_transform_save_image
@@ -52,27 +52,30 @@ def get_batch(config, tokenizer, processor, model_path):
     return batch
 
 
-@pytest.mark.parametrize("gpu_allocator", [8], indirect=True)
-def test_vlm_gen(monkeypatch, gpu_allocator, ray_fixture):
-    monkeypatch.setenv('ARNOLD_HDFS_NATIVE', 'true')
+def test_vlm_gen():
+    import os
+    os.environ['ARNOLD_HDFS_NATIVE'] = 'true'
     override_config = OmegaConf.create({
         'data': {
             'max_prompt_length': 8192,
-            'max_response_length': 8192,
+            'max_response_length': 4096,
+            'image_key': "img",
         },
         'actor_rollout_ref': {
             "model": {
-                "path": "/mnt/hdfs/qingyuhao/models/m8_vlm_680m_seedvit"
+                "path": "/mnt/hdfs/tianqilin/models/m8_nsa/hf",
+                "use_rmpad": True,
             },
             "rollout": {
-                "tensor_model_parallel_size": 8,
-                "enable_paged_attention": True,
+                "tensor_model_parallel_size": 4,
+                "enable_paged_attention": False,
                 "max_ctx_batch_size": 1,
                 "num_slots": 256,
-                "gpu_memory_utilization": 0.5,
+                "slot_block_size": 4096,
+                "gpu_memory_utilization": 0.7,
                 "vit_use_xperf_gpt": False,
                 "xperf_triton": {
-                    "model_name": "M8",
+                    "model_name": "M8_nsa",
                     "enable": True,
                     "max_batch_size": 16,
                 },
@@ -80,7 +83,7 @@ def test_vlm_gen(monkeypatch, gpu_allocator, ray_fixture):
         },
         "trainer": {
             "nnodes": 1,
-            "n_gpus_per_node": 8,
+            "n_gpus_per_node": 4,
             "project_name": "alpha_seed_test",
             "experiment_name": "hybrid_engine_vlm",
             "logger": ['console'],
@@ -97,9 +100,13 @@ def test_vlm_gen(monkeypatch, gpu_allocator, ray_fixture):
 
     rollout_manager = create_rollout_manager(config)
     batch = load_and_transform_save_image(batch, tokenizer, processor, dist_data_manager, max_prompt_length=8192)
-    batch, _ = ray.get(rollout_manager.val_generate_async.remote(batch))
+    batch = rollout_manager.val_generate(batch)
     prompt0_len = batch.batch['attention_mask'][0].sum()
     input_ids = batch.batch['input_ids'][batch.batch['input_ids'] != tokenizer.pad_token_id]
     input_ids = input_ids[input_ids > 0]
     response0 = tokenizer.decode(input_ids, skip_special_tokens=True)
     print(response0)
+
+
+if __name__ == '__main__':
+    test_vlm_gen()

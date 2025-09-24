@@ -196,12 +196,14 @@ class XPerfTritonInferenceModule:
         return self
 
     def enter(self):
-        self.allocate_kv_cache()
+        if self.config.model_name != "M8_nsa":
+            self.allocate_kv_cache()
         self.capture_cuda_graph()
 
     def exit(self):
         self.release_cuda_graph()
-        self.free_kv_cache()
+        if self.config.model_name != "M8_nsa":
+            self.free_kv_cache()
 
     @torch.inference_mode()
     def forward_orca(
@@ -221,6 +223,7 @@ class XPerfTritonInferenceModule:
         context_total_kv_len=None,
         decode_max_kv_len=None,
         decode_total_kv_len=None,
+        return_full_hidden_states_after_layernorm=False,
     ):
         outputs = []
         ctx_bsz = 0
@@ -298,7 +301,8 @@ def _reshard_fsdp_state_dict_to_xperf_triton_m8(tp_model: XPerfTritonInferenceMo
         rank = tp_model.global_rank % tp_model.world_size if rank is None else rank
         num_split = tp_model.world_size if num_split is None else num_split
         splits = torch.split(tensor, tensor.shape[dim] // num_split, dim=dim)
-        return splits[rank]
+        # note: torch.split is a view operation, we need to clone it to release the cuda memory of full_tensor
+        return splits[rank].clone()
 
     def split_qkv_project(c_attn: torch.Tensor):
         if tp_model.tp_size == 1:
@@ -319,11 +323,47 @@ def _reshard_fsdp_state_dict_to_xperf_triton_m8(tp_model: XPerfTritonInferenceMo
                 dim=1,
             ).t().contiguous()
 
+    def split_qkv_project_nsa(c_attn: torch.Tensor):
+        if tp_model.config.tp_size == 1:
+            return c_attn.t().contiguous()
+        else:
+            q_dim = (tp_model.config.model_config.head_dim * tp_model.config.model_config.num_heads *
+                     tp_model.config.model_config.q_head_times)
+            kv_dim = (tp_model.config.model_config.head_dim * tp_model.config.model_config.num_kv_heads * 3)
+            tensor_q = c_attn[:, :q_dim]
+            tensor_k = c_attn[:, q_dim:q_dim + kv_dim]
+            tensor_v = c_attn[:, q_dim + kv_dim:]
+            return torch.concat(
+                [
+                    split_with_dim(tensor_q, 1, tp_model.config.tp_rank, tp_model.config.tp_size),
+                    torch.concat([
+                        split_with_dim(tensor_k[:, :kv_dim // 3], 1, tp_model.config.tp_rank, tp_model.config.tp_size),
+                        split_with_dim(tensor_k[:, kv_dim // 3:kv_dim // 3 * 2], 1, tp_model.config.tp_rank,
+                                       tp_model.config.tp_size),
+                        split_with_dim(tensor_k[:, kv_dim // 3 * 2:], 1, tp_model.config.tp_rank,
+                                       tp_model.config.tp_size),
+                    ],
+                                 dim=1),
+                    torch.concat([
+                        split_with_dim(tensor_v[:, :kv_dim // 3], 1, tp_model.config.tp_rank, tp_model.config.tp_size),
+                        split_with_dim(tensor_v[:, kv_dim // 3:kv_dim // 3 * 2], 1, tp_model.config.tp_rank,
+                                       tp_model.config.tp_size),
+                        split_with_dim(tensor_v[:, kv_dim // 3 * 2:], 1, tp_model.config.tp_rank,
+                                       tp_model.config.tp_size),
+                    ],
+                                 dim=1),
+                ],
+                dim=1,
+            ).t().contiguous()
+
     def split_out_project(c_proj: torch.Tensor):
         if tp_model.config.tp_size == 1:
             return c_proj.t().contiguous()
         else:
             return split_with_dim(c_proj, 0, tp_model.config.tp_rank, tp_model.config.tp_size).t().contiguous()
+
+    def split_compress_kv_tp(tensor: torch.Tensor):
+        return split_with_dim(tensor, 0)
 
     def split_ffn_ep(tensor: torch.Tensor):
         return split_with_dim(tensor, 0)
@@ -382,11 +422,57 @@ def _reshard_fsdp_state_dict_to_xperf_triton_m8(tp_model: XPerfTritonInferenceMo
         layer.rms_norm_1.weight.data = ln_1_weight.contiguous()
 
         self_attn = layer.self_attention
-        k = prefix + f'transformer.h.{layer_index}.attn.key_layernorm.weight'
-        key_norm_weight = get_tensor(state_dict[k])
-        key_norm_weight = torch.stack((key_norm_weight,), dim=0).to(torch.bfloat16).reshape(-1)
-        assert self_attn.key_norm.weight.data.shape == key_norm_weight.shape, f"{self_attn.key_norm.weight.data.shape} == {key_norm_weight.shape}"
-        self_attn.key_norm.weight.data = key_norm_weight.contiguous()
+        if getattr(self_attn, 'is_nsa_layer', False):
+            k = prefix + f'transformer.h.{layer_index}.attn.compress_key'
+            compress_key_weight = get_tensor(state_dict[k]).to(torch.bfloat16)
+            compress_key_weight = split_compress_kv_tp(compress_key_weight)
+            assert compress_key_weight.shape == self_attn.compress_key.weight.data.shape, f"{compress_key_weight.shape} == {self_attn.compress_key.weight.data.shape}"
+            self_attn.compress_key.weight.data = compress_key_weight.contiguous()
+
+            k = prefix + f'transformer.h.{layer_index}.attn.compress_value'
+            compress_value_weight = get_tensor(state_dict[k]).to(torch.bfloat16)
+            compress_value_weight = split_compress_kv_tp(compress_value_weight)
+            assert compress_value_weight.shape == self_attn.compress_value.weight.data.shape, f"{compress_value_weight.shape} == {self_attn.compress_value.weight.data.shape}"
+            self_attn.compress_value.weight.data = compress_value_weight.contiguous()
+
+            k = prefix + f'transformer.h.{layer_index}.attn.nsa_pe'
+            nsa_pe_weight = get_tensor(state_dict[k]).to(torch.bfloat16)
+            nsa_pe_weight = split_compress_kv_tp(nsa_pe_weight)
+            assert nsa_pe_weight.shape == self_attn.compress_key.pe.data.shape, f"{nsa_pe_weight.shape} == {self_attn.compress_key.pe.data.shape}"
+            assert nsa_pe_weight.shape == self_attn.compress_value.pe.data.shape, f"{nsa_pe_weight.shape} == {self_attn.compress_value.pe.data.shape}"
+            # compress_key和compress_value共享nsa_pe
+            self_attn.compress_key.pe.data = nsa_pe_weight.contiguous().clone()
+            self_attn.compress_value.pe.data = nsa_pe_weight.contiguous().clone()
+
+            k = prefix + f'transformer.h.{layer_index}.attn.nsa_gate'
+            nsa_gate_weight = get_tensor(state_dict[k]).to(torch.bfloat16).transpose(0, 1)
+            assert nsa_gate_weight.shape == layer.nsa_gate.nsa_gate.weight.data.shape, f"{nsa_gate_weight.shape} == {layer.nsa_gate.nsa_gate.weight.data.shape}"
+            layer.nsa_gate.nsa_gate.weight.data = nsa_gate_weight.contiguous()
+
+            k = prefix + f'transformer.h.{layer_index}.attn.compress_key_layernorm.weight'
+            compress_key_norm_weight = get_tensor(state_dict[k])
+            compress_key_norm_weight = torch.stack((compress_key_norm_weight,), dim=0).to(torch.bfloat16).reshape(-1)
+            assert self_attn.compress_key_norm.weight.data.shape == compress_key_norm_weight.shape, f"{self_attn.compress_key_norm.weight.data.shape} == {compress_key_norm_weight.shape}"
+            self_attn.compress_key_norm.weight.data = compress_key_norm_weight.contiguous()
+
+            k = prefix + f'transformer.h.{layer_index}.attn.sparse_key_layernorm.weight'
+            sparse_key_norm_weight = get_tensor(state_dict[k])
+            sparse_key_norm_weight = torch.stack((sparse_key_norm_weight,), dim=0).to(torch.bfloat16).reshape(-1)
+            assert self_attn.sparse_key_norm.weight.data.shape == sparse_key_norm_weight.shape, f"{self_attn.sparse_key_norm.weight.data.shape} == {sparse_key_norm_weight.shape}"
+            self_attn.sparse_key_norm.weight.data = sparse_key_norm_weight.contiguous()
+
+            k = prefix + f'transformer.h.{layer_index}.attn.sliding_key_layernorm.weight'
+            sliding_key_norm_weight = get_tensor(state_dict[k])
+            sliding_key_norm_weight = torch.stack((sliding_key_norm_weight,), dim=0).to(torch.bfloat16).reshape(-1)
+            assert self_attn.sliding_key_norm.weight.data.shape == sliding_key_norm_weight.shape, f"{self_attn.sliding_key_norm.weight.data.shape} == {sliding_key_norm_weight.shape}"
+            self_attn.sliding_key_norm.weight.data = sliding_key_norm_weight.contiguous()
+
+        else:
+            k = prefix + f'transformer.h.{layer_index}.attn.key_layernorm.weight'
+            key_norm_weight = get_tensor(state_dict[k])
+            key_norm_weight = torch.stack((key_norm_weight,), dim=0).to(torch.bfloat16).reshape(-1)
+            assert self_attn.key_norm.weight.data.shape == key_norm_weight.shape, f"{self_attn.key_norm.weight.data.shape} == {key_norm_weight.shape}"
+            self_attn.key_norm.weight.data = key_norm_weight.contiguous()
 
         k = prefix + f'transformer.h.{layer_index}.attn.context_norm.weight'
         context_norm_weight = get_tensor(state_dict[k])
@@ -401,7 +487,12 @@ def _reshard_fsdp_state_dict_to_xperf_triton_m8(tp_model: XPerfTritonInferenceMo
         k = prefix + f'transformer.h.{layer_index}.attn.v_proj.weight'
         v_proj_weight = get_tensor(state_dict.pop(k)).to(torch.bfloat16).view(-1, hidden_size)
 
-        qkv_weight = split_qkv_project(torch.cat((q_proj_weight, k_proj_weight, v_proj_weight), dim=0).transpose(0, 1))
+        if getattr(self_attn, 'is_nsa_layer', False):
+            qkv_weight = split_qkv_project_nsa(
+                torch.cat((q_proj_weight, k_proj_weight, v_proj_weight), dim=0).transpose(0, 1))
+        else:
+            qkv_weight = split_qkv_project(
+                torch.cat((q_proj_weight, k_proj_weight, v_proj_weight), dim=0).transpose(0, 1))
 
         assert self_attn.qkv_proj.weight.data.shape == qkv_weight.shape, f"{self_attn.qkv_proj.weight.data.shape} == {qkv_weight.shape}"
         self_attn.qkv_proj.weight.data = qkv_weight.contiguous()

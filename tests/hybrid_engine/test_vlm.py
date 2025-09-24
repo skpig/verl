@@ -51,7 +51,6 @@ def get_batch(config, tokenizer, processor, model_path):
 
 @pytest.mark.parametrize("gpu_allocator", [8], indirect=True)
 def test_vlm_gen(monkeypatch, gpu_allocator, ray_fixture):
-    monkeypatch.setenv('ARNOLD_HDFS_NATIVE', 'true')
     override_config = OmegaConf.create({
         'data': {
             'max_prompt_length': 8192,
