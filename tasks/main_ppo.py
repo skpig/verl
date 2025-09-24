@@ -27,6 +27,7 @@ import warnings
 import random
 import contextlib
 import gc
+import requests
 import json
 import numpy as np
 from datetime import datetime
@@ -79,14 +80,32 @@ ARNOLD_REGION = os.getenv("ARNOLD_REGION", "CN")
 ENABLE_REDIS_TRITON_CACHE = int(os.getenv("ENABLE_REDIS_TRITON_CACHE", '1'))
 CHANNEL = "llm_channel"
 
+is_wl_cluster = False
+log_collection_url = "http://lab-mlnlp.byted.org/log_collection"
 if os.getenv("RUNTIME_IDC_NAME", "") == "wlby":
-    CHANNEL = "llm_channel_wl"
+    is_wl_cluster = True
 
 
 def send_to_kafka(message):
     message["ARNOLD_TRIAL_ID"] = ARNOLD_TRIAL_ID
     message["ARNOLD_TRIAL_OWNER"] = ARNOLD_TRIAL_OWNER
-    collect_array(CHANNEL, [json.dumps(message, ensure_ascii=False).encode("utf-8")])
+    if is_wl_cluster:
+        payload = {"log": message}
+        try:
+            resp = requests.post(
+                log_collection_url,
+                json=payload,  # 自动设置 Content-Type: application/json
+                timeout=10,  # 超时保护
+                headers={"Accept": "application/json"},
+                proxies={
+                    "http": None,
+                    "https": None
+                }  # 不走环境代理（重要）
+            )
+        except Exception as e:
+            pass
+    else:
+        collect_array(CHANNEL, [json.dumps(message, ensure_ascii=False).encode("utf-8")])
 
 
 def is_awaitable(obj):
