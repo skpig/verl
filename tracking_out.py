@@ -122,7 +122,7 @@ class Trial:
                     df_lst.append(df)
                 df = pd.concat(df_lst)
                 # deduplicate
-                df = df.drop_duplicates(subset=['step'], keep='last')
+                df = df.drop_duplicates(subset=['step'], keep='first')
                 df.to_csv(self.cache_path, index=False)
             else:
                 run = api.run(project=proj_name, run_id=trial_id)
@@ -133,6 +133,7 @@ class Trial:
         
         if proj_name == "debug_hbz":
             step_range = 400
+            # step_range = 500
         else:
             step_range = 300
         self.df = df[df['step'] <= step_range].reset_index(drop=True)
@@ -399,8 +400,8 @@ def figure_token_acc():
             "#2C67A7", # vanilla
             "#73C37A", # dynamic
             "#76B5AF", # replay
-            "#D6E4D2", # prior
-            "#FBB463", # ablation
+            "#FBB463", # prior
+            # "#D6E4D2", # ablation
             "#F57F72", # ours
         ]
     )
@@ -416,7 +417,7 @@ def figure_token_acc():
         x_numtokens_y_aime_lst = []
         x_numtokens_y_amc_lst = []
         for alg in all_trial_groups[proj]:
-            if base_alg not in alg or "mopps" in alg:
+            if base_alg not in alg or "mopps" in alg or "abl" in alg:
                 print("skip", alg)
                 continue
 
@@ -431,31 +432,19 @@ def figure_token_acc():
 
             x_time_y_aime = all_trial_groups[proj][alg].get_top_x_y_dataframe(x_col='tim', y_col='aime', step_range=step_range)
             x_time_y_amc = all_trial_groups[proj][alg].get_top_x_y_dataframe(x_col='tim', y_col='amc', step_range=step_range)
-            x_numtokens_y_aime = all_trial_groups[proj][alg].get_top_x_y_dataframe(x_col='token', y_col='aime')
-            x_numtokens_y_amc = all_trial_groups[proj][alg].get_top_x_y_dataframe(x_col='token', y_col='amc', step_range=step_range)
 
-            x_time_y_aime['alg'] = alg
             x_time_y_amc['alg'] = alg
-            x_numtokens_y_aime['alg'] = alg
-            x_numtokens_y_amc['alg'] = alg
 
+            # x_time_y_amc['val-core/amc12/acc/mean@16'] = x_time_y_aime['val-core/aime24/acc/mean@32'].cummax()
             x_time_y_amc['val-core/amc12/acc/mean@16'] = x_time_y_amc['val-core/amc12/acc/mean@16'].cummax()
+            x_time_y_amc['timing_s/cumsum_step'] = x_time_y_amc['timing_s/cumsum_step'] / 3600
 
-            x_time_y_aime_lst.append(x_time_y_aime)
             x_time_y_amc_lst.append(x_time_y_amc)
-            x_numtokens_y_aime_lst.append(x_numtokens_y_aime)
-            x_numtokens_y_amc_lst.append(x_numtokens_y_amc)
 
-        x_time_y_aime = pd.concat(x_time_y_aime_lst)
         x_time_y_amc = pd.concat(x_time_y_amc_lst)
-        x_numtokens_y_aime = pd.concat(x_numtokens_y_aime_lst)
-        x_numtokens_y_amc = pd.concat(x_numtokens_y_amc_lst)
-
-        # x_time_y_aime = x_time_y_aime[x_time_y_aime['step'] % 10 == 0]
-        # x_time_y_amc = x_time_y_amc[x_time_y_amc['step'] % 10 == 0]
-        # x_numtokens_y_aime = x_numtokens_y_aime[x_numtokens_y_aime['step'] % 10 == 0]
-        # x_numtokens_y_amc = x_numtokens_y_amc[x_numtokens_y_amc['step'] % 10 == 0]
-
+        x_time_y_aime = None
+        x_numtokens_y_aime = None
+        x_numtokens_y_amc = None
 
         return x_time_y_aime, x_time_y_amc, x_numtokens_y_aime, x_numtokens_y_amc
 
@@ -465,28 +454,28 @@ def figure_token_acc():
     _, df, _, _ = _subfigure("debug_hbz", 'ppo')
     sns.lineplot(data=df, x='timing_s/cumsum_step', y='val-core/amc12/acc/mean@16', hue='alg', ax=ax[0, 0], drawstyle='steps-post', palette=palette)
     # sns.regplot(data=df, x='timing_s/cumsum_step', y='val-core/amc12/acc/mean@16', hue='alg', ax=ax[0, 0], lowess=True)
-    ax[0,0].set(xlim=(0, 300000), ylim=(0.55, 0.8))
+    ax[0,0].set(xlim=(0, 80), ylim=(0.55, 0.8))
     ax[0,0].set_title("ppo on DAPO-Train")
 
     _, df, _, _ = _subfigure("debug_hbz3", 'ppo')
     # df['val-core/amc12/acc/mean@16'] = df['val-core/amc12/acc/mean@16'].cummax()
     sns.lineplot(data=df, x='timing_s/cumsum_step', y='val-core/amc12/acc/mean@16', hue='alg', ax=ax[0, 1], drawstyle='steps-post', palette=palette)
     # sns.regplot(data=df, x='timing_s/cumsum_step', y='val-core/amc12/acc/mean@16', hue='alg', ax=ax[0, 1], lowess=True)
-    ax[0,1].set(xlim=(0, 200000), ylim=(0.5, 0.7))
+    ax[0,1].set(xlim=(0, 50), ylim=(0.5, 0.7))
     ax[0,1].set_title("ppo on AIME-Old")
 
     _, df, _, _ = _subfigure("debug_hbz", 'grpo')
     # df['val-core/amc12/acc/mean@16'] = df['val-core/amc12/acc/mean@16'].cummax()
     sns.lineplot(data=df, x='timing_s/cumsum_step', y='val-core/amc12/acc/mean@16', hue='alg', ax=ax[1, 0], drawstyle='steps-post', palette=palette)
     # sns.regplot(data=df, x='timing_s/cumsum_step', y='val-core/amc12/acc/mean@16', hue='alg', ax=ax[1, 0], lowess=True)
-    ax[1,0].set(xlim=(0, 250000), ylim=(0.65, 0.8))
+    ax[1,0].set(xlim=(0, 60), ylim=(0.65, 0.8))
     ax[1,0].set_title("grpo on DAPO-Train")
     
     _, df, _, _ = _subfigure("debug_hbz3", 'grpo')
     # df['val-core/amc12/acc/mean@16'] = df['val-core/amc12/acc/mean@16'].cummax()
     sns.lineplot(data=df, x='timing_s/cumsum_step', y='val-core/amc12/acc/mean@16', hue='alg', ax=ax[1, 1], drawstyle='steps-post', palette=palette)
     # sns.regplot(data=df, x='timing_s/cumsum_step', y='val-core/amc12/acc/mean@16', hue='alg', ax=ax[1, 1], lowess=True)
-    ax[1,1].set(xlim=(0, 150000), ylim=(0.5, 0.7))
+    ax[1,1].set(xlim=(0, 40), ylim=(0.5, 0.7))
     ax[1,1].set_title("grpo on AIME-Old")
 
     fig.savefig(f'logs/main_figure.png', dpi=600, bbox_inches='tight')
@@ -500,8 +489,8 @@ def figure_length_scaling():
             "#2C67A7", # vanilla
             "#73C37A", # dynamic
             "#76B5AF", # replay
-            "#D6E4D2", # prior
-            # "#FBB463", # ablation
+            "#FBB463", # prior
+            # "#D6E4D2", # ablation
             "#F57F72", # ours
         ]
     )
@@ -529,26 +518,27 @@ def figure_length_scaling():
             x_step_y_length['alg'] = alg
             x_step_y_length_lst.append(x_step_y_length)
         x_step_y_length = pd.concat(x_step_y_length_lst)
-        x_step_y_length = x_step_y_length[x_step_y_length['step'] % 10 == 0]
+        x_step_y_length.reset_index(drop=True, inplace=True)
+        # x_step_y_length = x_step_y_length[x_step_y_length['step'] % 10 == 0]
         return x_step_y_length
     
-    fig, ax = plt.subplots(2, 2, figsize=(20, 10))
+    fig, ax = plt.subplots(ncols=2, figsize=(20, 5))
 
-    df = _subfigure("debug_hbz", 'ppo')
-    sns.lineplot(data=df, x='step', y='response_length/mean', hue='alg', ax=ax[0, 0], palette=palette)
-    ax[0,0].set_title("ppo on DAPO-Train")
+    # df = _subfigure("debug_hbz", 'ppo')
+    # sns.lineplot(data=df, x='step', y='response_length/mean', hue='alg', ax=ax[0, 0], palette=palette)
+    # ax[0,0].set_title("ppo on DAPO-Train")
 
-    df = _subfigure("debug_hbz3", 'ppo')
-    sns.lineplot(data=df, x='step', y='response_length/mean', hue='alg', ax=ax[0, 1], palette=palette)
-    ax[0,1].set_title("ppo on AIME-Old")
+    # df = _subfigure("debug_hbz3", 'ppo')
+    # sns.lineplot(data=df, x='step', y='response_length/mean', hue='alg', ax=ax[0, 1], palette=palette)
+    # ax[0,1].set_title("ppo on AIME-Old")
 
     df = _subfigure("debug_hbz", 'grpo')
-    sns.lineplot(data=df, x='step', y='response_length/mean', hue='alg', ax=ax[1, 0], palette=palette)
-    ax[1,0].set_title("grpo on DAPO-Train")
+    sns.lineplot(data=df, x='step', y='response_length/mean', hue='alg', ax=ax[0], palette=palette)
+    ax[0].set_title("grpo on DAPO-Train")
     
     df = _subfigure("debug_hbz3", 'grpo')
-    sns.lineplot(data=df, x='step', y='response_length/mean', hue='alg', ax=ax[1, 1], palette=palette)
-    ax[1,1].set_title("grpo on AIME-Old")
+    sns.lineplot(data=df, x='step', y='response_length/mean', hue='alg', ax=ax[1], palette=palette)
+    ax[1].set_title("grpo on AIME-Old")
 
     plt.savefig('logs/length_scaling.png', dpi=600, bbox_inches='tight')
     plt.savefig('logs/length_scaling.pdf', dpi=600, bbox_inches='tight')
@@ -635,18 +625,28 @@ def figure_prelim():
     plt.close()
 
 def figure_sampler():
+    fig, axs = plt.subplots(ncols=2, figsize=(20, 5))
+    palette = sns.color_palette(
+        [
+            "#2C67A7", 
+            "#498AA5", 
+            "#76B5AF", 
+            "#C1D5BF", 
+            "#D6E4D2"
+        ]
+    )
+
+    """Ablation on Sigma"""
     runs= {
-        (0.3, 0.99): "run_20250908_0d850204",
         (0.1, 0.99): "run_20250920_f7922ba3",
         (0.2, 0.99): "run_20250918_b9f682a9",
-        (0.4, 0.99): "run_20250919_9bc4e8e5",
-        (0.5, 0.99): "run_20250918_0707b433",
-        (0.3, 0.9): "run_20250918_bcfc9e33",
-        (0.3, 0.95): "run_20250919_edec02d6",
-        (0.3, 0.995): "run_20250918_c1746896",
+        (0.3, 0.99): "run_20250908_0d850204",
+        # (0.4, 0.99): "run_20250919_9bc4e8e5",
+        # (0.5, 0.99): "run_20250918_0707b433",
+        # (0.3, 0.9): "run_20250918_bcfc9e33",
+        # (0.3, 0.95): "run_20250919_edec02d6",
+        # (0.3, 0.995): "run_20250918_c1746896",
     }
-
-    fig, axs = plt.subplots(2, 1, figsize=(10, 10))
 
     api = wandb.TrackingApi()
     all_df = []
@@ -657,17 +657,76 @@ def figure_sampler():
             run = api.run(project="debug_hbz3", run_id=run_id)
             h = run.history()
             df = pd.DataFrame(h)
-            df = df[['step', 'sampler/pg_correlation', 'sampler/pg_error']]
+            df = df[['step', 'sampler/pg_correlation', 'sampler/pg_error', 'val-core/amc12/acc/mean@16', 'val-core/aime24/acc/mean@32']]
             df.to_csv(f'logs/sampler_{run_id}.csv', index=False)
         df['sigma'] = sigma
         df['lambda'] = lambda_value
         all_df.append(df)
     df = pd.concat(all_df)
     
-    sns.lineplot(data=df, x='step', y='sampler/pg_correlation', hue='sigma', ax=axs[0])
-    sns.lineplot(data=df, x='step', y='sampler/pg_error', hue='sigma', ax=axs[1])
+    # sns.lineplot(data=df, x='step', y='sampler/pg_correlation', hue='sigma', ax=axs[0][0])
+    sns.lineplot(data=df, x='step', y='sampler/pg_error', hue='sigma', ax=axs[0], palette=palette)
+    axs[0].set_title("Ablation on Sigma")
+    axs[0].set(xlim=(0, 300), ylim=(0.05, 0.3))
+
+    df = df.groupby('sigma').agg(
+        AIME24=('val-core/aime24/acc/mean@32', 'max'),
+        AMC23=('val-core/amc12/acc/mean@16', 'max'),
+    ).reset_index()
+    df['AMC23'] = df['AMC23'] * 100
+    df['AIME24'] = df['AIME24'] * 100
+    # print in latex table
+    print(df.to_latex(index=False,             
+            float_format="%.2f",   # 浮点数保留 3 位小数
+            ))
 
     
+    """Ablation on Lambda"""
+    runs= {
+        # (0.3, 0.9): "run_20250918_bcfc9e33",
+        (0.3, 0.99): "run_20250908_0d850204",
+        # (0.1, 0.99): "run_20250920_f7922ba3",
+        # (0.2, 0.99): "run_20250918_b9f682a9",
+        # (0.4, 0.99): "run_20250919_9bc4e8e5",
+        # (0.5, 0.99): "run_20250918_0707b433",
+        (0.3, 0.95): "run_20250919_edec02d6",
+        (0.3, 0.995): "run_20250918_c1746896",
+    }
+
+    api = wandb.TrackingApi()
+    all_df = []
+    for (sigma, lambda_value), run_id in runs.items():
+        if os.path.exists(f'logs/sampler_{run_id}.csv'):
+            df = pd.read_csv(f'logs/sampler_{run_id}.csv')
+        else:
+            run = api.run(project="debug_hbz3", run_id=run_id)
+            h = run.history()
+            df = pd.DataFrame(h)
+            df = df[['step', 'sampler/pg_correlation', 'sampler/pg_error', 'val-core/amc12/acc/mean@16', 'val-core/aime24/acc/mean@32']]
+            df.to_csv(f'logs/sampler_{run_id}.csv', index=False)
+        df['sigma'] = sigma
+        df['lambda'] = lambda_value
+        all_df.append(df)
+    df = pd.concat(all_df)
+
+    # sns.lineplot(data=df, x='step', y='sampler/pg_correlation', hue='lambda', ax=axs[1][0])
+    sns.lineplot(data=df, x='step', y='sampler/pg_error', hue='lambda', ax=axs[1], palette=palette)
+    axs[1].set_title("Ablation on Lambda")
+    axs[1].set(xlim=(0, 300), ylim=(0.05, 0.3))
+
+    df = df.groupby('lambda').agg(
+        AIME24=('val-core/aime24/acc/mean@32', 'max'),
+        AMC23=('val-core/amc12/acc/mean@16', 'max'),
+    ).reset_index()
+    df['AMC23'] = df['AMC23'] * 100
+    df['AIME24'] = df['AIME24'] * 100
+    # print in latex table
+    print(df.to_latex(index=False,             
+            float_format="%.2f",   # 浮点数保留 3 位小数
+            ))
+
+
+
     plt.savefig(f"logs/sampler.png", dpi=600, bbox_inches='tight')
     plt.savefig(f"logs/sampler.pdf", dpi=600, bbox_inches='tight')
     plt.close()
@@ -689,7 +748,7 @@ id2trialid = {
         "109": ["run_20250911_5c97fa50"], #, "run_20250911_5c97fa50"], # ppo-prost
         "45": ["run_20250902_086dc19c"],# "run_20250910_53457396"], # grpo
         "46": ["run_20250826_c5e64a3d"],# "run_20250901_1f64b57e"],  # grpo-mopps
-        "48": ["run_20250914_f8c4a6f8"], # grpo-dynamic, run_20250914_f8c4a6f8, run_20250910_d1ebb807
+        "48": [["run_20250914_f8c4a6f8", "run_20250910_d1ebb807"]], # grpo-dynamic, since the first run is less than 400 step, for the drawing of `length_scaling`
         "50": ["run_20250911_500dd081"], # grpo-replay, run_20250913_0352e438
         "54": ["run_20250914_d4cdde86"], # grpo-prior
         "52": ["run_20250911_b45b98e3"], # grpo-ablation, run_20250914_293b77af
@@ -701,15 +760,15 @@ id2trialid = {
     "debug_hbz3": {
         "4": ["run_20250910_d26b10d8"], #, "run_20250910_d26b10d8"], # ppo
         "5": ["run_20250909_c2ede604"], # "run_20250914_44220a21"], # ppo-mopps
-        "8": ["run_20250917_43061166"], # ppo-dynamic, ["run_20250911_a6b42635"] not good
+        "8": [["run_20250917_43061166", "run_20250916_4f6f64e1"]], # ppo-dynamic, ["run_20250911_a6b42635"] not good
         "10": ["run_20250911_76482ee4"], #ppo-replay, ["run_20250911_76482ee4"] not finished
         "14": ["run_20250913_85374dab"], # ppo-prior, ["run_20250913_85374dab"] not finished
         "12": ["run_20250913_18e79f96"], #ppo-ablation ["run_20250913_18e79f96"] not finished
         "25": ["run_20250908_9baae94d"], # run_20250909_6bf8a0f8"], # "run_20250908_9baae94d", "run_20250909_f1264f19"], # ppo-prost
         "6": ["run_20250910_199b7e6f"], # "run_20250912_6605481d"], # grpo, "run_20250908_9d2d86b8"
         "7": ["run_20250909_050f6407"], # "run_20250910_3845177e"], # grpo-mopps
-        "9": ["run_20250911_21082c38"], # grpo-dynamic, ["run_20250911_21082c38"] not finished
-        "11": ["run_20250912_3d20de87"], # "run_20250912_3d20de87"], # grpo-replay
+        "9": [["run_20250911_21082c38", "run_20250915_2a892a9e", "run_20250922_6aa08c81"]], # grpo-dynamic, ["run_20250911_21082c38"] not finished
+        "11": ["run_20250922_71175d2c"], # "run_20250912_3d20de87"], # grpo-replay
         "15": ["run_20250913_c8c23d45"], # "run_20250915_2ba7a109"], # grpo-prior
         "13": ["run_20250913_76ad6fa3"], # grpo-ablation
         "26": ["run_20250908_0d850204"], # "run_20250909_98c5b567", "run_20250909_47695421"] # grpo-prost
@@ -766,18 +825,20 @@ def process_all_runs_multiprocess(max_workers=4):
     print("所有任务处理完成！")
 
 if __name__ == "__main__":
+    os.chdir(os.path.dirname(os.path.abspath(__file__)))
     # 设置多进程启动方式为spawn，确保wandb API的线程安全
     # multiprocessing.set_start_method('spawn', force=True)
     # process_all_runs_multiprocess(max_workers=1)
     sns.set_theme(style="whitegrid")
 
     # table_main_result(all_ids)
-    # figure_token_acc()
+    figure_token_acc()
     # figure_prelim()
-    # figure_length_scaling()
-    figure_sampler()
+    figure_length_scaling()
+    # TrialGroup("debug_hbz", "50", id2trialid["debug_hbz"]["50"])
+    # figure_sampler()
 
-    # small model
+    # small model on Qwen3-4b
     # table_main_result(small_ids)
 
     """Single"""
