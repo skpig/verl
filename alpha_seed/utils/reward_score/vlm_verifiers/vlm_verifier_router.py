@@ -41,19 +41,24 @@ class VLMRouter(Verifier, reward_style="vlm_verifier_router"):
     def is_remote(self):
         return True
 
-    def preprocess(self, input_ids, ground_truth):
-        input_ids = [x for x in input_ids if x != -100]
-        solution_str = self.tokenizer.decode(input_ids)
-        solution_str_post_proc = post_process_solution_str(self.config,
-                                                           solution_str,
-                                                           eos_token=self.tokenizer.eos_token)
-        ## we need only the response part for vlm_verifier_router
-        marker_user = '<[BOS_never_used_51bce0c785ca2f68081bfa7d91973934]>user\n'
-        marker_assistant = '<[BOS_never_used_51bce0c785ca2f68081bfa7d91973934]>assistant\n'
+    def preprocess(self, *args, **kwargs):
+        if 'input_ids' in kwargs:
+            input_ids = kwargs['input_ids']
+            input_ids = [x for x in input_ids if x != -100]
+            solution_str = self.tokenizer.decode(input_ids)
+            solution_str_post_proc = post_process_solution_str(self.config,
+                                                               solution_str,
+                                                               eos_token=self.tokenizer.eos_token)
+            ## we need only the response part for vlm_verifier_router
+            marker_user = '<[BOS_never_used_51bce0c785ca2f68081bfa7d91973934]>user\n'
+            marker_assistant = '<[BOS_never_used_51bce0c785ca2f68081bfa7d91973934]>assistant\n'
 
-        assert marker_assistant in solution_str_post_proc and marker_user in solution_str_post_proc, f"marker_assistant {marker_assistant} or marker_user {marker_user} not in solution_str_post_proc {solution_str_post_proc}"
-        solution_str_post_proc_anwswer = solution_str_post_proc.rsplit(marker_user, 1)[1]
-        solution_str_post_proc_anwswer = solution_str_post_proc_anwswer.split(marker_assistant, 1)[1]
+            assert marker_assistant in solution_str_post_proc and marker_user in solution_str_post_proc, f"marker_assistant {marker_assistant} or marker_user {marker_user} not in solution_str_post_proc {solution_str_post_proc}"
+            solution_str_post_proc_anwswer = solution_str_post_proc.rsplit(marker_user, 1)[1]
+            solution_str_post_proc_anwswer = solution_str_post_proc_anwswer.split(marker_assistant, 1)[1]
+        else:
+            solution_str_post_proc_anwswer = kwargs['solution_str']
+        ground_truth = kwargs['ground_truth']
         think_template = self.config.data.think_template if self.config.data.think_template is not None else 'v2'
         return solution_str_post_proc_anwswer, ground_truth, think_template, self.config.trainer.code_sandbox_psm, self.config.trainer.volc_ark_key, self.config.trainer.volc_model_name
 

@@ -29,12 +29,17 @@ class AiderVerifier(Verifier, reward_style="aider"):
     def is_remote(self):
         return self.config.trainer.use_remote_sandbox
 
-    def preprocess(self, input_ids, ground_truth):
-        input_ids = np.array(input_ids)
-        input_ids = input_ids[input_ids >= 0].tolist()
-        solution_str = self.tokenizer.decode(input_ids, skip_special_tokens=False)
-        solution_str = solution_str.split("assistant\n")[-1]
-        solution_str_post_proc = solution_str.rsplit(self.tokenizer.eos_token, 1)[0]
+    def preprocess(self, *args, **kwargs):
+        ground_truth = kwargs['ground_truth']
+        if 'input_ids' in kwargs:
+            input_ids = kwargs['input_ids']
+            input_ids = np.array(input_ids)
+            input_ids = input_ids[input_ids >= 0].tolist()
+            solution_str = self.tokenizer.decode(input_ids, skip_special_tokens=False)
+            solution_str = solution_str.split("assistant\n")[-1]
+            solution_str_post_proc = solution_str.rsplit(self.tokenizer.eos_token, 1)[0]
+        else:
+            solution_str_post_proc = kwargs['solution_str']
         return solution_str_post_proc, ground_truth, self.config.trainer.code_sandbox_psm
 
     @staticmethod

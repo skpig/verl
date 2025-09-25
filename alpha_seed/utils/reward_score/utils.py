@@ -77,15 +77,20 @@ class Verifier:
     def is_remote(self):
         return False
 
-    def preprocess(self, input_ids, ground_truth):
-        input_ids = np.array(input_ids)
-        input_ids = input_ids[input_ids >= 0].tolist()
-        solution_str = self.tokenizer.decode(input_ids, skip_special_tokens=False)
-        solution_str = solution_str.split("assistant\n")[-1]
-        solution_str_post_proc = post_process_solution_str(self.config,
-                                                           solution_str,
-                                                           self.reward_style,
-                                                           eos_token=self.tokenizer.eos_token)
+    def preprocess(self, *args, **kwargs):
+        ground_truth = kwargs['ground_truth']
+        if 'input_ids' in kwargs:
+            input_ids = kwargs['input_ids']
+            input_ids = np.array(input_ids)
+            input_ids = input_ids[input_ids >= 0].tolist()
+            solution_str = self.tokenizer.decode(input_ids, skip_special_tokens=False)
+            solution_str = solution_str.split("assistant\n")[-1]
+            solution_str_post_proc = post_process_solution_str(self.config,
+                                                               solution_str,
+                                                               self.reward_style,
+                                                               eos_token=self.tokenizer.eos_token)
+        else:
+            solution_str_post_proc = kwargs['solution_str']
         return solution_str_post_proc, ground_truth
 
     def get_remote_score(self, data_uid):
@@ -103,6 +108,8 @@ class Verifier:
             score = self.get_remote_score(data_uid)
 
         if score is None:
+            if self.is_remote():
+                return self.compute_score_remote(*args, **kwargs)
             score = self.compute_score(*args, **kwargs)
         return score
 
@@ -110,8 +117,8 @@ class Verifier:
     def compute_score(*args, **kwargs) -> float:
         pass
 
-    def compute_score_remote(self, input_ids, ground_truth, **kwargs):
-        return self.compute_score(*self.preprocess(input_ids, ground_truth))
+    def compute_score_remote(self, *args, **kwargs):
+        return self.compute_score(*self.preprocess(*args, **kwargs))
 
 
 class ExternalVerifier(Verifier, reward_style="external"):
