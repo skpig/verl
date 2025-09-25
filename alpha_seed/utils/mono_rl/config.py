@@ -34,6 +34,8 @@ def _set_config_fsdp_engine(mono_config, source_config: DictConfig, model_config
     _set_config_field(mono_config.model, config, "update_gate_ema")
     _set_config_field(mono_config.model, config, "remove_o_bias")
     _set_config_field(mono_config.model, config, "freeze_gate")
+    _set_config_field(mono_config.model, config, "record_amax")
+    _set_config_field(mono_config.model, config, "calibrate_batch_num")
 
     # set the hf_model_config field of the fsdp_engine from model_config
     source_model_config = model_config

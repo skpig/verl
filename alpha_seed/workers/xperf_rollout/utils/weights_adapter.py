@@ -217,6 +217,7 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
         self.source_weights: Dict[str, Union[torch.Tensor, DTensor]] = {}
         self.need_amax = "A8" in self.quant_mode
         self.amax_ready = False
+        self.quant_ratio_ready = False
         self.backend = backend
 
     def get_model_info(self, xperf_model: torch.nn.Module) -> None:
@@ -382,24 +383,47 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
             if self.need_amax:
                 self.source_weights[layer_idx].update({
                     "qkv_proj_amax":
-                        loader(f"{layer_key}.attn.input_amax_qkv", f"{layer_key}.self_attn.input_amax_qkv"),
+                        loader(f"{layer_key}.attn.q_proj.input_amax", f"{layer_key}.self_attn.q_proj.input_amax"),
+                    "qkv_proj_ratio":
+                        loader(f"{layer_key}.attn.q_proj.smooth_quant_ratio",
+                               f"{layer_key}.self_attn.q_proj.smooth_quant_ratio"),
                     "o_proj_amax":
-                        loader(f"{layer_key}.attn.input_amax_o", f"{layer_key}.self_attn.input_amax_o"),
+                        loader(f"{layer_key}.attn.o_proj.input_amax", f"{layer_key}.self_attn.o_proj.input_amax"),
+                    "o_proj_ratio":
+                        loader(f"{layer_key}.attn.o_proj.smooth_quant_ratio",
+                               f"{layer_key}.self_attn.o_proj.smooth_quant_ratio"),
                     "fc1_amax":
-                        loader(f"{layer_key}.mlp.moe.input_amax_fc1", f"{layer_key}.mlp.input_amax_fc1"),
+                        loader(f"{layer_key}.mlp.moe.experts.input_amax_fc1", f"{layer_key}.mlp.input_amax_fc1"),
+                    "fc1_ratio":
+                        loader(f"{layer_key}.mlp.moe.experts.smooth_quant_ratio_fc1",
+                               f"{layer_key}.mlp.smooth_quant_ratio_fc1"),
                     "fc2_amax":
-                        loader(f"{layer_key}.mlp.moe.input_amax_fc2", f"{layer_key}.mlp.input_amax_fc2"),
+                        loader(f"{layer_key}.mlp.moe.experts.input_amax_fc2", f"{layer_key}.mlp.input_amax_fc2"),
+                    "fc2_ratio":
+                        loader(f"{layer_key}.mlp.moe.experts.smooth_quant_ratio_fc2",
+                               f"{layer_key}.mlp.smooth_quant_ratio_fc2"),
                     "share_fc1_amax":
-                        loader(f"{layer_key}.mlp.moe.share_input_amax_fc1"),
+                        loader(f"{layer_key}.mlp.moe.experts_share.input_amax_fc1"),
+                    "share_fc1_ratio":
+                        loader(f"{layer_key}.mlp.moe.experts_share.smooth_quant_ratio_fc1"),
                     "share_fc2_amax":
-                        loader(f"{layer_key}.mlp.moe.share_input_amax_fc2")
+                        loader(f"{layer_key}.mlp.moe.experts_share.input_amax_fc2"),
+                    "share_fc2_ratio":
+                        loader(f"{layer_key}.mlp.moe.experts_share.smooth_quant_ratio_fc2")
                 })
                 if self.source_weights[layer_idx]["qkv_proj_amax"].max() > 0:
                     # 第一次rollout的时候没有amax信息，使用全1作为smoothQuant scale
                     self.amax_ready = True
                 else:
                     self.amax_ready = False
-                    print("amax is not ready, will use all ones as smoothQuant scale")
+                    if torch.distributed.get_rank() == 0:
+                        print("amax is not ready, will use all ones as smoothQuant scale")
+                if self.source_weights[layer_idx]["qkv_proj_ratio"].max() > 0:
+                    self.quant_ratio_ready = True
+                else:
+                    self.quant_ratio_ready = False
+                    if torch.distributed.get_rank() == 0:
+                        print("quant ratio is not ready, will use all 0.5 as smoothQuant ratio")
 
         for mtp_idx in range(0, self.mtp_n_heads):
             layer_idx = self.num_layers - self.mtp_n_heads + mtp_idx
@@ -461,13 +485,21 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
             elif "W4A8" in self.quant_mode:
                 qkv_proj_amax, o_proj_amax = self._process_attention_amax(layer_idx)
                 fc1_amax, fc2_amax, share_fc1_amax, share_fc2_amax = self._process_ffn_amax(layer_idx)
+                qkv_proj_ratio = self.source_weights[layer_idx]["qkv_proj_ratio"]
+                o_proj_ratio = self.source_weights[layer_idx]["o_proj_ratio"]
+                fc1_ratio = self.source_weights[layer_idx]["fc1_ratio"]
+                fc2_ratio = self.source_weights[layer_idx]["fc2_ratio"]
+                share_fc1_ratio = self.source_weights[layer_idx]["share_fc1_ratio"]
+                share_fc2_ratio = self.source_weights[layer_idx]["share_fc2_ratio"]
                 dense_gemm_w8a8_weights, dense_gemm_w8a8_smooth_quant_scale, dense_gemm_w8a8_weight_qscale, \
                     group_gemm_w4a8_weights, group_gemm_w4a8_smooth_quant_scale, group_gemm_w4a8_i8_weight_qscale, \
                     group_gemm_w4a8_i4_weight_qscale_zero = self._process_quant_w4a8(
                         [qkv_weight, o_weight, share_fc1_weight, share_fc2_weight],
                         [qkv_proj_amax, o_proj_amax, share_fc1_amax, share_fc2_amax],
+                        [qkv_proj_ratio, o_proj_ratio, share_fc1_ratio, share_fc2_ratio],
                         [fc1_weight, fc2_weight],
-                        [fc1_amax, fc2_amax])
+                        [fc1_amax, fc2_amax],
+                        [fc1_ratio, fc2_ratio])
                 qkv_weight, o_weight, share_fc1_weight, share_fc2_weight = dense_gemm_w8a8_weights
                 fc1_weight, fc2_weight = group_gemm_w4a8_weights
                 w4_qscale = [
@@ -1257,7 +1289,8 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
         return *fp8_weights, fp8_qscale
 
     def _process_quant_w4a8(self, dense_gemm_weights: List[torch.Tensor], dense_gemm_amax: List[torch.Tensor],
-                            group_gemm_weights: List[torch.Tensor], group_gemm_amax: List[torch.Tensor]):
+                            dense_gemm_quant_ratio: List[torch.Tensor], group_gemm_weights: List[torch.Tensor],
+                            group_gemm_amax: List[torch.Tensor], group_gemm_quant_ratio: List[torch.Tensor]):
 
         dense_gemm_w8a8_weights = []
         dense_gemm_w8a8_smooth_quant_scale = []
@@ -1267,23 +1300,25 @@ class FSDPLLMWeightsAdapter(WeightsAdapter, AdapterProtocol):
         group_gemm_w4a8_i8_weight_qscale = []
         group_gemm_w4a8_i4_weight_qscale_zero = []
 
-        for weight, amax in zip(dense_gemm_weights, dense_gemm_amax):
+        for weight, amax, ratio in zip(dense_gemm_weights, dense_gemm_amax, dense_gemm_quant_ratio):
+            ratio = ratio.item() if ratio is not None and self.quant_ratio_ready else 0.5
             if weight is None:
                 smooth_quant_scale, weight, i8_weight_qscale = None, None, None
             else:
-                smooth_quant_scale, weight, i8_weight_qscale = quant_gemm_weight_w8a8(weight, amax)
+                smooth_quant_scale, weight, i8_weight_qscale = quant_gemm_weight_w8a8(weight, amax, ratio)
                 smooth_quant_scale = (1.0 / smooth_quant_scale).to(smooth_quant_scale.dtype)
             dense_gemm_w8a8_weights.append(weight)
             dense_gemm_w8a8_smooth_quant_scale.append(smooth_quant_scale)
             dense_gemm_w8a8_weight_qscale.append(i8_weight_qscale)
 
-        for weight, amax in zip(group_gemm_weights, group_gemm_amax):
+        for weight, amax, ratio in zip(group_gemm_weights, group_gemm_amax, group_gemm_quant_ratio):
             is_dense = False
+            ratio = ratio.item() if ratio is not None and self.quant_ratio_ready else 0.5
             if weight.dim() == 2:
                 weight = weight.unsqueeze(0)
                 is_dense = True
             smooth_quant_scale, i4_weight, i8_weight_qscale, i4_weight_qscale, i4_weight_qzero = \
-                quant_group_gemm_weight_w4a8(weight, amax)
+                quant_group_gemm_weight_w4a8(weight, amax, ratio)
             smooth_quant_scale = (1.0 / smooth_quant_scale).to(smooth_quant_scale.dtype)
             i4_scale_zero = torch.stack([i4_weight_qscale, -i4_weight_qscale * i4_weight_qzero], dim=-1)
 

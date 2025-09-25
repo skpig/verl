@@ -208,7 +208,8 @@ class AsyncXPerfGPTRollout(object):
             text_cfg["use_perrank_qscale"] = False
             text_cfg["use_perexpert_qscale"] = True
             text_cfg["has_kv_qscale"] = False
-            text_cfg["m8_optimal_fusion"] = True
+            if text_cfg["hidden_size"] % 512 == 0:
+                text_cfg["m8_optimal_fusion"] = True
             if text_cfg["quant_mode"] == "W4A8C8":
                 text_cfg["has_kv_qscale"] = True
         sched_cfg = {
