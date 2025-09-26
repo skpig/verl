@@ -332,6 +332,9 @@ class RewardManager():
                 'pause_tokens_index': pause_tokens_index
             }
 
+            if reward_style in ("code-sandbox", "vlm_verifier_router"):
+                score_fn_inputs["code_sandbox_psm"] = self.config.trainer.code_sandbox_psm
+
             extra_data = data_item.non_tensor_batch.get('extra_data', None)
             if isinstance(extra_data, dict) and ((env_state_bytes := extra_data.get('env_states', None)) is not None):
                 import base64

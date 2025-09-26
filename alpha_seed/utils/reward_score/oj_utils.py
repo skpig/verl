@@ -33,8 +33,8 @@ class OJVerifier(Verifier, reward_style="code-sandbox"):
         return solution_str, ground_truth, self.config.trainer.code_sandbox_psm
 
     @staticmethod
-    def compute_score(solution_str, ground_truth, code_sandbox_psm) -> float:
-        return compute_score(solution_str, ground_truth, code_sandbox_psm)
+    def compute_score(solution_str, ground_truth, code_sandbox_psm, *args, **kwargs) -> float:
+        return compute_score(solution_str, ground_truth, code_sandbox_psm, *args, **kwargs)
 
 
 def parse_sandbox_error_msg(req_res):
@@ -92,12 +92,12 @@ def parse_sandbox_error_msg(req_res):
     return "Unknown (No Tests)", error_msg
 
 
-def compute_score(solution_str, ground_truth, code_sandbox_psm, **argv) -> float:
+def compute_score(solution_str, ground_truth, code_sandbox_psm, *args, **kwargs) -> dict:
     if isinstance(ground_truth, str):
         ground_truth = json.loads(ground_truth)
     oj_features = ground_truth["oj_features"]
     oj_features["completion"] = solution_str
-    client_timeout = 30
+    client_timeout = 60
     for run in range(OJ_MAX_ATTEMPTS):
         if code_sandbox_psm != "":
             endpoint = get_sandbox_endpoint(code_sandbox_psm)
@@ -109,14 +109,24 @@ def compute_score(solution_str, ground_truth, code_sandbox_psm, **argv) -> float
                             config=TestConfig(**oj_features["config"]))
         try:
             req_res = submit(req, endpoint=endpoint, max_attempts=1, client_timeout=client_timeout)
+
+            err_msg = req_res.json()
+            if isinstance(err_msg, str):
+                err_msg = json.loads(err_msg)
+            err_msg["solution_str"] = solution_str
+            err_msg["ground_truth"] = ground_truth
+            err_msg["code_sandbox_psm"] = code_sandbox_psm
+
             if req_res.accepted:
-                return {"score": 1, "msg": ""}
+                return {"score": 1, "msg": json.dumps(err_msg, ensure_ascii=False)}
             else:
-                ret_code, error_msg = parse_sandbox_error_msg(req_res)
-                return {"score": -1, "msg": f"{ret_code}\n{error_msg}"}
+                ret_code, error_msg_parsed = parse_sandbox_error_msg(req_res)
+                err_msg["ret_code"] = ret_code
+                err_msg["error_msg_parsed"] = error_msg_parsed
+                return {"score": -1, "msg": json.dumps(err_msg, ensure_ascii=False)}
         except Exception as ex:
             print(f'sandbox fail with error: {ex}, retrying with {run+1}/{OJ_MAX_ATTEMPTS} attempts')
-        client_timeout += 30
+        client_timeout += 60
     print(f'Finally sandbox fails')
     return {"score": -2, "msg": ""}
 
