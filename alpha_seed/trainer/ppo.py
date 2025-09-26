@@ -1030,6 +1030,7 @@ class RayPPOTrainer(object):
                                                   self.use_rm, self.val_reward_fn, self.actor_rollout_wg,
                                                   self.rollout_manager, self.dist_data_manager)
 
+    @stage_logger.log_duration('init_workers')
     def init_workers(self, kv_store=None, ckpt_global_uploader=None, from_step=0, resume_folder=None):
         """Init resource pool and worker group"""
         from_scratch = from_step == 0
@@ -2133,7 +2134,7 @@ class RayPPOTrainer(object):
                 wandb.finish()
                 return
 
-    @stage_logger.log_duration('initilization')
+    @stage_logger.log_duration('initialization')
     def setup(self):
         self._create_kl_control()
         self._create_dataloader()

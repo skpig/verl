@@ -949,7 +949,7 @@ def main(config):
     # Check for duplicate command line arguments first
     # This prevents hard-to-debug issues from duplicate parameters
     check_duplicate_overrides()
-    with stage_logger.log_duration_context("initilization"):
+    with stage_logger.log_duration_context("initialization"):
         config = auto_recipe(config)
         set_special_tokens(config)
         config = init_ray_cluster(config)
