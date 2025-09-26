@@ -179,5 +179,4 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.actor.tp_size=${tp_size} \
     actor_rollout_ref.ref.tp_size=${tp_size} \
     critic.tp_size=${tp_size} \
-    +actor_rollout_ref.rollout.use_ep=True \
     2>&1 | tee log.txt

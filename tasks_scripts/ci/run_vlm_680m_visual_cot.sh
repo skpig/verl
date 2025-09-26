@@ -11,8 +11,8 @@ RM_MODEL_PATH=$SFT_MODEL_PATH
 
 TRAIN_FILE=hdfs://harunawl/home/byte_data_seed_wl/user/caisonghua/v3.5.1-20B-PPO-PEv2_mini.parquet
 TEST_FILE=hdfs://harunawl/home/byte_data_seed_wl/user/caisonghua/vstar_zerobench_chunk_8_repeat8.parquet
-default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/caisonghua/test/vlm_grpo_$(date +%F)
-
+default_hdfs_dir=/opt/tiger/vlm_grpo_$(date +%F)
+mkdir -p ${default_hdfs_dir}
 
 # 训练长度
 max_prompt_length=8192

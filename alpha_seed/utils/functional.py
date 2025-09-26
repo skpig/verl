@@ -4,6 +4,8 @@ import importlib
 import logging
 import torch
 import json
+import os
+import shutil
 from mono_rl import DataProto
 from verl.utils.seqlen_balancing import rearrange_micro_batches
 from typing import Dict, Any
@@ -126,7 +128,10 @@ def import_from_string(import_str: str) -> Any:
 def save_simple_train_data_to_hdfs(batch, tokenizer, step, file_base_path, max_prompt_length, special_tokens):
     file_path = f"{file_base_path}/simple_train_data"
     local_file_path = f'train_simple_{step}.jsonl'
-    makedirs(file_path, exist_ok=True)
+    if file_path.startswith("hdfs://"):
+        makedirs(file_path, exist_ok=True)
+    else:
+        os.makedirs(file_path, exist_ok=True)
     # open file
     with open(local_file_path, "w") as f:
 
@@ -170,4 +175,7 @@ def save_simple_train_data_to_hdfs(batch, tokenizer, step, file_base_path, max_p
             f.write(json.dumps(data, ensure_ascii=False) + "\n")
             f.flush()
 
-    hput(local_file_path, file_path)
+    if file_path.startswith("hdfs://"):
+        hput(local_file_path, file_path)
+    else:
+        shutil.copy(local_file_path, file_path)

@@ -635,10 +635,12 @@ class RayAutoTuner(Worker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def search(self, constraints: Constraints = None, export_path: str = None, export_dir: str = None):
         if export_path is None:
-            if export_dir:
-                export_path = os.path.join(export_dir, self.tuner.default_filename)
-            else:
-                export_path = self.tuner.default_filename
+            export_path = self.tuner.default_filename
+            if constraints is not None:
+                name, ext = os.path.splitext(export_path)
+                export_path = f"{name}.tp{constraints.tp_size}{ext}"
+        if export_dir:
+            export_path = os.path.join(export_dir, export_path)
         return self.tuner.search(
             constraints=constraints,
             export_path=export_path,
@@ -647,7 +649,12 @@ class RayAutoTuner(Worker):
 
 
 @ray.remote
-def auto_tune_task(config, ngpus_per_node: int, nnodes: int, save_dir: str = None, strategy: str = 'fsdp'):
+def auto_tune_task(config,
+                   ngpus_per_node: int,
+                   nnodes: int,
+                   save_dir: str = None,
+                   constraints: Optional[Constraints] = None,
+                   strategy: str = 'fsdp'):
 
     # standalone run
     if isinstance(config, Namespace):
@@ -666,7 +673,6 @@ def auto_tune_task(config, ngpus_per_node: int, nnodes: int, save_dir: str = Non
     # alphaseed rl job run
     else:
         env = None  # infer by runtime
-        constraints = None
         model_path = config.actor_rollout_ref.model.path
         max_seqlen = config.data.max_prompt_length + config.data.max_response_length
         export_path = None  # will be constructed at runtime

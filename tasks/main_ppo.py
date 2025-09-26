@@ -848,11 +848,17 @@ def auto_recipe(config):
             insert_nested(skips, key, omegaconf.OmegaConf.select(config, key))
         # auto recipe with runtime profiling
         if config.recipe == "auto":
-            from alpha_seed.tuner.auto_tuner import auto_tune_task
+            from alpha_seed.tuner.auto_tuner import auto_tune_task, Constraints
             init_ray(config)
+            # setup constraints
+            constraints = None
+            constrained_tp_size = skips.get('actor_rollout_ref', {}).get('actor', {}).get('tp_size', None)
+            if constrained_tp_size is not None:
+                constraints = Constraints(tp_size=constrained_tp_size)
+            # launch auto-tune task
             config.recipe = ray.get(
                 auto_tune_task.remote(config, config.trainer.n_gpus_per_node, config.trainer.nnodes, config.recipe_hub,
-                                      config.actor_rollout_ref.actor.strategy))[0]
+                                      constraints, config.actor_rollout_ref.actor.strategy))[0]
             print(f"get auto-tuned recipe at {config.recipe}")
         filepath = copy_local_path_from_hdfs(config.recipe, always_recopy=True)
         recipe = omegaconf.OmegaConf.load(filepath)
