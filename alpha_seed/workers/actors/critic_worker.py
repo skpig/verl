@@ -142,16 +142,17 @@ class CriticWorker(Worker):
         elif self.critic_strategy == 'vescale-fsdp2':
             if self.config.model.fsdp_config.param_offload:
                 return
+            from vescale.parallel.fsdp2.extension.optimizer_offload import enforce_offload_optim, enforce_onload_optim
             if device == 'cuda':
                 if model and self.critic_module:
                     self.critic_module.to(torch.cuda.current_device(), non_blocking=True)
                 if optimizer and self.critic_optimizer:
-                    load_fsdp_optimizer(self.critic_optimizer, torch.cuda.current_device())
+                    enforce_onload_optim(self.critic_optimizer, -0.01)
             elif device == "cpu":
                 if model and self.critic_module:
                     self.critic_module.to('cpu', non_blocking=True)
                 if optimizer and self.critic_optimizer:
-                    offload_fsdp_optimizer(self.critic_optimizer)
+                    enforce_offload_optim(self.critic_optimizer, -0.01)
         elif self.critic_strategy == 'megatron':
             if device == 'cuda':
                 load_megatron_model_to_gpu(models=self.critic_module, load_grad=optimizer)
