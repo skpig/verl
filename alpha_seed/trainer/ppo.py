@@ -2089,7 +2089,7 @@ class RayPPOTrainer(object):
 
                         # update ref ema
                         with Timer(name='update_ref_ema', logger=None) as timer:
-                            self.ref_policy_wg.update_ref_ema()
+                            self.ref_policy_wg.update_ref_ema(self.global_step)
                         metrics['timing/update_ref_ema'] = timer.last
 
                         # validate
@@ -2415,8 +2415,8 @@ class RayPPOTrainer(object):
     def compute_reference(self, batch, metrics):
         # compute reference
         if self.use_reference_policy:
-            if not (self.config.actor_rollout_ref.actor.kl_loss_weight == 0 and
-                    self.config.algorithm.kl_ctrl.kl_coef == 0):
+            if not (self.config.actor_rollout_ref.actor.kl_loss_weight == 0 and self.config.algorithm.kl_ctrl.kl_coef
+                    == 0 and self.config.actor_rollout_ref.actor.use_ewma_loss is False):
                 # skip ref log prob if no kl loss
                 # compute reference log_prob
                 with Timer(name='ref', logger=None) as timer:

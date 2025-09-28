@@ -175,6 +175,13 @@ class AsyncActorRolloutRefWorker(Worker):
 
         self.binding_timer = Timer(logger=None)
 
+        # for ewma
+        self.ewma_w_list = [1]
+        w = 1
+        for _ in range(10000):
+            w = 1 + config.ref.ema * w
+            self.ewma_w_list.append(w)
+
     def _get_actor_mono_config(self):
         actor_mono_config = actor_config_to_mono_config(self.config.actor, self.config.model)
         if not self._is_actor:
@@ -951,10 +958,12 @@ class AsyncActorRolloutRefWorker(Worker):
         self.sharding_manager.release_param_and_cache()
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def update_ref_ema(self):
+    def update_ref_ema(self, global_step):
         """
         Update the reference policy via ema
         """
+        global_step -= 1
+
         if self.actor_strategy in ['megatron']:
             # TODO(fix me)
             return
@@ -974,7 +983,12 @@ class AsyncActorRolloutRefWorker(Worker):
             with torch.no_grad():
                 # Note that the param here is sharded
                 # Note (zhangchi.usc1992) this may be running on CPU and potentially slow
-                param_ema.copy_(param.to(param_ema.device) * (1 - beta) + beta * param_ema)
+                if self.config.ref.ema_normalization:
+                    ema_w = self.ewma_w_list[global_step]
+                    ema_w_new = self.ewma_w_list[global_step + 1]
+                    param_ema.copy_(param.to(param_ema.device) * 1 / ema_w_new + beta * ema_w / ema_w_new * param_ema)
+                else:
+                    param_ema.copy_(param.to(param_ema.device) * (1 - beta) + beta * param_ema)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def do_ndtimeline_action(self, action, *args, **kwargs):

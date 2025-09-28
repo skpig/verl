@@ -109,7 +109,7 @@ class VLMRayPPOTrainer(RayPPOTrainer):
 
                     # update ref ema
                     with Timer(name='update_ref_ema', logger=None) as timer:
-                        self.ref_policy_wg.update_ref_ema()
+                        self.ref_policy_wg.update_ref_ema(self.global_step)
                     metrics['timing/update_ref_ema'] = timer.last
 
                     # validate

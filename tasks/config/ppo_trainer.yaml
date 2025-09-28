@@ -93,6 +93,8 @@ actor_rollout_ref:
     ppo_epochs: 1
     shuffle: True
     use_ewma_loss: False
+    use_rollout_behavior_log_probs: False
+    use_old_as_ema: False
     act_offload: False
     act_offload_upbound: null
     act_offload_buff_size: 32
@@ -148,6 +150,7 @@ actor_rollout_ref:
     use_dynamic_bsz: True
     max_token_len: -1
     ema: 1.0
+    ema_normalization: False
   rollout:
     ban_eos: v0
     name: xperf_gpt

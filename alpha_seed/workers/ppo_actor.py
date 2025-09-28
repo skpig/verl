@@ -185,16 +185,18 @@ def default_pg_loss_fn(config, micro_data, full_entropy, log_prob):
     else:
         response_mask = attention_mask[:, -response_length:]
 
-    use_rollout_behavior_log_probs = config.get("use_rollout_behavior_log_probs", False)
+    use_rollout_behavior_log_probs = config['use_rollout_behavior_log_probs']
+    use_old_as_ema = config['use_old_as_ema']
+    use_ewma_loss = config['use_ewma_loss']
+    ref_log_prob = micro_data.get("ref_log_prob", None)
     if use_rollout_behavior_log_probs:
-        # use ewma if use_rollout_behavior_log_probs: importance sampling by rollout_logprob, clip by old_log_prob
-        use_ewma_loss = True
         old_log_prob = micro_data['rollout_behavior_log_probs']
-        ref_log_prob = micro_data['old_log_probs']
     else:
-        use_ewma_loss = config.get("use_ewma_loss", False)
         old_log_prob = micro_data["old_log_probs"]
-        ref_log_prob = micro_data.get("ref_log_prob", None)
+    if use_ewma_loss:
+        assert ref_log_prob is not None, "ref_log_probs is needed if ewma enabled"
+    if use_old_as_ema:
+        ref_log_prob = micro_data['old_log_probs']
 
     advantages = micro_data["advantages"]
     upgo_advantages = micro_data["upgo_advantages"]
