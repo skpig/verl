@@ -32,7 +32,7 @@ except ImportError:
     MegavisionMetricsCtx = None
 
 # rule-based reward score
-from alpha_seed.utils.reward_score.vlm_verifiers.extra_reward import add_length_reward, punish_format_return_positions
+from alpha_seed.utils.reward_score.vlm_verifiers.extra_reward import add_length_reward, punish_format_return_positions, check_general_response_format, is_final_answer_lengthy
 from alpha_seed.utils.reward_score import response_post_proc
 from alpha_seed.utils.reward_score.utils import Verifier
 from alpha_seed.utils.duplicate import para_dup
@@ -130,6 +130,33 @@ class VLMRewardManager(RewardManager):
         think_template = self.config.data.think_template if self.config.data.think_template is not None else 'v2'
         os.environ["THINK_TEMPLATE"] = think_template
 
+        self.ability_keys = ["unknown"] + self.config.data.get(
+            'ability_list',
+            "creation,math,comprehension,rewrite,other,communication,qa,security,code,translation").split(",")
+        if self.config.data.get('ability_kl_weights', ''):
+            self.ability_kl_weights = [1.0] + [float(t) for t in self.config.data.ability_kl_weights.split(",")]
+        else:
+            self.ability_kl_weights = [1.0 for _ in range(len(self.ability_keys))]
+        assert len(self.ability_kl_weights) == len(self.ability_keys)
+        self.ability_dict = dict(map(lambda x: (x[0], x[1]), enumerate(self.ability_keys)))  # {idx: ability_name}
+
+        self.verify_index_set = set()
+        self.verify_fusion_rule_dict = defaultdict(set)
+        for i, ability_key in self.ability_dict.items():
+            verifier_keywords = ["verifier_", "verifiable_", "collie", "instrruler", "sandbox_code"]
+            if any([x in ability_key for x in verifier_keywords]):
+                self.verify_index_set.add(i)
+
+            if "instrruler" in ability_key:
+                self.verify_fusion_rule_dict["instrruler"].add(i)
+            elif "function_call" in ability_key:
+                self.verify_fusion_rule_dict["function_call"].add(i)
+            elif any([
+                    key == ability_key
+                    for key in ["verifier_vlm_visionarena", "verifier_lmsys_arena", "verifier_lmsys_multi_lang"]
+            ]):
+                self.verify_fusion_rule_dict["code_switch"].add(i)
+
     def update_len_ema(self, data: DataProto):
         index = data.non_tensor_batch['index']
         lengths = data.batch['attention_mask'][:, self.config.data.max_prompt_length:].sum(-1)
@@ -203,6 +230,22 @@ class VLMRewardManager(RewardManager):
             valid_response_length = data_item.batch['attention_mask'][prompt_length:].sum().item()
             valid_response_ids = response_ids[:valid_response_length]
 
+            # Sanity check end of think token
+            END_THINK_ID = 17
+            if self.config.data.check_template:
+                expected_tokens = ['</think>', '</think_never_used_51bce0c785ca2f68081bfa7d91973934>']
+                actual_token = self.tokenizer.convert_ids_to_tokens(END_THINK_ID)
+                error_msg = f"END_THINK_ID token does not match expected token, got {actual_token}"
+                assert actual_token in expected_tokens, error_msg
+
+            valid_response_ids_list = valid_response_ids.tolist()
+            if END_THINK_ID in valid_response_ids_list:
+                valid_think_length = len(valid_response_ids_list) - 1 - valid_response_ids_list[::-1].index(
+                    END_THINK_ID)
+            else:
+                valid_think_length = 0
+            valid_answer_length = valid_response_length - valid_think_length
+
             # decode
             if 'prompt' in data_item.non_tensor_batch:
                 # for vlm self.tokenizer.decode throws OverflowError: out of range integral type conversion attempted,
@@ -233,10 +276,19 @@ class VLMRewardManager(RewardManager):
 
             # get prompt uuid
             data_uid = data_item.non_tensor_batch['uid']
+            if 'ability_idx' in data_item.batch:
+                ab_idx = data_item.batch['ability_idx'].squeeze().item()
+                no_thinking_required = data_item.batch["no_thinking_required"].squeeze().item() == 1
+            else:
+                ab_idx = -1
+                no_thinking_required = False
+            is_overlong = valid_response_length == self.config.data.max_response_length
 
             # select rm_score
             reward_style = data_item.non_tensor_batch['reward_model']['style']
-            verifier = Verifier.get_verifier(reward_style, tokenizer=self.tokenizer, config=self.config)
+            verifier = None
+            if reward_style != 'remote_service':
+                verifier = Verifier.get_verifier(reward_style, tokenizer=self.tokenizer, config=self.config)
             ground_truth = data_item.non_tensor_batch['reward_model']['ground_truth']
             score_fn_inputs = {
                 "batch_info": data_item.batch,
@@ -248,7 +300,8 @@ class VLMRewardManager(RewardManager):
                 "solution_len": valid_response_length,
                 "solution_ids": valid_response_ids,
                 'rm_name': self.rm_name,
-                'pause_tokens_index': pause_tokens_index
+                'pause_tokens_index': pause_tokens_index,
+                'no_thinking_required': no_thinking_required,
             }
             env_state_bytes = data_item.non_tensor_batch.get('env_states', None)
             if env_state_bytes is not None:
@@ -267,24 +320,38 @@ class VLMRewardManager(RewardManager):
             else:
                 verifier_score = -1
 
-            rm_prompt, rm_response, rm_score = None, None, None
             score_fn_inputs["verifier_score"] = verifier_score
-            if (not is_validation) and self.config.trainer.use_remote_rm and self.rm_name == 'train':
+            rm_response, rm_score = "", 0
+            waiting_time, rm_time_cost, rm_retry_cnt = 0, 0, 0
+
+            is_valid_format = check_general_response_format(solution_str, no_thinking_required)
+            score = verifier_score
+            call_remote_rm = data_item.non_tensor_batch['reward_model'].get('grm_required', False)
+            if (not is_validation) and call_remote_rm and self.rm_name == 'train':
+                if verifier is None:
+                    verifier_score = -1  # for no verifier case, set verifier_score to -1
                 remote_rm_type = self.config.trainer.remote_rm_type
-                rm_verifier = Verifier.get_verifier(remote_rm_type, tokenizer=self.tokenizer, config=self.config)
-                rm_prompt, rm_response, rm_score = rm_verifier.compute_score_client(data_uid)
-                score_lst = [rm_score, verifier_score]
-                score = rm_verifier.merge_score(score_lst, self.score_merger)
-            else:
-                score = verifier_score
+                rm_verifier = Verifier.get_verifier(f"{remote_rm_type}_service",
+                                                    tokenizer=self.tokenizer,
+                                                    config=self.config)
+                rm_response, rm_score, waiting_time, rm_time_cost, rm_retry_cnt = rm_verifier.compute_score_client(
+                    data_uid)
+                if waiting_time >= 0:  # it means the remote rm call is successful
+                    rm_kwargs = {
+                        "verify_index_set": self.verify_index_set,
+                        "verify_fusion_rule_dict": self.verify_fusion_rule_dict,
+                        "ab_idx": ab_idx,
+                        "is_valid_format": is_valid_format
+                    }
+                    score = rm_verifier.merge_vlm_score(verifier_score, rm_score, self.score_merger, **rm_kwargs)
 
             is_para_dup = para_dup.find_single_turn_duplicate(
                 solution_str, enable_resp_para=self.config.reward_model.enable_resp_para)[0]
 
             if self.config.reward_model.get('need_punish_lengthy_answer', False):
                 # Maybe it's not a good coding style to reuse `is_para_dup` here. To be refactored if we have the time.
-                is_para_dup = is_para_dup or para_dup.is_final_answer_lengthy(response_ids=valid_response_ids.tolist(),
-                                                                              tokenizer=self.tokenizer)
+                is_para_dup = is_para_dup or is_final_answer_lengthy(response_ids=valid_response_ids.tolist(),
+                                                                     tokenizer=self.tokenizer)
             is_trunc = (response_length == valid_response_length) and score == -1
 
             ngram = list(ngrams(valid_response_ids.tolist(), 2)) if ngrams is not None else []
@@ -298,8 +365,10 @@ class VLMRewardManager(RewardManager):
                 "verifier_score": verifier_score,
                 "score": score,
                 "rm_score": rm_score,
-                "rm_prompt": rm_prompt,
                 "rm_response": rm_response,
+                "rm_wait_time": waiting_time,
+                "rm_time_cost": rm_time_cost,
+                "rm_retry_cnt": rm_retry_cnt,
                 "is_para_dup": is_para_dup,
                 "is_trunc": is_trunc,
                 "idx": idx,
@@ -308,7 +377,13 @@ class VLMRewardManager(RewardManager):
                 "format_reward": format_reward,
                 "pause_tokens_index": pause_tokens_index,
                 "thinking_len": thinking_len,
-                'global_index': data_item.non_tensor_batch['index']
+                'global_index': data_item.non_tensor_batch['index'],
+                "ability_idx": ab_idx,
+                "no_thinking_required": no_thinking_required,
+                'valid_think_length': valid_think_length,
+                'valid_answer_length': valid_answer_length,
+                'valid_prompt_length': valid_prompt_length,
+                'is_valid_format': is_valid_format
             }
 
             return return_dict
@@ -327,7 +402,10 @@ class VLMRewardManager(RewardManager):
         aider_fail_cnt = 0
         rm_total_cnt = 0
         rm_fail_cnt = 0
+        rm_retry_cnt_sum = 0
         rm_score_sum = 0
+        rm_wait_time_sum = 0
+        rm_time_cost_sum = 0
         dup_cnt = 0
         dup_lens = []
         timeout_cnt = 0
@@ -349,6 +427,21 @@ class VLMRewardManager(RewardManager):
         all_thinking_len = []
         all_dup_punish_scores = []
 
+        # For per ability log
+        ability_infos = {
+            "ability_idx": [],
+            "rm_score": [],
+            "verifier_score": [],
+            "score": [],
+            "no_thinking_required": [],
+            "valid_think_length": [],
+            "valid_answer_length": [],
+            "valid_response_length": [],
+            "valid_prompt_length": [],
+            "is_valid_format": [],
+            "indices": [],
+        }
+
         all_final_scores_to_lens = defaultdict(list)
         static_conf = make_static_omegaconf(self.config)
         if self.rm_req_executor is not None:
@@ -366,9 +459,13 @@ class VLMRewardManager(RewardManager):
             reward_style = output_dict['reward_style']
             valid_response_length = output_dict['valid_response_length']
             score = output_dict['score']
+            score_msg = output_dict['score_msg'] if 'score_msg' in output_dict else 'None'
             verifier_score = output_dict['verifier_score']
             rm_score = output_dict['rm_score']
             rm_response = output_dict['rm_response']
+            rm_wait_time = output_dict['rm_wait_time']
+            rm_time_cost = output_dict['rm_time_cost']
+            rm_retry_cnt = output_dict['rm_retry_cnt']
             is_para_dup = output_dict['is_para_dup']
             is_trunc = output_dict['is_trunc']
             idx = output_dict['idx']
@@ -378,6 +475,8 @@ class VLMRewardManager(RewardManager):
             pause_tokens_index = output_dict['pause_tokens_index']
             format_reward = output_dict['format_reward']
             global_index = output_dict['global_index']
+            ability_idx = output_dict['ability_idx']
+            no_thinking_required = output_dict['no_thinking_required']
 
             all_thinking_len.append(thinking_len)
             all_ngram.extend(ngram)
@@ -408,12 +507,20 @@ class VLMRewardManager(RewardManager):
             # eval的时候不做这个norm
             if need_norm:
                 score = (score - self.mean) / self.std
-            if self.config.trainer.use_remote_rm and rm_score is not None:
-                rm_total_cnt += 1
-                if rm_score == RM_INVALID_SCORE:
-                    rm_fail_cnt += 1
+            if self.config.trainer.use_remote_rm:
+                if rm_score == 0:
+                    # Skip this sample when rm_score == 0 (no RM service call).
+                    pass
                 else:
-                    rm_score_sum += rm_score
+                    rm_total_cnt += 1
+                    rm_retry_cnt_sum += rm_retry_cnt
+                    rm_wait_time_sum += rm_wait_time
+                    rm_time_cost_sum += rm_time_cost
+                    if rm_score == RM_INVALID_SCORE:
+                        rm_score = 0
+                        rm_fail_cnt += 1
+                    else:
+                        rm_score_sum += rm_score
 
             raw_scores[idx, valid_response_length - 1] = score
             raw_reward = score
@@ -463,6 +570,18 @@ class VLMRewardManager(RewardManager):
             all_length_rewards.append(length_reward)
             all_overlong_rewards.append(overlong_reward)
             all_dup_punish_scores.append(dup_punish_reward)
+
+            ability_infos["ability_idx"].append(ability_idx)
+            ability_infos["no_thinking_required"].append(no_thinking_required)
+            ability_infos["rm_score"].append(rm_score)
+            ability_infos["verifier_score"].append(verifier_score)
+            ability_infos["score"].append(score)
+            ability_infos["valid_response_length"].append(valid_response_length)
+            ability_infos["valid_think_length"].append(output_dict["valid_think_length"])
+            ability_infos["valid_answer_length"].append(output_dict["valid_answer_length"])
+            ability_infos["valid_prompt_length"].append(output_dict["valid_prompt_length"])
+            ability_infos["is_valid_format"].append(output_dict["is_valid_format"])
+            ability_infos["indices"].append(idx)
 
             if reward_style not in already_print_data_sources:
                 already_print_data_sources[reward_style] = 0
@@ -520,6 +639,12 @@ class VLMRewardManager(RewardManager):
                     rm_fail_cnt / rm_total_cnt if rm_total_cnt > 0 else -1,
                 prefix + f"remote_rm/{remote_rm_type}_mean_score":
                     rm_score_sum / (rm_total_cnt - rm_fail_cnt) if rm_total_cnt - rm_fail_cnt > 0 else -1,
+                prefix + f"remote_rm/{remote_rm_type}_mean_wait_time":
+                    rm_wait_time_sum / rm_total_cnt if rm_total_cnt > 0 else -1,
+                prefix + f"remote_rm/{remote_rm_type}_mean_time":
+                    rm_time_cost_sum / rm_total_cnt if rm_total_cnt > 0 else -1,
+                prefix + f"remote_rm/{remote_rm_type}_mean_retry_cnt":
+                    rm_retry_cnt_sum / rm_total_cnt if rm_total_cnt > 0 else -1,
             })
 
         log_counter = {prefix + f"score_counter/raw_{key}": value for key, value in raw_counter.items()}
@@ -547,7 +672,155 @@ class VLMRewardManager(RewardManager):
             prefix + f"score/dup_punish":
                 sum(all_dup_punish_scores) / max(1, len(all_dup_punish_scores)),
         }
-        log_data = {**log_data, **log_counter, **log_score_to_lens, **log_score}
+        # Ability Log (Only for Train)
+        log_score_per_ability = {}
+        log_score_overall = {}
+        if not is_validation:
+            valid_think_format_cnt, valid_non_think_format_cnt = 0, 0
+            total_think_cnt, total_non_think_cnt = 0, 0
+            for sample_idx in range(len(ability_infos["is_valid_format"])):
+                if ability_infos["no_thinking_required"][sample_idx]:
+                    if ability_infos["is_valid_format"][sample_idx]:
+                        valid_non_think_format_cnt += 1
+                    total_non_think_cnt += 1
+                else:
+                    if ability_infos["is_valid_format"][sample_idx]:
+                        valid_think_format_cnt += 1
+                    total_think_cnt += 1
+            thinking_format_error = (total_think_cnt - valid_think_format_cnt) / (total_think_cnt + 1e-8)
+            non_thinking_format_error = (total_non_think_cnt - valid_non_think_format_cnt) / (total_non_think_cnt +
+                                                                                              1e-8)
+            log_score_overall[prefix + f"ability_infos/thinking_format/thinking_format_error"] = thinking_format_error
+            log_score_overall[prefix +
+                              f"ability_infos/thinking_format/non_thinking_format_error"] = non_thinking_format_error
+
+            max_response_length = self.config.data.max_response_length
+            nothink_max_response_length = max_response_length
+
+            def log_stats(log_dict, prefix, category, tensor_dict):
+                """Log mean, max, min for each tensor in tensor_dict under a specific category."""
+                for key, (tensor, need_max_min, default_value) in tensor_dict.items():
+                    base_key = f"{prefix}{category}/{key}"
+                    if len(tensor) > 0:
+                        tensor = tensor.float()
+                        log_dict[f"{base_key}"] = tensor.mean().item()
+                        if need_max_min:
+                            base_key_split = base_key.split('/')
+                            base_key_prefix, base_key_suffix = '/'.join(base_key_split[:-1]), base_key_split[-1]
+                            log_dict[f"{base_key_prefix}/max_{base_key_suffix}"] = tensor.max().item()
+                            log_dict[f"{base_key_prefix}/min_{base_key_suffix}"] = tensor.min().item()
+                    else:
+                        log_dict[f"{base_key}"] = default_value
+                        if need_max_min:
+                            base_key_split = base_key.split('/')
+                            base_key_prefix, base_key_suffix = '/'.join(base_key_split[:-1]), base_key_split[-1]
+                            log_dict[f"{base_key_prefix}/max_{base_key_suffix}"] = default_value
+                            log_dict[f"{base_key_prefix}/min_{base_key_suffix}"] = default_value
+
+            # Overlong Calculation
+            ability_infos["is_overlong"] = []
+            for sample_idx in range(len(ability_infos["valid_response_length"])):
+                if ability_infos["valid_response_length"][
+                        sample_idx] == max_response_length and not ability_infos["no_thinking_required"][sample_idx]:
+                    ability_infos["is_overlong"].append(1.0)
+                elif ability_infos["valid_response_length"][
+                        sample_idx] == nothink_max_response_length and ability_infos["no_thinking_required"][sample_idx]:
+                    ability_infos["is_overlong"].append(1.0)
+                else:
+                    ability_infos["is_overlong"].append(0.0)
+
+            all_log_tensors_per_ability = {}
+            for ab_idx, ab_name in self.ability_dict.items():
+                ab_mask = torch.LongTensor(ability_infos["ability_idx"]) == ab_idx
+                nothink_ab_mask = torch.BoolTensor(ability_infos["no_thinking_required"]) & ab_mask
+
+                all_log_tensors_per_ability[f"score/verifier_score_{ab_name}"] = (torch.tensor(
+                    ability_infos["verifier_score"])[ab_mask], True, -1.0)
+                all_log_tensors_per_ability[f"score/raw_rm_score_{ab_name}"] = (torch.tensor(
+                    ability_infos["rm_score"])[ab_mask], True, 0.0)
+                all_log_tensors_per_ability[f"score/rm_score_{ab_name}"] = (torch.tensor(
+                    ability_infos["score"])[ab_mask], True, -1.0)
+                all_log_tensors_per_ability[f"sample_generator/input_seq_len_{ab_name}"] = (torch.tensor(
+                    ability_infos["valid_prompt_length"])[ab_mask], True, 0.0)
+                all_log_tensors_per_ability[f"sample_generator/output_think_seq_len_{ab_name}"] = (torch.tensor(
+                    ability_infos["valid_think_length"])[ab_mask], False, 0.0)
+                all_log_tensors_per_ability[f"sample_generator/output_ans_seq_len_{ab_name}"] = (torch.tensor(
+                    ability_infos["valid_answer_length"])[ab_mask], False, 0.0)
+                all_log_tensors_per_ability[f"sample_generator/overlong_ratio_{ab_name}"] = (torch.tensor(
+                    ability_infos["is_overlong"])[ab_mask], False, 0.0)
+                all_log_tensors_per_ability[f"ability/seq_len_{ab_name}"] = (torch.tensor(
+                    ability_infos["valid_response_length"])[ab_mask], False, 0.0)
+
+                all_log_tensors_per_ability[f"score/nothink_verifier_score_{ab_name}"] = (torch.tensor(
+                    ability_infos["verifier_score"])[nothink_ab_mask], True, -1.0)
+                all_log_tensors_per_ability[f"score/nothink_raw_rm_score_{ab_name}"] = (torch.tensor(
+                    ability_infos["rm_score"])[nothink_ab_mask], True, 0.0)
+                all_log_tensors_per_ability[f"score/nothink_rm_score_{ab_name}"] = (torch.tensor(
+                    ability_infos["score"])[nothink_ab_mask], True, -1.0)
+                all_log_tensors_per_ability[f"sample_generator/nothink_input_seq_len_{ab_name}"] = (torch.tensor(
+                    ability_infos["valid_prompt_length"])[nothink_ab_mask], False, 0.0)
+                all_log_tensors_per_ability[f"sample_generator/nothink_overlong_ratio_{ab_name}"] = (torch.tensor(
+                    ability_infos["is_overlong"])[nothink_ab_mask], False, 0.0)
+                all_log_tensors_per_ability[f"ability/nothink_seq_len_{ab_name}"] = (torch.tensor(
+                    ability_infos["valid_response_length"])[nothink_ab_mask], False, 0.0)
+
+                # Log Data Fraction
+                ab_frac = ab_mask.sum().item() / len(ab_mask)
+                log_score_per_ability[prefix + f"ability_infos/training/{ab_name}_frac"] = ab_frac
+            log_stats(log_score_per_ability, prefix, "ability_infos", all_log_tensors_per_ability)
+
+            # Overall status
+            all_verifier_score = torch.tensor(ability_infos["verifier_score"])
+            all_raw_rm_score = torch.tensor(ability_infos["rm_score"])
+            all_rm_score = torch.tensor(ability_infos["score"])
+            all_input_len = torch.tensor(ability_infos["valid_prompt_length"])
+            all_output_len = torch.tensor(ability_infos["valid_response_length"])
+            mean_overlong_ratio = torch.tensor(ability_infos["is_overlong"]).mean().item()
+
+            nothink_mask = torch.BoolTensor(ability_infos["no_thinking_required"])
+            nothink_all_verifier_score = torch.tensor(ability_infos["verifier_score"])[nothink_mask]
+            nothink_all_raw_rm_score = torch.tensor(ability_infos["rm_score"])[nothink_mask]
+            nothink_all_rm_score = torch.tensor(ability_infos["score"])[nothink_mask]
+            nothink_all_input_len = torch.tensor(ability_infos["valid_prompt_length"])[nothink_mask]
+            nothink_all_output_len = torch.tensor(ability_infos["valid_response_length"])[nothink_mask]
+            if nothink_mask.sum() > 0:
+                nothink_mean_overlong_ratio = torch.tensor(ability_infos["is_overlong"])[nothink_mask].mean().item()
+            else:
+                nothink_mean_overlong_ratio = 0.0
+
+            all_log_tensors = {
+                "input_seq_len": (all_input_len, True, 0.0),
+                "output_seq_len": (all_output_len, True, 0.0),
+                "verifier_score": (all_verifier_score, False, -1.0),
+                "raw_rm_score": (all_raw_rm_score, False, 0.0),
+                "rm_score": (all_rm_score, False, -1.0),
+                "nothink_input_seq_len": (nothink_all_input_len, True, 0.0),
+                "nothink_output_seq_len": (nothink_all_output_len, True, 0.0),
+                "nothink_verifier_score": (nothink_all_verifier_score, False, -1.0),
+                "nothink_raw_rm_score": (nothink_all_raw_rm_score, False, 0.0),
+                "nothink_rm_score": (nothink_all_rm_score, False, -1.0),
+            }
+            log_stats(log_score_overall, prefix, "ability_infos/training", all_log_tensors)
+            log_score_overall[prefix + f"ability_infos/sample_generator/overlong_ratio_total"] = mean_overlong_ratio
+            log_score_overall[
+                prefix + f"ability_infos/sample_generator/nothink_overlong_ratio_total"] = nothink_mean_overlong_ratio
+            log_score_overall[prefix + f"ability_infos/training/nothink_frac"] = torch.BoolTensor(
+                ability_infos["no_thinking_required"]).float().mean().item()
+
+            permutation_indices = torch.tensor(ability_infos["indices"])
+            data.batch['raw_rm_score'] = torch.zeros_like(all_raw_rm_score).scatter(0, permutation_indices,
+                                                                                    all_raw_rm_score)
+            data.batch['raw_verifier_score'] = torch.zeros_like(all_verifier_score).scatter(
+                0, permutation_indices, all_verifier_score)
+
+        log_data = {
+            **log_data,
+            **log_counter,
+            **log_score_to_lens,
+            **log_score,
+            **log_score_per_ability,
+            **log_score_overall
+        }
         if self.logger is not None:
             self.logger.log(data=log_data, step=global_step)
 
@@ -565,20 +838,26 @@ class VLMRewardManager(RewardManager):
             send_message_to_employee("alpha seed任务aider失败率过高",
                                      f"任务链接: {task_url}, 失败率: {round(aider_fail_cnt / aider_total_cnt * 100.0, 2)}",
                                      user_email)
+        if (not is_validation) and (self.config.trainer.remote_rm_type
+                                    == "grm") and self.config.trainer.use_remote_rm and self.rm_name == 'train':
+            if rm_total_cnt > 0 and rm_fail_cnt / rm_total_cnt >= 0.01:
+                send_message_to_employee("alpha seed任务GRM失败率过高",
+                                         f"任务链接: {task_url}, 失败率: {round(rm_fail_cnt / rm_total_cnt * 100.0, 2)}",
+                                         user_email)
 
         log_table = None
         if self.config.trainer.num_cases_to_wandb > 0:
             log_table = {
                 f"gen&score_{self.rm_name}_{global_step}":
                     wandb.Table(columns=[
-                        "Index", "Step", "Prompt", "Gen Sequence", "GroundTruth", "Score", "Verifier Score", "RM Score",
-                        "RM Response", "ScoreMsg", "Gen Sequence PostProc", "Is_Dup", "Is_Trunc", "Len"
+                        "Index", "Step", "Image", "Prompt", "Gen Sequence", "GroundTruth", "Score", "Verifier Score",
+                        "RM Score", "RM Response", "Gen Sequence PostProc", "Is_Dup", "Is_Trunc", "Len"
                     ],
                                 data=self.log_table)
             }
             if (not is_validation and global_step % self.config.trainer.logger_step_interval == 0) or global_step == 1:
                 # logger_step = global_step - global_step % self.config.trainer.logger_step_interval
-                self.logger.log(log_table, step=global_step, backend='tracking')
+                self.logger.log(log_table, step=global_step, backend='wandb')
 
         if self.config.trainer.save_cases_to_hdfs:
             print(f"[{time.ctime()}][save cases] reward_fn begin")

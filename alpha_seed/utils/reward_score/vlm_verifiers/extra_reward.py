@@ -232,17 +232,18 @@ def filter_thinking_part_v2(response, eos_token=None):
     return response, success
 
 
-def filter_thinking_part(response, eos_token=None):
+def filter_thinking_part(response, no_thinking_required=False):
     think_template = os.getenv("THINK_TEMPLATE", "v3")
     print("[debug think_template 1 ]", think_template)
-    if think_template == 'v1':
-        return filter_thinking_part_v1(response)
-    elif think_template == 'v2':
-        return filter_thinking_part_v2(response)
-    elif think_template == 'v3':  ## v2 v3 use same template, only change special token
-        return filter_thinking_part_v2(response)
-    else:
+    if think_template not in ['v1', 'v2', 'v3', 'v4']:
         raise NotImplementedError
+    if think_template == 'v1':
+        response, status = filter_thinking_part_v1(response)
+    elif think_template in ['v2', 'v3', 'v4']:  ## v2 v3 use same template, only change special token
+        response, status = filter_thinking_part_v2(response)
+    if not no_thinking_required and not status:
+        response = ''
+    return response, status
 
 
 def punish_format_return_positions(text, config):
@@ -315,7 +316,15 @@ def punish_format_return_positions(text, config):
         ]
 
 
-def match_visual_cot_format(response: str, verifier_feature: dict, allow_last_turn_fc: bool = False) -> bool:
+def match_visual_cot_format(
+    response: str,
+    verifier_feature: dict,
+    allow_last_turn_fc: bool = False,
+    check_tool_success: bool = True,
+    check_tool_mention: bool = True,
+    no_thinking_required: bool = False,
+    only_check_think_format: bool = False,
+) -> bool:
     eos_token = get_special_tokens_dict_or_name("eos")
     bos_token = get_special_tokens_dict_or_name("bos")
     tool_prefix = "tool name=plugin\n"  # tool plugin返回结果的chatml前缀
@@ -326,7 +335,12 @@ def match_visual_cot_format(response: str, verifier_feature: dict, allow_last_tu
     fc_end_token = "<|FunctionCallEnd|>"
     img_placeholder = f'{get_special_tokens_dict_or_name("soi")}{get_special_tokens_dict_or_name("eoi")}'  # The image tokens inbetween have already been discarded in main_ppo.py.
 
-    no_thinking_required: bool = verifier_feature.get('no_thinking_required', False)
+    think_template = os.getenv("THINK_TEMPLATE", "v3")
+    if no_thinking_required and think_template in ['v1', 'v2', 'v3', 'v4']:
+        is_nothink_format_valid = (think_start_token not in response) and (think_end_token not in response)
+        if not is_nothink_format_valid:
+            return False
+
     black_words_in_answer: list[str] = verifier_feature.get('black_words_in_answer', [])
     if not allow_last_turn_fc:
         black_words_in_answer = [fc_start_token, fc_end_token] + black_words_in_answer
@@ -335,11 +349,11 @@ def match_visual_cot_format(response: str, verifier_feature: dict, allow_last_tu
     assert not response.endswith(
         eos_token), f"The ending EOS should have been discarded by `post_process_solution_str`. {repr(response)}"
 
-    def check_think_and_fc_format(s: str) -> tuple[bool, str]:
+    def check_think_and_fc_format(s: str, only_check_think_format: bool = False) -> tuple[bool, str]:
         """
-        1. <|FunctionCallBegin|> 和 <|FunctionCallEnd|> 是否成对出现，并且先后顺序没问题，并且 count <= 1
+        1. <|FunctionCallBegin|> 和 <|FunctionCallEnd|> 是否成对出现，并且先后顺序没问题，并且 count <= 1 (Optional)
         2. 开头是否是 think start token, think start token 和 think end token 是否成对出现，并且先后顺序没问题，并且 count == 1
-        3. <|FunctionCallBegin|> 和 <|FunctionCallEnd|>没有出现在 think start token 和 think end token 之间
+        3. <|FunctionCallBegin|> 和 <|FunctionCallEnd|>没有出现在 think start token 和 think end token 之间 (Optional)
         """
         tool_name = ""
 
@@ -351,15 +365,18 @@ def match_visual_cot_format(response: str, verifier_feature: dict, allow_last_tu
         count_think_start_token = s.count(think_start_token)
         count_think_end_token = s.count(think_end_token)
 
-        if count_fc_start_token != count_fc_end_token or count_fc_start_token > 1:
-            return False, tool_name
-
         if count_think_start_token != 1 or count_think_end_token != 1:
             return False, tool_name
 
         pos_think_start_token = s.find(think_start_token)
         pos_think_end_token = s.find(think_end_token)
         if pos_think_start_token == -1 or pos_think_end_token == -1 or pos_think_start_token >= pos_think_end_token:
+            return False, tool_name
+
+        if only_check_think_format:
+            return True, tool_name
+
+        if count_fc_start_token != count_fc_end_token or count_fc_start_token > 1:
             return False, tool_name
 
         if count_fc_start_token == 1:
@@ -381,6 +398,7 @@ def match_visual_cot_format(response: str, verifier_feature: dict, allow_last_tu
                 assert isinstance(signature_list, list)
                 assert len(signature_list) >= 1
                 signature = signature_list[0]
+                assert isinstance(signature, dict)
                 assert isinstance(signature.get("name"), str)
                 assert isinstance(signature.get("parameters"), dict)
                 tool_name = signature["name"]
@@ -389,7 +407,7 @@ def match_visual_cot_format(response: str, verifier_feature: dict, allow_last_tu
 
         return True, tool_name
 
-    def check_answer_black_words(s: str, is_last: bool, tool_calls: list[str]) -> bool:
+    def check_answer_black_words(s: str, is_last: bool) -> bool:
         """
         1. 如果是最后一轮，think end token 后不能出现违禁词，违禁词可能包括<|FunctionCallBegin|> 和 <|FunctionCallEnd|>
         2. 如果不是最后一轮，think end token 后的内容必须包裹在<|FunctionCallBegin|> 和 <|FunctionCallEnd|>内
@@ -399,13 +417,6 @@ def match_visual_cot_format(response: str, verifier_feature: dict, allow_last_tu
             for bw in black_words_in_answer:
                 if bw in answer:
                     return False
-            if verifier_feature.get('force_tool_use_if_point_or_bbox'):
-                if ('<point>' in answer) or ('</point>' in answer):
-                    if 'POINT' not in tool_calls:
-                        return False
-                if ('<bbox>' in answer) or ('</bbox>' in answer):
-                    if ('GROUNDING' not in tool_calls) and ('ZOOM' not in tool_calls):
-                        return False
         else:
             if not answer.startswith(fc_start_token) or not answer.endswith(fc_end_token):
                 return False
@@ -433,28 +444,53 @@ def match_visual_cot_format(response: str, verifier_feature: dict, allow_last_tu
     for rd_idx, rd in enumerate(rounds):
         if rd.startswith(bos_token + tool_prefix):
             if tools_called and (tools_called[-1] in visual_tools):
-                if img_placeholder not in rd:
+                if check_tool_success and (img_placeholder not in rd):
                     fc_param_error = True
         else:
             rd = rd.replace(bos_token + assistant_prefix, "")
-            if no_thinking_required:
+            if no_thinking_required and think_template in ['v1', 'v2', 'v3', 'v4']:
                 rd = add_dummy_think(rd)
-            is_format_valid, tool_call = check_think_and_fc_format(rd)
-            if tool_call:
-                tools_called.append(tool_call)
+            is_format_valid, tool_call = check_think_and_fc_format(rd, only_check_think_format=only_check_think_format)
+            tools_called.append(tool_call)
             if not is_format_valid:
                 format_error = True
             if not format_error:
-                if not check_answer_black_words(rd, is_last=rd_idx == len(rounds) - 1, tool_calls=tools_called):
+                if not check_answer_black_words(rd, is_last=rd_idx == len(rounds) - 1):
                     fc_call_error = True
     if fc_param_error or format_error or fc_call_error:
         return False
 
     # Penalize it if it mentions a tool but does not actually call the tool:
-    for tool in visual_tools:
-        if (tool in response) and (tool not in tools_called):
+    if check_tool_mention:
+        for tool in visual_tools:
+            if (tool in response) and (tool not in tools_called):
+                return False
+
+    return True
+
+
+def check_general_response_format(response: str, no_thinking_required: bool = False) -> bool:
+    think_start_token = get_special_tokens_dict_or_name("think_start_token")
+    think_end_token = get_special_tokens_dict_or_name("think_end_token")
+    think_template = os.getenv("THINK_TEMPLATE", "v3")
+
+    if no_thinking_required and think_template in ['v1', 'v2', 'v3', 'v4']:
+        is_valid = (think_start_token not in response) and (think_end_token not in response)
+        return is_valid
+    else:
+        if not response.startswith(think_start_token):
             return False
 
+        count_think_start_token = response.count(think_start_token)
+        count_think_end_token = response.count(think_end_token)
+
+        if count_think_start_token != 1 or count_think_end_token != 1:
+            return False
+
+        pos_think_start_token = response.find(think_start_token)
+        pos_think_end_token = response.find(think_end_token)
+        if pos_think_start_token == -1 or pos_think_end_token == -1 or pos_think_start_token >= pos_think_end_token:
+            return False
     return True
 
 
@@ -468,6 +504,32 @@ if os.environ.get("VLM_ARC_KEY", None):
     )
 else:
     VLM_ARC_CLIENT = None
+
+
+def is_final_answer_lengthy(response_ids: list[int], tokenizer, max_ans_tokens: int = 2048) -> bool:
+    num_total_tokens = len(response_ids)
+
+    bos_token, = tokenizer.encode('<[BOS_never_used_51bce0c785ca2f68081bfa7d91973934]>')
+    k = len(response_ids) - 1
+    while (k >= 0) and (response_ids[k] != bos_token):
+        k -= 1
+    if k >= 0:  # If there is BOS, indicating the start of the final turn:
+        response_ids = response_ids[k + 1:]  # Only check the last turn when doing multi-turn RL.
+
+    think_end = get_special_tokens_dict_or_name("think_end_token")
+    end_of_think_token, = tokenizer.encode(think_end)
+    k = len(response_ids) - 1
+    while (k >= 0) and (response_ids[k] != end_of_think_token):
+        k -= 1
+    if k >= 0:  # If there is think_end_token, indicating the end of the CoT:
+        response_ids = response_ids[k + 1:]  # Remove the CoT part.
+
+    num_answer_tokens = len(response_ids)
+    is_lengthy = num_answer_tokens > max_ans_tokens
+    if is_lengthy:
+        print(f"[LENGTHY ANSWER DETECTED] {num_total_tokens} total tokens, {num_answer_tokens} answer tokens.")
+    return is_lengthy
+
 
 # def punish_format(generation, config):
 #     """

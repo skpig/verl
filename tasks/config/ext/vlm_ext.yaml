@@ -1,6 +1,22 @@
 # @package _global_
+critic:
+  model:
+    override_config:
+      text_config:
+        attention_dropout: 0.0
+        embd_pdrop: 0.0
+        resid_pdrop: 0.0
+      vision_config:
+        attention_dropout: 0.0
+        embd_pdrop: 0.0
+        resid_pdrop: 0.0
 reward_model:
   enable_resp_para: True
   use_vlm_verifier_router: True
 data:
+  image_key: img
   check_template: True
+tasks:
+  reward_manager: tasks.vlm.reward_manager.VLMRewardManager
+  trainer: tasks.vlm.ppo_trainer.VLMRayPPOTrainer
+  dataset: alpha_seed.utils.dataset.vlm_rl_dataset.RLHFDatasetVL

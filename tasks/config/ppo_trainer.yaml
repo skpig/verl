@@ -8,6 +8,13 @@ data:
   image_key: null
   dist_image: True
   use_ref_answer: False
+  add_thinking_prompt: False
+  add_thinking_prompt_ratio: 1.0
+  override_ability_with_datasource: True
+  override_datasource_with_ability: False
+  ability_list: "code,math"
+  ability_kl_weights: "1.0,1.0"
+  grm_required_abilities: "code,math"
   max_prompt_length: 512
   max_response_length: 512
   train_batch_size: 1024
@@ -369,7 +376,7 @@ reward_model:
     ray_actor_pool_size: 16
     model_name: ''
     max_retry: 3
-    timeout: 60
+    timeout: 3600
     retry_interval: 1
     top_p: 1.0
   len_ema_json: null
@@ -727,3 +734,4 @@ triton_cache:
 tasks:
     reward_manager: tasks.main_ppo.RewardManager
     trainer: alpha_seed.trainer.ppo.RayPPOTrainer
+    dataset: null

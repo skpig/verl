@@ -78,12 +78,9 @@ class VisualCoTVerifier(BaseVerifier):
 
         client, endpoint = get_vlm_client_and_endpoint()
 
-        try:
-            eot_token = get_special_tokens_dict_or_name("think_end_token")
-            eos_token = get_special_tokens_dict_or_name("eos")
-            final_answer: str = response.split(eot_token)[-1].split(eos_token)[0]
-        except Exception:
-            raise ExtractAnswerFailed
+        eot_token = get_special_tokens_dict_or_name("think_end_token")
+        eos_token = get_special_tokens_dict_or_name("eos")
+        final_answer: str = response.split(eot_token)[-1].split(eos_token)[0]
 
         if not final_answer.strip():
             raise ExtractAnswerFailed

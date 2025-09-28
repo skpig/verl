@@ -125,7 +125,9 @@ def import_from_string(import_str: str) -> Any:
         return importlib.import_module(import_str)
 
 
-def save_simple_train_data_to_hdfs(batch, tokenizer, step, file_base_path, max_prompt_length, special_tokens):
+def save_simple_train_data_to_hdfs(batch, tokenizer, step, config):
+    file_base_path = config.trainer.default_hdfs_dir
+    max_prompt_length = config.data.max_prompt_length
     file_path = f"{file_base_path}/simple_train_data"
     local_file_path = f'train_simple_{step}.jsonl'
     if file_path.startswith("hdfs://"):
@@ -157,21 +159,25 @@ def save_simple_train_data_to_hdfs(batch, tokenizer, step, file_base_path, max_p
             decode_batch_response.append(valid_response_idx)
         responses = tokenizer.batch_decode(decode_batch_response, skip_special_tokens=False)
 
-        for score, token_level_reward, prompt, response, dataset_index in zip(raw_scores, token_level_rewards, prompts,
-                                                                              responses, dataset_indexs):
+        if 'raw_rm_score' in batch.batch:
+            raw_rm_scores = batch.batch['raw_rm_score']
+        if 'raw_verifier_score' in batch.batch:
+            raw_verifier_scores = batch.batch['raw_verifier_score']
+        soi = config.data.special_tokens.soi
+        eoi = config.data.special_tokens.eoi
+
+        for i in range(len(raw_scores)):
             data = {
-                "index_id":
-                    dataset_index,
-                "raw_score":
-                    score.item(),
-                "token_level_reward":
-                    token_level_reward.item(),
-                "prompt":
-                    prompt,
-                "response":
-                    response.replace(f"{special_tokens.soi}{special_tokens.eoi}",
-                                     f"{special_tokens.soi}<ImageHere>{special_tokens.eoi}"),
+                "index_id": dataset_indexs[i],
+                "raw_score": raw_scores[i].item(),
+                "token_level_reward": token_level_rewards[i].item(),
+                "prompt": prompts[i],
+                "response": responses[i].replace(f"{soi}{eoi}", f"{soi}<ImageHere>{eoi}"),
             }
+            if 'raw_rm_score' in batch.batch:
+                data['raw_rm_score'] = raw_rm_scores[i].item()
+            if 'raw_verifier_score' in batch.batch:
+                data['raw_verifier_score'] = raw_verifier_scores[i].item()
             f.write(json.dumps(data, ensure_ascii=False) + "\n")
             f.flush()
 

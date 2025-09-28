@@ -229,10 +229,10 @@ from .utils import Verifier
 class VerifierServiceVolc(Verifier, reward_style="verifier_service_volc"):
 
     def is_remote(self):
-        return self.config.trainer.use_remote_verifier
+        return True
 
-    def preprocess(self, input_ids, ground_truth):
-        solution_str, ground_truth = super().preprocess(input_ids, ground_truth)
+    def preprocess(self, *args, **kwargs):
+        solution_str, ground_truth = super().preprocess(*args, **kwargs)
         return solution_str, ground_truth, self.config.trainer.volc_ark_key, self.config.trainer.volc_model_name
 
     @staticmethod

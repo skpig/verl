@@ -154,3 +154,65 @@ def extract_boxed_number(input_string):
         return match.group(1)
     else:
         return None
+
+
+def union_intervals(intervals: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    if not intervals:
+        return list()
+    intervals.sort(key=lambda x: x[0])
+    merged = []
+    current_start, current_end = intervals[0]
+    for i in range(1, len(intervals)):
+        next_start, next_end = intervals[i]
+        if next_start <= current_end:
+            current_end = max(current_end, next_end)
+        else:
+            merged.append((current_start, current_end))
+            current_start, current_end = next_start, next_end
+    merged.append((current_start, current_end))
+    return merged
+
+
+def intersect_intervals(
+    list_a: list[tuple[float, float]],
+    list_b: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    intersection = list()
+    i = j = 0
+    while i < len(list_a) and j < len(list_b):
+        a_start, a_end = list_a[i]
+        b_start, b_end = list_b[j]
+        overlap_start = max(a_start, b_start)
+        overlap_end = min(a_end, b_end)
+        if overlap_start < overlap_end:
+            intersection.append((overlap_start, overlap_end))
+        if a_end < b_end:
+            i += 1
+        else:
+            j += 1
+    return intersection
+
+
+def get_total_length(intervals: list[tuple[float, float]]) -> float:
+    return sum(end - start for start, end in intervals)
+
+
+def get_base_precision_recall(gt: list[tuple[float, float]], pred: list[tuple[float, float]]) -> dict:
+    gt_union = union_intervals(gt)
+    gt_total_time = get_total_length(gt_union)
+
+    pred_total_cost = sum(end - start for start, end in pred)
+
+    if gt_total_time == 0 and pred_total_cost == 0:
+        return {'precision': 1.0, 'recall': 1.0}
+    if gt_total_time == 0 or pred_total_cost == 0:
+        return {'precision': 0.0, 'recall': 0.0}
+
+    pred_union = union_intervals(pred)
+    intersection = intersect_intervals(gt_union, pred_union)
+    tp_time = get_total_length(intersection)
+
+    recall = tp_time / gt_total_time
+    precision = tp_time / pred_total_cost
+
+    return {'precision': precision, 'recall': recall}

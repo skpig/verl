@@ -56,6 +56,7 @@ def test_vlm_gen(monkeypatch, gpu_allocator, ray_fixture):
             'max_prompt_length': 8192,
             'max_response_length': 8192,
             'image_key': "img",
+            'think_template': 'v2',
         },
         'actor_rollout_ref': {
             "model": {

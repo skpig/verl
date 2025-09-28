@@ -8,7 +8,7 @@ import time
 
 import openai
 from PIL import Image
-from tenacity import (retry, stop_after_attempt, wait_random_exponential, retry_if_not_exception_type)
+from tenacity import (retry, stop_after_attempt, wait_exponential_jitter, retry_if_not_exception_type)
 
 from alpha_seed.utils.reward_score.vlm_verifiers.base_verifier import BaseVerifier, VerifyResult, VerifierFailed
 
@@ -175,7 +175,7 @@ def run_gpt4v_v2(client,
     msgs = message_creator_v2(prompt, image_path, sys_prompt=sys_prompt, detail=detail)
 
     @retry(retry=retry_if_not_exception_type(openai.BadRequestError),
-           wait=wait_random_exponential(min=1, max=60),
+           wait=wait_exponential_jitter(jitter=120, max=180),
            stop=stop_after_attempt(6))
     def completion_with_backoff(**kwargs):
         return client.chat.completions.create(**kwargs)
@@ -220,7 +220,7 @@ def llm_as_metric(question, answer, predict, client):
     score = -100000
     gpt_response = ""
     tb = ""
-    for _ in range(10):
+    for _ in range(5):
         tb = ""
         try:
             if 'gpt' in gpt_version:
@@ -247,7 +247,7 @@ def llm_as_metric(question, answer, predict, client):
             tb = "".join(traceback.format_exception(*sys.exc_info()))
             score = -100000
             gpt_response = ""
-            sleep_time = random.random() * 90 + 30
+            sleep_time = random.random() * 60 + 60
             time.sleep(sleep_time)
             continue
     if tb:
@@ -270,6 +270,9 @@ class VstarVerifier(BaseVerifier):
             api_version="2023-07-01-preview",
             api_key=random.choice(api_keys),
         )
+
+        # Our peak GPT quota is very limited. Wait a while to smooth the traffic.
+        time.sleep(random.random() * 300)
 
         score, gpt_response = llm_as_metric(query, answer, response, client)
         return VerifyResult(score=score, extracted_answer=response)

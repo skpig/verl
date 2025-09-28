@@ -159,5 +159,6 @@ python3 tasks/main_ppo.py \
     trainer.total_steps=${NUM_STEPS} \
     trainer.save_cases_to_hdfs=False \
     data.think_template=v1 \
-    tasks.reward_manager=tasks.vlm.reward_manager.RewardManager \
+    +ext=vlm_ext \
+    data.check_template=False \
     trainer.use_remote_verifier=True

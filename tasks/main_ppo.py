@@ -15,6 +15,7 @@
 Note that we don't combine the main with ray_trainer as ray_trainer is used by other main.
 """
 
+import asyncio
 from alpha_seed.logging import refine_log
 from alpha_seed.workers.streaming_service.cluster_hpa import ArnoldTrialResourceManager
 from alpha_seed.workers.streaming_service.streaming_rollout import RemoteAsyncXPerfGPTRollout
@@ -33,6 +34,7 @@ from datetime import datetime
 from transformers import AutoTokenizer
 from multiprocessing import Process
 from collections import Counter
+from functools import partial
 # rule-based reward score
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from collections import defaultdict
@@ -106,6 +108,7 @@ class RemoteClient:
         self.callback_running_pool = defaultdict(dict)
         self.results = defaultdict(dict)
         self.remote_service = remote_service
+        self.executor = ThreadPoolExecutor(max_workers=128)
 
     def clear(self):
         # for some cases, the results won't be claimed. So we need to clear the results.
@@ -121,14 +124,17 @@ class RemoteClient:
         if verifier is not None and not self.callback_running_pool[req_id].get(reward_style, False):
             self.callback_running_pool[req_id][reward_style] = True
             kwargs['remote_service'] = self.remote_service
-            result_future = verifier.compute_score_remote(**kwargs)
-            assert req_id not in self.results, f"{req_id} already exists, reward_style: {reward_style}"
+            if req_id in self.results:
+                assert reward_style not in self.results[req_id], \
+                    f"{req_id} already has result for reward_style: {reward_style}"
+            loop = asyncio.get_event_loop()
+            compute_score_fn = partial(verifier.compute_score_remote, **kwargs)
+            result_future = loop.run_in_executor(self.executor, compute_score_fn)
             self.results[req_id][reward_style] = result_future
-            return result_future
 
     async def get_results(self, req_id, reward_style):
         if req_id not in self.results or reward_style not in self.results[req_id]:
-            print(f"[get_results] {req_id} not found")
+            print(f"[get_results] {req_id} {reward_style} not found")
             return None
 
         assert req_id in self.results, f"{req_id} not found"
@@ -332,9 +338,10 @@ class RewardManager():
                 score_fn_inputs['env_state_bytes'] = base64.b64decode(env_state_bytes) if isinstance(
                     env_state_bytes, str) else env_state_bytes
 
-            raw_score = 0
             score_msg = ''
-            rm_prompt, rm_response, rm_score = None, None, None
+            rm_response = ""
+            raw_score, rm_score = 0, 0
+            waiting_time, rm_time_cost, rm_retry_cnt = 0, 0, 0
             if isinstance(extra_data, dict) and (cached_score := extra_data.get('score', None)) is not None:
                 # score already calculated and is passed in extra_data
                 score = cached_score
@@ -354,8 +361,8 @@ class RewardManager():
                 if (not is_validation) and self.config.trainer.use_remote_rm and self.rm_name == 'train':
                     remote_rm_type = self.config.trainer.remote_rm_type
                     rm_verifier = Verifier.get_verifier(remote_rm_type, tokenizer=self.tokenizer, config=self.config)
-                    rm_prompt, rm_response, rm_score = rm_verifier.compute_score_client(data_uid)
-                    print('remote grm ================', rm_prompt, rm_response, rm_score, flush=True)
+                    rm_response, rm_score, waiting_time, rm_time_cost, rm_retry_cnt = rm_verifier.compute_score_client(
+                        data_uid)
                     score_lst = [rm_score, raw_score]
                     score = rm_verifier.merge_score(score_lst, self.score_merger)
                 else:
@@ -376,8 +383,10 @@ class RewardManager():
                 "score": score,
                 "score_msg": score_msg,
                 "rm_score": rm_score,
-                "rm_prompt": rm_prompt,
                 "rm_response": rm_response,
+                "rm_wait_time": waiting_time,
+                "rm_time_cost": rm_time_cost,
+                "rm_retry_cnt": rm_retry_cnt,
                 "is_para_dup": is_para_dup,
                 "is_trunc": is_trunc,
                 "idx": idx,
@@ -405,7 +414,10 @@ class RewardManager():
         swe_fail_cnt = 0
         rm_total_cnt = 0
         rm_fail_cnt = 0
+        rm_retry_cnt_sum = 0
         rm_score_sum = 0
+        rm_wait_time_sum = 0
+        rm_time_cost_sum = 0
         dup_cnt = 0
         dup_lens = []
         timeout_cnt = 0
@@ -451,6 +463,9 @@ class RewardManager():
             raw_score = output_dict['raw_score']
             rm_score = output_dict['rm_score']
             rm_response = output_dict['rm_response']
+            rm_wait_time = output_dict['rm_wait_time']
+            rm_time_cost = output_dict['rm_time_cost']
+            rm_retry_cnt = output_dict['rm_retry_cnt']
             is_para_dup = output_dict['is_para_dup']
             is_trunc = output_dict['is_trunc']
             idx = output_dict['idx']
@@ -502,11 +517,18 @@ class RewardManager():
             if need_norm:
                 score = (score - self.mean) / self.std
             if self.config.trainer.use_remote_rm and rm_score is not None:
-                rm_total_cnt += 1
-                if rm_score == RM_INVALID_SCORE:
-                    rm_fail_cnt += 1
+                if rm_score == 0:
+                    # For sample with grm score 0, we skip it since it does not require grm
+                    pass
                 else:
-                    rm_score_sum += rm_score
+                    rm_total_cnt += 1
+                    rm_retry_cnt_sum += rm_retry_cnt
+                    if rm_score == RM_INVALID_SCORE:
+                        rm_fail_cnt += 1
+                    else:
+                        rm_score_sum += rm_score
+                        rm_wait_time_sum += rm_wait_time
+                        rm_time_cost_sum += rm_time_cost
 
             raw_scores[idx, valid_response_length - 1] = raw_score
             raw_reward = score
@@ -646,6 +668,12 @@ class RewardManager():
                     rm_fail_cnt / rm_total_cnt if rm_total_cnt > 0 else -1,
                 prefix + f"remote_rm/{remote_rm_type}_mean_score":
                     rm_score_sum / (rm_total_cnt - rm_fail_cnt) if rm_total_cnt - rm_fail_cnt > 0 else -1,
+                prefix + f"remote_rm/{remote_rm_type}_mean_wait_time":
+                    rm_wait_time_sum / (rm_total_cnt - rm_fail_cnt) if rm_total_cnt - rm_fail_cnt > 0 else -1,
+                prefix + f"remote_rm/{remote_rm_type}_mean_time":
+                    rm_time_cost_sum / (rm_total_cnt - rm_fail_cnt) if rm_total_cnt - rm_fail_cnt > 0 else -1,
+                prefix + f"remote_rm/{remote_rm_type}_mean_retry_cnt":
+                    rm_retry_cnt_sum / rm_total_cnt if rm_total_cnt > 0 else -1,
             })
 
         log_counter = {prefix + f"score_counter/raw_{key}": value for key, value in raw_counter.items()}
@@ -764,6 +792,7 @@ class RewardManager():
             )
             self.async_case_running_tasks.add(task)
             print(f"[{time.ctime()}][save cases] reward_fn end")
+
         if not is_validation:
             return reward_tensor, raw_scores, len_scores, idx_tensor
         else:

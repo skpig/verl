@@ -5,6 +5,7 @@ from alpha_seed.utils.dataset.rl_dataset import RLHFDataset
 from verl.utils.fs import copy_local_path_from_hdfs
 from omnistore.utilities.io.bfile import is_local_path
 from alpha_seed.utils.functional import log_cpu_memory_usage
+from alpha_seed.utils.functional import import_from_string
 
 
 class DataLoaderMgr:
@@ -29,14 +30,19 @@ class DataLoaderMgr:
                     from alpha_seed.utils.dataset.rl_dataset_swalm import RLHFDatasetVLSwalm as RLHFDataset
                 else:
                     from alpha_seed.utils.dataset.vlm_rl_dataset import RLHFDatasetVL as RLHFDataset
+            dataset_cls = RLHFDataset
         else:
             from alpha_seed.utils.dataset.rl_dataset import collate_fn
             if self.config.data.get("enable_swalm_agent", False):
                 from alpha_seed.utils.dataset.rl_dataset_swalm import RLHFDatasetSwalm as RLHFDataset
             else:
                 from alpha_seed.utils.dataset.rl_dataset import RLHFDataset
+            dataset_cls = RLHFDataset
 
-        self.RLHFDataset = RLHFDataset
+        if config.tasks.dataset is not None:
+            dataset_cls = import_from_string(config.tasks.dataset)
+
+        self.RLHFDataset = dataset_cls
         self.collate_fn = collate_fn
 
         self._create_datasets()

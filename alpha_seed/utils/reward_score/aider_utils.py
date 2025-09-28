@@ -27,7 +27,7 @@ def get_sandbox_endpoint(aider_service_psm):
 class AiderVerifier(Verifier, reward_style="aider"):
 
     def is_remote(self):
-        return self.config.trainer.use_remote_sandbox
+        return True
 
     def preprocess(self, *args, **kwargs):
         ground_truth = kwargs['ground_truth']

@@ -249,13 +249,12 @@ class RolloutManager:
     def _init_eos_callback(self):
         # set the eos_callback_fn of actor_rollout
         from alpha_seed.workers.xperf_rollout.component.query import Query
-        use_remote_rm = self.config.trainer.use_remote_rm
         raw_config = self.config
 
         def sandbox_callback_fn(query: Query):
             reward_model = query.meta_info.get('reward_model')
             has_remote_verifier = True
-            if reward_model is not None and 'style' in reward_model:
+            if reward_model is not None and 'style' in reward_model and reward_model['style'] != 'remote_service':
                 verifier = Verifier.get_verifier(reward_model['style'], raw_config)
                 if verifier is None or not verifier.is_remote():
                     has_remote_verifier = False
@@ -273,6 +272,22 @@ class RolloutManager:
                                           input_ids=input_ids,
                                           ground_truth=ground_truth,
                                           reward_style=reward_style)
+            # grm verifier
+            call_remote_rm = reward_model.get('grm_required', False)
+            if call_remote_rm:
+                verifier = Verifier.get_verifier('grm_service', raw_config)
+                input_ids = query.input_ids + query.new_token_ids
+                reward_model = query.meta_info['reward_model']
+                ground_truth = reward_model['ground_truth']
+
+                params = dict(
+                    input_ids=input_ids,
+                    ground_truth=ground_truth,
+                    reward_style='grm_service',
+                    call_rm_service=call_remote_rm,
+                    reward_model=reward_model,
+                )
+                verifier.add_requests(req_id=req_id, **params)
 
         if self.config.reward_model.enable_eos_callback:
             self.hybrid_wg.set_eos_callback_fn(sandbox_callback_fn)
@@ -1262,13 +1277,13 @@ class RolloutManager:
                                                           device=batch.batch["input_ids"].device)
             gen_batch_required_keys.append(key)
 
-        if self.config.get("use_decouple_critic", False):
+        if self.config.critic.get("use_decouple_critic", False):
             for key in [
                     "input_ids_critic",
                     "attention_mask_critic",
             ]:
-                if key not in batch:
-                    batch.batch[key] = _get_response_tensor(dtype=torch.int64)
+                # if key not in batch:
+                #     batch.batch[key] = _get_response_tensor(dtype=torch.int64)
                 gen_batch_required_keys.append(key)
         if is_train and self.config.algorithm.use_model_output_mask:
             if (key := "model_output_mask") not in batch:
@@ -1277,6 +1292,10 @@ class RolloutManager:
                                                           length=self.config.data.max_response_length,
                                                           device=batch.batch['input_ids'].device)
             gen_batch_required_keys.append(key)
+
+        for key in ["ability_idx", "no_thinking_required"]:
+            if key in batch.batch:
+                gen_batch_required_keys.append(key)
 
         gen_batch = batch.pop(batch_keys=gen_batch_required_keys)
         gen_batch.non_tensor_batch = batch.non_tensor_batch

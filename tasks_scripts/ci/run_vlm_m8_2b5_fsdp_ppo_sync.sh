@@ -175,7 +175,7 @@ python3 tasks/main_ppo.py \
     trainer.log_file=/opt/tiger/alpha-seed/log.jsonl \
     trainer.resume_steps="auto" \
     actor_rollout_ref.actor.kl_loss_weight=${kl_loss_weight} \
-    +actor_rollout_ref.rollout.max_ctx_batch_size=1 \
+    actor_rollout_ref.rollout.max_ctx_batch_size=1 \
     actor_rollout_ref.rollout.enable_paged_attention=True \
     trainer.save_cases_to_hdfs=False \
     trainer.total_steps=${NUM_STEPS} \

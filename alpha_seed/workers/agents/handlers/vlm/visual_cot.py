@@ -60,11 +60,12 @@ class VisualCotAgent(AsyncAgent):
                                                 single_batch=True)
 
     def _reward_fn(self, item: DataProto, out: DataProto):
-        reward_style = item.non_tensor_batch['reward_model'][0]['style']
+        reward_model = out.non_tensor_batch['reward_model'][0]
+        reward_style = reward_model['style']
         verifier = Verifier.get_verifier(reward_style, self.config, self.tokenizer)
         req_id = item.non_tensor_batch['uid'][0]
         input_ids = out.batch['input_ids'][0]
-        ground_truth = item.non_tensor_batch['reward_model'][0]['ground_truth']
+        ground_truth = reward_model['ground_truth']
         verifier.add_requests(req_id=req_id, input_ids=input_ids, ground_truth=ground_truth, reward_style=reward_style)
 
     async def __call__(self, item: DataProto, context: TaskContext, **kwargs):
@@ -83,6 +84,7 @@ class VisualCotAgent(AsyncAgent):
         max_length = max_prompt_length + max_response_length
         max_turns = context.config.actor_rollout_ref.rollout.agent.max_turns
         item.meta_info = copy.deepcopy(item.meta_info)
+        reward_model = item.non_tensor_batch.pop('reward_model')
 
         # Extract initial messages from DataProto
         messages = await self._extract_messages_from_dataproto(item, max_prompt_length)
@@ -100,8 +102,9 @@ class VisualCotAgent(AsyncAgent):
         raw_output_ids = []
         last_data = None
 
-        images_bytes = get_local_data([messages[0]['images_bytes_ref']], self.dist_data_manager)
-        messages[0]['images_bytes'] = images_bytes
+        if 'images_bytes_ref' in messages[0]:
+            images_bytes = get_local_data([messages[0]['images_bytes_ref']], self.dist_data_manager)
+            messages[0]['images_bytes'] = images_bytes
         last_completion = None
         first_round_prompt_length = 0
         finish_reason = None
@@ -183,8 +186,7 @@ class VisualCotAgent(AsyncAgent):
 
             # 增加上一轮的模型输出
             messages.append({"role": "assistant", "content": {"input_ids": response_message['raw_output_ids']}})
-            images_bytes = processed_msg['images_bytes']
-            logger.info(f"response_text: {response_text}")
+            images_bytes = processed_msg.get('images_bytes')
             # Parse tool calls from response
             tool_calls = await self.tool_parser.extract_tool_calls(response_text, images_bytes)
             num_tool_calls += len(tool_calls)
@@ -265,6 +267,7 @@ class VisualCotAgent(AsyncAgent):
         out = pack_to_dataproto(item, self.tokenizer, data_pack, context.config.actor_rollout_ref.rollout)
         out.non_tensor_batch['agent_num_turns'] = np.array([num_turns])
         out.non_tensor_batch['agent_num_tool_calls'] = np.array([num_tool_calls])
+        out.non_tensor_batch['reward_model'] = reward_model
         return out
 
     async def _extract_messages_from_dataproto(self, item, max_prompt_length) -> List[Dict]:

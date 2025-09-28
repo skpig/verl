@@ -34,7 +34,7 @@ registered_bench_repo2hosts = cfg.get("swe", {}).get("bench_repo2hosts", {})
 class SWERepairVerifier(Verifier, reward_style="swe_repair_verifier"):
 
     def is_remote(self):
-        return self.config.trainer.use_remote_swe_sandbox
+        return True
 
     @staticmethod
     def compute_score(solution_str, ground_truth) -> float:

@@ -60,21 +60,29 @@ class VLMRouter(Verifier, reward_style="vlm_verifier_router"):
             solution_str_post_proc_anwswer = kwargs['solution_str']
         ground_truth = kwargs['ground_truth']
         think_template = self.config.data.think_template if self.config.data.think_template is not None else 'v2'
-        return solution_str_post_proc_anwswer, ground_truth, think_template, self.config.trainer.code_sandbox_psm, self.config.trainer.volc_ark_key, self.config.trainer.volc_model_name
+        no_thinking_required = kwargs.get('no_thinking_required', False)
+        return solution_str_post_proc_anwswer, ground_truth, think_template, self.config.trainer.code_sandbox_psm, \
+            self.config.trainer.volc_ark_key, self.config.trainer.volc_model_name, no_thinking_required
 
     @staticmethod
     def compute_score(solution_str, ground_truth, think_template, code_sandbox_psm, volc_ark_key, volc_model_name,
-                      **argv) -> float:
+                      no_thinking_required, **argv) -> float:
         return compute_score(solution_str, ground_truth, code_sandbox_psm, volc_ark_key, volc_model_name,
-                             think_template)
+                             think_template, no_thinking_required)
 
 
 # Note: AlphaSeed uses [-1, +1] for reward scores and -2 for error handling, which is different from SeedRL's [0, 1].
-def compute_score(solution_str, ground_truth, code_sandbox_psm: str, volc_ark_key: str, volc_model_name: str,
-                  think_template: str, **kwargs) -> float:
+def compute_score(solution_str,
+                  ground_truth,
+                  code_sandbox_psm: str,
+                  volc_ark_key: str,
+                  volc_model_name: str,
+                  think_template: str,
+                  no_thinking_required: bool = False,
+                  **kwargs) -> float:
     try:
         ref = submit_verifier.remote(solution_str, ground_truth, code_sandbox_psm, volc_ark_key, volc_model_name,
-                                     think_template)
+                                     think_template, no_thinking_required)
         try:
             score = ray.get(ref, timeout=1500)
         except ray.exceptions.GetTimeoutError:
@@ -92,8 +100,13 @@ def compute_score(solution_str, ground_truth, code_sandbox_psm: str, volc_ark_ke
 
 
 @ray.remote
-def submit_verifier(response: str, verifier_feature: str, code_sandbox_psm: str, volc_ark_key: str,
-                    volc_model_name: str, think_template: str):
+def submit_verifier(response: str,
+                    verifier_feature: str,
+                    code_sandbox_psm: str,
+                    volc_ark_key: str,
+                    volc_model_name: str,
+                    think_template: str,
+                    no_thinking_required: bool = False):
     os.environ['THINK_TEMPLATE'] = think_template
     full_rollout = response
 
@@ -129,16 +142,34 @@ def submit_verifier(response: str, verifier_feature: str, code_sandbox_psm: str,
         response = response[:-len(eos_token)]
         k = response.rfind(bos_token)
 
+    validation_verifiers = [
+        'verifier_vstar',
+        'verifier_zerobench',
+        'verifier_charxiv',
+    ]
     # Verify if it follows the VisualCoT format. Allow the last turn to be FC to support LLM FC data.
-    if verifier_name not in ('verifier_vstar', 'verifier_zerobench') and think_template != "v1":
+    if (verifier_name not in validation_verifiers) and (os.getenv("THINK_TEMPLATE", "v2") != "v1"):
         # Skip these two for now. May delete this `if` in the future.
-        if not match_visual_cot_format(response, verifier_feature=feature, allow_last_turn_fc=True):
+        if verifier_name in ["text_function_call_v3"]:
+            only_check_think_format = True
+        else:
+            only_check_think_format = False
+
+        if not match_visual_cot_format(
+                response,
+                verifier_feature=feature,
+                allow_last_turn_fc=True,
+                no_thinking_required=no_thinking_required,
+                only_check_think_format=only_check_think_format,
+        ):
             response = ''  # Let it fail.
 
     verify_full_rollout = feature.get('verify_full_rollout', False) or (verifier_name in (
         'visual_cot_verifier',
         'auxline_rule_verifier',
+        'video_grounding_counting_verifier',
         'rotate_tool_verifier',
+        'visual_chained_tool_use_verifier',
     ))
     if not verify_full_rollout:
         # Discard turns related with function calling and keep only the last assistant response:
@@ -146,11 +177,11 @@ def submit_verifier(response: str, verifier_feature: str, code_sandbox_psm: str,
         if k >= 0:
             response = response[k + len(bos_assistant_nl):]
         # Discard the CoT part:
-        response, _ = filter_thinking_part(response)
+        response, _ = filter_thinking_part(response, no_thinking_required=no_thinking_required)
 
     try:
         if response == '':
-            raise ExtractAnswerFailed
+            raise ExtractAnswerFailed('Failed basic format checks!')
 
         # Notice for pip dependencies:
         #   - Verifier "count/pointing/bbox/countbypoint/mcqa/action_count/temporal_ground" requires: shapely==2.0.6 word2number==1.1
@@ -158,6 +189,11 @@ def submit_verifier(response: str, verifier_feature: str, code_sandbox_psm: str,
         if verifier_name == 'math':
             from alpha_seed.utils.reward_score.vlm_verifiers.math_verifier import MathVerifier
             result = MathVerifier().verify(response=response, verifier_feature_dict=feature)
+        elif verifier_name == 'math_v2':
+            from alpha_seed.utils.reward_score.vlm_verifiers.math_verifier import MathV2Verifier
+            result = MathV2Verifier(volc_ark_key=volc_ark_key,
+                                    volc_model_name=volc_model_name).verify(response=response,
+                                                                            verifier_feature_dict=feature)
         elif verifier_name == 'arena_code_switch_verifier':
             from alpha_seed.utils.reward_score.vlm_verifiers.arena_lang_llm_verifier import LLMArenaLangVerifier
             result = LLMArenaLangVerifier().verify(response=response, verifier_feature_dict=feature)
@@ -221,6 +257,9 @@ def submit_verifier(response: str, verifier_feature: str, code_sandbox_psm: str,
         elif verifier_name == "mcqa":
             from alpha_seed.utils.reward_score.vlm_verifiers.mcqa_verifier import MCQAVerifier
             result = MCQAVerifier().verify(response=response, verifier_feature_dict=feature)
+        elif verifier_name == "mcqa_instruct":
+            from alpha_seed.utils.reward_score.vlm_verifiers.mcqa_instruct_verifier import MCQAInstructVerifier
+            result = MCQAInstructVerifier().verify(response=response, verifier_feature_dict=feature)
         elif verifier_name == "action_count":
             from alpha_seed.utils.reward_score.vlm_verifiers.action_count_verifier import ActionCountVerifier
             result = ActionCountVerifier().verify(response=response, verifier_feature_dict=feature, delta=0.8)
@@ -235,18 +274,34 @@ def submit_verifier(response: str, verifier_feature: str, code_sandbox_psm: str,
             result = ModelBasedGroundingComplexVerifierVolc(
                 volc_ark_key=volc_ark_key, volc_model_name=volc_model_name).verify(response=response,
                                                                                    verifier_feature_dict=feature)
+        elif verifier_name == 'single_bbox_llm_verifier':
+            from alpha_seed.utils.reward_score.vlm_verifiers.single_bbox_llm_verifier import SingleBBoxVerifier
+            result = SingleBBoxVerifier(volc_ark_key=volc_ark_key,
+                                        volc_model_name=volc_model_name).verify(response=response,
+                                                                                verifier_feature_dict=feature)
+        elif verifier_name == 'PHYSICS_benchmark_verifier':
+            from alpha_seed.utils.reward_score.vlm_verifiers.PHYSICS_benchmark_verifier import PhysicsVerifier
+            result = PhysicsVerifier(volc_ark_key=volc_ark_key,
+                                     volc_model_name=volc_model_name).verify(response=response,
+                                                                             verifier_feature_dict=feature)
         elif verifier_name == 'visual_cot_verifier':
             from alpha_seed.utils.reward_score.vlm_verifiers.visual_cot_verifier import VisualCoTVerifier
             result = VisualCoTVerifier().verify(response=response, verifier_feature_dict=feature)
         elif verifier_name == 'visual_cot_verifier_geoguess_combine':
             from alpha_seed.utils.reward_score.vlm_verifiers.visual_cot_verifier_geoguess_combine import VisualCoTVerifier_Geo_Combine
             result = VisualCoTVerifier_Geo_Combine().verify(response=response, verifier_feature_dict=feature)
+        elif verifier_name == 'visual_cot_verifier_maze':
+            from alpha_seed.utils.reward_score.vlm_verifiers.visual_cot_verifier_maze import VisualCoTVerifier_Maze
+            result = VisualCoTVerifier_Maze().verify(response=response, verifier_feature_dict=feature)
         elif verifier_name == 'verifier_vstar':
             from alpha_seed.utils.reward_score.vlm_verifiers.validation.vstar_verifier import VstarVerifier
             result = VstarVerifier().verify(response=response, verifier_feature_dict=feature)
         elif verifier_name == 'verifier_zerobench':
             from alpha_seed.utils.reward_score.vlm_verifiers.validation.zerobench_verifier import ZeroBenchVerifier
             result = ZeroBenchVerifier().verify(response=response, verifier_feature_dict=feature)
+        elif verifier_name == 'verifier_charxiv':
+            from alpha_seed.utils.reward_score.vlm_verifiers.validation.charxiv_verifier import CharaxivVerifier
+            result = CharaxivVerifier().verify(response=response, verifier_feature_dict=feature)
         elif verifier_name == 'bracket_rule_verifier':
             from alpha_seed.utils.reward_score.vlm_verifiers.bracket_rule_verifier import BracketRuleVerifier
             result = BracketRuleVerifier().verify(response=response, verifier_feature_dict=feature)
@@ -269,9 +324,32 @@ def submit_verifier(response: str, verifier_feature: str, code_sandbox_psm: str,
             from alpha_seed.utils.reward_score.vlm_verifiers.general_sandbox_code_verifier import GeneralSandboxVerifier
             result = GeneralSandboxVerifier(code_sandbox_service_psm=code_sandbox_psm).verify(
                 response=response, verifier_feature_dict=feature)
+        elif verifier_name == 'video_grounding_counting_verifier':
+            from alpha_seed.utils.reward_score.vlm_verifiers.video_grounding_counting import VideoGroundingCountingVerifier
+            result = VideoGroundingCountingVerifier().verify(response=response, verifier_feature_dict=feature)
         elif verifier_name == 'rotate_tool_verifier':
             from alpha_seed.utils.reward_score.vlm_verifiers.rotate_tool_verifier import RotateToolVerifier
             result = RotateToolVerifier().verify(response=response, verifier_feature_dict=feature)
+        elif verifier_name == 'chart_verifier_service':
+            from alpha_seed.utils.reward_score.vlm_verifiers.chart_verifier import ModelBasedChartVerifierVolc
+            result = ModelBasedChartVerifierVolc(volc_ark_key=volc_ark_key,
+                                                 volc_model_name=volc_model_name).verify(response=response,
+                                                                                         verifier_feature_dict=feature)
+        elif verifier_name == "gui_orm":
+            from alpha_seed.utils.reward_score.vlm_verifiers.gui_orm_verifier import GUIORMVerifier
+            result = GUIORMVerifier().verify(response=response, verifier_feature_dict=feature)
+        elif verifier_name == "instrruler":
+            from alpha_seed.utils.reward_score.vlm_verifiers.instrruler_verifier import InstrRulerVerifier
+            result = InstrRulerVerifier().verify(response=response, verifier_feature_dict=feature)
+        elif verifier_name == "text_function_call_v3":
+            from alpha_seed.utils.reward_score.vlm_verifiers.text_function_call_v3_verifier import FunctionCallv3Verifier
+            result = FunctionCallv3Verifier().verify(response=response, verifier_feature_dict=feature)
+        elif verifier_name == 'visual_chained_tool_use_verifier':
+            from alpha_seed.utils.reward_score.vlm_verifiers.visual_chained_tool_use_verifier import VisualChainedToolUseVerifier
+            result = VisualChainedToolUseVerifier().verify(response=response, verifier_feature_dict=feature)
+        elif verifier_name == 'seed_grm_verifier':
+            from alpha_seed.utils.reward_score.vlm_verifiers.seed_grm_verifier import SeedGRMVerifier
+            result = SeedGRMVerifier().verify(response=response, verifier_feature_dict=feature)
         else:
             raise NotImplementedError(f'No verifier named "{verifier_name}".')
 
@@ -283,19 +361,22 @@ def submit_verifier(response: str, verifier_feature: str, code_sandbox_psm: str,
                 'answer': answer,
                 'verifier_name': verifier_name,
                 'score': final_score,
+                'no_thinking_required': bool(no_thinking_required),
             },
             ensure_ascii=False)
         print(f'[VLM VERIFIER INFO] {status}')
         return final_score
 
-    except ExtractAnswerFailed:
+    except ExtractAnswerFailed as e:
         status = json.dumps(
             {
-                'tag': 'parsing_fail',
+                'tag': f'parsing_fail: {e}',
                 'pred': full_rollout,
-                'verifier_feature': feature,
+                'answer': answer,
+                'verifier_name': verifier_name,
                 # Assign lower scores to ill-formatted answers compared to incorrect but well-formatted answers.
-                'score': -1.2
+                'score': -1.2,
+                'no_thinking_required': bool(no_thinking_required),
             },
             ensure_ascii=False)
         print(f'[VLM VERIFIER WARNING] {status}')
@@ -307,7 +388,8 @@ def submit_verifier(response: str, verifier_feature: str, code_sandbox_psm: str,
                 'tag': f'verifier service failed: {e}',
                 'pred': full_rollout,
                 'verifier_feature': feature,
-                'score': -2.0
+                'score': -2.0,
+                'no_thinking_required': bool(no_thinking_required),
             },
             ensure_ascii=False)
         print(f'[VLM VERIFIER ERROR] {status}')
@@ -322,7 +404,8 @@ def submit_verifier(response: str, verifier_feature: str, code_sandbox_psm: str,
                 'tag': f'verification error: {tb}',
                 'pred': full_rollout,
                 'verifier_feature': feature,
-                'score': -2.0
+                'score': -2.0,
+                'no_thinking_required': bool(no_thinking_required),
             },
             ensure_ascii=False)
         print(f'[VLM VERIFIER ERROR] {status}')

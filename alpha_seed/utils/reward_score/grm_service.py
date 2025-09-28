@@ -2,12 +2,14 @@ import re
 import time
 import asyncio
 import math
+import json
 import torch
 import random
-import traceback
 import pandas as pd
 import ray
 import logging
+import numpy as np
+from uuid import uuid4
 from alpha_seed.workers.xperf_rollout.component.query import Query
 from mono_rl.utils.infer.client import GRMServingClient
 from mono_rl.utils.dataset.dist_data_util import get_dist_data_manager
@@ -15,17 +17,144 @@ from typing import Dict, List
 from langchain.schema import HumanMessage, SystemMessage
 from bytedagi.model_io import InferenceRequest, ModelIO
 from langchain.schema import HumanMessage
-from bytedance import servicediscovery
-from servicediscovery import ServiceDiscoveryError
+from alpha_seed.utils.reward_score.rm_utils import wait_remote_server_ready, check_nan, _extract_conversation, _process_history, decode_with_image_tag, replace_image_tag, get_query_imgs
 from alpha_seed.utils.reward_score.utils import Verifier
 
 # NOTE: GRM,QRM,ORM has same invalid score
 RM_INVALID_SCORE = -100.0
-MAX_RETRIES = 3
-REQUEST_DELAY = 1.0
+
+logging.disable(logging.INFO)
 
 
-class GrmVerifier(Verifier, reward_style="grm"):
+def prepare_vlm_grm_input(
+    tokenizer,
+    row_dict,
+    prompt_key,
+    is_image=False,
+    max_prompt_len=4096,
+    max_resp_len=24576,
+):
+    """
+        Args:
+            prompts: [{"role": "user", "content": "..."}, ...]
+            answer: 正确答案
+            max_prompt_len: 输入最大长度
+            max_resp_len: 响应最大长度
+        """
+
+    def pad_sequence(seq, target_len):
+        seq = seq[:target_len]
+        out = torch.full((target_len,), tokenizer.pad_token_id, dtype=torch.long)
+        out[-len(seq):] = torch.tensor(seq, dtype=torch.long)
+        return out
+
+    system_prompt = row_dict.get('system_prompt', '')
+    ability = row_dict.get("ability", "unknown")
+    # build system prompt
+    if ability in ["verifiable_function_call"]:
+        sp = ''
+        for prompt_turn in json.loads(system_prompt):
+            if 'name' in prompt_turn and prompt_turn['name'] is not None and prompt_turn['name'] != '':
+                sp += f'{prompt_turn["role"]} name={prompt_turn["name"]}\n{prompt_turn["content"]}\n'
+            else:
+                sp += f'{prompt_turn["role"]}\n{prompt_turn["content"]}\n'
+    else:
+        sp = row_dict.get('system_prompt', '')
+        if row_dict.get('remark', '') and ('answer' in row_dict['remark'] or 'dypcot' in row_dict['remark']):
+            if 'dypcot' in row_dict['remark']:
+                sp += "\n\n请参考以下内容进行回答: \n\n" + row_dict['remark'][row_dict['remark'].find("dypcot:") + 7:]
+            else:
+                sp += "\n\n请参考以下内容进行回答: \n\n" + row_dict['remark'][row_dict['remark'].find("answer"):]
+
+    prompts = row_dict[prompt_key]
+    if is_image:  # [FIXME] Hack for text input
+        prompts = [raw_ctx.replace("<image>", "<|image|>") for raw_ctx in prompts]
+
+    # # GRM reference response
+    grm_reference_resp = row_dict.get('rm_reference_response', None)
+    if grm_reference_resp is None or check_nan(grm_reference_resp) or len(grm_reference_resp) == 0:
+        grm_reference_resp = row_dict.get('ground_truth', None)  # Legency字段 (remove in future)
+        if grm_reference_resp is None or check_nan(grm_reference_resp) or len(grm_reference_resp) == 0:
+            grm_reference_resp = "No ground truth is found."
+
+    assert not pd.isna(grm_reference_resp)
+
+    if sp is None:
+        sp = ""
+    pre_context = ""
+    if sp != "":
+        pre_context = f"<对话场景设定>\n{sp}\n</对话场景设定>\n\n"
+    else:
+        pre_context = f"<对话场景设定>\n无\n</对话场景设定>\n\n"
+    pre_context = tokenizer(pre_context)["input_ids"]
+    history, final_question = _extract_conversation(prompts)
+    final_question = final_question["content"]
+
+    # context
+    context = tokenizer(
+        f"<当前user问题>\n{final_question}\n</当前user问题>\n\n"
+        f"<回答1>\n{grm_reference_resp}\n</回答1>\n\n"
+        f"<回答2>\n",
+    )["input_ids"]
+    post_context = tokenizer("\n</回答2>")["input_ids"]
+
+    history_ids = _process_history(tokenizer,
+                                   history,
+                                   base_length=len(pre_context) + len(context) + len(post_context),
+                                   max_total=max_prompt_len)
+
+    return {
+        "rm_pre_ids": pad_sequence(pre_context + history_ids + context, max_prompt_len),
+        "rm_post_ids": torch.tensor(post_context)
+    }
+
+
+def prepare_grm_input(
+    prompts,
+    answer,
+    tokenizer,
+    max_prompt_len=4096,
+    max_resp_len=24576,
+):
+    """
+        Args:
+            prompts: [{"role": "user", "content": "..."}, ...]
+            answer: 正确答案
+            max_prompt_len: 输入最大长度
+            max_resp_len: 响应最大长度
+        """
+
+    def pad_sequence(seq, target_len):
+        return torch.tensor([tokenizer.pad_token_id] * (target_len - len(seq)) + seq[:target_len])
+
+    assert not pd.isna(answer)
+    # system prompt
+    system_prompt = next((prompt["content"] for prompt in prompts if prompt["role"] == "system"), "")
+    pre_context = ""
+    if system_prompt != "":
+        pre_context = f"<场景设定>\n{system_prompt}\n</场景设定>\n\n"
+    pre_context = tokenizer(pre_context)["input_ids"]
+    # history
+    history, final_question = _extract_conversation(prompts)
+    # context
+    context = tokenizer(
+        f"<问题>\n{final_question}\n</问题>\n\n"
+        f"<标准答案>\n{answer}\n</标准答案>\n\n"
+        f"<回答>\n",
+    )["input_ids"]
+    post_context = tokenizer("\n</回答>")["input_ids"]
+    # 历史对话
+    history_ids = _process_history(tokenizer,
+                                   history,
+                                   base_length=len(pre_context) + len(context) + len(post_context),
+                                   max_total=max_prompt_len)
+    return {
+        "rm_pre_ids": pad_sequence(pre_context + history_ids + context, max_prompt_len),
+        "rm_post_ids": torch.tensor(post_context)
+    }
+
+
+class GrmVerifier(Verifier, reward_style="grm_service"):
 
     def __init__(self, config=None, tokenizer=None):
         super().__init__(config=config, tokenizer=tokenizer)
@@ -33,17 +162,18 @@ class GrmVerifier(Verifier, reward_style="grm"):
     def is_remote(self):
         return True
 
-    def get_remote_score(self, data_uid):
-        score_dict = super().get_remote_score(data_uid)
-        return score_dict['grm_prompt'], score_dict['grm_resp'], score_dict['score']
-
     def compute_score_client(self, data_uid, *args, **kwargs) -> float:
+        cur_time = time.time()
         result = None
         if self.is_remote():
             result = self.get_remote_score(data_uid)
+            if isinstance(result, ray.ObjectRef):
+                result = ray.get(result)
+        wait_time = time.time() - cur_time
         if result is None:
-            return None, None, None
-        return result
+            # rsp, score, wait_cost, total_time , retry_cnt
+            return "", 0, -1, -1, -1
+        return result['grm_resp'], result['score'], wait_time, result['time_cost'], result['retry_cnt']
 
     def compute_score_remote(self, *args, **kwargs) -> float:
         remote_service = kwargs['remote_service']
@@ -70,102 +200,41 @@ class GrmVerifier(Verifier, reward_style="grm"):
             raise NotImplementedError
         return score
 
+    def merge_vlm_score(self, verifier_score, rm_score, merge_type="v1", **kwargs):
+        verify_index_set = kwargs.get("verify_index_set", set())
+        verify_fusion_rule_dict = kwargs.get("verify_fusion_rule_dict", {})
+        ab_idx = kwargs.get("ab_idx", -1)
+        is_valid_format = kwargs.get("is_valid_format", True)
 
-def wait_remote_server_ready(psm: str):
-    fail_time = 0
-    while fail_time < 20:
-        try:
-            sd_result = servicediscovery.get_one(psm, address_family="dual-stack")
-            print(f"[GRM SERVER INFO] psm {psm} ready !!!")
-            return
-        except ServiceDiscoveryError:
-            print(f"[GRM SERVER WARNING] waitting psm {psm} ready, cnt={fail_time}, begin sleep 60s")
-            time.sleep(60)
-            fail_time += 1
-    raise ServiceDiscoveryError(f"psm {psm} not ready after 30 times retry, please check remote rm log")
-
-
-def prepare_grm_input(
-    prompts,
-    answer,
-    tokenizer,
-    max_prompt_len=4096,
-    max_resp_len=24576,
-):
-    """
-        Args:
-            prompts: [{"role": "user", "content": "..."}, ...]
-            answer: 正确答案
-            max_prompt_len: 输入最大长度
-            max_resp_len: 响应最大长度
-        """
-
-    def pad_sequence(seq, target_len):
-        return torch.tensor([tokenizer.pad_token_id] * (target_len - len(seq)) + seq[:target_len])
-
-    assert not pd.isna(answer)
-
-    # system prompt
-    system_prompt = next((prompt["content"] for prompt in prompts if prompt["role"] == "system"), "")
-    pre_context = ""
-    if system_prompt != "":
-        pre_context = f"<场景设定>\n{system_prompt}\n</场景设定>\n\n"
-    pre_context = tokenizer(pre_context)["input_ids"]
-
-    # history
-    history, final_question = _extract_conversation(prompts)
-
-    # context
-    context = tokenizer(
-        f"<问题>\n{final_question}\n</问题>\n\n"
-        f"<标准答案>\n{answer}\n</标准答案>\n\n"
-        f"<回答>\n",
-    )["input_ids"]
-    post_context = tokenizer("\n</回答>")["input_ids"]
-
-    # 历史对话
-    history_ids = _process_history(tokenizer,
-                                   history,
-                                   base_length=len(pre_context) + len(context) + len(post_context),
-                                   max_total=max_prompt_len)
-
-    return {
-        "rm_pre_ids": pad_sequence(pre_context + history_ids + context, max_prompt_len),
-        "rm_post_ids": torch.tensor(post_context)
-    }
-
-
-def _extract_conversation(prompts):
-    conversation = [p["content"] for p in prompts if p["role"] in ("user", "assistant")]
-    assert len(conversation) % 2 == 1, f"invalid conversation: {prompts}"
-    return conversation[:-1], conversation[-1]
-
-
-def _process_history(tokenizer, history, base_length, max_total):
-    history_tag_ids = tokenizer("<对话历史>\n")["input_ids"]
-    history_end_tag_ids = tokenizer("\n</对话历史>\n\n")["input_ids"]
-    available = (max_total - base_length - len(history_tag_ids) - len(history_end_tag_ids))
-    buffer = []
-    current_len = 0
-
-    # 逆向处理历史对话
-    for message in reversed(history):
-        role = message["role"]
-        content = message["content"]
-        new_content = f"{role}\n{content}\n"
-        new_tokens = tokenizer(new_content)["input_ids"]
-
-        if current_len + len(new_tokens) > available:
-            break
-
-        buffer.append(new_tokens)
-        current_len += len(new_tokens)
-
-    if buffer:
-        history_tokens = sum(reversed(buffer), [])
-        return (history_tag_ids + history_tokens + history_end_tag_ids)
-    else:
-        return []
+        if ab_idx not in verify_index_set:
+            verifier_score = -1.0
+            if rm_score == RM_INVALID_SCORE:
+                score = 0.5
+            else:
+                score = rm_score
+            if not is_valid_format:
+                score = -0.1
+        else:
+            rescaled_verifier_score = (verifier_score + 1) / 2  # Map verifier_score from [-1, 1] to [0, 1]
+            if ab_idx in verify_fusion_rule_dict["code_switch"]:
+                if rm_score == RM_INVALID_SCORE:
+                    score = 0.5
+                else:
+                    score = rm_score * (0.1 + 0.9 * rescaled_verifier_score)
+            elif ab_idx in verify_fusion_rule_dict["instrruler"]:
+                if rm_score == RM_INVALID_SCORE:
+                    score = rescaled_verifier_score
+                else:
+                    score = rm_score * rescaled_verifier_score
+            elif ab_idx in verify_fusion_rule_dict["function_call"]:
+                if rm_score == RM_INVALID_SCORE:
+                    score = rescaled_verifier_score
+                else:
+                    score = min(rm_score + rescaled_verifier_score * 0.5, 1.0)
+            else:
+                score = rescaled_verifier_score
+        score = (score * 2) - 1  # Rescale back from [0, 1] to [-1, 1]
+        return score
 
 
 def init_grm_server(config, **kwargs):
@@ -176,6 +245,7 @@ def init_grm_server(config, **kwargs):
         idc=rm_conf.rm_server.llm_serving_idc,
         cluster=rm_conf.rm_server.llm_serving_cluster,
         model_name=rm_conf.rm_server.model_name,
+        max_response_length=rm_conf.grm.max_response_length,
         inner_pool_size=rm_conf.rm_server.client_pool_size,
         retry=rm_conf.rm_server.max_retry,
         retry_interval=rm_conf.rm_server.retry_interval,
@@ -188,56 +258,30 @@ def init_grm_server(config, **kwargs):
     return vlm_grm_clients
 
 
-def decode_with_image_tag(tokenizer, ids, skip_special_tokens=True, image_tag="<image>"):
-    seq = torch.as_tensor(ids, dtype=torch.long, device="cpu").tolist()
-    if -100 not in seq:  # pure text
-        return tokenizer.decode(seq, skip_special_tokens=skip_special_tokens)
-    out, i, n = [], 0, len(seq)
-    while i < n:
-        if seq[i] == -100:
-            while i < n and seq[i] == -100:
-                i += 1
-            out.append(image_tag)
-        else:
-            j = i
-            while j < n and seq[j] != -100:
-                j += 1
-            out.append(tokenizer.decode(seq[i:j], skip_special_tokens=skip_special_tokens))
-            i = j
+def swap_std_ans(text: str) -> str:
+    STD_OPEN, STD_CLOSE = "<回答1>", "</回答1>"
+    ANS_OPEN, ANS_CLOSE = "<回答2>", "</回答2>"
 
-    return "".join(out)
+    std_m = re.search(rf"{STD_OPEN}(.*?){STD_CLOSE}", text, flags=re.DOTALL)
+    ans_m = re.search(rf"{ANS_OPEN}(.*?){ANS_CLOSE}", text, flags=re.DOTALL)
+    if not (std_m and ans_m):
+        return text  # 任一缺失就原样返回，或你也可 raise
 
+    std, ans = std_m.group(1), ans_m.group(1)
 
-def replace_image_tag(prompt, images_bytes_lst=None, img_tag="<image>"):
-    pattern = rf"({re.escape(img_tag)})"
-    prompt_chunks = re.split(pattern, prompt)
-    image_tag_count = sum(1 for chunk in prompt_chunks if chunk == img_tag)
-    assert image_tag_count == len(images_bytes_lst), (
-        f"Mismatch between image tags ({image_tag_count}) and provided images ({len(images_bytes_lst)})")
+    # 2) 用占位符避免相互覆盖
+    placeholder = f"__SWAP_PLACEHOLDER_{uuid4().hex}__"
 
-    content = []
-    image_idx = 0
-    for chunk in prompt_chunks:
-        if len(chunk) == 0:
-            continue
-        if chunk == "<image>":
-            content.append({"type": "image_binary", "image_binary": {"binary": images_bytes_lst[image_idx]}})
-            image_idx += 1
-        else:
-            content.append({"type": "text", "text": chunk})
-    return content
+    text = re.sub(r"(<回答1>)(.*?)(</回答1>)",
+                  lambda m: m.group(1) + placeholder + m.group(3),
+                  text,
+                  count=1,
+                  flags=re.DOTALL)
 
+    text = re.sub(r"(<回答2>)(.*?)(</回答2>)", lambda m: m.group(1) + std + m.group(3), text, count=1, flags=re.DOTALL)
 
-def get_query_imgs(dist_data_manager, **kwargs):
-    images_bytes_lst = kwargs.get("images_bytes_lst", [])
-    images_bytes_ref = kwargs.get('images_bytes_ref_lst', [])
-    if images_bytes_lst:
-        return images_bytes_lst
-    if images_bytes_ref:
-        images_bytes_ref_lst = [images_bytes_ref]
-        image_lst = ray.get(ray.get(dist_data_manager.get_refs.remote(images_bytes_ref_lst)))
-        return image_lst[0]  # np.array
-    return []
+    text = text.replace(placeholder, ans)
+    return text
 
 
 class RemoteGRMServingClient(GRMServingClient):
@@ -260,6 +304,7 @@ class RemoteGRMServingClient(GRMServingClient):
                          idc=idc,
                          cluster=cluster,
                          model_name=model_name,
+                         max_response_length=max_response_length,
                          tokenizer=tokenizer,
                          top_p=top_p,
                          timeout=timeout,
@@ -267,7 +312,7 @@ class RemoteGRMServingClient(GRMServingClient):
                          retry_interval=retry_interval,
                          pool_size=pool_size,
                          random_rsp=False)
-        # wait_remote_server_ready(psm)
+        wait_remote_server_ready(psm)
         self.config = kwargs.get("config", None)
         self.tokenizer = tokenizer
         self.timeout = timeout
@@ -278,27 +323,38 @@ class RemoteGRMServingClient(GRMServingClient):
         self.prepare_grm_prompt_mode = self.config.reward_model.grm.get("prepare_grm_prompt_mode", [0])
         self.score_parser_version = self.config.reward_model.grm.get("score_parser", ['v1'])
         self.empty_response_default_score = self.config.reward_model.grm.get("empty_response_default_score", [0])
+        self.use_grm_reverse = self.config.reward_model.grm.get("use_grm_reverse", False)
         special_tokens = self.config.data.special_tokens
         self.think_begin = special_tokens.think_begin
         self.think_end = special_tokens.think_end
         self.assistant_begin = "assistant\n"
-        self.img_tag = "<image>"
+        self.img_tag = "<|image|>"
 
-    def _preprocess_grm_data(self, rm_pre_ids, rollout_ids, rm_post_ids, images_bytes_lst, rm_method):
+    def _preprocess_grm_data(self, rm_pre_ids, response_ids, rm_post_ids, rm_method, **kwargs):
         # for preprocess function, just always used by one data
         system_prompt = self.grm_system_prompts[rm_method]
         response_mode = self.response_postprocess_mode[rm_method]
         prompt_mode = self.prepare_grm_prompt_mode[rm_method]
+        images_bytes_lst = get_query_imgs(self.dist_data_manager, **kwargs)
 
         grm_pre_text = decode_with_image_tag(self.tokenizer, rm_pre_ids)
         grm_post_text = decode_with_image_tag(self.tokenizer, rm_post_ids)
-        response_text = decode_with_image_tag(self.tokenizer, rollout_ids)
+        if response_ids is not None:
+            response_ids = [
+                t for t in response_ids
+                if t not in [self.tokenizer.bos_token_id, self.tokenizer.eos_token_id, self.tokenizer.pad_token_id]
+            ]
+            response_text = decode_with_image_tag(self.tokenizer, response_ids, skip_special_tokens=False)
+        else:
+            input_ids = kwargs.get('input_ids')
+            input_ids = [
+                t for t in input_ids
+                if t not in [self.tokenizer.bos_token_id, self.tokenizer.eos_token_id, self.tokenizer.pad_token_id]
+            ]
+            input_ids_text = decode_with_image_tag(self.tokenizer, input_ids, skip_special_tokens=False)
+            response_text = input_ids_text.rsplit(self.assistant_begin, 1)[-1]
 
         response_empty_flag = False
-        if len(images_bytes_lst) > 0:  # 强制使用拼接模式
-            prompt_mode = 1
-            response_mode = 0
-
         if response_mode > 0:  # 0 = no postprocess
             response_text = self._postprocess_response(response_text, response_mode)
         if response_text == "":
@@ -311,8 +367,19 @@ class RemoteGRMServingClient(GRMServingClient):
         else:
             raise NotImplementedError
 
-        grm_prompt = replace_image_tag(grm_prompt, images_bytes_lst, img_tag=self.img_tag)
-        return system_prompt, grm_prompt, response_empty_flag
+        ref_grm_prompt_w_img = replace_image_tag(grm_prompt, images_bytes_lst, img_tag=self.img_tag)
+        rev_grm_prompt, rev_grm_prompt_w_img = "", ""
+        if self.use_grm_reverse and not response_empty_flag:
+            rev_grm_prompt = swap_std_ans(grm_prompt)
+            rev_grm_prompt_w_img = replace_image_tag(rev_grm_prompt, images_bytes_lst, img_tag=self.img_tag)
+
+        if random.random() < 0.01:
+            debug_info = f"[GRM REVERSE DEBUG] grm prompt: {grm_prompt}"
+            if self.use_grm_reverse and not response_empty_flag:
+                debug_info = debug_info + f"\n grm reverse prompt: {rev_grm_prompt}"
+            print(debug_info)
+        grm_pmp = [grm_prompt, rev_grm_prompt]
+        return system_prompt, ref_grm_prompt_w_img, rev_grm_prompt_w_img, response_empty_flag, grm_pmp
 
     async def get_result(self, predict_output, rm_method):
         response_buffer = []
@@ -326,51 +393,110 @@ class RemoteGRMServingClient(GRMServingClient):
             raise AttributeError(f"无效解析器: {parser_name}")
 
         score = parser(response)
+        if score == RM_INVALID_SCORE:
+            return response, RM_INVALID_SCORE
         weight_score = score * self.score_weight[rm_method]
         return response, weight_score
 
-    async def call(self, reward_model=None, response_ids="", rm_method=0, **kwargs):
+    async def call(self, reward_model=None, response_ids=None, rm_method=0, **kwargs):
         cur_time = time.time()
-        logging.disable(logging.INFO)
         rm_pre_ids = reward_model.get("rm_pre_ids", None)
         rm_post_ids = reward_model.get("rm_post_ids", None)
-        images_bytes_lst = get_query_imgs(self.dist_data_manager, **kwargs)
-        system_prompt, prompt, response_empty_flag = self._preprocess_grm_data(rm_pre_ids, response_ids, rm_post_ids,
-                                                                               images_bytes_lst, rm_method)
+        images_bytes_ref = reward_model.get("images_bytes_ref", None)
+
+        system_prompt, ref_prompt, rev_prompt, response_empty_flag, grm_prompt = \
+            await asyncio.to_thread(
+                self._preprocess_grm_data,
+                rm_pre_ids=rm_pre_ids,
+                response_ids=response_ids,
+                rm_post_ids=rm_post_ids,
+                rm_method=rm_method,
+                images_bytes_ref=images_bytes_ref,
+                **kwargs
+            )
+
         if response_empty_flag:
             default_score = self.empty_response_default_score[rm_method]
             return {
                 "score": default_score,
                 "status": "empty response",
-                "grm_prompt": prompt,
+                "grm_prompt": grm_prompt,
                 "grm_resp": "",
                 "retry_cnt": 0,
                 "time_cost": time.time() - cur_time
             }
 
-        for attempt in range(self.retry + 1):
-            try:
-                astream_task, predict_output = None, None
+        total_retry_cnt = 0
+        grm_resps = []
+        rev_resp, rev_grm_score, retry_cnt = "", RM_INVALID_SCORE, 0
 
+        tasks = [self._call(ref_prompt, system_prompt, rm_method)]
+        if self.use_grm_reverse:
+            tasks.append(self._call(rev_prompt, system_prompt, rm_method))
+        results = await asyncio.gather(*tasks)
+        (ref_resp, ref_grm_score, retry_cnt), *rest = results
+        total_retry_cnt += retry_cnt
+
+        if self.use_grm_reverse:
+            (rev_resp, rev_grm_score, retry_cnt) = rest[0]
+            total_retry_cnt += retry_cnt
+
+        if ref_grm_score == RM_INVALID_SCORE and rev_grm_score == RM_INVALID_SCORE:
+            final_score = RM_INVALID_SCORE
+        elif ref_grm_score == RM_INVALID_SCORE:
+            final_score = 1 - rev_grm_score
+        elif rev_grm_score == RM_INVALID_SCORE:
+            final_score = ref_grm_score
+        else:
+            final_score = (ref_grm_score + (1 - rev_grm_score)) / 2
+        assert (final_score == RM_INVALID_SCORE) or (
+            0.0 <= final_score <= 1.0), f"score={final_score} is invalied, grm_scores={[ref_grm_score, rev_grm_score]}"
+        grm_resps.append(f"FORWARD:\n{ref_resp}\nREVERSE:\n{rev_resp}\n")
+
+        if final_score == RM_INVALID_SCORE:
+            # fail to get result
+            return {
+                "score": RM_INVALID_SCORE,
+                "status": "fail",
+                "grm_prompt": grm_prompt,
+                "grm_resp": "",
+                "retry_cnt": total_retry_cnt,
+                "time_cost": time.time() - cur_time
+            }
+        else:
+            return {
+                "score": final_score,
+                "status": "success",
+                "grm_prompt": grm_prompt,
+                "grm_resp": "\n".join(grm_resps),
+                "retry_cnt": total_retry_cnt,
+                "time_cost": time.time() - cur_time
+            }
+
+    async def _call(self, prompt, system_prompt=None, rm_method=0):
+        for attempt in range(self.retry + 1):
+            astream_task, predict_output = None, None
+            try:
                 messages = []
                 if system_prompt:
                     messages.append(SystemMessage(content=system_prompt))
                 messages.append(HumanMessage(content=prompt))
                 predict_input = InferenceRequest(messages=messages)
 
-                # 获得结果
+                # get result
                 predict_output = await self.clients[random.randrange(len(self.clients))].astream(predict_input)
-                astream_task = asyncio.create_task(self.get_result(predict_output, rm_method))
-                grm_resp, grm_score = await asyncio.wait_for(asyncio.shield(astream_task), self.timeout)
+                grm_resp, grm_score = await self.get_result(predict_output, rm_method)
+                # astream_task = asyncio.create_task(self.get_result(predict_output, rm_method))
+                # grm_resp, grm_score = await asyncio.wait_for(asyncio.shield(astream_task), self.timeout)
 
-                return {
-                    "score": grm_score,
-                    "status": "success",
-                    "grm_prompt": prompt,
-                    "grm_resp": grm_resp,
-                    "retry_cnt": attempt,
-                    "time_cost": time.time() - cur_time
-                }
+                if grm_score == RM_INVALID_SCORE:
+                    # get invalid score, retry
+                    print(f"[GRM Retry] Attempt {attempt+1}: 解析分数失败，\n====\n{grm_resp}\n====\n")
+                    if attempt < self.retry:
+                        continue
+                    else:
+                        break
+                return grm_resp, grm_score, attempt
 
             except Exception as e:
                 if astream_task:
@@ -379,27 +505,12 @@ class RemoteGRMServingClient(GRMServingClient):
                     predict_output.response_iterator.cancel()
                 if isinstance(e, (TimeoutError, asyncio.TimeoutError)):
                     print(f"[GRM Request Timeout] ... ")
-                    return {
-                        "score": RM_INVALID_SCORE,
-                        "status": "timeout fail",
-                        "grm_prompt": prompt,
-                        "grm_resp": "",
-                        "retry_cnt": attempt,
-                        "time_cost": time.time() - cur_time
-                    }  # 超时不重试
+                    return "", RM_INVALID_SCORE, attempt  # 超时不重试
                 else:
                     print(f"[GRM Request] Attempt {attempt+1} failed: {e}")
                     if attempt < self.retry:
                         await asyncio.sleep(self.retry_interval)
-
-        return {
-            "score": RM_INVALID_SCORE,
-            "status": "retry_max fail",
-            "grm_prompt": prompt,
-            "grm_resp": "",
-            "retry_cnt": attempt,
-            "time_cost": time.time() - cur_time
-        }
+        return "", RM_INVALID_SCORE, self.retry
 
     def _postprocess_response(self, input_str, postprocess_mode):
         start_idx = input_str.find(self.think_begin)
@@ -425,6 +536,17 @@ class RemoteGRMServingClient(GRMServingClient):
                 output_str = input_str[start_idx:]
             else:
                 output_str = input_str
+        elif postprocess_mode == 3:  # compatibility mode
+            if start_idx == -1 and end_idx == -1:  # NoThink Mode
+                output_str = input_str
+            elif start_idx != -1 and end_idx != -1:
+                end_idx += len(self.think_end)
+                output_str = input_str[:start_idx] + input_str[end_idx:]
+            elif end_idx != -1:
+                end_idx += len(self.think_end)
+                output_str = input_str[end_idx:]
+            else:
+                output_str = ""
         else:
             raise NotImplementedError
         return output_str
@@ -460,3 +582,40 @@ class RemoteGRMServingClient(GRMServingClient):
             return final_score
         else:
             return RM_INVALID_SCORE
+
+    def _parse_score_v3(self, raw_response):
+
+        def simple_parse(raw_response):
+            predict_0 = predict_1 = -1
+            if "回答1对比回答2胜出" in raw_response:
+                predict_0 = 1
+            if "回答1对比回答2落败" in raw_response:
+                predict_1 = 1
+
+            if predict_0 == 1 and predict_1 == -1:
+                return 0
+            elif predict_1 == 1 and predict_0 == -1:
+                return 1
+            else:
+                return RM_INVALID_SCORE
+
+        sigmoid = lambda x: 1 / (1 + np.exp(-x))
+        # 预处理
+        res = raw_response.split(self.config.data.special_tokens.think_end)[-1]
+        res = res.replace(" ", "")
+        res = res.replace("Answer1", "回答1")
+        res = res.replace("Answer2", "回答2")
+
+        matches = re.findall(r"对比(.*?)结论", res, re.DOTALL)
+        if not matches:
+            return simple_parse(res)
+        res_match = matches[-1].replace("**", "")
+        pattern = r'回答1总得分：(?:.*?=)?[^\d]*(\d+\.?\d*).*?回答2总得分：(?:.*?=)?[^\d]*(\d+\.?\d*)'
+        matches = re.findall(pattern, res_match, re.DOTALL)
+        if not matches:
+            return simple_parse(res)
+        else:
+            score1, score2 = matches[-1]
+            score1 = float(score1)
+            score2 = float(score2)
+            return sigmoid(score2 - score1)

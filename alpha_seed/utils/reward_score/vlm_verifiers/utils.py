@@ -1,3 +1,4 @@
+import json
 import os
 import random
 import time
@@ -118,3 +119,25 @@ def check_language_correctness(query: str, response: str, verifier_feature: dict
                         answer=first_cot, expected_response_lang=response_language, client=client, endpoint=endpoint):
                     print(f'[VLM VERIFIER LANG SWITCH DETECTED (COT)] {repr(query)} {repr(first_cot)}')
                     raise ExtractAnswerFailed
+
+
+def get_valid_visual_tool_calls(full_rollout_response: str, num_input_images: int):
+    last_call_valid = False
+    last_call_str = ''
+    # It maps `imgidx` to the tool call that generates the corresponding image, or to an empty dict if the image is given in the prompt:
+    valid_tool_calls: list[dict] = [{}] * num_input_images
+    eos = get_special_tokens_dict_or_name("eos")
+    bos = get_special_tokens_dict_or_name("bos")
+    soi = get_special_tokens_dict_or_name("soi")
+    eoi = get_special_tokens_dict_or_name("eoi")
+    convs = ("assistant\n" + full_rollout_response).split(f'{eos}{bos}')
+    for idx, conv in enumerate(convs):
+        if '<|FunctionCallBegin|>' in conv:
+            last_call_str = conv.split("<|FunctionCallBegin|>")[1].split("<|FunctionCallEnd|>")[0]
+            if (idx + 1 < len(convs)) and ((f'{soi}{eoi}' in convs[idx + 1]) or
+                                           (f'{soi}<ImageHere>{eoi}' in convs[idx + 1])):
+                last_call_valid = True
+                valid_tool_calls.append(json.loads(last_call_str)[0])
+            else:
+                last_call_valid = False
+    return last_call_valid, last_call_str, valid_tool_calls

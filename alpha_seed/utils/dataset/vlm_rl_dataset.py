@@ -25,11 +25,13 @@ import copy
 import numpy as np
 import pandas as pd
 import torch
-import json
+import random
 import verl.utils.torch_functional as verl_F
 from PIL import Image
+import os
 
 from alpha_seed.utils.dataset.rl_dataset import RLHFDataset
+from alpha_seed.prompts.think_template_utils import align_special_tokens
 from mono_rl.utils.dataset.dist_data_util import DistImageLoader, get_local_inputs, \
     save_dataproto_image_data_dist, init_or_get_dist_data_manager
 
@@ -227,6 +229,8 @@ class RLHFDatasetVL(RLHFDataset):
         stable_pool_name = self.stable_pool_names[0] if self.stable_pool_names else ''
         self.dist_data_manager = init_or_get_dist_data_manager(stable_pool_name)
         self.use_vlm_verifier_router = self.config.reward_model.get('use_vlm_verifier_router', False)
+        if self.config.data.think_template:
+            os.environ['THINK_TEMPLATE'] = self.config.data.think_template
         super().__init__(*args, **kwargs)
 
     def _read_files_and_tokenize_dist(self):
@@ -329,6 +333,7 @@ class RLHFDatasetVL(RLHFDataset):
             chat = [c["content"] for c in chat]
 
         user_contents = [{"type": "text", "text": f"{self.tokenizer.bos_token}user\n"}]
+        chat[0] = align_special_tokens(chat[0])
         prompt_chunks = re.split(r"(<image>)", chat[0])
         for chunk in prompt_chunks:
             if not chunk:
@@ -342,6 +347,7 @@ class RLHFDatasetVL(RLHFDataset):
             "text": f"{self.tokenizer.eos_token}{self.tokenizer.bos_token}assistant\n"
         })
         system_prompt = row_dict.get('system_prompt', '').strip()
+        system_prompt = align_special_tokens(system_prompt) if system_prompt else system_prompt
         conversation = []
         if system_prompt:
             conversation.append({
@@ -390,18 +396,6 @@ class RLHFDatasetVL(RLHFDataset):
             if key in row_dict_ret:
                 row_dict_ret[key] = row_dict_ret[key].to(dtype)
 
-        # Add grm input on VLM dataset
-        if self.remote_rm_type == 'grm':
-            from alpha_seed.utils.reward_score.grm_service import prepare_grm_input
-            grm_input = prepare_grm_input(chat,
-                                          row_dict['reward_model']['ground_truth'],
-                                          self.tokenizer,
-                                          max_prompt_len=self.max_prompt_length,
-                                          max_resp_len=self.max_response_length)
-
-            row_dict['reward_model']['grm_pre_ids'] = grm_input['grm_pre_ids'].to(torch.int32).tolist()
-            row_dict['reward_model']['grm_post_ids'] = grm_input['grm_post_ids'].to(torch.int32).tolist()
-
         row_dict_ret['data_source'] = row_dict['data_source']
         row_dict_ret['off_policy_steps'] = torch.zeros([1]).to(torch.int8)
         row_dict_ret['images_bytes_ref'] = row_dict['images_bytes_ref']
@@ -431,7 +425,13 @@ class RLHFDatasetVL(RLHFDataset):
             print(r'old dataloader ckpt file is used, please train from scratch for better ckpt performance')
 
 
-def transform_image(prompt, images_bytes, tokenizer, processor, truncation, max_prompt_length=None):
+def transform_image(prompt,
+                    images_bytes,
+                    tokenizer,
+                    processor,
+                    truncation,
+                    max_prompt_length=None,
+                    critic_reference_response=None):
     row_dict_ret = {}
     pil_images = [decode_bytes_to_rgb_image(img) for img in images_bytes
                  ] if images_bytes is not None and len(images_bytes) > 0 else None
@@ -454,6 +454,28 @@ def transform_image(prompt, images_bytes, tokenizer, processor, truncation, max_
     row_dict_ret['input_ids'] = input_ids[0]
     row_dict_ret['prompt'] = prompt
     row_dict_ret['attention_mask'] = attention_mask[0]
+
+    if critic_reference_response:
+        CRITIC_TEMPLATE = "{prompt}\n针对上述问题，已有回复：\n{critic_reference_response}\n相比之下，请回答下面的回复是否更好：\n"
+        pos = prompt.rfind(f'{tokenizer.bos_token}assistant\n')
+        if pos != -1:
+            critic_prompt = prompt[:pos] + prompt[pos + len(f'{tokenizer.bos_token}assistant\n'):]
+        else:
+            critic_prompt = prompt
+        critic_prompt = CRITIC_TEMPLATE.format(prompt=critic_prompt,
+                                               critic_reference_response=critic_reference_response)
+        critic_input_ids, critic_attention_mask = convert_single_prompt_to_input_ids(
+            critic_prompt, tokenizer, processor.image_processor, num_image_tokens)
+        if max_prompt_length is not None:
+            critic_input_ids, critic_attention_mask = postprocess_data(critic_input_ids,
+                                                                       critic_attention_mask,
+                                                                       max_length=max_prompt_length,
+                                                                       pad_token_id=tokenizer.pad_token_id,
+                                                                       left_pad=True,
+                                                                       truncation=truncation)
+        row_dict_ret['input_ids_critic'] = critic_input_ids[0]
+        row_dict_ret['attention_mask_critic'] = critic_attention_mask[0]
+
     if images_bytes is not None and len(images_bytes) > 0:
         row_dict_ret['raw_image'] = []
         pixel_values = inputs['pixel_values']
@@ -480,17 +502,26 @@ def load_and_transform_save_image(prompts,
         processed_list = []
         from alpha_seed.utils.dataset.vlm_rl_dataset import collate_fn
         for i in range(len(image_bytes)):
+            if 'critic_reference_response' in prompts.non_tensor_batch:
+                critic_reference_response = prompts.non_tensor_batch['critic_reference_response'][i]
+            else:
+                critic_reference_response = None
             processed = transform_image(prompts.non_tensor_batch['prompt'][i],
                                         image_bytes[i],
                                         tokenizer,
                                         processor,
                                         truncation=truncation,
-                                        max_prompt_length=max_prompt_length)
+                                        max_prompt_length=max_prompt_length,
+                                        critic_reference_response=critic_reference_response)
             processed_list.append(processed)
         processed_dict = collate_fn(processed_list)
         prompt_ids = processed_dict.pop('input_ids')  # (bs, prompt_length)
         prompts.batch['input_ids'] = prompt_ids
         prompts.batch['attention_mask'] = processed_dict.pop('attention_mask')
+        if 'input_ids_critic' in processed_dict:
+            prompts.batch['input_ids_critic'] = processed_dict.pop('input_ids_critic')
+        if 'attention_mask_critic' in processed_dict:
+            prompts.batch['attention_mask_critic'] = processed_dict.pop('attention_mask_critic')
         prompts.non_tensor_batch['image_data'] = processed_dict['image_data']
         prompts.non_tensor_batch['num_image_tokens'] = processed_dict['num_image_tokens']
         save_dataproto_image_data_dist(prompts, dist_data_manager)

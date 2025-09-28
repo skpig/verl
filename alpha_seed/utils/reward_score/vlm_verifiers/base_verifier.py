@@ -4,13 +4,17 @@ from dataclasses import dataclass
 class ExtractAnswerFailed(Exception):
 
     def __init__(self, message: str = ''):
-        super().__init__(f'{type(self).__name__}: {message}')
+        if message:
+            message = ': ' + message
+        super().__init__(f'{type(self).__name__}{message}')
 
 
 class VerifierFailed(Exception):
 
     def __init__(self, message: str = ''):
-        super().__init__(f'{type(self).__name__}: {message}')
+        if message:
+            message = ': ' + message
+        super().__init__(f'{type(self).__name__}{message}')
 
 
 @dataclass

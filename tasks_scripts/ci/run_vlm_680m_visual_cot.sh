@@ -112,15 +112,6 @@ python3 tasks/main_ppo.py \
     critic.ppo_micro_batch_size=${train_micro_batch_size} \
     critic.infer_micro_batch_size=${infer_micro_batch_size} \
     critic.model.fsdp_config.param_offload=False \
-    +critic.model.override_config.attention_dropout=0. \
-    +critic.model.override_config.embd_pdrop=0. \
-    +critic.model.override_config.resid_pdrop=0. \
-    +critic.model.override_config.text_config.attention_dropout=0. \
-    +critic.model.override_config.text_config.embd_pdrop=0. \
-    +critic.model.override_config.text_config.resid_pdrop=0. \
-    +critic.model.override_config.vision_config.attention_dropout=0. \
-    +critic.model.override_config.vision_config.embd_pdrop=0. \
-    +critic.model.override_config.vision_config.resid_pdrop=0. \
     +critic.use_rmpad=True \
     actor_rollout_ref.actor.fsdp_size=${fsdp_size} \
     actor_rollout_ref.ref.fsdp_size=${fsdp_size} \

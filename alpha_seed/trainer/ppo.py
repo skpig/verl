@@ -168,6 +168,11 @@ def apply_kl_penalty(data: DataProto,
     token_level_scores = data.batch['token_level_scores']
     batch_size = data.batch.batch_size[0]
 
+    if "ability_kl_weights" in data.batch:
+        ability_kl_weights = data.batch['ability_kl_weights']
+    else:
+        ability_kl_weights = torch.ones(batch_size, dtype=torch.float32, device=token_level_scores.device)
+
     if use_model_output_mask:
         loss_mask = data.batch['model_output_mask']
         response_mask = loss_mask[:, -response_length:]
@@ -186,7 +191,7 @@ def apply_kl_penalty(data: DataProto,
         kld = torch.zeros_like(response_mask, dtype=torch.float32)
     kld = torch.clamp(kld, max=10.0, min=-10.0)
 
-    token_level_rewards = token_level_scores - beta * kld
+    token_level_rewards = token_level_scores - beta * kld * ability_kl_weights.unsqueeze(dim=1)
 
     current_kl = masked_mean(kld, mask=response_mask, axis=-1)  # average over sequence
     current_kl = torch.mean(current_kl, dim=0).item()
@@ -202,7 +207,19 @@ def apply_kl_penalty(data: DataProto,
     kl_diff = (rollout_behavior_log_probs - old_log_probs) * response_mask
     kl_diff[:, -1] = 0
     kl_diff_mean = (kl_diff.sum() / response_mask.sum()).item()
-    metrics.update({'rollout/kl_diff_mean': kl_diff_mean})
+    kl_abs_diff_mean = (kl_diff.abs().sum() / response_mask.sum()).item()
+
+    log_ratio = old_log_probs - rollout_behavior_log_probs
+    k3_kl_matrix = torch.exp(log_ratio) - log_ratio - 1
+    k3_kl_matrix = k3_kl_matrix * response_mask
+    k3_kl_matrix[:, -1] = 0
+    k3_kl_mean = (k3_kl_matrix.sum() / response_mask.sum()).item()
+
+    metrics.update({
+        'rollout/kl_diff_mean': kl_diff_mean,
+        'rollout/kl_abs_diff_mean': kl_abs_diff_mean,
+        'rollout/kl_k3_diff_mean': k3_kl_mean
+    })
 
     kl_diff_max = kl_diff.max().item()
     idx = torch.nonzero(kl_diff_max == kl_diff)
@@ -745,6 +762,8 @@ def compute_metrics_on_driver(batch: DataProto):
         data_source = data_sources[i]
         data_source_reward_2nd[data_source].append(sequence_score[i])
         # 一级分类
+        if data_source is None:
+            data_source = 'unknown##unknown'
         data_source = data_source.split('##')[0]
         data_source_reward_1st[data_source].append(sequence_score[i])
 

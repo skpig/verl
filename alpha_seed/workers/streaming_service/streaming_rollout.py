@@ -574,6 +574,16 @@ class AsyncXPerfGPTRollout(object):
                 if data is not None:  # 当且仅当数据存在时赋值
                     current_meta[key] = data[i]
 
+        # Misc
+        misc_keys = ["ability_idx", "no_thinking_required"]
+        misc_data = {key: prompts.batch.get(key, None) for key in misc_keys}
+        for i in range(batch_size):
+            current_meta = prompt_meta_info[i]  # 获取当前元数据引用
+            for key in misc_keys:
+                data = misc_data[key]
+                if data is not None:  # 当且仅当数据存在时赋值
+                    current_meta[key] = data[i]
+
         batch_size = len(prompts)
         if 'image_data_ref' in prompts.non_tensor_batch:
             image_data = get_local_inputs(prompts.non_tensor_batch, 'image_data_ref', self.dist_data_manager)

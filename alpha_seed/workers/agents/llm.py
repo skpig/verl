@@ -45,7 +45,8 @@ def make_reqeust_data_and_metadata(item: DataProto, prompt: str, host, port):
     meta_info = {k: item.meta_info[k] for k in ["step", "generation_kwargs"] if k in item.meta_info}
     # required for eos callback
     meta_info['uid'] = item.non_tensor_batch['uid'][0]
-    meta_info['reward_model'] = item.non_tensor_batch['reward_model'][0]
+    if 'reward_model' in item.non_tensor_batch:
+        meta_info['reward_model'] = item.non_tensor_batch['reward_model'][0]
     meta_info['server_meta'] = {
         'host': host,
         'port': port,

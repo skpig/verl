@@ -17,6 +17,6 @@ class CountVerifier(BaseVerifier):
         if predict_num == count_answer:
             score = 1
         else:
-            # score = 1 if predict_num == count_answer else 0
-            score = min(max(1 - abs(count_answer - predict_num) / count_answer, 0), delta)
+            score = 1 if predict_num == count_answer else 0
+            # score = min(max(1 - abs(count_answer - predict_num) / count_answer, 0), delta)
         return VerifyResult(score=score, extracted_answer=response)

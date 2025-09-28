@@ -56,10 +56,10 @@ def get_special_tokens_dict_or_name(name=None, version=None):
 
 def align_special_tokens(text):
     think_template = os.getenv("THINK_TEMPLATE", "v3")
-    if think_template not in ["v2", "v3"]:  ## only convert between v2 and v3
+    if think_template not in ["v2", "v3", "v4"]:  ## convert think token between v2 and [v3, v4]
         return text
 
-    if think_template == "v3":
+    if think_template in ["v3", "v4"]:
         special_tokens_dict_target = get_special_tokens_dict_or_name(version="v3")
         special_tokens_dict_input = get_special_tokens_dict_or_name(version="v2")
     elif think_template == "v2":
@@ -68,7 +68,7 @@ def align_special_tokens(text):
     else:
         raise NotImplementedError
 
-    for key in special_tokens_dict_target:
+    for key in ["think_start_token", "think_end_token"]:
         if key in special_tokens_dict_input and special_tokens_dict_target[key] != special_tokens_dict_input[key]:
             if special_tokens_dict_input[key] in text:
                 text = text.replace(special_tokens_dict_input[key], special_tokens_dict_target[key])
@@ -94,3 +94,25 @@ def check_tokenizer_with_template(tokenizer, config):
     if is_vlm:
         for key in ['soi', 'eoi']:
             _check(key)
+
+
+def get_thinking_system_prompt(version=None, no_thinking_required=False):
+    if version is None:
+        think_template = os.getenv("THINK_TEMPLATE", "v3")
+    else:
+        think_template = version
+
+    if think_template == 'v2':
+        thinking_sp = "You should first think about the reasoning process in the mind and then provide the user with the answer. The reasoning process is enclosed within <think> </think> tags, i.e. <think> reasoning process here </think> answer here"
+        non_thinking_sp = None
+    elif think_template in ['v3', 'v4']:
+        thinking_sp = "You should first think about the reasoning process in the mind and then provide the user with the answer. The reasoning process is enclosed within <think_never_used_51bce0c785ca2f68081bfa7d91973934> </think_never_used_51bce0c785ca2f68081bfa7d91973934> tags, i.e. <think_never_used_51bce0c785ca2f68081bfa7d91973934> reasoning process here </think_never_used_51bce0c785ca2f68081bfa7d91973934> answer here"
+        non_thinking_sp = None
+    else:
+        supported_versions = ['v2', 'v3', 'v4']
+        raise ValueError(f"Unsupported think_template '{think_template}'. "
+                         f"Supported versions: {supported_versions}")
+    if not no_thinking_required:
+        return thinking_sp
+    else:
+        return non_thinking_sp

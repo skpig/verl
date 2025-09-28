@@ -255,7 +255,7 @@ def verify(pred, answer, question, pe):
 class DeepResearchVerifier(Verifier, reward_style="deep_research_verifier"):
 
     def is_remote(self):
-        return self.config.trainer.use_remote_search
+        return True
 
     @staticmethod
     def compute_score(solution_str, ground_truth, **kwargs) -> float:

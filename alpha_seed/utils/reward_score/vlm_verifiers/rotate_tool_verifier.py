@@ -3,6 +3,7 @@ import json
 from alpha_seed.prompts.think_template_utils import get_special_tokens_dict_or_name
 from alpha_seed.utils.reward_score.vlm_verifiers.extra_reward import match_visual_cot_format
 from alpha_seed.utils.reward_score.vlm_verifiers.base_verifier import BaseVerifier, VerifyResult, ExtractAnswerFailed
+from alpha_seed.utils.reward_score.vlm_verifiers.utils import get_valid_visual_tool_calls
 
 
 class RotateToolVerifier(BaseVerifier):
@@ -17,23 +18,7 @@ class RotateToolVerifier(BaseVerifier):
         if ('<|FunctionCallBegin|>' not in response) and ('<|FunctionCallEnd|>' not in response):
             return VerifyResult(score=float(0 == gt_rotate_degree), extracted_answer='0')
 
-        last_call_valid = False
-        valid_tool_calls: list[dict] = [
-            {}
-        ]  # It maps `imgidx` to the tool call generating the corresponding image, assuming a query has only 1 image.
-        eos = get_special_tokens_dict_or_name("eos")
-        bos = get_special_tokens_dict_or_name("bos")
-        soi = get_special_tokens_dict_or_name("soi")
-        eoi = get_special_tokens_dict_or_name("eoi")
-        convs = ("assistant\n" + response).split(f'{eos}{bos}')
-        for idx, conv in enumerate(convs):
-            if '<|FunctionCallBegin|>' in conv:
-                tool_call_str = conv.split("<|FunctionCallBegin|>")[1].split("<|FunctionCallEnd|>")[0]
-                if (idx + 1 < len(convs)) and (f'{soi}{eoi}' in convs[idx + 1]):
-                    last_call_valid = True
-                    valid_tool_calls.append(json.loads(tool_call_str)[0])
-                else:
-                    last_call_valid = False
+        last_call_valid, _, valid_tool_calls = get_valid_visual_tool_calls(response, num_input_images=1)
         if not last_call_valid:
             return VerifyResult(score=0.0, extracted_answer='invalid_tool_call')
 

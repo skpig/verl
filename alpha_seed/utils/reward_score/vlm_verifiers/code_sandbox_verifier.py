@@ -13,17 +13,17 @@ class CodeSandboxVerifier(BaseVerifier):
     def verify(self, response: str, verifier_feature_dict: dict) -> VerifyResult:
         solution_str = last_codeblock_postprocess(input_text=response,
                                                   codeblock_seps=['python', 'cpp', 'java'],
-                                                  last_response_strict=False)
+                                                  last_response_strict=True)
         ground_truth = verifier_feature_dict['answer']
-        score = compute_score(solution_str=solution_str,
-                              ground_truth=ground_truth,
-                              code_sandbox_psm=self.code_sandbox_service_psm)
-        if isinstance(score, dict):
-            score = score['score']
+        result = compute_score(solution_str=solution_str,
+                               ground_truth=ground_truth,
+                               code_sandbox_psm=self.code_sandbox_service_psm)
+        score = result['score']
+        msg = result['msg']
         if score == 1:
             return VerifyResult(score=1.0, extracted_answer=solution_str)
         elif score == -1:
-            return VerifyResult(score=0.0, extracted_answer=solution_str)
+            return VerifyResult(score=0.0, extracted_answer=msg)
         elif score == -2:
             raise VerifierFailed
         else:

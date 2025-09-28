@@ -10,9 +10,9 @@ import ray
 import logging
 from transformers import AutoTokenizer
 from alpha_seed.workers.xperf_rollout.component.query import Query
-from alpha_seed.utils.reward_score.grm_service import decode_with_image_tag, replace_image_tag, get_query_imgs, RM_INVALID_SCORE
+from alpha_seed.utils.reward_score.grm_service import RM_INVALID_SCORE
+from alpha_seed.utils.reward_score.rm_utils import wait_remote_server_ready, check_nan, _extract_conversation, _process_history, decode_with_image_tag, replace_image_tag, get_query_imgs
 from mono_rl.utils.infer.client import QRMServingClient
-from mono_rl.utils.infer.cli.base_infer_cli import InferCli
 from mono_rl.utils.dataset.dist_data_util import get_dist_data_manager
 
 from bytedagi.model_io import InferenceRequest, ModelIO
@@ -23,7 +23,7 @@ from servicediscovery import ServiceDiscoveryError
 from .utils import Verifier
 
 
-class QrmVerifier(Verifier, reward_style="qrm"):
+class QrmVerifier(Verifier, reward_style="qrm_service"):
 
     def __init__(self, config=None, tokenizer=None):
         super().__init__(config=config, tokenizer=tokenizer)
@@ -34,12 +34,17 @@ class QrmVerifier(Verifier, reward_style="qrm"):
         return True
 
     def compute_score_client(self, data_uid, *args, **kwargs) -> float:
-        score_dict = None
+        cur_time = time.time()
+        result = None
         if self.is_remote():
-            score_dict = self.get_remote_score(data_uid)
-        if score_dict is None:
-            return None, None, None
-        return score_dict['qrm_prompt'], "", score_dict['score']
+            result = self.get_remote_score(data_uid)
+            if isinstance(result, ray.ObjectRef):
+                result = ray.get(result)
+        wait_time = time.time() - cur_time
+        if result is None:
+            # rsp, score, wait_cost, total_time , retry_cnt
+            return "", 0, -1, -1, -1
+        return "", result['score'], wait_time, result['time_cost'], result['retry_cnt']
 
     def compute_score_remote(self, *args, **kwargs) -> float:
         remote_service = kwargs['remote_service']
@@ -51,20 +56,6 @@ class QrmVerifier(Verifier, reward_style="qrm"):
             return sum(scores_lst) / len(scores_lst)
         else:
             raise NotImplementedError(f"{merge_type=} not implemented")
-
-
-def wait_remote_server_ready(psm: str):
-    fail_time = 0
-    while fail_time < 20:
-        try:
-            sd_result = servicediscovery.get_one(psm, address_family="dual-stack")
-            print(f"[QRM SERVER INFO] psm {psm} ready !!!")
-            return
-        except ServiceDiscoveryError:
-            print(f"[QRM SERVER WARNING] waitting psm {psm} ready, cnt={fail_time}, begin sleep 60s")
-            time.sleep(60)
-            fail_time += 1
-    raise ServiceDiscoveryError(f"psm {psm} not ready after 30 times retry, please check remote rm log")
 
 
 def init_qrm_server(config, **kwargs):
@@ -86,13 +77,15 @@ def init_qrm_server(config, **kwargs):
     return vlm_qrm_clients
 
 
-def prepare_qrm_input(prompts, answer, tokenizer):
+def prepare_qrm_input(prompts, answer, tokenizer, is_image=False):
     text_before_resp1 = "\n针对上述问题，已有回复：\n"
     text_before_resp2 = "\n相比之下，请回答下面的回复是否更好：\n"
     text_after_instruct = "回答是或否。[EOS]assistant\n"
     bos = tokenizer.bos_token
     eos = tokenizer.eos_token
     qrm_pre_prompt = f"{bos}{prompts}{eos}{text_before_resp1}{answer}{text_before_resp2}"
+    if is_image:  # [FIXME] Hack for text input
+        prompts = [raw_ctx.replace("<image>", "<|image|>") for raw_ctx in qrm_pre_prompt]
     qrm_post_prompt = f"{text_after_instruct}"
     qrm_pre_ids = tokenizer(qrm_pre_prompt)["input_ids"]
     qrm_post_ids = tokenizer(qrm_post_prompt)["input_ids"]
@@ -136,14 +129,22 @@ class VLMQRMServingClient(QRMServingClient):
         self.text_before_resp1 = "\n针对上述问题，已有回复：\n"
         self.text_before_resp2 = "\n相比之下，请回答下面的回复是否更好：\n"
         self.text_after_instruct = "回答是或否。[EOS]assistant\n"
-        self.img_tag = "<image>"
+        self.img_tag = "<|image|>"
         wait_remote_server_ready(psm)
 
-    def _preprocess_qrm_data(self, rollout_ids, rm_pre_ids, rm_post_ids, **kwargs):
+    def _preprocess_qrm_data(self, rm_pre_ids, response_ids, rm_post_ids, **kwargs):
         images_bytes_lst = get_query_imgs(self.dist_data_manager, **kwargs)
-        qrm_pre_text = decode_with_image_tag(self.tokenizer, rm_pre_ids)
-        qrm_post_text = decode_with_image_tag(self.tokenizer, rm_post_ids)
-        response_text = decode_with_image_tag(self.tokenizer, rollout_ids)
+        rm_pre_ids = torch.as_tensor(rm_pre_ids, dtype=torch.long, device="cpu")
+        rm_post_ids = torch.as_tensor(rm_post_ids, dtype=torch.long, device="cpu")
+        rm_pre_ids = self.trim_tensor(rm_pre_ids)
+        rm_post_ids = self.trim_tensor(rm_post_ids)
+        qrm_pre_text = decode_with_image_tag(self.tokenizer, rm_pre_ids, skip_special_tokens=False)
+        qrm_post_text = decode_with_image_tag(self.tokenizer, rm_post_ids, skip_special_tokens=False)
+        response_ids = [
+            t for t in response_ids
+            if t not in [self.tokenizer.bos_token_id, self.tokenizer.eos_token_id, self.tokenizer.pad_token_id]
+        ]
+        response_text = decode_with_image_tag(self.tokenizer, response_ids, skip_special_tokens=False)
 
         qrm_prompt = f"{qrm_pre_text}{response_text}{qrm_post_text}"
         content = replace_image_tag(qrm_prompt, images_bytes_lst, img_tag=self.img_tag)
@@ -171,13 +172,20 @@ class VLMQRMServingClient(QRMServingClient):
         assert length == 1, "in qrl mode, only output one token 是/否， something must be wrong"
         return math.exp(values)
 
-    async def call(self, reward_model=None, rollout_ids="", **kwargs):
+    async def call(self, reward_model=None, response_ids="", **kwargs):
         # 理解为每次处理单条数据
         logging.disable(logging.INFO)
         cur_time = time.time()
         rm_pre_ids = reward_model.get("rm_pre_ids", None)
         rm_post_ids = reward_model.get("rm_post_ids", None)
-        data = self._preprocess_qrm_data(rollout_ids, rm_pre_ids, rm_post_ids, **kwargs)
+        images_bytes_ref = reward_model.get("images_bytes_ref", None)
+
+        data = await asyncio.to_thread(self._preprocess_qrm_data,
+                                       rm_pre_ids=rm_pre_ids,
+                                       response_ids=response_ids,
+                                       rm_post_ids=rm_post_ids,
+                                       images_bytes_ref=images_bytes_ref,
+                                       **kwargs)
 
         for attempt in range(self.retry + 1):
             try:

@@ -1,11 +1,13 @@
 import ray
 import wandb
+import torch
 from codetiming import Timer
 from alpha_seed.trainer.ppo import RayPPOTrainer
 from alpha_seed.workers.xperf_rollout.profiler.visualizer import visualize_standalone_usage
 from alpha_seed.utils.observility.pretty_print import pprint
 from alpha_seed.utils.functional import save_simple_train_data_to_hdfs
 from mono_rl.utils.dataset.dist_data_util import load_image_data_dist, init_or_get_dist_data_manager, release_object
+from mono_rl import DataProto
 
 
 class VLMRayPPOTrainer(RayPPOTrainer):
@@ -76,11 +78,10 @@ class VLMRayPPOTrainer(RayPPOTrainer):
 
                     batch = self._compute_adv(batch, metrics, use_async_gen)
                     self.compute_metrics(batch, metrics)
+                    if 'ability_idx' in batch.batch:
+                        self.compute_metrics_per_ability(batch, metrics)
                     with Timer(name='save_output_batch', logger=None) as timer:
-                        save_simple_train_data_to_hdfs(batch, self.tokenizer, self.global_step,
-                                                       self.config.trainer.default_hdfs_dir,
-                                                       self.config.data.max_prompt_length,
-                                                       self.config.data.special_tokens)
+                        save_simple_train_data_to_hdfs(batch, self.tokenizer, self.global_step, self.config)
                     metrics['timing/save_output_batch'] = timer.last
                     if self.global_step == 1:
                         print('Debugging', batch.batch)
@@ -151,3 +152,128 @@ class VLMRayPPOTrainer(RayPPOTrainer):
                     t.result()  # call this to collect the result(including error traceback)
                 wandb.finish()
                 return
+
+    def compute_metrics_per_ability(self, batch, metrics):
+        with Timer(name='compute_metrics_per_ability', logger=None) as timer:
+            batch.meta_info['use_critic'] = self.use_critic
+            batch.meta_info["ability_dict"] = self.reward_fn.ability_dict
+            data_metrics: DataProto = self.actor_rollout_wg.execute_with_func_generator(
+                compute_data_metrics_per_ability, batch)
+            data_metrics = data_metrics.meta_info['metrics']
+            metrics.update(data_metrics)
+
+        metrics['timing/compute_metrics_per_ability'] = timer.last
+
+
+def compute_data_metrics_per_ability(self, batch: DataProto):
+
+    def allreduce_sum(x: torch.Tensor) -> torch.Tensor:
+        import torch.distributed as dist
+        if dist.is_available() and dist.is_initialized():
+            dist.all_reduce(x, op=dist.ReduceOp.SUM)
+        return x
+
+    def allreduce_var(x: torch.Tensor, unbiased: bool = True) -> torch.Tensor:
+        import torch.distributed as dist
+        if not (dist.is_available() and dist.is_initialized()):
+            return x.std(unbiased=unbiased)
+
+        local_sum = x.sum()
+        local_sqsum = (x**2).sum()
+        local_count = torch.tensor(x.numel(), device=x.device, dtype=torch.long)
+
+        global_sum = local_sum.clone()
+        global_sqsum = local_sqsum.clone()
+        global_count = local_count.clone()
+
+        dist.all_reduce(global_sum, op=dist.ReduceOp.SUM)
+        dist.all_reduce(global_sqsum, op=dist.ReduceOp.SUM)
+        dist.all_reduce(global_count, op=dist.ReduceOp.SUM)
+
+        global_sum = global_sum.to(torch.float32)
+        global_sqsum = global_sqsum.to(torch.float32)
+        global_count = global_count.to(torch.float32)
+
+        mean = global_sum / global_count
+        var = global_sqsum / global_count - mean**2
+
+        if unbiased and global_count > 1:
+            var *= global_count / (global_count - 1)
+        return var.to(x.dtype)
+
+    metrics = {}
+    use_critic = batch.meta_info['use_critic']
+    ability_dict = batch.meta_info["ability_dict"]
+
+    batch = batch.to('cuda')
+    old_log_probs = batch.batch['old_log_probs']  # (bs, s)
+    old_entropy = batch.batch['old_entropy']  # (bs, s)
+    ability_idx = batch.batch['ability_idx']  # (bs)
+    response_length = batch.batch['responses'].shape[-1]  # (bs)
+    advantages = batch.batch['advantages']  # (bs, s)
+    response_mask = batch.batch['attention_mask'][:, -response_length:]  # (bs, s)
+    if use_critic:
+        returns = batch.batch['returns']  # (bs, s)
+        values = batch.batch['values']
+
+    if batch.meta_info['use_model_output_mask']:
+        model_output_mask = batch.batch['model_output_mask'][:, -response_length:]
+    else:
+        model_output_mask = response_mask
+    model_output_mask_bool = model_output_mask.bool()  # (bs, s)
+
+    old_prob = old_log_probs.exp()  # 提前做完exp计算
+
+    response_length = response_mask.sum(-1)  # (bs)
+    eos_idx = torch.clamp(response_length.long(), min=1) - 1  # (bs)
+    eos_adv = torch.gather(advantages, dim=1, index=eos_idx.unsqueeze(dim=1).long()).reshape(-1)  # (bs)
+
+    # 求和过程中，通信shape一直为(bs,s)
+    for ab_idx, ab_name in ability_dict.items():
+        token_mask = model_output_mask_bool & (ability_idx.unsqueeze(-1) == ab_idx
+                                              )  # (bs,s) 有效回复位置+对应ability的位置，按每个bs进行mask
+
+        ent_sum_local = (old_entropy.masked_fill(~token_mask, 0.0)).sum()  # (bs, s)
+        ent_cnt_local = token_mask.sum()  # (bs, s)
+
+        prob_sum_local = (old_prob.masked_fill(~token_mask, 0.0)).sum()  # (bs, s)
+        prob_cnt_local = token_mask.sum()  # (bs, s)
+
+        eos_mask = (ability_idx == ab_idx)  # (B,)
+        eos_sum_local = eos_adv.masked_fill(~eos_mask, 0.0).sum()  # (B,)
+        eos_cnt_local = eos_mask.sum()  # (B,)
+
+        # 全局统计
+        ent_sum = allreduce_sum(ent_sum_local.clone())
+        ent_cnt = allreduce_sum(ent_cnt_local.clone())
+        prob_sum = allreduce_sum(prob_sum_local.clone())
+        prob_cnt = allreduce_sum(prob_cnt_local.clone())
+        eos_sum = allreduce_sum(eos_sum_local.clone())
+        eos_cnt = allreduce_sum(eos_cnt_local.clone())
+
+        # global中存在有效数据时才进行统计
+        ent_mean = float((ent_sum / ent_cnt.clamp(min=1)).item()) if ent_cnt.item() > 0 else 0.0
+        prob_mean = float((prob_sum / prob_cnt.clamp(min=1)).item()) if prob_cnt.item() > 0 else 0.0
+        eos_mean = float((eos_sum / eos_cnt.clamp(min=1)).item()) if eos_cnt.item() > 0 else 0.0
+
+        if use_critic:
+            return_diff_local = (returns - values).masked_fill(~token_mask, 0.0).sum()  # (bs, s)
+            return_local = (returns.masked_fill(~token_mask, 0.0)).sum()
+            return_diff_var = allreduce_var(return_diff_local.clone())
+            return_var = allreduce_var(return_local.clone())
+
+            if ent_cnt.item() > 0:
+                vf_explained_var = (1.0 - return_diff_var / (return_var + 1e-5)).detach().item()
+            else:
+                vf_explained_var = 0.0
+            metrics.update({
+                f'ability_infos/ability/vf_explained_var_{ab_name}': vf_explained_var,
+            })
+
+        metrics.update({
+            f'ability_infos/ability/entropy_{ab_name}': ent_mean,
+            f'ability_infos/ability/adv_eos_{ab_name}': eos_mean,
+            f'ability_infos/ability/prob_mean_{ab_name}': prob_mean,
+        })
+
+    return DataProto.from_dict({'dummy': torch.ones(size=(1,))}, meta_info={'metrics': metrics})

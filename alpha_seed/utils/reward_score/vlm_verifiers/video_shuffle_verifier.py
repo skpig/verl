@@ -34,9 +34,9 @@ def ranking_reward(answer_order, predict_order):
     answer_order = list(map(int, answer_order.split()))
     predict_order = list(map(int, predict_order.split()))
     if len(answer_order) != len(predict_order):
-        return -1
+        return 0
     if sorted(answer_order) != sorted(predict_order):
-        return -1
+        return 0
     n = len(answer_order)
     # 1. 构建元素 → 正确位置的映射
     pos_map = {val: idx for idx, val in enumerate(answer_order)}
@@ -58,9 +58,9 @@ def ranking_reward_strict(answer_order, predict_order):
     answer_order = list(map(int, answer_order.split()))
     predict_order = list(map(int, predict_order.split()))
     if len(answer_order) != len(predict_order):
-        return -1
+        return 0
     if sorted(answer_order) != sorted(predict_order):
-        return -1
+        return 0
     n = len(answer_order)
     if answer_order == predict_order:
         return 1

@@ -26,10 +26,10 @@ def get_sandbox_endpoint(code_sandbox_psm):
 class OJVerifier(Verifier, reward_style="code-sandbox"):
 
     def is_remote(self):
-        return self.config.trainer.use_remote_sandbox
+        return True
 
-    def preprocess(self, input_ids, ground_truth):
-        solution_str, ground_truth = super().preprocess(input_ids, ground_truth)
+    def preprocess(self, *args, **kwargs):
+        solution_str, ground_truth = super().preprocess(*args, **kwargs)
         return solution_str, ground_truth, self.config.trainer.code_sandbox_psm
 
     @staticmethod

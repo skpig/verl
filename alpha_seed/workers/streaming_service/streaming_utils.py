@@ -348,6 +348,26 @@ def pack_to_dataproto(prompts, tokenizer, data_pack: DataPack, config) -> DataPr
             restored_tensor_batch[key] = prompts.batch[key]
     batch.update(restored_tensor_batch)
 
+    restored_tensor_batch = {}
+    misc_keys = ["ability_idx", "no_thinking_required"]
+    for key in misc_keys:
+        if key in prompts.batch:
+            restored_tensor_batch[key] = prompts.batch[key]
+    batch.update(restored_tensor_batch)
+
+    restored_tensor_batch = {}
+    if "input_ids_critic" in prompts.batch:
+        restored_tensor_batch["input_ids_critic"] = torch.hstack((
+            prompts.batch["input_ids_critic"],
+            response_ids,
+        ))
+    if "attention_mask_critic" in prompts.batch:
+        restored_tensor_batch["attention_mask_critic"] = torch.hstack((
+            prompts.batch["attention_mask_critic"],
+            response_attention_mask,
+        ))
+    batch.update(restored_tensor_batch)
+
     out = DataProto.from_dict(batch)
     data_pack.metrics["max_off_policy_steps"] = [response_off_policy.max().item()]
     out.meta_info["xperf_metrics"] = data_pack.metrics

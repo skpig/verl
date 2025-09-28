@@ -1,8 +1,6 @@
 import re
 from collections import Counter
 
-from alpha_seed.prompts.think_template_utils import get_special_tokens_dict_or_name
-
 
 def find_single_turn_duplicate(response_text, enable_resp_para=False):
     # 输入单条 response，返回：是否重复，是否极端重复，标记出重复片段的 response
@@ -38,28 +36,3 @@ def find_single_turn_duplicate(response_text, enable_resp_para=False):
             lcs_str = resp_para_counter.most_common(1)[0][0]
             return True, lcs_str
     return False, response_text
-
-
-def is_final_answer_lengthy(response_ids: list[int], tokenizer, max_ans_tokens: int = 4000) -> bool:
-    num_total_tokens = len(response_ids)
-
-    bos_token, = tokenizer.encode('<[BOS_never_used_51bce0c785ca2f68081bfa7d91973934]>')
-    k = len(response_ids) - 1
-    while (k >= 0) and (response_ids[k] != bos_token):
-        k -= 1
-    if k >= 0:  # If there is BOS, indicating the start of the final turn:
-        response_ids = response_ids[k + 1:]  # Only check the last turn when doing multi-turn RL.
-
-    think_end = get_special_tokens_dict_or_name("think_end_token")
-    end_of_think_token, = tokenizer.encode(think_end)
-    k = len(response_ids) - 1
-    while (k >= 0) and (response_ids[k] != end_of_think_token):
-        k -= 1
-    if k >= 0:  # If there is think_end_token, indicating the end of the CoT:
-        response_ids = response_ids[k + 1:]  # Remove the CoT part.
-
-    num_answer_tokens = len(response_ids)
-    is_lengthy = num_answer_tokens > max_ans_tokens
-    if is_lengthy:
-        print(f"[LENGTHY ANSWER DETECTED] {num_total_tokens} total tokens, {num_answer_tokens} answer tokens.")
-    return is_lengthy

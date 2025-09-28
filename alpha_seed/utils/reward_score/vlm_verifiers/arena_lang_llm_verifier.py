@@ -1,20 +1,49 @@
-import json
-import logging
 import os
+import time
+import random
+import logging
+import openai
+from alpha_seed.utils.reward_score.vlm_verifiers.base_verifier import (
+    BaseVerifier,
+    ExtractAnswerFailed,
+    VerifierFailed,
+    VerifyResult,
+)
+import math
+
 # pip install 'volcengine-python-sdk[ark]'
 # from volcenginesdkarkruntime import Ark
 # import httpx
 import random
+import json
 import re
-import time
+import tiktoken
+from hdfs_io import hcopy
+import tempfile
+from transformers import AutoTokenizer
 
-import openai
+_from_path_tiktoken = ("hdfs://haruna/home/byte_data_seed/hl_lq/iccv/data/tokenizer/tiktoken")
+_to_path_tiktoken = "/tmp/tiktoken_vision_arena_cache"
 
-from alpha_seed.utils.reward_score.vlm_verifiers.base_verifier import BaseVerifier, ExtractAnswerFailed, VerifyResult
+if not os.path.exists(f"{_to_path_tiktoken}/"):
+    try:
+        # 确保 os 和 hcopy 已经在此作用域可用 (通常在文件顶部导入)
+        os.makedirs(_to_path_tiktoken, exist_ok=True)
+        # 从 HDFS 复制文件到本地目录
+        hcopy(_from_path_tiktoken, _to_path_tiktoken)
+        # 展示目录内容
+        print(f"Directory contents after HDFS copy to local: {os.listdir(_to_path_tiktoken)}")
+        # 设置 TIKTOKEN_CACHE_DIR 环境变量
+    except Exception as e:
+        print(f"Error during VisionArenaEval tiktoken cache setup from HDFS: {e}")
+        # 根据实际情况决定是否在此处抛出异常或设置一个备用路径
+os.environ["TIKTOKEN_CACHE_DIR"] = f"{_to_path_tiktoken}/tiktoken"
+
+print(f"TIKTOKEN_CACHE_DIR set to: {_to_path_tiktoken}/tiktoken by VisionArenaEval class definition after HDFS copy.")
 
 
 def has_chinese(text):
-    chinese_char_pattern = re.compile(r'[\u4e00-\u9fff]')
+    chinese_char_pattern = re.compile(r"[\u4e00-\u9fff]")
     if chinese_char_pattern.search(text):
         return 1.0
     else:
@@ -35,7 +64,7 @@ def contains_english_word(text):
 
 logger = logging.getLogger()
 
-VERIFY_TEMPLATE = '''你是一位像计算机程序一样严苛、负责审查语言一致性的AI助手。你的核心任务是进行无情的、逐字逐句的扫描。
+VERIFY_TEMPLATE = """你是一位像计算机程序一样严苛、负责审查语言一致性的AI助手。你的核心任务是进行无情的、逐字逐句的扫描。
 
 ### **核心工作流程**
 在内心严格模拟以下思考过程，然后仅输出最终结论：
@@ -125,21 +154,11 @@ VERIFY_TEMPLATE = '''你是一位像计算机程序一样严苛、负责审查�
 
 <参考答案>
 {}
-</参考答案>'''
+</参考答案>"""
 
 
 def parse_json_string_to_dict(json_string: str):
-    """
-    将JSON格式的字符串解析为Python字典。
-
-    参数:
-        json_string (str): 要解析的JSON格式字符串。
-
-    返回:
-        dict: 解析后的字典，如果解析失败则返回None。
-    """
     try:
-
         json_string = json_string.replace("```json", "").replace("```", "").strip()
         return json.loads(json_string)
     except json.JSONDecodeError as e:
@@ -151,42 +170,86 @@ def parse_json_string_to_dict(json_string: str):
 
 # https://ark-cn-beijing.bytedance.net/api/v3
 # https://ark.cn-beijing.volces.com/api/v3
-#GPT_BASE_URL: https://search.bytedance.net/gpt/openapi/online/multimodal/crawl
-#GPT_MODEL_NAME: gpt-4.1-2025-04-14
+# GPT_BASE_URL: https://search.bytedance.net/gpt/openapi/online/multimodal/crawl
+# GPT_MODEL_NAME: gpt-4.1-2025-04-14
 
 
 class LLMArenaLangVerifier(BaseVerifier):
 
     def __init__(self) -> None:
         super().__init__()
-        if not os.environ.get('GPT_BASE_URL', None):
-            raise ValueError('GPT_BASE_URL is not set')
-        if not os.environ.get('GPT_API_KEY', None):
-            raise ValueError('GPT_API_KEY is not set')
-        if not os.environ.get('GPT_MODEL_NAME', None):
-            raise ValueError('GPT_MODEL_NAME is not set')
+        if not os.environ.get("GPT_BASE_URL", None):
+            raise ValueError("GPT_BASE_URL is not set")
+        if not os.environ.get("GPT_API_KEY", None):
+            raise ValueError("GPT_API_KEY is not set")
+        if not os.environ.get("GPT_MODEL_NAME", None):
+            raise ValueError("GPT_MODEL_NAME is not set")
 
-        GPT_API_KEY = os.environ.get('GPT_API_KEY', None)
-        GPT_API_KEY_BAK = os.environ.get('GPT_API_KEY_BAK', None)
-        GPT_BASE_URL = os.environ.get('GPT_BASE_URL', None)
-        GPT_MODEL_NAME = os.environ.get('GPT_MODEL_NAME', None)
-        self.client = openai.AzureOpenAI(azure_endpoint=GPT_BASE_URL,
-                                         api_version="2023-07-01-preview",
-                                         api_key=GPT_API_KEY)
-        self.client_bak = openai.AzureOpenAI(azure_endpoint=GPT_BASE_URL,
-                                             api_version="2023-07-01-preview",
-                                             api_key=GPT_API_KEY)
+        GPT_API_KEY = os.environ.get("GPT_API_KEY", None)
+        GPT_API_KEY_BAK = os.environ.get("GPT_API_KEY_BAK", None)
+        GPT_BASE_URL = os.environ.get("GPT_BASE_URL", None)
+        GPT_MODEL_NAME = os.environ.get("GPT_MODEL_NAME", None)
+        from openai import OpenAI
+
+        self.client = openai.AzureOpenAI(
+            azure_endpoint=GPT_BASE_URL,
+            api_version="2023-07-01-preview",
+            api_key=GPT_API_KEY,
+        )
+        self.client_bak = openai.AzureOpenAI(
+            azure_endpoint=GPT_BASE_URL,
+            api_version="2023-07-01-preview",
+            api_key=GPT_API_KEY,
+        )
         if GPT_API_KEY_BAK:
-            self.client_bak = openai.AzureOpenAI(azure_endpoint=GPT_BASE_URL,
-                                                 api_version="2023-07-01-preview",
-                                                 api_key=GPT_API_KEY_BAK)
+            self.client_bak = openai.AzureOpenAI(
+                azure_endpoint=GPT_BASE_URL,
+                api_version="2023-07-01-preview",
+                api_key=GPT_API_KEY_BAK,
+            )
 
         self.model = GPT_MODEL_NAME
+        # self.tokenizer = tiktoken.encoding_for_model("gpt-4o")
+        self.hdfs_path = "hdfs://haruna/home/byte_data_seed/ssd_hldy/user/sunzewei.v/tokenizers/bbpe155k-v6.4.3-ml.pret_v5.2_20250519"
+        self.tokenizer = None
+
+    def _load_tokenizer_once(self):
+        if self.tokenizer is None:
+            with tempfile.TemporaryDirectory(prefix="tokenizer_") as temp_dir:
+                tokenizer_path = os.path.join(temp_dir, "tokenizer")
+                hcopy(self.hdfs_path, tokenizer_path)
+                self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+
+    # 当我们设置 σ = 0.5 * ref_len 时：
+    # 当长度偏离达到 1σ 时：
+    # actual_len = ref_len ± σ = ref_len ± 0.5 * ref_len。
+    # 也就是说，当实际长度是参考长度的 50% 或 150% 时。
+    # 此时的得分是 exp(-σ² / (2 * σ²)) = exp(-0.5) ≈ 0.607。
+    # 解读： 如果你的字符串长度只有参考长度的一半，或者超出了50%，那么它的长度得分会下降到大约 60.7%。这是一个很显著但又不过于严厉的惩罚。
+    # 当长度偏离达到 2σ 时：
+    # actual_len = ref_len ± 2σ = ref_len ± ref_len。
+    # 也就是说，当实际长度是 0 (理论上) 或参考长度的 2倍 时。
+    # 此时的得分是 exp(-(2σ)² / (2 * σ²)) = exp(-2) ≈ 0.135。
+    # 解读： 如果你的字符串长度达到了参考长度的两倍，得分会锐减到只有 13.5%，这已经是一个非常严厉的惩罚了。
+    def cal_len_score(self, response_word_num: int, avg_word_num: int) -> float:
+        sigma = 0.5 * avg_word_num
+        len_score = math.exp(-((response_word_num - avg_word_num)**2) / (2 * sigma**2))
+
+        return len_score
 
     def verify(self, response: str, verifier_feature_dict: dict) -> VerifyResult:
-        problem = verifier_feature_dict['problem']
-        answer = verifier_feature_dict['answer']
+        problem = verifier_feature_dict["problem"]
+        answer = verifier_feature_dict["answer"]
         lang = verifier_feature_dict["lang"]
+
+        self._load_tokenizer_once()
+        tokenized_response = self.tokenizer(response)['input_ids']
+        response_word_num = len(tokenized_response)
+        if "avg_word_num" in verifier_feature_dict:
+            avg_word_num = verifier_feature_dict["avg_word_num"]
+            len_score = self.cal_len_score(response_word_num, avg_word_num)
+        else:
+            len_score = 1
 
         if response == "":
             raise ExtractAnswerFailed
@@ -219,25 +282,29 @@ class LLMArenaLangVerifier(BaseVerifier):
                     prompt = VERIFY_TEMPLATE.format(problem, response, answer)
                     random_number = random.randint(0, 1)
                     if random_number == 0:
-                        completion = self.client.chat.completions.create(model=self.model,
-                                                                         messages=[
-                                                                             {
-                                                                                 "role": "user",
-                                                                                 "content": prompt
-                                                                             },
-                                                                         ],
-                                                                         timeout=120,
-                                                                         max_tokens=200)
+                        completion = self.client.chat.completions.create(
+                            model=self.model,
+                            messages=[
+                                {
+                                    "role": "user",
+                                    "content": prompt
+                                },
+                            ],
+                            timeout=120,
+                            max_tokens=200,
+                        )
                     else:
-                        completion = self.client_bak.chat.completions.create(model=self.model,
-                                                                             messages=[
-                                                                                 {
-                                                                                     "role": "user",
-                                                                                     "content": prompt
-                                                                                 },
-                                                                             ],
-                                                                             timeout=120,
-                                                                             max_tokens=200)
+                        completion = self.client_bak.chat.completions.create(
+                            model=self.model,
+                            messages=[
+                                {
+                                    "role": "user",
+                                    "content": prompt
+                                },
+                            ],
+                            timeout=120,
+                            max_tokens=200,
+                        )
 
                     judge_response = completion.choices[0].message.content
                     judgement_dict = parse_json_string_to_dict(judge_response)
@@ -246,9 +313,6 @@ class LLMArenaLangVerifier(BaseVerifier):
                     judgement = judgement_dict["result"]
                     if judgement.startswith("否") or judgement.lower().startswith("no"):
                         score = 0.0
-                    logging.info(
-                        f"judgement_dict: {judgement_dict}\n\nproblem: {problem}\n\nanswer: {answer} \n\nresponse: {response}"
-                    )
                     break
                 except Exception as ex:
                     import traceback
@@ -256,8 +320,7 @@ class LLMArenaLangVerifier(BaseVerifier):
                     time.sleep(random.choice(list(range(10, 25))))
                     continue
 
-        logging.info(
-            f"verifier score: {score}\n\nprompt lang:{lang}, answer has chinese: {answer_has_chinese}, response has chinese: {response_has_chinese}, answer_has_en: {answer_has_en}, response_has_en: {response_has_en}\n\nproblem: {problem}\n\nanswer: {answer} \n\nresponse: {response}"
-        )
+        # logging.info(f"verifier score: {score}\n\nprompt lang:{lang}, answer has chinese: {answer_has_chinese}, response has chinese: {response_has_chinese}, answer_has_en: {answer_has_en}, response_has_en: {response_has_en}\n\nproblem: {problem}\n\nanswer: {answer} \n\nresponse: {response}")
+        score = score * len_score
 
         return VerifyResult(score=score, extracted_answer=response)

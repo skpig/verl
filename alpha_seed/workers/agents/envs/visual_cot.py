@@ -277,7 +277,7 @@ def ZOOM(image_bytes: bytes, bbox_str: str = "", scale: float = 0.0) -> dict:
     }
     """
     ## avoid too large image
-    if (scale <= 0) or (scale > 2.0):
+    if (scale <= 0) or (scale > 4.0):
         raise ValueError(f"Scale should be between 0.0 (excluded) and 2.0 (included), but got {scale}.")
     # Validate and parse the bbox if present
     x1_rel = y1_rel = x2_rel = y2_rel = None

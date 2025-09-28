@@ -8,7 +8,7 @@ from alpha_seed.prompts.think_template_utils import get_special_tokens_dict_or_n
 from alpha_seed.utils.reward_score.vlm_verifiers.extra_reward import match_visual_cot_format
 from alpha_seed.utils.reward_score.vlm_verifiers.base_verifier import BaseVerifier, VerifyResult, ExtractAnswerFailed
 from alpha_seed.utils.reward_score.vlm_verifiers.base_verifier import VerifierFailed
-from alpha_seed.utils.reward_score.vlm_verifiers.utils import check_language_correctness
+from alpha_seed.utils.reward_score.vlm_verifiers.utils import check_language_correctness, get_valid_visual_tool_calls
 
 
 def parse_point(points_str):
@@ -170,24 +170,7 @@ class AuxlineVerifier(BaseVerifier):
 
         try:
             # 取最后一次调用
-
-            convs = (
-                "assistant\n" +
-                response).split(f'{get_special_tokens_dict_or_name("eos")}{get_special_tokens_dict_or_name("bos")}')
-            tool_str = ''
-            valid_tool_call = [{}]
-            eoi = get_special_tokens_dict_or_name("eoi")
-            soi = get_special_tokens_dict_or_name("soi")
-            # 选最后一次工具调用
-            for idx, conv in enumerate(convs):
-                content = conv
-                if '<|FunctionCallBegin|>' in content:
-                    tool_str = conv.split("<|FunctionCallBegin|>")[1].split("<|FunctionCallEnd|>")[0]
-                    cur_tools = json.loads(tool_str)
-                    cur_tool_param = cur_tools[0]["parameters"]
-                    cur_tool_name = cur_tools[0]["name"]
-                    if idx + 1 < len(convs) and f'{soi}{eoi}' in convs[idx + 1]:
-                        valid_tool_call.append(cur_tools[0])
+            _, tool_str, valid_tool_call = get_valid_visual_tool_calls(response, num_input_images=1)
             if not tool_str:
                 return VerifyResult(score=SCORE_INVALID_FORMAT, extracted_answer=response)
             try:

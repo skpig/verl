@@ -109,7 +109,7 @@ class Verifier:
 
         if score is None:
             if self.is_remote():
-                return self.compute_score_remote(*args, **kwargs)
+                return self.compute_score(*self.preprocess(**kwargs))
             score = self.compute_score(*args, **kwargs)
         return score
 
@@ -118,7 +118,7 @@ class Verifier:
         pass
 
     def compute_score_remote(self, *args, **kwargs):
-        return self.compute_score(*self.preprocess(*args, **kwargs))
+        return self.compute_score(*self.preprocess(**kwargs))
 
 
 class ExternalVerifier(Verifier, reward_style="external"):
