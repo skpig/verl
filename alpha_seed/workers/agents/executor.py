@@ -252,6 +252,8 @@ class RayActorExecutor(ExecutorBase):
                                                           request_manager_name, None) for idx in range(self.max_workers)
         ]
         self.worker_pointer = cycle(range(self.max_workers))
+        self.concurrency_limit = [asyncio.Semaphore(9999) for _ in range(self.max_workers)
+                                 ]  # prevent exceeding Ray’s default 10k pending task limit
 
     async def submit(self, agent_cls: Type[AsyncAgent] | Type[ThreadedAgent], /, item: DataProto, *args, **kwargs):
         worker_idx = next(self.worker_pointer)
@@ -259,7 +261,8 @@ class RayActorExecutor(ExecutorBase):
         # 兼容旧的functional handler
         if inspect.isfunction(agent_cls):
             agent_cls = functional_agent(agent_cls)
-        return await worker.execute.remote(agent_cls, item, *args, **kwargs)
+        async with self.concurrency_limit[worker_idx]:
+            return await worker.execute.remote(agent_cls, item, *args, **kwargs)
 
     def set_global_step(self, global_step: int):
         refs = []

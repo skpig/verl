@@ -1230,21 +1230,22 @@ class RolloutManager:
             write_task = None
             ready_batch_buffer = []
             completed_num = 0
+            total_len = len(val_gen_batch)
+            log_interval = total_len / 100
+            log_threshold = log_interval
 
-            while running_batch:
-                done, running_batch = await asyncio.wait(running_batch, return_when=asyncio.FIRST_COMPLETED)
-                ready_batch = await asyncio.gather(*done, return_exceptions=True)
-                ready_batch = [task for task in ready_batch if task is not None]
-                ready_batch_buffer.extend(ready_batch)
-                completed_num += len(ready_batch)
-                time_elaspe = time.time() - start
-                logger.info(
-                    f"[INFO] {step} val generate progress: {completed_num}/{last_completed_num+completed_num}/{len(gen_batch)}, time elaspe: {time_elaspe}s, throughput: {completed_num / time_elaspe}"
-                )
+            for fut in asyncio.as_completed(running_batch):
+                result = await fut
+                if result is not None:
+                    ready_batch_buffer.append(result)
+                    completed_num += 1
+                if completed_num >= log_threshold:
+                    time_elapse = time.time() - start
+                    log_threshold += log_interval
+                    logger.info(f"[INFO] {step} val generate progress: {completed_num}/{total_len}, "
+                                f"time elapse: {time_elapse:.2f}s, throughput: {completed_num / time_elapse:.2f}")
                 if time.time() - start_time > self.config.rollout_server.evals.ckpt_interval_seconds:
                     start_time = time.time()
-                    if len(done) == 0:
-                        continue
                     if write_task is not None:
                         # wait last write task to finish
                         await write_task
