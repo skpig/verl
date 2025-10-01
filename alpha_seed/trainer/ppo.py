@@ -137,8 +137,8 @@ class ResourcePoolManager:
 
 
 import torch
-import torch.nn.functional as F
-from tensordict import TensorDict
+import uuid
+import numpy as np
 from verl.utils.torch_functional import masked_mean
 
 
@@ -2035,9 +2035,16 @@ class RayPPOTrainer(object):
                             self._balance_batch(batch=batch, metrics=metrics, logging_prefix='global_seqlen')
 
                             metrics.setdefault('timing/train_mem_offload', 0)
-
                         with stage_logger.log_duration_context("advantage_calculation"):
                             batch = self.compute_reference(batch, metrics)
+
+                            # Generate unique training_uid before old_log_probs for proper caching
+                            # This prevents uid collision issues when the same uid appears in different batches
+                            batch_size = len(batch.batch)
+                            training_uids = np.array(
+                                [f"{self.global_step}_{uuid.uuid4().hex[:8]}_{i}" for i in range(batch_size)],
+                                dtype=object)
+                            batch.non_tensor_batch['training_uid'] = training_uids
 
                             input_batch = batch
                             if self.enable_actor_critic_spatial_mux:

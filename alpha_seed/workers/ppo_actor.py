@@ -39,11 +39,17 @@ class DataParallelPPOActor(BasePPOActor):
     def __init__(self, as_config: DictConfig, model_engine: FSDPModel):
         super().__init__(as_config)
         self.engine = model_engine
+        # Cache for old_experts to avoid communication overhead
+        self.old_experts_cache = {}
 
     def compute_log_prob(self, data: DataProto, reuse_old_experts=False):
         select_keys = ['responses', 'input_ids', 'attention_mask']
         image_keys = get_image_keys(data.non_tensor_batch)
-        selected_data = data.select(batch_keys=select_keys, non_tensor_batch_keys=image_keys)
+        # Only use training_uid for caching when reuse_old_experts is enabled
+        non_tensor_keys = image_keys
+        if reuse_old_experts and 'training_uid' in data.non_tensor_batch:
+            non_tensor_keys = non_tensor_keys + ['training_uid']
+        selected_data = data.select(batch_keys=select_keys, non_tensor_batch_keys=non_tensor_keys)
 
         mtp_n_heads = getattr(self.engine.model_config, 'mtp_n_heads', 1)
 
@@ -51,11 +57,13 @@ class DataParallelPPOActor(BasePPOActor):
         log_prob_lst = []
         acceptance_matrix_lst = [[] for _ in range(mtp_n_heads - 1)]
         selected_experts_lst = []
+        uid_lst = []  # Collect UIDs for caching
+
         # Note: mismatched data order (here vs. upldate policy) can lead to
         # mismatched log probs. In order to match them, we need to split
         # batch into mini batches (same with training).
         chunk_size = math.ceil(selected_data.batch.batch_size[0] / self.config.ppo_mini_batch_size)
-        for _, mini_batch in enumerate(selected_data.chunk(chunk_size)):
+        for chunk_idx, mini_batch in enumerate(selected_data.chunk(chunk_size)):
             output_proto = self.engine.forward_backward_step(data=mini_batch,
                                                              forward_only=True,
                                                              reuse_old_experts=reuse_old_experts)
@@ -63,22 +71,37 @@ class DataParallelPPOActor(BasePPOActor):
                 self.engine.model_module._handle.reshard(True)  # release memory
             log_prob_lst.append(output_proto.batch['logprobs'])
             entropy_lst.append(output_proto.batch['entropy'])
+
+            # Cache old_experts with uid as key
             if reuse_old_experts:
-                selected_experts_lst.append(output_proto.batch['old_experts'])
+                batch_old_experts = output_proto.batch['old_experts']
+                selected_experts_lst.append(batch_old_experts)
+
+                # Store in cache using training_uid for reuse_old_experts
+                # training_uid should be unique per training step to avoid collisions
+                if 'training_uid' in mini_batch.non_tensor_batch:
+                    training_uids = mini_batch.non_tensor_batch['training_uid']
+                    for i, training_uid in enumerate(training_uids):
+                        if training_uid is not None:
+                            self.old_experts_cache[training_uid] = batch_old_experts[i].cpu()
+                    uid_lst.extend(training_uids)
+                else:
+                    raise RuntimeError(
+                        "training_uid not found in mini_batch.non_tensor_batch when reuse_old_experts=True")
+
             for j in range(mtp_n_heads - 1):
                 if output_proto.batch.get(f"acceptance_matrix_{j}", None) is not None:
                     acceptance_matrix_lst[j].append(output_proto.batch[f'acceptance_matrix_{j}'])
+
         log_probs = torch.concat(log_prob_lst, dim=0)
         entropy = torch.concat(entropy_lst, dim=0)
-        if reuse_old_experts:
-            selected_experts = torch.concat(selected_experts_lst, dim=0)
-        else:
-            selected_experts = None
+
         if len(acceptance_matrix_lst) and len(acceptance_matrix_lst[0]):
             acceptance_matrix = [torch.concat(acceptance_matrix_lst[j], dim=0) for j in range(mtp_n_heads - 1)]
         else:
             acceptance_matrix = []
-        return entropy, log_probs, tuple(acceptance_matrix), selected_experts
+        # Don't return selected_experts since they are already cached
+        return entropy, log_probs, tuple(acceptance_matrix)
 
     def train_one_step(self, data: DataProto):
         self.engine.set_loss(pg_loss_fn, OmegaConf.to_container(self.config, resolve=True))
@@ -112,6 +135,26 @@ class DataParallelPPOActor(BasePPOActor):
         for batch_idx, mini_batch in enumerate(dataloader):
             self.engine.optimizer_zero_grad()
 
+            # Retrieve cached old_experts if reuse_old_experts is enabled
+            # Use training_uid as cache key to avoid uid collision issues
+            if self.config.get('reuse_old_experts', False) and 'training_uid' in mini_batch.non_tensor_batch:
+                training_uids = mini_batch.non_tensor_batch['training_uid']
+                cached_experts = []
+                missing_keys = []
+
+                for training_uid in training_uids:
+                    if training_uid in self.old_experts_cache:
+                        cached_experts.append(self.old_experts_cache[training_uid])
+                    else:
+                        missing_keys.append(training_uid)
+                # Must hit all cache keys, otherwise raise error
+                if missing_keys:
+                    raise RuntimeError(f"Failed to find training_uids in old_experts cache: {missing_keys}. "
+                                       f"This indicates a mismatch between compute_log_prob and update_policy batches.")
+                # Add old_experts to mini_batch from cache
+                device = mini_batch.batch['responses'].device  # Use responses tensor to get device
+                mini_batch.batch['old_experts'] = torch.stack(cached_experts).to(device)
+
             # compute minibatch full token count
             mini_batch_full_token_count_mask = mini_batch.batch['attention_mask'][:, -response_length:]
             if 'overlong_mask' in mini_batch.batch.keys():
@@ -139,7 +182,15 @@ class DataParallelPPOActor(BasePPOActor):
 
         self.engine.optimizer_zero_grad()
         self.engine.clear_memory_cache()
+
+        # Clear the old_experts cache after each update_policy step
+        self.clear_experts_cache()
+
         return metrics
+
+    def clear_experts_cache(self):
+        """Clear the old_experts cache after each step to prevent memory leak."""
+        self.old_experts_cache.clear()
 
 
 def pg_loss_fn(config: Dict, output: TensorDict, micro_data: TensorDict):
@@ -308,7 +359,10 @@ def make_mini_step_dataloader(data, ppo_mini_batch_size, return_dataproto=False)
     ]:
         if opt_key in data.batch.keys():
             select_keys.append(opt_key)
+    # Only include training_uid for proper routing in update_policy
     non_tensor_keys = get_image_keys(data.non_tensor_batch)
+    if 'training_uid' in data.non_tensor_batch:
+        non_tensor_keys = non_tensor_keys + ['training_uid']
     if non_tensor_keys:
         assert return_dataproto
     if return_dataproto:
