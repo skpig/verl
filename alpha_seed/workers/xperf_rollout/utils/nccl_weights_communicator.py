@@ -73,7 +73,7 @@ class NCCLWeightsCommunicator(WeightsCommunicator):
                     param_names = ["weight", "bias"]
                 for param_name in param_names:
                     param = getattr(module, param_name).cuda()
-                    comm_fn(param, comm_rank)
+                    param = comm_fn(param, comm_rank)
                     setattr(module, param_name, param)
 
             # TODO: if freezed, we don't need to update vit model
@@ -89,7 +89,7 @@ class NCCLWeightsCommunicator(WeightsCommunicator):
                     for i, weight in enumerate(layer_weight):
                         if isinstance(weight, torch.Tensor):
                             weight = weight.cuda()
-                            comm_fn(weight, comm_rank)
+                            weight = comm_fn(weight, comm_rank)
                             vit_engine.visual_encoder.module.layers_weight[layer][i].data = weight.data
                 comm_and_assign(vit_engine.visual_encoder.module.patch_embed.proj)
             else:

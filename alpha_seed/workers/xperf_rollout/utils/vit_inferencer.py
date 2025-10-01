@@ -156,7 +156,7 @@ class TorchVitInferencer(BaseVitInferencer):
             for param_name in param_names:
                 param = getattr(module, param_name)
                 cu_param = param.cuda()
-                comm_fn(cu_param, comm_rank)
+                cu_param = comm_fn(cu_param, comm_rank)
                 setattr(module, param_name, nn.Parameter(cu_param))
 
         for layer in self.visual_encoder.blocks:
