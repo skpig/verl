@@ -65,7 +65,9 @@ class ElasticRolloutManager:
             time.sleep(10)
             self._update_relay_addr()
 
-    def init_elastic_rollout(self, hybrid_replica: ReplicatedRayWorkerGroup):
+    def init_elastic_rollout(self,
+                             hybrid_replica: ReplicatedRayWorkerGroup,
+                             val_standalone_replica: ReplicatedRayWorkerGroup = None):
         rollout_config = self.config.streaming_rollout
         # 每个rollout_worker用1个gpu，每个gpu对应1个rank
         res_shape = [self.config.streaming_rollout.n_gpus_per_node] * self.config.streaming_rollout.nnodes
@@ -152,8 +154,12 @@ class ElasticRolloutManager:
         # 两个副本组合并一起组成伸缩组
         elastic_replicas = ScalingRayWorkerGroup(min_guaranteed_replicas, best_effort_replicas)
         # 组合 hybrid replica
+        intermittent_replicas = {'hybrid': hybrid_replica}
+        if val_standalone_replica is not None:
+            intermittent_replicas['val'] = val_standalone_replica
+
         replicas = CombinedRayWorkerGroupAdapter(
-            intermittent={'hybrid': hybrid_replica},
+            intermittent=intermittent_replicas,
             persistent={'elastic': elastic_replicas},
         )
         lb_mode = rollout_config.proxy.lb_mode

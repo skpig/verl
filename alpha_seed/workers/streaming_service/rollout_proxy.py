@@ -326,6 +326,9 @@ class CombinedRayWorkerGroupAdapter(ReplicatedRayWorkerGroup):
             f"name({name}) should be in intermittent replicas({self._intermittent_replicas.keys()})"
         self._replica_active[name] = ready
 
+    def is_replica_ready(self, name: str) -> bool:
+        return self._replica_active.get(name, False)
+
     @property
     def alive_worker_group_ids(self) -> Set[str]:
         return set(self.get_alive_worker_groups().keys())
