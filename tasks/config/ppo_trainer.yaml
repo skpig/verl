@@ -88,6 +88,7 @@ actor_rollout_ref:
     offpolicy_kl_loss_weight: 0.0
     lm_loss_weight: 0.0
     kl_penalty: ${algorithm.kl_penalty}
+    force_append_eos: ${algorithm.force_append_eos}
     use_model_output_mask: ${algorithm.use_model_output_mask}
     entropy_coeff: 0.001
     ppo_epochs: 1
@@ -371,6 +372,9 @@ reward_model:
     score_parser: [ "v2", "v2" ]  # 不同grm用不同的score parser
     score_weight: [ 0.6, 0.4 ] # 最终返回一个各grm score的weighed sum
     empty_response_default_score: [ 1.0, 0.0 ] # response为空给默认score不必请求grm
+  qrm:
+    use_rm_reverse: False
+    max_prompt_length: ${data.max_prompt_length}
   rm_server: # ORM, GRM, and QRM can all be configured
     llm_serving_psm: ''
     llm_serving_idc: ''

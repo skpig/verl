@@ -231,6 +231,11 @@ class GrmVerifier(Verifier, reward_style="grm_service"):
                     score = rescaled_verifier_score
                 else:
                     score = min(rm_score + rescaled_verifier_score * 0.5, 1.0)
+            elif ab_idx in verify_fusion_rule_dict["grm"]:
+                if rm_score == RM_INVALID_SCORE:
+                    score = rescaled_verifier_score
+                else:
+                    score = rm_score + 0.4 * rescaled_verifier_score - 0.2
             else:
                 score = rescaled_verifier_score
         score = (score * 2) - 1  # Rescale back from [0, 1] to [-1, 1]
@@ -246,6 +251,7 @@ def init_grm_server(config, **kwargs):
         cluster=rm_conf.rm_server.llm_serving_cluster,
         model_name=rm_conf.rm_server.model_name,
         max_response_length=rm_conf.grm.max_response_length,
+        pool_size=rm_conf.rm_server.ray_actor_pool_size,
         inner_pool_size=rm_conf.rm_server.client_pool_size,
         retry=rm_conf.rm_server.max_retry,
         retry_interval=rm_conf.rm_server.retry_interval,

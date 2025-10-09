@@ -155,8 +155,12 @@ def replace_image_tag(prompt, images_bytes_lst=None, img_tag="<|image|>", tokeni
     pattern = rf"({re.escape(img_tag)})"
     prompt_chunks = re.split(pattern, prompt)
     image_tag_count = sum(1 for chunk in prompt_chunks if chunk == img_tag)
-    assert image_tag_count == len(images_bytes_lst), (
-        f"Mismatch between image tags ({image_tag_count}) and provided images ({len(images_bytes_lst)})")
+    if image_tag_count != len(images_bytes_lst):
+        raise ValueError("Mismatch between image tags "
+                         f"({image_tag_count}) and provided images ({len(images_bytes_lst)})\n"
+                         "=== PROMPT RAW START ===\n"
+                         f"{prompt}\n"
+                         "=== PROMPT RAW END ===")
     content = []
     image_idx = 0
     for chunk in prompt_chunks:

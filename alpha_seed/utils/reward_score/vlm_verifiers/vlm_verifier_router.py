@@ -350,6 +350,16 @@ def submit_verifier(response: str,
         elif verifier_name == 'seed_grm_verifier':
             from alpha_seed.utils.reward_score.vlm_verifiers.seed_grm_verifier import SeedGRMVerifier
             result = SeedGRMVerifier().verify(response=response, verifier_feature_dict=feature)
+        elif verifier_name == "text_grm_instruction_follow_verifier":
+            from alpha_seed.utils.reward_score.vlm_verifiers.text_grm_instruction_follow_verifier import TextGRMInstructionFollowVerifierVolc
+            result = TextGRMInstructionFollowVerifierVolc(
+                volc_ark_key=volc_ark_key, volc_model_name=volc_model_name).verify(response=response,
+                                                                                   verifier_feature_dict=feature)
+        elif verifier_name == 'mixed_perception_verifier':
+            from alpha_seed.utils.reward_score.vlm_verifiers.mixed_perception_verifier import ModelBasedMixedPerceptionVerifierVolc
+            result = ModelBasedMixedPerceptionVerifierVolc(
+                volc_ark_key=volc_ark_key, volc_model_name=volc_model_name).verify(response=response,
+                                                                                   verifier_feature_dict=feature)
         else:
             raise NotImplementedError(f'No verifier named "{verifier_name}".')
 

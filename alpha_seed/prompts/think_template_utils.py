@@ -36,7 +36,7 @@ def get_special_tokens_dict_or_name(name=None, version=None):
             "soi": "[SOI]",
             "eoi": "[EOI]",
         }
-    elif think_template == 'v4':
+    elif think_template in ['v4', 'v5']:
         special_tokens_dict = {
             "bos": "<[BOS_never_used_51bce0c785ca2f68081bfa7d91973934]>",
             "eos": "<[EOS_never_used_51bce0c785ca2f68081bfa7d91973934]>",
@@ -56,10 +56,10 @@ def get_special_tokens_dict_or_name(name=None, version=None):
 
 def align_special_tokens(text):
     think_template = os.getenv("THINK_TEMPLATE", "v3")
-    if think_template not in ["v2", "v3", "v4"]:  ## convert think token between v2 and [v3, v4]
+    if think_template not in ["v2", "v3", "v4", "v5"]:  ## convert think token between v2 and [v3, v4, v5]
         return text
 
-    if think_template in ["v3", "v4"]:
+    if think_template in ["v3", "v4", "v5"]:
         special_tokens_dict_target = get_special_tokens_dict_or_name(version="v3")
         special_tokens_dict_input = get_special_tokens_dict_or_name(version="v2")
     elif think_template == "v2":
@@ -108,8 +108,35 @@ def get_thinking_system_prompt(version=None, no_thinking_required=False):
     elif think_template in ['v3', 'v4']:
         thinking_sp = "You should first think about the reasoning process in the mind and then provide the user with the answer. The reasoning process is enclosed within <think_never_used_51bce0c785ca2f68081bfa7d91973934> </think_never_used_51bce0c785ca2f68081bfa7d91973934> tags, i.e. <think_never_used_51bce0c785ca2f68081bfa7d91973934> reasoning process here </think_never_used_51bce0c785ca2f68081bfa7d91973934> answer here"
         non_thinking_sp = None
+    elif think_template == 'v5':
+        thinking_sp = f'''You should begin by detailing the internal reasoning process, and then present the answer to the user. The reasoning process should be enclosed within <think_never_used_51bce0c785ca2f68081bfa7d91973934> </think_never_used_51bce0c785ca2f68081bfa7d91973934> tags, as follows:
+<think_never_used_51bce0c785ca2f68081bfa7d91973934> reasoning process here </think_never_used_51bce0c785ca2f68081bfa7d91973934> answer here. 
+ 
+You have different modes of thinking:
+Unrestricted think mode: Engage in an internal thinking process with thorough reasoning and reflections. You have an unlimited budget for thinking tokens and can continue thinking until you fully solve the problem.
+Efficient think mode: Provide a concise internal thinking process with efficient reasoning and reflections. You don't have a strict token budget but be less verbose and more direct in your thinking. 
+No think mode: Respond directly to the question without any internal reasoning process or extra thinking tokens. Still follow the template with the minimum required thinking tokens to justify the answer. 
+Budgeted think mode: Limit your internal reasoning and reflections to stay within the specified token budget.
+
+Based on the complexity of the problem, select the appropriate mode for reasoning among the provided options listed below.
+
+Provided Mode(s):
+Unrestricted think'''
+        non_thinking_sp = f'''You should begin by detailing the internal reasoning process, and then present the answer to the user. The reasoning process should be enclosed within <think_never_used_51bce0c785ca2f68081bfa7d91973934> </think_never_used_51bce0c785ca2f68081bfa7d91973934> tags, as follows:
+<think_never_used_51bce0c785ca2f68081bfa7d91973934> reasoning process here </think_never_used_51bce0c785ca2f68081bfa7d91973934> answer here. 
+ 
+You have different modes of thinking:
+Unrestricted think mode: Engage in an internal thinking process with thorough reasoning and reflections. You have an unlimited budget for thinking tokens and can continue thinking until you fully solve the problem.
+Efficient think mode: Provide a concise internal thinking process with efficient reasoning and reflections. You don't have a strict token budget but be less verbose and more direct in your thinking. 
+No think mode: Respond directly to the question without any internal reasoning process or extra thinking tokens. Still follow the template with the minimum required thinking tokens to justify the answer. 
+Budgeted think mode: Limit your internal reasoning and reflections to stay within the specified token budget.
+
+Based on the complexity of the problem, select the appropriate mode for reasoning among the provided options listed below.
+
+Provided Mode(s):
+No think'''
     else:
-        supported_versions = ['v2', 'v3', 'v4']
+        supported_versions = ['v2', 'v3', 'v4', 'v5']
         raise ValueError(f"Unsupported think_template '{think_template}'. "
                          f"Supported versions: {supported_versions}")
     if not no_thinking_required:

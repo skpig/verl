@@ -22,7 +22,7 @@ from .utils import Verifier
 
 TEXT_BEFORE_RESP1 = "\n针对上述问题，已有回复：\n"
 TEXT_BEFORE_RESP2 = "\n相比之下，请回答下面的回复是否更好：\n"
-TEXT_AFTER_INSTRUCT = "回答是或否。[EOS]assistant\n"
+TEXT_AFTER_INSTRUCT = "<[EOS_never_used_51bce0c785ca2f68081bfa7d91973934]>回答是或否。[EOS]assistant\n"
 
 
 class QrmVerifier(Verifier, reward_style="qrm_service"):
@@ -109,6 +109,7 @@ def init_qrm_server(config, **kwargs):
         idc=rm_conf.rm_server.llm_serving_idc,
         cluster=rm_conf.rm_server.llm_serving_cluster,
         model_name=rm_conf.rm_server.model_name,
+        pool_size=rm_conf.rm_server.ray_actor_pool_size,
         inner_pool_size=rm_conf.rm_server.client_pool_size,
         retry=rm_conf.rm_server.max_retry,
         retry_interval=rm_conf.rm_server.retry_interval,
@@ -125,7 +126,7 @@ def prepare_qrm_input(prompts, answer, tokenizer, max_prompt_len=4096, max_resp_
     bos = tokenizer.bos_token
     eos = tokenizer.eos_token
     qrm_pre_prompt = f"{bos}{prompts}{eos}{TEXT_BEFORE_RESP1}{answer}{TEXT_BEFORE_RESP2}"
-    qrm_post_prompt = f"{eos}{TEXT_AFTER_INSTRUCT}"
+    qrm_post_prompt = f"{TEXT_AFTER_INSTRUCT}"
     qrm_pre_ids = tokenizer(qrm_pre_prompt)["input_ids"]
     qrm_post_ids = tokenizer(qrm_post_prompt)["input_ids"]
 
@@ -201,7 +202,7 @@ def prepare_vlm_qrm_input(
         f"{TEXT_BEFORE_RESP2}",
     )["input_ids"]
 
-    post_context = tokenizer(f"{eos}{TEXT_AFTER_INSTRUCT}")["input_ids"]
+    post_context = tokenizer(f"{TEXT_AFTER_INSTRUCT}")["input_ids"]
 
     history_ids = process_qrm_history(tokenizer,
                                       history,
@@ -281,7 +282,7 @@ class VLMQRMServingClient(QRMServingClient):
             end = response_text.find(self.think_end, inner_start)
             if end == -1:
                 return response_text
-            return response_text[inner_start:end]
+            return response_text[:start] + response_text[end + len(self.think_end):]
 
         output_str = trim_think_tag(response_text)
         response_empty_flag = False
@@ -341,7 +342,7 @@ class VLMQRMServingClient(QRMServingClient):
     async def call(self, reward_model=None, response_ids="", **kwargs):
         # 理解为每次处理单条数据
         logging.disable(logging.INFO)
-        cur_time = time.time()
+        cur_time = kwargs.get("call_fn_time", time.time())
         rm_pre_ids = reward_model.get("rm_pre_ids", None)
         rm_post_ids = reward_model.get("rm_post_ids", None)
         images_bytes_ref = reward_model.get("images_bytes_ref", None)

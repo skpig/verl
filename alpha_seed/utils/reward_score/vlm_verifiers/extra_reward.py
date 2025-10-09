@@ -235,11 +235,11 @@ def filter_thinking_part_v2(response, eos_token=None):
 def filter_thinking_part(response, no_thinking_required=False):
     think_template = os.getenv("THINK_TEMPLATE", "v3")
     print("[debug think_template 1 ]", think_template)
-    if think_template not in ['v1', 'v2', 'v3', 'v4']:
+    if think_template not in ['v1', 'v2', 'v3', 'v4', 'v5']:
         raise NotImplementedError
     if think_template == 'v1':
         response, status = filter_thinking_part_v1(response)
-    elif think_template in ['v2', 'v3', 'v4']:  ## v2 v3 use same template, only change special token
+    elif think_template in ['v2', 'v3', 'v4', 'v5']:  ## v2 v3 use same template, only change special token
         response, status = filter_thinking_part_v2(response)
     if not no_thinking_required and not status:
         response = ''
@@ -339,6 +339,12 @@ def match_visual_cot_format(
     if no_thinking_required and think_template in ['v1', 'v2', 'v3', 'v4']:
         is_nothink_format_valid = (think_start_token not in response) and (think_end_token not in response)
         if not is_nothink_format_valid:
+            return False
+    elif no_thinking_required and think_template == 'v5':
+        no_think_format_pattern = rf"^{re.escape(think_start_token)}{re.escape(think_end_token)}.+$"
+        if response.count(think_start_token) != 1 or response.count(think_end_token) != 1:
+            return False
+        elif not re.match(no_think_format_pattern, response, re.DOTALL):
             return False
 
     black_words_in_answer: list[str] = verifier_feature.get('black_words_in_answer', [])
@@ -477,6 +483,12 @@ def check_general_response_format(response: str, no_thinking_required: bool = Fa
     if no_thinking_required and think_template in ['v1', 'v2', 'v3', 'v4']:
         is_valid = (think_start_token not in response) and (think_end_token not in response)
         return is_valid
+    elif no_thinking_required and think_template == 'v5':
+        no_think_format_pattern = rf"^{re.escape(think_start_token)}{re.escape(think_end_token)}.+$"
+        if response.count(think_start_token) != 1 or response.count(think_end_token) != 1:
+            return False
+        elif not re.match(no_think_format_pattern, response, re.DOTALL):
+            return False
     else:
         if not response.startswith(think_start_token):
             return False
@@ -491,6 +503,23 @@ def check_general_response_format(response: str, no_thinking_required: bool = Fa
         pos_think_end_token = response.find(think_end_token)
         if pos_think_start_token == -1 or pos_think_end_token == -1 or pos_think_start_token >= pos_think_end_token:
             return False
+    return True
+
+
+def check_overlong_unfinished_format(response: str) -> bool:
+    think_start_token = get_special_tokens_dict_or_name("think_start_token")
+    think_end_token = get_special_tokens_dict_or_name("think_end_token")
+    think_template = os.getenv("THINK_TEMPLATE", "v3")
+
+    if not response.startswith(think_start_token):
+        return False
+
+    count_think_start_token = response.count(think_start_token)
+    count_think_end_token = response.count(think_end_token)
+
+    incomplete_think_pattern = rf"^{re.escape(think_start_token)}(?!.*{re.escape(think_end_token)})"
+    if not re.match(incomplete_think_pattern, response, re.DOTALL):
+        return False
     return True
 
 

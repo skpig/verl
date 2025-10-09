@@ -32,7 +32,7 @@ except ImportError:
     MegavisionMetricsCtx = None
 
 # rule-based reward score
-from alpha_seed.utils.reward_score.vlm_verifiers.extra_reward import add_length_reward, punish_format_return_positions, check_general_response_format, is_final_answer_lengthy
+from alpha_seed.utils.reward_score.vlm_verifiers.extra_reward import add_length_reward, punish_format_return_positions, check_general_response_format, is_final_answer_lengthy, check_overlong_unfinished_format
 from alpha_seed.utils.reward_score import response_post_proc
 from alpha_seed.utils.reward_score.utils import Verifier
 from alpha_seed.utils.duplicate import para_dup
@@ -103,7 +103,6 @@ class VLMRewardManager(RewardManager):
         self.mean = self.config.reward_model.mean
         self.std = self.config.reward_model.std
         self.need_punish_duplicate = self.config.reward_model.get('need_punish_duplicate', False)
-        self.score_merger = self.config.reward_model.grm.get('score_merger', 'v1')
         self.punish_score = self.config.reward_model.get('punish_score', 'rule-lighteval/MATH_v2:-1,code-sandbox:0')
         self.punish_score = dict(map(lambda x: (x.split(':')[0], float(x.split(':')[1])), self.punish_score.split(',')))
         self.need_punish_trunc = self.config.reward_model.get('need_punish_trunc', False)
@@ -143,7 +142,7 @@ class VLMRewardManager(RewardManager):
         self.verify_index_set = set()
         self.verify_fusion_rule_dict = defaultdict(set)
         for i, ability_key in self.ability_dict.items():
-            verifier_keywords = ["verifier_", "verifiable_", "collie", "instrruler", "sandbox_code"]
+            verifier_keywords = ["verifier_", "verifiable_", "collie", "instrruler", "sandbox_code", "grm_"]
             if any([x in ability_key for x in verifier_keywords]):
                 self.verify_index_set.add(i)
 
@@ -156,6 +155,10 @@ class VLMRewardManager(RewardManager):
                     for key in ["verifier_vlm_visionarena", "verifier_lmsys_arena", "verifier_lmsys_multi_lang"]
             ]):
                 self.verify_fusion_rule_dict["code_switch"].add(i)
+            elif ability_key.startswith("grm_") and not ability_key.startswith("grm_only_"):
+                self.verify_fusion_rule_dict["grm"].add(i)
+
+        self.apply_format_penalty_overlong = self.config.reward_model.get('apply_format_penalty_overlong', True)
 
     def update_len_ema(self, data: DataProto):
         index = data.non_tensor_batch['index']
@@ -320,30 +323,35 @@ class VLMRewardManager(RewardManager):
             else:
                 verifier_score = -1
 
+            is_valid_format = check_general_response_format(solution_str, no_thinking_required)
+            if is_overlong and not no_thinking_required:
+                is_unfinished_think = check_overlong_unfinished_format(solution_str)
+                if not self.apply_format_penalty_overlong and is_unfinished_think:
+                    verifier_score = -1  # Do not apply format penalty for overlong sample under thinking mode
+                    is_valid_format = True
+
             score_fn_inputs["verifier_score"] = verifier_score
             rm_response, rm_score = "", 0
             waiting_time, rm_time_cost, rm_retry_cnt = 0, 0, 0
 
-            is_valid_format = check_general_response_format(solution_str, no_thinking_required)
             score = verifier_score
             remote_rm_type = data_item.non_tensor_batch['reward_model'].get('rm_required_type', None)
             if (not is_validation) and remote_rm_type is not None and self.rm_name == 'train':
                 if verifier is None:
                     verifier_score = -1  # for no verifier case, set verifier_score to -1
-                remote_rm_type = self.config.trainer.remote_rm_type
                 rm_verifier = Verifier.get_verifier(f"{remote_rm_type}_service",
                                                     tokenizer=self.tokenizer,
                                                     config=self.config)
                 rm_response, rm_score, waiting_time, rm_time_cost, rm_retry_cnt = rm_verifier.compute_score_client(
                     data_uid)
-                if waiting_time >= 0:  # it means the remote rm call is successful
+                if waiting_time >= 0:  # it means the remote rm call is successful, otherwise -1
                     rm_kwargs = {
                         "verify_index_set": self.verify_index_set,
                         "verify_fusion_rule_dict": self.verify_fusion_rule_dict,
                         "ab_idx": ab_idx,
                         "is_valid_format": is_valid_format
                     }
-                    score = rm_verifier.merge_vlm_score(verifier_score, rm_score, self.score_merger, **rm_kwargs)
+                    score = rm_verifier.merge_vlm_score(verifier_score, rm_score, **rm_kwargs)
 
             is_para_dup = para_dup.find_single_turn_duplicate(
                 solution_str, enable_resp_para=self.config.reward_model.enable_resp_para)[0]

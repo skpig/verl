@@ -128,6 +128,12 @@ def import_from_string(import_str: str) -> Any:
 def save_simple_train_data_to_hdfs(batch, tokenizer, step, config):
     file_base_path = config.trainer.default_hdfs_dir
     max_prompt_length = config.data.max_prompt_length
+
+    ability_keys = ["unknown"] + config.data.get(
+        'ability_list',
+        "creation,math,comprehension,rewrite,other,communication,qa,security,code,translation").split(",")
+    ability_dict = dict(map(lambda x: (x[0], x[1]), enumerate(ability_keys)))  # {idx: ability_name}
+
     file_path = f"{file_base_path}/simple_train_data"
     local_file_path = f'train_simple_{step}.jsonl'
     if file_path.startswith("hdfs://"):
@@ -163,6 +169,8 @@ def save_simple_train_data_to_hdfs(batch, tokenizer, step, config):
             raw_rm_scores = batch.batch['raw_rm_score']
         if 'raw_verifier_score' in batch.batch:
             raw_verifier_scores = batch.batch['raw_verifier_score']
+        if 'ability_idx' in batch.batch:
+            ability_indices = batch.batch['ability_idx']
         soi = config.data.special_tokens.soi
         eoi = config.data.special_tokens.eoi
 
@@ -178,6 +186,9 @@ def save_simple_train_data_to_hdfs(batch, tokenizer, step, config):
                 data['raw_rm_score'] = raw_rm_scores[i].item()
             if 'raw_verifier_score' in batch.batch:
                 data['raw_verifier_score'] = raw_verifier_scores[i].item()
+            if 'ability_idx' in batch.batch:
+                data['ability_idx'] = ability_indices[i].item()
+                data['ability'] = ability_dict.get(ability_indices[i].item(), 'unknown')
             f.write(json.dumps(data, ensure_ascii=False) + "\n")
             f.flush()
 

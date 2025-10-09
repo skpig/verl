@@ -8,6 +8,7 @@ import torch
 import asyncio
 import os
 import ray
+import time
 
 from mono_rl import DataProto
 
@@ -38,20 +39,20 @@ class SingleTurn(AsyncAgent):
                                   reward_style=reward_style,
                                   no_thinking_required=no_thinking_required)
         # grm verifier
-        call_remote_rm = reward_model.get('grm_required', False)
-        if call_remote_rm:
-            verifier = Verifier.get_verifier('grm_service', self.config, self.tokenizer.tokenizer)
+        remote_rm_type = reward_model.get('rm_required_type', None)
+        if remote_rm_type is not None:
+            reward_style = f'{remote_rm_type}_service'
+            verifier = Verifier.get_verifier(reward_style, self.config, self.tokenizer.tokenizer)
             response_ids = input_ids[self.config.data.max_prompt_length:]
             response_length = out.batch['attention_mask'][0][self.config.data.max_prompt_length:].sum()
             response_ids = response_ids[:response_length]
-            params = dict(
-                input_ids=input_ids,
-                ground_truth=ground_truth,
-                reward_style='grm_service',
-                response_ids=response_ids,
-                call_rm_service=call_remote_rm,
-                reward_model=reward_model,
-            )
+            params = dict(input_ids=input_ids,
+                          ground_truth=ground_truth,
+                          reward_style=reward_style,
+                          response_ids=response_ids,
+                          call_rm_service=True,
+                          reward_model=reward_model,
+                          call_fn_time=time.time())
             verifier.add_requests(req_id=req_id, **params)
 
     async def __call__(self, item: DataProto, context: TaskContext, **kwargs):

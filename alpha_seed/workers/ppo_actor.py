@@ -235,6 +235,8 @@ def default_pg_loss_fn(config, micro_data, full_entropy, log_prob):
         response_mask = loss_mask[:, -response_length:]
     else:
         response_mask = attention_mask[:, -response_length:]
+    if config.get("force_append_eos", False):
+        response_mask[:, -1] = 0  # mask force_append_eos
 
     use_rollout_behavior_log_probs = config['use_rollout_behavior_log_probs']
     use_old_as_ema = config['use_old_as_ema']

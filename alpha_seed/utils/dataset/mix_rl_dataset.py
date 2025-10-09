@@ -2,7 +2,7 @@ import os
 import math
 import re
 import json
-
+from omegaconf import OmegaConf
 import copy
 import pandas as pd
 import torch
@@ -33,7 +33,6 @@ class MixRLDataset(RLHFDatasetVL):
         self.ability_keys = ["unknown"] + self.ability_list.split(",")
         self.ability_dict = dict(map(lambda x: (x[1], x[0]), enumerate(self.ability_keys)))
         self.ability_kl_weights = [1.0] + [float(x) for x in self.ability_kl_weights.split(',')]
-        self.max_rm_prompt_length = self.config.data.get('max_rm_prompt_length', self.config.data.max_prompt_length)
         self.rm_required_abilities = self.config.data.get('rm_required_abilities', 'code,math')
         self.rm_required_abilities = ["unknown"] + self.rm_required_abilities.split(",")
         self.is_eval = kwargs.get('is_eval', False)
@@ -44,6 +43,11 @@ class MixRLDataset(RLHFDatasetVL):
         os.environ['THINK_TEMPLATE'] = self.config.data.think_template
 
         super().__init__(*args, **kwargs)
+        self.max_rm_prompt_length = OmegaConf.select(
+            self.config,
+            f"reward_model.{self.remote_rm_type}.max_prompt_length",
+            default=self.config.data.max_prompt_length,
+        )
 
     def __getitem__(self, item):
         """
