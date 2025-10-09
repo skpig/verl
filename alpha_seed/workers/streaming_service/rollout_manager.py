@@ -272,10 +272,11 @@ class RolloutManager:
                                           input_ids=input_ids,
                                           ground_truth=ground_truth,
                                           reward_style=reward_style)
-            # grm verifier
-            call_remote_rm = reward_model.get('grm_required', False)
-            if call_remote_rm:
-                verifier = Verifier.get_verifier('grm_service', raw_config)
+
+            # remote rm verifier
+            rm_required_type = reward_model.get('rm_required_type', None)
+            if rm_required_type is not None:
+                verifier = Verifier.get_verifier(f'{rm_required_type}_service', raw_config)
                 input_ids = query.input_ids + query.new_token_ids
                 reward_model = query.meta_info['reward_model']
                 ground_truth = reward_model['ground_truth']
@@ -283,8 +284,8 @@ class RolloutManager:
                 params = dict(
                     input_ids=input_ids,
                     ground_truth=ground_truth,
-                    reward_style='grm_service',
-                    call_rm_service=call_remote_rm,
+                    reward_style=f'{rm_required_type}_service',
+                    call_rm_service=True,
                     reward_model=reward_model,
                 )
                 verifier.add_requests(req_id=req_id, **params)

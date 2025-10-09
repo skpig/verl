@@ -14,7 +14,7 @@ data:
   override_datasource_with_ability: False
   ability_list: "code,math"
   ability_kl_weights: "1.0,1.0"
-  grm_required_abilities: "code,math"
+  rm_required_abilities: "code,math"
   max_prompt_length: 512
   max_response_length: 512
   train_batch_size: 1024
@@ -360,7 +360,7 @@ critic:
 
 reward_model:
   grm:
-    use_grm_reverse: False
+    use_rm_reverse: False
     score_merger: "v1"  # grm与verifier的融合方法
     max_prompt_length: ${data.max_prompt_length}
     max_response_length: ${data.max_response_length}

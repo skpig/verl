@@ -326,8 +326,8 @@ class VLMRewardManager(RewardManager):
 
             is_valid_format = check_general_response_format(solution_str, no_thinking_required)
             score = verifier_score
-            call_remote_rm = data_item.non_tensor_batch['reward_model'].get('grm_required', False)
-            if (not is_validation) and call_remote_rm and self.rm_name == 'train':
+            remote_rm_type = data_item.non_tensor_batch['reward_model'].get('rm_required_type', None)
+            if (not is_validation) and remote_rm_type is not None and self.rm_name == 'train':
                 if verifier is None:
                     verifier_score = -1  # for no verifier case, set verifier_score to -1
                 remote_rm_type = self.config.trainer.remote_rm_type

@@ -31,3 +31,29 @@ def select_remote_rm_fn(config, **kwargs):
         pass
     else:
         raise NotImplementedError(f"{config.trainer.remote_rm_type=} not implemented")
+
+
+def select_prepare_vlm_rm_input_fn(config):
+    if config.trainer.remote_rm_type == "qrm":
+        from alpha_seed.utils.reward_score.qrm_service import prepare_vlm_qrm_input
+        return prepare_vlm_qrm_input
+    elif config.trainer.remote_rm_type == "grm":
+        from alpha_seed.utils.reward_score.grm_service import prepare_vlm_grm_input
+        return prepare_vlm_grm_input
+    elif config.trainer.remote_rm_type == "orm":
+        pass
+    else:
+        raise NotImplementedError(f"{config.trainer.remote_rm_type=} not implemented")
+
+
+def select_prepare_rm_input_fn(remote_rm_type):
+    if remote_rm_type == "qrm":
+        from alpha_seed.utils.reward_score.qrm_service import prepare_qrm_input
+        return prepare_qrm_input
+    elif remote_rm_type == "grm":
+        from alpha_seed.utils.reward_score.grm_service import prepare_grm_input
+        return prepare_grm_input
+    elif remote_rm_type == "orm":
+        pass
+    else:
+        raise NotImplementedError(f"{remote_rm_type=} not implemented")

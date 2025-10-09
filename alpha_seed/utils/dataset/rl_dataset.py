@@ -36,6 +36,7 @@ from verl.utils.model import compute_position_id_with_mask
 import verl.utils.torch_functional as verl_F
 
 from alpha_seed.prompts.load import random_transform, load_prompts, ith_transform
+from alpha_seed.utils.reward_score import select_prepare_rm_input_fn
 
 
 def collate_fn(data_list: list[dict]) -> dict:
@@ -285,15 +286,16 @@ class RLHFDataset(Dataset):
         row_dict['answer_input_ids'] = input_ids[0]
         row_dict['answer_attention_mask'] = attention_mask[0]
 
-        if self.remote_rm_type == 'grm':
-            from alpha_seed.utils.reward_score.grm_service import prepare_grm_input
-            grm_input = prepare_grm_input(chat,
-                                          answer,
-                                          self.tokenizer,
-                                          max_prompt_len=self.max_prompt_length,
-                                          max_resp_len=self.max_response_length)
-            row_dict['reward_model']['rm_pre_ids'] = grm_input['rm_pre_ids'].to(torch.int32).tolist()
-            row_dict['reward_model']['rm_post_ids'] = grm_input['rm_post_ids'].to(torch.int32).tolist()
+        if self.remote_rm_type is not None:
+            prepare_rm_input = select_prepare_rm_input_fn(self.remote_rm_type)
+            rm_input = prepare_rm_input(chat,
+                                        answer,
+                                        self.tokenizer,
+                                        max_prompt_len=self.max_prompt_length,
+                                        max_resp_len=self.max_response_length)
+            row_dict['reward_model']['rm_pre_ids'] = rm_input['rm_pre_ids'].to(torch.int32).tolist()
+            row_dict['reward_model']['rm_post_ids'] = rm_input['rm_post_ids'].to(torch.int32).tolist()
+            row_dict['reward_model']['rm_required_type'] = self.remote_rm_type
 
         # encode prompts without chat template
         if self.return_raw_chat:

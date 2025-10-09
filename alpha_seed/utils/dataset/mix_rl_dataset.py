@@ -9,6 +9,7 @@ import torch
 import random
 from alpha_seed.prompts.think_template_utils import get_thinking_system_prompt
 from .vlm_rl_dataset import RLHFDatasetVL, convert_conversation_to_prompt, get_reward_model
+from alpha_seed.utils.reward_score import select_prepare_vlm_rm_input_fn
 
 
 def check_nan(v) -> bool:
@@ -32,9 +33,9 @@ class MixRLDataset(RLHFDatasetVL):
         self.ability_keys = ["unknown"] + self.ability_list.split(",")
         self.ability_dict = dict(map(lambda x: (x[1], x[0]), enumerate(self.ability_keys)))
         self.ability_kl_weights = [1.0] + [float(x) for x in self.ability_kl_weights.split(',')]
-        self.max_grm_prompt_length = self.config.data.get('max_grm_prompt_length', self.config.data.max_prompt_length)
-        self.grm_required_abilities = self.config.data.get('grm_required_abilities', 'code,math')
-        self.grm_required_abilities = ["unknown"] + self.grm_required_abilities.split(",")
+        self.max_rm_prompt_length = self.config.data.get('max_rm_prompt_length', self.config.data.max_prompt_length)
+        self.rm_required_abilities = self.config.data.get('rm_required_abilities', 'code,math')
+        self.rm_required_abilities = ["unknown"] + self.rm_required_abilities.split(",")
         self.is_eval = kwargs.get('is_eval', False)
         if self.is_eval:
             self.override_datasource_with_ability = False
@@ -169,7 +170,7 @@ class MixRLDataset(RLHFDatasetVL):
             reward_model = {
                 # NOTE: at this point it only flags that remote service is required
                 'style': f"remote_service",
-                'ground_truth': row_dict['ground_truth'],
+                'ground_truth': row_dict.get('rm_reference_response'),
             }
             row_dict_ret['reward_model'] = reward_model
         else:
@@ -191,24 +192,23 @@ class MixRLDataset(RLHFDatasetVL):
         row_dict_ret['prompt_names'] = [""]
         row_dict_ret['prompt'] = prompt
 
-        if self.remote_rm_type == 'grm':
-            from alpha_seed.utils.reward_score.grm_service import prepare_vlm_grm_input
-            grm_input = prepare_vlm_grm_input(
-                self.tokenizer,
-                row_dict,
-                self.prompt_key,
-                is_image=is_image,
-                max_prompt_len=self.max_grm_prompt_length,
-                max_resp_len=self.max_response_length,
-            )
+        prepare_kwargs = dict(
+            tokenizer=self.tokenizer,
+            row_dict=row_dict,
+            prompt_key=self.prompt_key,
+            is_image=is_image,
+            max_prompt_len=self.max_rm_prompt_length,
+            max_resp_len=self.max_response_length,
+        )
 
-            row_dict_ret['reward_model'].update(grm_input)
-            row_dict_ret['reward_model']['images_bytes_ref'] = row_dict['images_bytes_ref']
-            # type cast for grm input
-            grm_required = True
-            if ability not in self.grm_required_abilities or self.is_eval:
-                grm_required = False
-            row_dict_ret['reward_model']['grm_required'] = grm_required
+        if self.remote_rm_type is not None:
+            if ability not in self.rm_required_abilities or self.is_eval:
+                row_dict_ret['reward_model']['rm_required_type'] = None
+            else:
+                rm_input = select_prepare_vlm_rm_input_fn(self.config)(**prepare_kwargs)
+                row_dict_ret['reward_model'].update(rm_input)
+                row_dict_ret['reward_model']['images_bytes_ref'] = row_dict['images_bytes_ref']
+                row_dict_ret['reward_model']['rm_required_type'] = self.remote_rm_type
 
         # Add critic_reference_response
         critic_reference_response = row_dict.get('critic_reference_response', None)

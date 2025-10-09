@@ -24,7 +24,7 @@ TRAIN_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rl
 TEST_FILE=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf/math/test_with_ref_ans_top_100.parquet
 default_hdfs_dir=hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/test/p6_400m_omnistore_test_1
 
-use_grm_reverse=False
+use_rm_reverse=False
 rm_psm="data.aml.arnold_inference_57781906"
 rm_idc="'lq,lf,hl,yg,gl,wlby'"
 rm_cluster="default"
@@ -125,7 +125,7 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.actor.optim.weight_decay=${weight_decay} \
     trainer.remote_rm_type='grm' \
     trainer.use_remote_rm=True \
-    reward_model.grm.use_grm_reverse=${use_grm_reverse} \
+    reward_model.grm.use_rm_reverse=${use_rm_reverse} \
     reward_model.grm.score_merger=v1 \
     reward_model.rm_server.llm_serving_psm=${rm_psm} \
     reward_model.rm_server.llm_serving_idc=${rm_idc} \

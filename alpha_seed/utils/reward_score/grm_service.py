@@ -17,7 +17,7 @@ from typing import Dict, List
 from langchain.schema import HumanMessage, SystemMessage
 from bytedagi.model_io import InferenceRequest, ModelIO
 from langchain.schema import HumanMessage
-from alpha_seed.utils.reward_score.rm_utils import wait_remote_server_ready, check_nan, _extract_conversation, _process_history, decode_with_image_tag, replace_image_tag, get_query_imgs
+from alpha_seed.utils.reward_score.rm_utils import wait_remote_server_ready, check_nan, _extract_conversation, process_grm_history, decode_with_image_tag, replace_image_tag, get_query_imgs, swap_std_ans
 from alpha_seed.utils.reward_score.utils import Verifier
 
 # NOTE: GRM,QRM,ORM has same invalid score
@@ -98,10 +98,10 @@ def prepare_vlm_grm_input(
     )["input_ids"]
     post_context = tokenizer("\n</回答2>")["input_ids"]
 
-    history_ids = _process_history(tokenizer,
-                                   history,
-                                   base_length=len(pre_context) + len(context) + len(post_context),
-                                   max_total=max_prompt_len)
+    history_ids = process_grm_history(tokenizer,
+                                      history,
+                                      base_length=len(pre_context) + len(context) + len(post_context),
+                                      max_total=max_prompt_len)
 
     return {
         "rm_pre_ids": pad_sequence(pre_context + history_ids + context, max_prompt_len),
@@ -144,10 +144,10 @@ def prepare_grm_input(
     )["input_ids"]
     post_context = tokenizer("\n</回答>")["input_ids"]
     # 历史对话
-    history_ids = _process_history(tokenizer,
-                                   history,
-                                   base_length=len(pre_context) + len(context) + len(post_context),
-                                   max_total=max_prompt_len)
+    history_ids = process_grm_history(tokenizer,
+                                      history,
+                                      base_length=len(pre_context) + len(context) + len(post_context),
+                                      max_total=max_prompt_len)
     return {
         "rm_pre_ids": pad_sequence(pre_context + history_ids + context, max_prompt_len),
         "rm_post_ids": torch.tensor(post_context)
@@ -258,32 +258,6 @@ def init_grm_server(config, **kwargs):
     return vlm_grm_clients
 
 
-def swap_std_ans(text: str) -> str:
-    STD_OPEN, STD_CLOSE = "<回答1>", "</回答1>"
-    ANS_OPEN, ANS_CLOSE = "<回答2>", "</回答2>"
-
-    std_m = re.search(rf"{STD_OPEN}(.*?){STD_CLOSE}", text, flags=re.DOTALL)
-    ans_m = re.search(rf"{ANS_OPEN}(.*?){ANS_CLOSE}", text, flags=re.DOTALL)
-    if not (std_m and ans_m):
-        return text  # 任一缺失就原样返回，或你也可 raise
-
-    std, ans = std_m.group(1), ans_m.group(1)
-
-    # 2) 用占位符避免相互覆盖
-    placeholder = f"__SWAP_PLACEHOLDER_{uuid4().hex}__"
-
-    text = re.sub(r"(<回答1>)(.*?)(</回答1>)",
-                  lambda m: m.group(1) + placeholder + m.group(3),
-                  text,
-                  count=1,
-                  flags=re.DOTALL)
-
-    text = re.sub(r"(<回答2>)(.*?)(</回答2>)", lambda m: m.group(1) + std + m.group(3), text, count=1, flags=re.DOTALL)
-
-    text = text.replace(placeholder, ans)
-    return text
-
-
 class RemoteGRMServingClient(GRMServingClient):
 
     def __init__(self,
@@ -323,7 +297,7 @@ class RemoteGRMServingClient(GRMServingClient):
         self.prepare_grm_prompt_mode = self.config.reward_model.grm.get("prepare_grm_prompt_mode", [0])
         self.score_parser_version = self.config.reward_model.grm.get("score_parser", ['v1'])
         self.empty_response_default_score = self.config.reward_model.grm.get("empty_response_default_score", [0])
-        self.use_grm_reverse = self.config.reward_model.grm.get("use_grm_reverse", False)
+        self.use_rm_reverse = self.config.reward_model.grm.get("use_rm_reverse", False)
         special_tokens = self.config.data.special_tokens
         self.think_begin = special_tokens.think_begin
         self.think_end = special_tokens.think_end
@@ -369,13 +343,18 @@ class RemoteGRMServingClient(GRMServingClient):
 
         ref_grm_prompt_w_img = replace_image_tag(grm_prompt, images_bytes_lst, img_tag=self.img_tag)
         rev_grm_prompt, rev_grm_prompt_w_img = "", ""
-        if self.use_grm_reverse and not response_empty_flag:
-            rev_grm_prompt = swap_std_ans(grm_prompt)
+        if self.use_rm_reverse and not response_empty_flag:
+            # NOTE: 如果要使用reverse功能，请保证分割tag的正确性
+            rev_grm_prompt = swap_std_ans(grm_prompt,
+                                          std_open="<回答1>",
+                                          std_close="</回答1>",
+                                          ans_open="<回答2>",
+                                          ans_close="</回答2>")
             rev_grm_prompt_w_img = replace_image_tag(rev_grm_prompt, images_bytes_lst, img_tag=self.img_tag)
 
         if random.random() < 0.01:
             debug_info = f"[GRM REVERSE DEBUG] grm prompt: {grm_prompt}"
-            if self.use_grm_reverse and not response_empty_flag:
+            if self.use_rm_reverse and not response_empty_flag:
                 debug_info = debug_info + f"\n grm reverse prompt: {rev_grm_prompt}"
             print(debug_info)
         grm_pmp = [grm_prompt, rev_grm_prompt]
@@ -431,13 +410,13 @@ class RemoteGRMServingClient(GRMServingClient):
         rev_resp, rev_grm_score, retry_cnt = "", RM_INVALID_SCORE, 0
 
         tasks = [self._call(ref_prompt, system_prompt, rm_method)]
-        if self.use_grm_reverse:
+        if self.use_rm_reverse:
             tasks.append(self._call(rev_prompt, system_prompt, rm_method))
         results = await asyncio.gather(*tasks)
         (ref_resp, ref_grm_score, retry_cnt), *rest = results
         total_retry_cnt += retry_cnt
 
-        if self.use_grm_reverse:
+        if self.use_rm_reverse:
             (rev_resp, rev_grm_score, retry_cnt) = rest[0]
             total_retry_cnt += retry_cnt
 
@@ -486,8 +465,6 @@ class RemoteGRMServingClient(GRMServingClient):
                 # get result
                 predict_output = await self.clients[random.randrange(len(self.clients))].astream(predict_input)
                 grm_resp, grm_score = await self.get_result(predict_output, rm_method)
-                # astream_task = asyncio.create_task(self.get_result(predict_output, rm_method))
-                # grm_resp, grm_score = await asyncio.wait_for(asyncio.shield(astream_task), self.timeout)
 
                 if grm_score == RM_INVALID_SCORE:
                     # get invalid score, retry

@@ -363,9 +363,12 @@ class RewardManager():
                     score_msg = raw_score['msg']
                     raw_score = raw_score['score']
 
-                if (not is_validation) and self.config.trainer.use_remote_rm and self.rm_name == 'train':
+                remote_rm_type = data_item.non_tensor_batch['reward_model'].get('rm_required_type', None)
+                if (not is_validation) and remote_rm_type is not None and self.rm_name == 'train':
                     remote_rm_type = self.config.trainer.remote_rm_type
-                    rm_verifier = Verifier.get_verifier(remote_rm_type, tokenizer=self.tokenizer, config=self.config)
+                    rm_verifier = Verifier.get_verifier(f"{remote_rm_type}_service",
+                                                        tokenizer=self.tokenizer,
+                                                        config=self.config)
                     rm_response, rm_score, waiting_time, rm_time_cost, rm_retry_cnt = rm_verifier.compute_score_client(
                         data_uid)
                     score_lst = [rm_score, raw_score]

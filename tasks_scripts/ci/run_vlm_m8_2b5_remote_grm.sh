@@ -67,7 +67,7 @@ infer_ppo_max_token_len=36864
 
 remote_rm_type='grm'
 use_remote_rm=True
-use_grm_reverse=True
+use_rm_reverse=True
 rm_psm="data.aml.arnold_inference_59310350"
 rm_idc="'lq,lf,hl,yg,gl,wlby'"
 rm_cluster="default"
@@ -149,7 +149,7 @@ python3 tasks/main_ppo.py \
     trainer.resume_steps="disable" \
     trainer.remote_rm_type=${remote_rm_type} \
     trainer.use_remote_rm=${use_remote_rm} \
-    reward_model.grm.use_grm_reverse=${use_grm_reverse} \
+    reward_model.grm.use_rm_reverse=${use_rm_reverse} \
     reward_model.grm.score_merger=v1 \
     reward_model.rm_server.llm_serving_psm=${rm_psm} \
     reward_model.rm_server.llm_serving_idc=${rm_idc} \
