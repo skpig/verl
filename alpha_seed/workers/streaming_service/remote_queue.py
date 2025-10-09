@@ -3,6 +3,7 @@ import threading
 
 import ray.util.queue
 import ray.util
+from alpha_seed.utils.server_client import get_stable_res
 
 
 class QueueIter:
@@ -26,7 +27,9 @@ class RemoteQueue:
             node_id=ray.get_runtime_context().get_node_id(),
             soft=False,
         )
+        stable_res = get_stable_res()
         actor_options = {'scheduling_strategy': scheduling_strategy}
+        actor_options.update({"resources": stable_res})
         self.queue = ray.util.queue.Queue(max_prefetch, actor_options)
         self._t = threading.Thread(target=self._produce_loop, name="RemoteQueueProducer", daemon=True)
         self._t.start()

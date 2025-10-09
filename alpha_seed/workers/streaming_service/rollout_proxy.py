@@ -180,7 +180,7 @@ class _MetricSourceImpl(MetricSource):
         min_con = min(concurrency_values)
         max_con = max(concurrency_values)
         total_con = sum(concurrency_values)
-        print(f'get recent concurrency min={min_con} max={max_con} total={total_con}')
+        print(f'[{time.ctime()}] get recent concurrency min={min_con} max={max_con} total={total_con}')
         self.concurrency_ts.append((now, total_con))
         tss = []
         metrics = []
@@ -342,11 +342,18 @@ class CombinedRayWorkerGroupAdapter(ReplicatedRayWorkerGroup):
 class StandaloneRolloutWGAdapter:
     """Provide the same api as standalone rollout worker group"""
 
-    def __init__(self, replicas):
+    def __init__(self, replicas: ScalingRayWorkerGroup):
         self.replicas = replicas
+        self.worker_group_unit_size = self.replicas.resource_unit.world_size
         self._tracer = Tracer.get_instance()
-        self._update_worker_start_ts = 0
+        self._update_worker_start_ts = 0  # 调用update worker开始的时刻
         self._stop_server_ts = 0
+        self._update_worker_num = 0  # 调用update worker时的dp数
+        self._update_worker_success_num = 0  # 调用update worker结束时成功的dp数(有些elastic在途中死掉)
+        self._stop_server_num = 0
+        self._stop_server_success_num = 0
+        self._restart_server_num = 0
+        self._restart_server_success_num = 0  # (同上)
 
     def get_master_addr(self) -> List[DataProto]:
         # 获取每个workergroup的每个rank的address
@@ -365,13 +372,16 @@ class StandaloneRolloutWGAdapter:
 
     def update_standalone_worker(self, role) -> List[ObjectRef]:
         # update转发给所有initialized的worker，不用管其是否ready，一开始肯定不ready，需要update weights后才会ready
+        initialized_wgs = self.replicas.get_initialized_worker_groups().values()
         self._update_worker_start_ts = time.time() * 1e6
+        self._update_worker_num = len(initialized_wgs) * self.worker_group_unit_size
         futs = []
-        for wg in self.replicas.get_initialized_worker_groups().values():
+        for wg in initialized_wgs:
             wg: Union[RayWorkerGroup, RemoteAsyncXPerfGPTRollout, AsyncActorRolloutRefWorker]
             refs = wg.update_standalone_worker(role)
             futs.append((wg, refs))
-        self.wait_ignore_actor_died(futs)
+        num_success = self.wait_ignore_actor_died(futs)
+        self._update_worker_success_num = num_success
         # 返回一个占位符即可
         return [ray.put(None)]
 
@@ -408,25 +418,35 @@ class StandaloneRolloutWGAdapter:
             name='update weights',
             ts=self._update_worker_start_ts,
             dur=time.time() * 1e6 - self._update_worker_start_ts,
+            args={
+                "worker_num": self._update_worker_num,
+                "worker_success_num": self._update_worker_success_num,
+            },
         )
         self._tracer.trace(evt)
 
     def stop_server_before_weights_update(self):
+        initialized_wgs = self.replicas.get_initialized_worker_groups().values()
         self._stop_server_ts = time.time() * 1e6
+        self._stop_server_num = len(initialized_wgs) * self.worker_group_unit_size
         futs = []
-        for wg in self.replicas.get_initialized_worker_groups().values():
+        for wg in initialized_wgs:
             wg: RemoteAsyncXPerfGPTRollout
             ref = wg.stop_server_before_weights_update_non_blocking()
             futs.append((wg, ref))
-        self.wait_ignore_actor_died(futs)
+        num_success = self.wait_ignore_actor_died(futs)
+        self._stop_server_success_num = num_success
 
     def restart_server_after_weights_update(self):
+        initialized_wgs = self.replicas.get_initialized_worker_groups().values()
+        self._restart_server_num = len(initialized_wgs) * self.worker_group_unit_size
         futs = []
-        for wg in self.replicas.get_initialized_worker_groups().values():
+        for wg in initialized_wgs:
             wg: RemoteAsyncXPerfGPTRollout
             ref = wg.restart_server_after_weights_update_non_blocking()
             futs.append((wg, ref))
-        self.wait_ignore_actor_died(futs)
+        num_success = self.wait_ignore_actor_died(futs)
+        self._restart_server_success_num = num_success
 
         evt = CompleteEvent(
             pid='RolloutProxy',
@@ -435,10 +455,16 @@ class StandaloneRolloutWGAdapter:
             name='stop/start server',
             ts=self._stop_server_ts,
             dur=time.time() * 1e6 - self._stop_server_ts,
+            args={
+                "stop_server_num": self._stop_server_num,
+                "stop_server_success_num": self._stop_server_success_num,
+                "restart_server_num": self._restart_server_num,
+                "restart_server_success_num": self._restart_server_success_num,
+            },
         )
         self._tracer.trace(evt)
 
-    def wait_ignore_actor_died(self, refs: List[Tuple[RayWorkerGroup, List[ray.ObjectRef]]]):
+    def wait_ignore_actor_died(self, refs: List[Tuple[RayWorkerGroup, List[ray.ObjectRef]]]) -> int:
         obj_wg_map = {}
         remaining = set()
         ready = set()
@@ -455,8 +481,10 @@ class StandaloneRolloutWGAdapter:
                     ray.get(obj)
                     ready.add(obj)
                 except ActorDiedError as e:
+                    wg = obj_wg_map[obj]
                     caller = inspect.stack()[1].frame.f_code.co_name
-                    print(f"actor({e.actor_id}) died at function({caller}). ignore this as this is expected.")
+                    print(f"[{time.ctime()}] actor({e.actor_id}) of wg({wg.group_name}) died at function({caller}). "
+                          f"ignore this as this is expected.")
                 except Exception as e:
                     # for other exceptions, carefully check whether it's caused by actor recycling by auto-scaling
                     # if the wg is scheduled to destroy, ignore all errors on it
@@ -474,6 +502,7 @@ class StandaloneRolloutWGAdapter:
 
             # Optional: avoid tight loop
             time.sleep(0.1)
+        return len(ready)
 
 
 class DebounceAccumulatedLogger:
@@ -493,7 +522,7 @@ class DebounceAccumulatedLogger:
             acc = self.wg_accumulate_value[wg_name]
             self.wg_accumulate_value[wg_name] = self.zero_val
             content = fmt.format(accumulated_value=acc)
-            print(content)
+            print(f"[{time.ctime()}] {content}")
 
 
 @dataclass
@@ -557,6 +586,7 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
         self.poll_interval = self.config.proxy.poll_internal_seconds
         self._progress_logger = DebounceAccumulatedLogger()
         self._metrics_logger = ProxyMetricsLogger()
+        self._wg_stack_trace_logger = open("/tmp/wg_stack_trace.log", "a")
 
         self.replicas.set_dead_callback(self._worker_group_dead_callback)
         self._loop_should_stop = threading.Event()
@@ -739,8 +769,10 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
         #   main thread
         if not isinstance(e, ActorDiedError):
             # ignore the stack of ActorDiedError, no useful information
-            traceback.print_exc()
-            print(f'show stack trace of task error of remote worker group only, {wg=}, {type(e)=}')
+            tb = traceback.format_exc()
+            self._wg_stack_trace_logger.write(f"[{time.ctime()}] {tb}\n")
+            print(f'[{time.ctime()}] show error of remote worker group only, {wg=}, {e}. '
+                  f'for stack trace refers to {self._wg_stack_trace_logger.name}')
         try:
             wg.destroy()
         except Exception:

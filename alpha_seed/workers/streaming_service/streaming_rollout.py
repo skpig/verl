@@ -16,6 +16,7 @@ Create a XPerfGPT Rollout
 """
 import time
 import traceback
+from alpha_seed.utils.server_client import KVStore
 
 from alpha_seed.workers.xperf_rollout.utils.base_weights_communicator import WeightsCommunicator, WeightsRankInfo
 from mono_rl import DataProto
@@ -638,6 +639,9 @@ class AsyncXPerfGPTRollout(object):
                     self._dump_context()
                     self._process_thread_last_error = e
                     self._process_thread_last_tb = traceback.format_exc()
+                    # teardown the entire process to inform task_runner
+                    # to prevent from hanging the TP group
+                    os._exit(22)
                     raise (e)
 
     def heartbeat(self):
@@ -851,15 +855,18 @@ class RemoteAsyncXPerfGPTRollout(Worker):
         print(f'Master address: {self.master_address}, Master port: {self.master_port}')
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    def setup_as_client(self, role, source_addresses_by_tp: List[List[WeightsRankInfo]],
-                        hybrid_rollout_info: List[WeightsRankInfo]):
+    def setup_as_client(self,
+                        role,
+                        source_addresses_by_tp: List[List[WeightsRankInfo]],
+                        hybrid_rollout_info: List[WeightsRankInfo],
+                        init_recv_buffer: bool = True):
         self._hybrid_rollout_info = hybrid_rollout_info
         # connect to weight source after model initialized
         tp_size = self.config.rollout.tensor_model_parallel_size
         # 按tp取整个dp group切片，% tp_size为了避免self是一个整个world包含多个dp(elastic下只会有1个dp，非elastic有多个dp)
         tp_rank = self.rank % tp_size
         source_info_this_tp = [dp[tp_rank] for dp in source_addresses_by_tp]
-        self.weights_communicator.setup_as_client(role, source_info_this_tp)
+        self.weights_communicator.setup_as_client(role, source_info_this_tp, init_recv_buffer=init_recv_buffer)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
     def setup_as_relay(self, ifname=None):
@@ -961,34 +968,67 @@ class ElasticAsyncXPerfGPTRollout(_unwrap_ray_remote(RemoteAsyncXPerfGPTRollout)
         super().__init__(config, role)
         self.hybrid_rollout_info = hybrid_rollout_info
         self._elastic_has_setup = threading.Event()
+        self.relay_info: Optional[WeightsRankInfo] = None
+        self.setup_relay = False
+        self.kv_store_actor = ray.get_actor(KVStore.name)
+        self.weights_source_by_dp_group = None
+
+    @contextmanager
+    def robust_stable_init_context(self):
+        # stable rollout在坏掉后重新被拉起时，先找其他stable rollout拉取，之后再把地址更新为hybrid地址
+        current_rollout_relay_addrs = ray.get(self.kv_store_actor.get_by_key.remote('rollout_relay_addresses'))
+        print(f"{current_rollout_relay_addrs=}")
+        self.setup_as_client(self.role, current_rollout_relay_addrs, self.hybrid_rollout_info, init_recv_buffer=False)
+        yield
+        self.setup_as_client(self.role,
+                             self.weights_source_by_dp_group,
+                             self.hybrid_rollout_info,
+                             init_recv_buffer=False)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def init_and_setup(
             self,
             weights_source_by_dp_group: List[List[WeightsRankInfo]],  # [[tp0,...], [tp0,...], ...]
             setup_relay: bool,
-            intermediately_update_weights: bool = False):
+            immediately_update_weights: bool = False):
         """
         放在这里统一setup，返回一个ObjectRef，让调用方一次性等待整个初始化完成
         :param weights_source_by_dp_group: 要连上的拉取weight的server address, 按 [dp0[tp0,...], dp1[tp0,...], ...] 分组
         :param setup_relay: 是否要设置为relay提供别的worker拉参数
-        :param intermediately_update_weights: 初始化完之后是否立即拉一次参数，适用于elastic的场景
+        :param immediately_update_weights: 初始化完之后是否立即拉一次参数，适用于elastic的场景
         :return: relay address, worker group返回的则是整个tp group的address，如果setup_relay=False，则返回空字符串
         """
         self.init_model()
+        self.weights_source_by_dp_group = weights_source_by_dp_group
         self.setup_as_client(self.role, weights_source_by_dp_group, self.hybrid_rollout_info)
+        self.setup_relay = setup_relay
 
-        relay_info: Optional[WeightsRankInfo] = None
         if setup_relay:
-            relay_info = self.setup_as_relay()
+            self.relay_info = self.setup_as_relay()  # 这里提前获取
 
-        if intermediately_update_weights:
-            self.update_standalone_worker(self.role)
+        # elastic 或者 新的被拉起的stable，需要立刻更新权重
+        if immediately_update_weights:
+            with nullcontext() if not self.setup_relay else self.robust_stable_init_context():
+                self.update_standalone_worker(self.role)
             self.restart_server_after_weights_update()
 
         self._elastic_has_setup.set()
-        return relay_info
+        return self.relay_info
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def initialized(self):
         return self._elastic_has_setup.is_set()
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def get_relay_info(self):
+        return self.relay_info
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def update_standalone_worker(self, role):
+        # 在更新权重前，elastic rollout需要更新relay addr的地址
+        if not self.setup_relay:
+            current_rollout_relay_addrs = ray.get(self.kv_store_actor.get_by_key.remote('rollout_relay_addresses'))
+            print(f"{current_rollout_relay_addrs=}")
+            # 这里重新设setup_as_client就是为了更新source_info并作连通性测试，避免重新初始化recv_buffer
+            self.setup_as_client(role, current_rollout_relay_addrs, self.hybrid_rollout_info, init_recv_buffer=False)
+        super().update_standalone_worker(role)

@@ -10,6 +10,7 @@ import torch
 from mono_rl import DataProto
 from mono_rl.utils.dataset.dist_data_util import release_ref_counts, add_ref_counts, init_or_get_dist_data_manager
 from alpha_seed.utils.reward_score import NON_AGENT_PLACE_HOLDER_SCORE
+from alpha_seed.utils.server_client import get_stable_res
 
 logger = logging.getLogger(__file__)
 '''
@@ -406,9 +407,11 @@ class RolloutPool:
                 node_id=ray.get_runtime_context().get_node_id(),
                 soft=False,
             )
+            stable_res = get_stable_res()
             options = {
                 'name': RolloutPool.name,
                 'scheduling_strategy': scheduling_strategy,
+                'resources': stable_res,
             }
             rollout_pool = ray.remote(RolloutPool).options(**options).remote(config, mode)
         return rollout_pool

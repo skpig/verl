@@ -128,8 +128,26 @@ def recreate_actor(actor_cls, name, *args, **kwargs):
     if not hasattr(actor_cls, "options"):
         # wrap by ray.remote if the class is a plain class
         actor_cls = ray.remote(actor_cls)
-    actor = actor_cls.options(name=name, *args, **kwargs).remote()
+
+    # 这里本身要约束，避免KVStore本调度到rollout资源上
+    stable_res = {}
+    if not is_local_ray_instance():
+        stable_res = {'worker': 1}
+    actor = actor_cls.options(name=name, resources=stable_res, *args, **kwargs).remote()
     return actor
+
+
+def get_stable_res():
+    if is_local_ray_instance():
+        return {}
+    try:
+        kv_store_actor = ray.get_actor(name=KVStore.name)
+        stable_res = ray.get(kv_store_actor.get_by_key.remote("stable_pool_res"))
+    except:  # 如果actor没有创建，默认返回1个worker
+        print("In test case we do not init kv_store_actor and return the default stable res: {'worker': 1}")
+        stable_res = {'worker': 1}
+
+    return stable_res
 
 
 def is_local_ray_instance():

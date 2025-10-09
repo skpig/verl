@@ -1,4 +1,5 @@
 import os
+import queue
 import threading
 import time
 import traceback
@@ -48,16 +49,20 @@ class HorizontalAutoScaling:
     暂时一起接管cluster资源，观察集群资源
     """
 
-    def __init__(self, replicas: ScalingRayWorkerGroup, worker_pool_name: str, config: ScalePolicyConfig,
+    def __init__(self, replicas: ReplicatedRayWorkerGroup, worker_pool_name: str, config: ScalePolicyConfig,
                  metric_source: MetricSource):
         self.replicas = replicas
         self.worker_pool_name = worker_pool_name
         self.config = config
         self.metric_source = metric_source
+        self._scale_up_down_refs_queue: queue.Queue[List[ObjectRef]] = queue.Queue()
         self._is_local_ray_cluster = is_local_ray_instance()
         self._tracer: Optional[Tracer] = None  # _scaling_loop 专用tracer
 
         threading.Thread(target=self._scaling_loop, daemon=True, name=f'scaling-loop/{worker_pool_name}').start()
+        threading.Thread(target=self._scaling_materializing,
+                         daemon=True,
+                         name=f'scaling-materialize/{worker_pool_name}').start()
 
     def _scaling_loop(self):
         self._tracer = Tracer.get_instance()
@@ -75,14 +80,16 @@ class HorizontalAutoScaling:
                     if num_able_scale_up > 0:
                         with self._tracing('scale_up', num_able_scale_up):
                             futs = self.replicas.scale_up(num_able_scale_up)
-                            print(f"scale up {num_able_scale_up} more replica on pool({self.worker_pool_name})")
+                            self._scale_up_down_refs_queue.put(futs)
+                            print(f"[{time.ctime()}] scale up {num_able_scale_up} more replica "
+                                  f"on pool({self.worker_pool_name})")
                             # 忽略这里返回的futs，因为等也没用，就让他们后台自己跑
                             alive_num_replicas = len(self.replicas.alive_worker_group_ids)
                             print(f"scale up done on pool({self.worker_pool_name}), current {alive_num_replicas=}")
                     else:
                         # do nothing, wait for next turn
-                        print(f"try to scale up {num_scale_up} more replica, but underlying resource is not enough. "
-                              "wait for cluster HPA ready")
+                        print(f"[{time.ctime()}] try to scale up {num_scale_up} on pool({self.worker_pool_name}) "
+                              f"more replica, but underlying resource is not enough. wait for cluster HPA ready")
 
                     # 如果可扩，则不再判断是否要缩容
                     continue
@@ -91,12 +98,41 @@ class HorizontalAutoScaling:
                 if should_scale_down and num_scale_down > 0:
                     with self._tracing('scale_down', num_scale_down):
                         futs = self.replicas.scale_down(num_scale_down)
-                        print(f"scale down {num_scale_down} replica on pool({self.worker_pool_name})")
+                        self._scale_up_down_refs_queue.put(futs)
+                        print(f"[{time.ctime()}] scale down {num_scale_down} replica on pool({self.worker_pool_name})")
                         alive_num_replicas = len(self.replicas.alive_worker_group_ids)
                         print(f"scale down done on pool({self.worker_pool_name}), current {alive_num_replicas=}")
             except Exception as e:
                 print(f'got exception during scaling resource loop, ignore this run')
                 traceback.print_exc()
+
+    def _scaling_materializing(self):
+        # 不断把所有refs消费掉，既不让他们变成unhandled actor task，也不会无限积压
+        # 暂时假设refs一定会结束，不做cancel处理
+        # 如有用可以顺便用来做tracing
+        remaining = set()
+        while True:
+            remaining_in_queue = self._scale_up_down_refs_queue.qsize()  # noqa: py-spy
+            try:
+                new_from_queue = self._scale_up_down_refs_queue.get(timeout=2.)
+            except queue.Empty:
+                new_from_queue = []
+            for ref in new_from_queue:
+                remaining.add(ref)
+
+            if not remaining:
+                time.sleep(1)
+                continue
+
+            done, not_done = ray.wait(list(remaining), num_returns=len(remaining), timeout=2.)
+            for obj in done:
+                try:
+                    ray.get(obj)
+                except Exception as e:
+                    # ignore everything
+                    pass
+                finally:
+                    remaining.discard(obj)
 
     @contextmanager
     def _tracing(self, event_name, num_replicas):
@@ -143,10 +179,15 @@ class HorizontalAutoScaling:
 
         # 持续一段时间超过threshold，则scale up
         recent_metrics = self.metric_source.get_recent_time_series_metrics(int(self.config.scale_up_wait))
+
         if not recent_metrics.metrics:
             return False, 0
 
         self._trace_scaling_metrics('up', recent_metrics)
+
+        # 针对stable rollout丢失的情形，缺少就立刻scale_up
+        if self.config.scale_up_threshold == -1:
+            return True, self.config.max_replicas - target_replicas
 
         # 过去观测的窗口每个值都超过阈值则scale up
         # 计算理论应该承载并发度
@@ -170,6 +211,10 @@ class HorizontalAutoScaling:
             return False, 0
 
         self._trace_scaling_metrics('down', recent_metrics)
+
+        # 针对stable不需要metric_source的情形
+        if self.config.scale_down_threshold == -1:
+            return False, 0
 
         # 过去观测的窗口每个值都超过阈值则scale up
         # 计算理论应该承载并发度

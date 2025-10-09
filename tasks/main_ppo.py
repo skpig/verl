@@ -29,6 +29,7 @@ import random
 import contextlib
 import gc
 import json
+import re
 import numpy as np
 from datetime import datetime
 from transformers import AutoTokenizer
@@ -49,6 +50,7 @@ import wandb
 import pandas as pd
 import hdfs_io
 from hdfs_io import makedirs
+from alpha_seed.utils.server_client import get_stable_res
 
 from alpha_seed.utils.server_client import is_local_ray_instance, validate_client_config, KVStore, ServerHealthCheck, TaskRunner, \
     ClientTaskRunner, check_all_workers_alive, recreate_actor
@@ -795,7 +797,6 @@ class RewardManager():
             )
             self.async_case_running_tasks.add(task)
             print(f"[{time.ctime()}][save cases] reward_fn end")
-
         if not is_validation:
             return reward_tensor, raw_scores, len_scores, idx_tensor
         else:
@@ -952,10 +953,21 @@ def main(config):
     # Check for duplicate command line arguments first
     # This prevents hard-to-debug issues from duplicate parameters
     check_duplicate_overrides()
-    with stage_logger.log_duration_context("initialization"):
+
+    with stage_logger.log_duration_context("initilization"):
         config = auto_recipe(config)
         set_special_tokens(config)
         config = init_ray_cluster(config)
+
+        # 创建用于作为全局的kv数据库
+        kv_store_actor = recreate_actor(KVStore, name=KVStore.name)
+        stable_res = {}
+        stable_pool_names = config.elastic.resource_pools.stable_pool_names
+        stable_pool_name = stable_pool_names[0] if stable_pool_names else ''
+        if stable_pool_name and not is_local_ray_instance():
+            stable_res = {stable_pool_name: 1}
+        ray.get(kv_store_actor.set_key_val.remote("stable_pool_res", stable_res))
+
         rm_reg, elastic_res_managers = setup_resource_manager(config)
 
     if config.server_client.role == "server":
@@ -965,11 +977,8 @@ def main(config):
             # Use a detached runner to prevent client scripts to run simultaneously
             runner = recreate_actor(ClientTaskRunner, name=ClientTaskRunner.name)
         else:
-            stable_res = {}
-            if not is_local_ray_instance():
-                stable_res = {
-                    os.getenv('TASK_RUNNER_NODE', 'worker'): 1,
-                }
+            stable_res = get_stable_res()
+
             runner = TaskRunner.options(name=TaskRunner.name, resources=stable_res, max_concurrency=2).remote()
         ray.get(runner.main.remote(main_task, config=config))
 
@@ -998,10 +1007,23 @@ def wait_till_nodes_ready(total_required_gpus: int, try_time=100):
 
 def check_arnold_resources(config):
     """Check the arnold resources before running"""
-    num_gpu_nodes = int(os.getenv('ARNOLD_WORKER_NUM', '0'))
-    num_gpus_per_node = int(os.getenv('ARNOLD_WORKER_GPU', '0'))
+    pat = re.compile(r"^ARNOLD_([A-Z]+)_NUM$")
+    available_roles = []
+    for env_key in os.environ.keys():
+        matcher = pat.match(env_key)
+        if matcher:
+            available_roles.append(matcher.group(1))
 
-    total_gpus = num_gpu_nodes * num_gpus_per_node
+    total_gpus = 0
+    for role in available_roles:
+        try:
+            num_gpu_nodes = int(os.getenv(f'ARNOLD_{role}_NUM', '0'))
+            num_gpus_per_node = int(os.getenv(f'ARNOLD_{role}_GPU', '0'))
+            total_gpus += num_gpu_nodes * num_gpus_per_node
+        except ValueError:
+            # ignore non integer env vars
+            continue
+
     if total_gpus <= 0:
         # maybe not on arnold environment? skip the check
         return
@@ -1301,11 +1323,8 @@ def config_to_trainer_kwargs(config):
     if config.data.image_key:
         kwargs['processor'] = processor
 
-    trainer_config_actor = None
-    if config.server_client.role == "server":
-        trainer_config_actor = recreate_actor(KVStore, name=KVStore.name)
-    elif config.server_client.role == "client":
-        trainer_config_actor = ray.get_actor(name=KVStore.name)
+    # server-client模式下也直接拿kv store，kv store在前面已经完成了初始化
+    trainer_config_actor = ray.get_actor(name=KVStore.name)
 
     if config.server_client.role == "server":
         trainer_config_actor.set_key_val.remote("server_client", True)
@@ -1332,12 +1351,14 @@ def config_to_trainer_kwargs(config):
         if config.trainer.use_remote_rm:
             remote_rm_service = select_remote_rm_fn(config)(config, tokenizer=tokenizer)
 
+        stable_res = ray.get(trainer_config_actor.get_by_key.remote("stable_pool_res"))
         # we will always start a remote client
         concurrency = config.reward_model.num_remote_client
         kwargs['remote_client'] = [
-            RemoteClient.options(name=f'remote_client_{idx}').remote(config=config,
-                                                                     tokenizer_path=config.actor_rollout_ref.model.path,
-                                                                     remote_service=remote_rm_service)
+            RemoteClient.options(name=f'remote_client_{idx}',
+                                 resources=stable_res).remote(config=config,
+                                                              tokenizer_path=config.actor_rollout_ref.model.path,
+                                                              remote_service=remote_rm_service)
             for idx in range(concurrency)
         ]
 

@@ -7,13 +7,13 @@ from collections import defaultdict
 import ray
 from omegaconf import DictConfig
 
-from alpha_seed.utils.server_client import is_local_ray_instance
 from alpha_seed.workers.streaming_service.rollout_query_trace import QueryTracer
 from alpha_seed.workers.streaming_service.rollout_request import StaleHistory, AbortHistory, Request
 from alpha_seed.workers.streaming_service.rollout_request_manager_diagnosis import FinishedEventStats, RequestDigest, \
     FiniteDict, ProgressStat, RequestStatCollector, RequestPoolInternalDiagnosis
 from alpha_seed.workers.xperf_rollout.component.query import Query, QueryUpdate
 from alpha_seed.utils.profile.timeline import CounterEvent
+from alpha_seed.utils.server_client import get_stable_res
 
 
 class FIFOListIter:
@@ -477,19 +477,14 @@ class RequestManagerRegisterCenter:
 
     @classmethod
     def init(cls, config: DictConfig):
-        resources = {}
-        if not is_local_ray_instance():
-            resources = {"worker": 1}
+        stable_res = get_stable_res()
         rmrc = RequestManagerRegisterCenter.options(name='RequestManagerRegisterCenter',
-                                                    resources=resources).remote(config)
+                                                    resources=stable_res).remote(config)
         ray.get(rmrc.ready.remote())
         return rmrc
 
     def create(self, instance_name: str):
-        resources = {}
-        if not is_local_ray_instance():
-            # 非local模式下，让RequestManager只跑在stable resources上
-            resources = {"worker": 1}
+        resources = get_stable_res()
         # note(lixiang): concurrency必须超过global batch size才行，不然会卡住更新不了请求，导致死锁
         query_trace_config = self.config.streaming_rollout.query_trace
         request_manager = RequestManager.options(name=f'RequestManager/{instance_name}',

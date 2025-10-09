@@ -21,6 +21,7 @@ import verl.utils.torch_functional as verl_F
 from ray import ObjectRef
 
 from alpha_seed.logging import refine_log
+from alpha_seed.utils.server_client import get_stable_res
 from alpha_seed.workers.streaming_service.remote_queue import RemoteQueue
 from alpha_seed.workers.streaming_service.rollout_query_timeline import RolloutQueryTimeline
 from alpha_seed.workers.streaming_service.rollout_request_manager import get_all_request_manager_actors
@@ -1010,13 +1011,17 @@ class RayPPOTrainer(object):
             node_id=ray.get_runtime_context().get_node_id(),
             soft=False,
         )
-        self.rollout_manager = (RolloutManagerActor.options(name="RolloutManager",
-                                                            max_concurrency=256,
-                                                            scheduling_strategy=scheduling_strategy).remote(
-                                                                config=self.config,
-                                                                logger=self.logger,
-                                                                tokenizer=self.tokenizer,
-                                                                processor=self.processor))
+        stable_res = get_stable_res()
+        options = {
+            'name': "RolloutManager",
+            'max_concurrency': 256,
+            'scheduling_strategy': scheduling_strategy,
+            'resources': stable_res,
+        }
+        self.rollout_manager = (RolloutManagerActor.options(**options).remote(config=self.config,
+                                                                              logger=self.logger,
+                                                                              tokenizer=self.tokenizer,
+                                                                              processor=self.processor))
         hybrid_wg = self.actor_rollout_wg
         ray.get(
             self.rollout_manager.initialize.remote(hybrid_wg=hybrid_wg,
@@ -1184,14 +1189,17 @@ class RayPPOTrainer(object):
         if self.config.actor_rollout_ref.ref.ema < 1:
             # will save ref ckpt
             uploader_tracker_role = 'ref'
-        self.ckpt_global_uploader = CkptGlobalUploader.options(name=CkptGlobalUploader.name).remote(
-            tracker_role=uploader_tracker_role,
-            ckpt_version=self.config.trainer.ckpt_version,
-            default_local_dir=self.config.trainer.default_local_dir
-            if not is_local_path(self.config.trainer.default_hdfs_dir) else self.config.trainer.default_hdfs_dir,
-            default_remote_dir=self.config.trainer.default_hdfs_dir,
-            upload_retry_count=int(self.config.trainer.ckpt_upload_retry_count)) if (
-                ckpt_global_uploader is None and not server_client_split) else ckpt_global_uploader
+
+        stable_res = get_stable_res()
+        self.ckpt_global_uploader = CkptGlobalUploader.options(
+            name=CkptGlobalUploader.name, resources=stable_res).remote(
+                tracker_role=uploader_tracker_role,
+                ckpt_version=self.config.trainer.ckpt_version,
+                default_local_dir=self.config.trainer.default_local_dir
+                if not is_local_path(self.config.trainer.default_hdfs_dir) else self.config.trainer.default_hdfs_dir,
+                default_remote_dir=self.config.trainer.default_hdfs_dir,
+                upload_retry_count=int(self.config.trainer.ckpt_upload_retry_count)) if (
+                    ckpt_global_uploader is None and not server_client_split) else ckpt_global_uploader
         for wg_name in self.all_wg:
             self.all_meta[wg_name] = self.all_wg[wg_name].get_meta()
         ndtimeline.report_topo(self.all_meta)

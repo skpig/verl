@@ -16,7 +16,7 @@ class WeightsRankInfo:
 
 class WeightsCommunicator:
 
-    def setup_as_client(self, role, source_endpoint_info: List[WeightsRankInfo]):
+    def setup_as_client(self, role, source_endpoint_info: List[WeightsRankInfo], init_recv_buffer: bool = True):
         pass
 
     def setup_as_server(self, ifname=None) -> Tuple[str, str]:

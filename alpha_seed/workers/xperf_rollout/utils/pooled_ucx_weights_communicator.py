@@ -477,12 +477,13 @@ class UCXWeightsCommunicator(WeightsCommunicator):
         # ucx endpoint接池类
         self.connection_pool = ConnectionPool()
 
-    def setup_as_client(self, role, source_endpoint_info: List[WeightsRankInfo]):
+    def setup_as_client(self, role, source_endpoint_info: List[WeightsRankInfo], init_recv_buffer: bool = True):
         assert source_endpoint_info is not None and len(source_endpoint_info) > 0 and isinstance(
             source_endpoint_info[0], WeightsRankInfo), f"{source_endpoint_info=}"
         self.source_info = source_endpoint_info
 
-        self.recv_buffer = cp.empty(self.buffer_chunk_size, dtype=cp.uint8)
+        if init_recv_buffer:
+            self.recv_buffer = cp.empty(self.buffer_chunk_size, dtype=cp.uint8)
 
         # 这个本身没什么用，就是测一下是否通而已
         async def register(client_role):
