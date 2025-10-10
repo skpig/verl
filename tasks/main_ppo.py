@@ -700,7 +700,7 @@ class RewardManager():
             for i, score in enumerate(all_raw_scores):
                 idx = i_to_idx[i]
                 data_source = data.non_tensor_batch['data_source'][idx]
-                score_by_data_source[data_source].append(score)
+                score_by_data_source[data_source].append(round(score, 1))
             for data_source, score_list in score_by_data_source.items():
                 counter = Counter(score_list)
                 log_counter.update({
