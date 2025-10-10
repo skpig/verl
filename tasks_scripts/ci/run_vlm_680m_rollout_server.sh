@@ -158,4 +158,5 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.rollout.mode=server \
     data.dist_image=True \
     trainer.volc_ark_key=123 \
-    trainer.volc_model_name=123
+    trainer.volc_model_name=123 \
+    actor_rollout_ref.rollout.recommend_standalone_usage.enable=True

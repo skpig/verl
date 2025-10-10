@@ -44,7 +44,7 @@ from transformers import AutoTokenizer, AutoProcessor
 from hdfs_io import hexists, makedirs, hcopy
 from alpha_seed.utils.observility.pretty_print import pprint
 from alpha_seed.utils.functional import print_dataproto_size
-from alpha_seed.workers.streaming_service.streaming_utils import record_xperf_metrics
+from alpha_seed.workers.streaming_service.streaming_utils import record_xperf_metrics, metrics_for_recommend_standalone_usage
 from alpha_seed.workers.agents.handlers import select_handler_fn
 from alpha_seed.workers.agents.handlers import TaskContext
 from alpha_seed.workers.streaming_service.streaming_utils import pad, process_output, create_response_tensor
@@ -1043,6 +1043,9 @@ class RolloutManager:
         pending = list(pending)
         ready_batch = self._normalize_done_tasks(done)
         finished_num = len(ready_batch)
+
+        if self.config.actor_rollout_ref.rollout.recommend_standalone_usage.enable:
+            metrics_for_recommend_standalone_usage(xperf_metrics)
 
         dummy_batch = DataProto(meta_info={"xperf_metrics": self._merge_xperf_metrics(ready_batch, xperf_metrics)})
         record_xperf_metrics(dummy_batch, metrics, self.logger, step, prefix="hybrid")

@@ -241,7 +241,7 @@ def visualize_metrics(metrics):
 def visualize_standalone_usage(config, metrics):
     if config.actor_rollout_ref.rollout.recommend_standalone_usage.enable:
         if config.streaming_rollout.nnodes == 0:
-            gen_time = metrics['timing/gen']
+            gen_time = metrics['timing/generate']
             step_time = metrics['timing/step']
             train_time = step_time - gen_time
             kv_utils = metrics['rollout/max_kv_util_for_complete_ratio']
