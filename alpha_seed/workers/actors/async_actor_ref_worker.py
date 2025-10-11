@@ -468,6 +468,7 @@ class AsyncActorRolloutRefWorker(Worker):
         self.processor = AutoProcessor.from_pretrained(self.local_path, trust_remote_code=trust_remote_code)
 
         # NOTE: the following for role specific attributes over-writing
+        self.dist_data_manager = self.actor_engine.dist_data_manager
         if self._is_actor and not self._is_valid_actor or self._is_standalone_rollout or self._is_standalone_validator:
             pass  # NOTE: no need to set extra fields for standalone rollout and validators.
         elif self._is_valid_actor or self._is_rollout:
@@ -482,7 +483,6 @@ class AsyncActorRolloutRefWorker(Worker):
                 self.actor_module_mariana, self.actor_model_config = self.actor_engine.model_module, self.actor_engine.actor_model_config
             if self._is_actor:
                 self.actor_optimizer, self.actor_lr_scheduler = self.actor_engine.optimizer, self.actor_engine.lr_scheduler
-            self.dist_data_manager = self.actor_engine.dist_data_manager
 
         if self._is_ref:
             from_scratch_ref = True if self.config.ref.ema == 1 else from_scratch

@@ -6,6 +6,7 @@ from transformers.modeling_utils import PreTrainedModel
 from seed_models.models.seed_vl.modeling_seed_vl import SeedVisionTransformer
 from transformers import AutoConfig
 import abc
+import torch.distributed as dist
 from torch.distributed._tensor import DTensor
 
 
@@ -24,13 +25,39 @@ def assert_not_nan(tensor: torch.Tensor):
         assert not torch.any(torch.isnan(tensor)).item(), f'Got nan in parameter {tensor} on rank {rank}'
 
 
-def update_param(state_dict, key, vit_model_param):
-    if isinstance(key, str):
-        param_in_state_dict = state_dict.pop(key).to(torch.bfloat16)
-        if isinstance(param_in_state_dict, DTensor):
-            param_in_state_dict = param_in_state_dict.full_tensor()
+def update_param(state_dict, key, vit_model_param, device_mesh, enable_mux=False):
+    if not enable_mux:
+        if isinstance(key, str):
+            param_in_state_dict = state_dict.pop(key).to(torch.bfloat16)
+            if isinstance(param_in_state_dict, DTensor):
+                param_in_state_dict = param_in_state_dict.full_tensor()
+        else:
+            param_in_state_dict = key
     else:
+        rank = device_mesh.get_rank()
+        world_size = device_mesh.size()
         param_in_state_dict = key
+        if isinstance(key, str) and key in state_dict:
+            param_in_state_dict = state_dict.pop(key).to(torch.bfloat16)
+            if isinstance(param_in_state_dict, DTensor):
+                param_in_state_dict = param_in_state_dict.full_tensor()
+
+        half = world_size // 2
+        if rank < half:
+            dst = rank + half
+            ndim = torch.tensor([len(param_in_state_dict.shape)], dtype=torch.long, device="cuda")
+            shape = torch.tensor(param_in_state_dict.shape, dtype=torch.long, device="cuda")
+            dist.send(ndim, dst=dst)
+            dist.send(shape, dst=dst)
+            dist.send(param_in_state_dict, dst=dst)
+        else:
+            src = rank - half
+            ndim = torch.empty(1, dtype=torch.long, device="cuda")
+            dist.recv(ndim, src=src)
+            shape = torch.empty(ndim.item(), dtype=torch.long, device="cuda")
+            dist.recv(shape, src=src)
+            param_in_state_dict = torch.empty(shape.tolist(), dtype=torch.bfloat16, device="cuda")
+            dist.recv(param_in_state_dict, src=src)
     assert vit_model_param.shape == param_in_state_dict.shape, f'{key=}, {vit_model_param.shape=}, {param_in_state_dict.shape=}'
     vit_model_param.data = param_in_state_dict.contiguous()
     assert_not_nan(vit_model_param.data)
@@ -132,19 +159,19 @@ class TorchVitInferencer(BaseVitInferencer):
             image_embeds = self.seed_proj(image_embeds)
         return image_embeds
 
-    def weights_update(self, state_dict):
+    def weights_update(self, state_dict, device_mesh, enable_mux=False):
         # for visual_encoder model
         for vision_key, param in self.visual_encoder.named_parameters():
             vision_key = "vision_encoder." + vision_key
-            update_param(state_dict, vision_key, param)
+            update_param(state_dict, vision_key, param, device_mesh, enable_mux)
 
         for proj_key, proj_param in self.seed_proj.named_parameters():
             proj_key = "multi_modal_projector." + proj_key
-            update_param(state_dict, proj_key, proj_param)
+            update_param(state_dict, proj_key, proj_param, device_mesh, enable_mux)
 
         for ln_key, ln_param in self.ln_vision.named_parameters():
             ln_key = "ln_vision." + ln_key
-            update_param(state_dict, ln_key, ln_param)
+            update_param(state_dict, ln_key, ln_param, device_mesh, enable_mux)
 
         torch.cuda.empty_cache()
 

@@ -59,7 +59,7 @@ class WeightsAdapter:
 
         # if xperf_vit params is used torch vit(based ):
         if xperf_vit is not None and isinstance(xperf_vit, TorchVitInferencer):
-            xperf_vit.weights_update(state_dict)
+            xperf_vit.weights_update(state_dict, device_mesh, self.adapter.enable_actor_critic_spatial_mux)
 
         elif xperf_vit is not None:
             setattr(xperf_vit, "use_xperf_gpt", True)
