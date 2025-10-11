@@ -3,6 +3,7 @@ import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 import hdfs_io
 import asyncio
+import shutil
 from omnistore.utilities.io.bfile import is_local_path
 
 
@@ -206,7 +207,12 @@ def upload_ckpt_with_retry(local_path, remote_path, upload_retry_count):
 
 def upload_ckpt(local_path, remote_path):
     if is_local_path(remote_path):
-        print(f"upload_ckpt: remote_path={remote_path} is a local or fuse dir, skipping upload")
+        try:
+            shutil.copy(local_path, remote_path)
+        except shutil.SameFileError:
+            print(f"upload_ckpt: local_path={local_path} is same as remote_path={remote_path}, skipping upload")
+        except Exception:
+            return False
         return True
 
     try:
@@ -220,7 +226,6 @@ def upload_ckpt(local_path, remote_path):
             except Exception as e:
                 print(f"remove {local_path} failed. error: ", e)
         else:
-            import shutil
             shutil.rmtree(local_path, ignore_errors=True)
 
     return True
