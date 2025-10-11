@@ -425,7 +425,7 @@ def compute_lm_loss(log_prob, raw_scores, eos_ids, loss_average_method='token'):
     mask1 = (scores > 0).repeat(1, log_prob.shape[1])
     mask = mask0 & mask1
     lm_loss = torch.masked_select(log_prob, mask)
-    if loss_average_method in ['sample', 'token', 'constant']:
+    if loss_average_method in ['sample', 'token', 'constant', 'direct_mean']:
         lm_loss = -torch.sum(lm_loss) / max(lm_loss.numel(), 1)
     elif loss_average_method in ['minibatch', 'batch']:
         lm_loss = -torch.sum(lm_loss)
@@ -450,7 +450,8 @@ def compute_policy_loss(old_log_prob,
                         kl_penalty_type,
                         overlong_mask,
                         loss_average_method,
-                        loss_average_constant=0):
+                        loss_average_constant=0,
+                        **kwargs):
     """Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py#L1122
 
     Args:
@@ -541,6 +542,163 @@ def compute_policy_loss(old_log_prob,
             pg_loss_mask = pg_loss_mask * overlong_mask.unsqueeze(-1)
 
     if loss_average_method == 'sample':
+        pg_loss = torch.mean(pg_loss)
+    elif loss_average_method == 'constant':
+        pg_loss = (pg_loss * pg_loss_mask).sum() / (loss_average_constant * (pg_loss_mask[:, 0]).sum() + 1e-6)
+    elif loss_average_method == 'token':
+        pg_loss = verl_F.masked_mean(pg_loss, pg_loss_mask)
+    else:
+        pg_loss = (pg_loss * pg_loss_mask).sum()
+
+    if upgo_loss_weight > 0.0:
+        rho = torch.minimum(ratio, torch.ones_like(ratio)).detach()
+        upgo_losses = -rho * upgo_advantages * log_prob
+        upgo_losses = torch.sum(upgo_losses * eos_mask, dim=1) / seq_len_per_sample
+        upgo_loss = torch.mean(upgo_losses)
+    else:
+        upgo_loss = torch.zeros(()).to(pg_loss.device)
+    total_loss = pg_loss + upgo_loss_weight * upgo_loss
+
+    pg_clipfrac = verl_F.masked_mean(torch.gt(pg_losses2, pg_losses1).float(), eos_mask)
+    pg_clipfrac_hi = verl_F.masked_mean(torch.gt(pg_losses2_hi, pg_losses1).float(), eos_mask)
+    pg_clipfrac_lo = verl_F.masked_mean(torch.gt(pg_losses2_lo, pg_losses1).float(), eos_mask)
+    pg_clipfrac2 = verl_F.masked_mean(torch.gt(pg_losses1, pg_losses3).float(), eos_mask)
+
+    if total_loss.isnan().any():
+        print("find nan in total_loss, tracing...")
+        variables = {"pg_losses1": pg_losses1, "pg_losses2": pg_losses2, "pg_losses3": pg_losses3}
+        variables.update({"log_prob": log_prob, "old_log_prob": old_log_prob, "advantages": advantages, "ratio": ratio})
+        for k, v in variables.items():
+            if v.isnan().any():
+                print("find nan in ", k, v)
+            if v.isinf().any():
+                print("find inf in ", k, v)
+        raise ValueError("find nan in total_loss")
+
+    return total_loss, pg_loss, upgo_loss, pg_clipfrac, pg_clipfrac_hi, pg_clipfrac_lo, pg_clipfrac2, ppo_kl, ppo_kl_sum
+
+
+def compute_policy_loss_experimental(old_log_prob,
+                                     ref_log_prob,
+                                     log_prob,
+                                     advantages,
+                                     upgo_advantages,
+                                     eos_mask,
+                                     cliprange_low,
+                                     cliprange_high,
+                                     cliprange2,
+                                     scale_pg_by_kl,
+                                     scale_pg_by_local_kl,
+                                     upgo_loss_weight,
+                                     use_ewma_loss,
+                                     kl_penalty_type,
+                                     overlong_mask,
+                                     loss_average_method,
+                                     loss_average_constant=0,
+                                     clip_mode='token',
+                                     dynamic_clip=False):
+    """Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py#L1122
+
+    Args:
+        old_log_prob: `(torch.Tensor)`
+            shape: (bs, response_length)
+        log_prob: `(torch.Tensor)`
+            shape: (bs, response_length)
+        advantages: `(torch.Tensor)`
+            shape: (bs, response_length)
+        eos_mask: `(torch.Tensor)`
+            shape: (bs, response_length)
+        cliprange: (float)
+            The clip range used in PPO. See https://arxiv.org/abs/1707.06347
+
+    Returns:
+        pg_loss: `a scalar torch.Tensor`
+            policy gradient loss computed via PPO
+        pg_clipfrac: (float)
+            a float number indicating the fraction of policy gradient loss being clipped
+
+    """
+    seq_len_per_sample = torch.clamp(torch.sum(eos_mask, dim=1), min=1.0)
+
+    if clip_mode == 'sentence':
+        advantages = verl_F.masked_mean(advantages, eos_mask, axis=1).unsqueeze(-1)
+        log_prob = verl_F.masked_mean(log_prob, eos_mask, axis=1).unsqueeze(-1)  # [bs, 1]
+        old_log_prob = verl_F.masked_mean(old_log_prob, eos_mask, axis=1).unsqueeze(-1)  # [bs, 1]
+        if ref_log_prob is not None:
+            ref_log_prob = verl_F.masked_mean(ref_log_prob, eos_mask, axis=1).unsqueeze(-1)  # [bs, 1]
+
+    if not use_ewma_loss:
+        ratio = torch.exp(torch.clamp(log_prob - old_log_prob, min=-5, max=5))
+        pg_losses1 = -advantages * ratio
+        if dynamic_clip:
+            prob = torch.exp(log_prob)
+            cliprange_low = (cliprange_low / torch.where(prob > 0.5, prob, 0.5)).clone().detach()
+            cliprange_high = (cliprange_high / torch.where(prob > 0.5, prob, 0.5)).clone().detach()
+        pg_losses2 = -advantages * torch.clamp(ratio, 1.0 - cliprange_low, 1.0 + cliprange_high)
+        pg_losses2_hi = -advantages * torch.clamp(ratio, max=1.0 + cliprange_high)
+        pg_losses2_lo = -advantages * torch.clamp(ratio, min=1.0 - cliprange_low)
+        pg_losses3 = torch.abs(-advantages * cliprange2)
+        pg_losses_clip = torch.maximum(pg_losses1, pg_losses2)
+        pg_losses = torch.minimum(pg_losses_clip, pg_losses3)  # 这个应该对advantage为正的情况不影响
+    else:
+        # ref: https://github.com/openai/ppo-ewma/blob/master/ppo_ewma/ppo.py#L93
+        # log space importance sampling
+        log_ratio = log_prob - ref_log_prob  # old
+        # clip by 10.0
+        logp_adj = torch.max(old_log_prob, log_prob.detach() - np.log(10.))
+        # log space importance sampling again
+        pg_losses1 = -advantages * torch.exp(log_prob - logp_adj)
+        clipped_logratio = torch.clamp(log_ratio, np.log(1.0 - cliprange_low), np.log(1.0 + cliprange_high))
+        pg_losses2 = -advantages * torch.exp(clipped_logratio + ref_log_prob - logp_adj)
+        clipped_logratio_hi = torch.clamp(log_ratio, max=np.log(1.0 + cliprange_high))
+        clipped_logratio_lo = torch.clamp(log_ratio, min=np.log(1.0 - cliprange_low))
+        pg_losses2_hi = -advantages * torch.exp(clipped_logratio_hi + ref_log_prob - logp_adj)
+        pg_losses2_lo = -advantages * torch.exp(clipped_logratio_lo + ref_log_prob - logp_adj)
+
+        pg_losses3 = torch.abs(-advantages * cliprange2)
+        pg_losses_clip = torch.maximum(pg_losses1, pg_losses2)
+        pg_losses = torch.minimum(pg_losses_clip, pg_losses3)  # 这个应该对advantage为正的情况不影响
+
+    assert loss_average_method in [
+        'sample', 'token', 'constant', 'minibatch', 'batch', 'direct_mean'
+    ], f"loss_average_method must be in ['sample', 'token', 'constant', 'minibatch', 'batch', 'direct_mean'], but got {loss_average_method}"
+
+    if loss_average_method == 'sample':
+        pg_loss = torch.sum(pg_losses * eos_mask, dim=1) / seq_len_per_sample  # batch
+    else:
+        pg_loss = pg_losses  # batch x seq_len
+
+    negative_approx_kl = torch.clamp(kl_penalty(log_prob, old_log_prob, kl_penalty_type=kl_penalty_type), min=-5, max=5)
+    ppo_kl = verl_F.masked_mean(-negative_approx_kl, eos_mask)
+    ppo_kl_sum = torch.mean(torch.sum(-negative_approx_kl * eos_mask, dim=1))
+
+    if scale_pg_by_kl:
+        sqrt_kl = torch.sqrt(
+            torch.clamp(torch.sum(kl_penalty(old_log_prob, ref_log_prob, kl_penalty_type=kl_penalty_type) * eos_mask,
+                                  dim=1),
+                        min=1.0))
+        normed_sqrt_kl = (1 / sqrt_kl) / (torch.sum(1 / sqrt_kl)) * torch.clamp(torch.sum(eos_mask[:, 0]), min=1.0)
+        if loss_average_method == 'sample':
+            pg_loss = pg_loss * normed_sqrt_kl
+        else:
+            pg_loss = pg_loss * normed_sqrt_kl.unsqueeze(-1)
+
+    if scale_pg_by_local_kl:
+        sqrt_kl = torch.sqrt(torch.clamp(torch.sum(negative_approx_kl * eos_mask, dim=1), min=1.0))
+        normed_sqrt_kl = (1 / sqrt_kl) / (torch.sum(1 / sqrt_kl)) * torch.clamp(torch.sum(eos_mask[:, 0]), min=1.0)
+        if loss_average_method == 'sample':
+            pg_loss = pg_loss * normed_sqrt_kl
+        else:
+            pg_loss = pg_loss * normed_sqrt_kl.unsqueeze(-1)
+
+    pg_loss_mask = eos_mask
+    if overlong_mask is not None:
+        if loss_average_method == 'sample':
+            pg_loss = pg_loss * overlong_mask
+        else:
+            pg_loss_mask = pg_loss_mask * overlong_mask.unsqueeze(-1)
+
+    if loss_average_method in ['sample', 'direct_mean']:
         pg_loss = torch.mean(pg_loss)
     elif loss_average_method == 'constant':
         pg_loss = (pg_loss * pg_loss_mask).sum() / (loss_average_constant * (pg_loss_mask[:, 0]).sum() + 1e-6)

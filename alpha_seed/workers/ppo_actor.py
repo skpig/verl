@@ -206,7 +206,7 @@ def pg_loss_fn(config: Dict, output: TensorDict, micro_data: TensorDict):
 
     policy_loss, micro_data_metric = default_pg_loss_fn(config, micro_data, full_entropy, log_prob)
 
-    if loss_average_method in ['token', 'sample', 'constant']:
+    if loss_average_method in ['token', 'sample', 'constant', 'direct_mean']:
         if use_dynamic_bsz:
             loss = policy_loss * (len(micro_data) / ppo_mini_batch_size)
         else:
@@ -273,8 +273,14 @@ def default_pg_loss_fn(config, micro_data, full_entropy, log_prob):
     kl_penalty_type = config.get("kl_penalty", "low_var_kl")
     loss_average_method = config.get("loss_average_method", "sample")
     loss_average_constant = config.get("loss_average_constant", 0)
+    use_experimental = config.get('experimental_algorithm', False)
+    clip_mode = config.get("clip_mode", "token")
+    dynamic_clip = config.get("dynamic_clip", False)
+
+    compute_loss_fn = core_algos.compute_policy_loss_experimental if use_experimental else core_algos.compute_policy_loss
+
     total_loss, pg_loss, upgo_loss, pg_clipfrac, pg_clipfrac_hi, pg_clipfrac_lo, pg_clipfrac2, ppo_kl, ppo_kl_sum = (
-        core_algos.compute_policy_loss(
+        compute_loss_fn(
             old_log_prob=old_log_prob,
             ref_log_prob=ref_log_prob,
             log_prob=log_prob,
@@ -292,6 +298,8 @@ def default_pg_loss_fn(config, micro_data, full_entropy, log_prob):
             overlong_mask=overlong_mask,
             loss_average_method=loss_average_method,
             loss_average_constant=loss_average_constant,
+            clip_mode=clip_mode,
+            dynamic_clip=dynamic_clip,
         ))
 
     if kl_loss_weight > 0.0:

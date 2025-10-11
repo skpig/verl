@@ -77,12 +77,15 @@ actor_rollout_ref:
     clip_ratio_low: null
     clip_ratio_high: null
     clip_ratio2: 10.0
-    loss_average_method: "sample"  # "token", "minibatch", "batch", "constant"
+    loss_average_method: "sample"  # "token", "minibatch", "batch", "constant", "direct_mean"
     loss_average_constant: 0
+    clip_mode: "token"  # "token", "sentence"
+    dynamic_clip: False  # dynamically adjust clip range based on probability
     reuse_old_experts: False
     scale_pg_by_kl: False
     scale_pg_by_local_kl: False
     upgo_loss_weight: 0.0
+    experimental_algorithm: False
     upgo_loss_version: 1
     kl_loss_weight: 0.0
     offpolicy_kl_loss_weight: 0.0
