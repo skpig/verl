@@ -86,6 +86,7 @@ python3 tasks/main_ppo.py \
     actor_rollout_ref.ref.use_dynamic_bsz=${use_dynamic_bsz} \
     actor_rollout_ref.rollout.use_dynamic_bsz=${use_dynamic_bsz} \
     actor_rollout_ref.actor.ppo_max_token_len=${actor_ppo_max_token_len} \
+    actor_rollout_ref.actor.infer_ppo_max_token_len=${infer_ppo_max_token_len} \
     actor_rollout_ref.ref.max_token_len=${infer_ppo_max_token_len} \
     actor_rollout_ref.rollout.max_token_len=${infer_ppo_max_token_len} \
     actor_rollout_ref.rollout.train_generate_kwargs.temperature=${temperature} \
@@ -162,3 +163,4 @@ python3 tasks/main_ppo.py \
     +ext=vlm_ext \
     data.check_template=False \
     trainer.use_remote_verifier=True
+

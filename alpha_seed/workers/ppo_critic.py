@@ -62,7 +62,10 @@ class DataParallelPPOCritic(BasePPOCritic):
         # Note: mismatched data order (here vs. upldate critic) can lead to
         # mismatched values. In order to match them, we need to split
         # batch into mini batches (same with training).
-        chunk_size = math.ceil(selected_data.batch.batch_size[0] / self.config.ppo_mini_batch_size)
+        if self.config.infer_num_mini_batch < 0:
+            chunk_size = math.ceil(selected_data.batch.batch_size[0] / self.config.ppo_mini_batch_size)
+        else:
+            chunk_size = self.config.infer_num_mini_batch
         for _, mini_batch in enumerate(selected_data.chunk(chunk_size)):
             if self.config.get("use_decouple_critic", False):
                 mini_batch.batch['attention_mask'] = mini_batch.batch['attention_mask_critic']

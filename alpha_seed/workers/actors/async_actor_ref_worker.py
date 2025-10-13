@@ -601,6 +601,8 @@ class AsyncActorRolloutRefWorker(Worker):
         data.meta_info['role'] = Role.Actor
         data.meta_info["response_length"] = data.batch["responses"].shape[1]
         data.meta_info['compute_entropy'] = (self.config.actor.entropy_coeff > 0)
+        if self.config.actor.use_dynamic_bsz:
+            data.meta_info['micro_batch_tokens'] = self.config.actor.ppo_max_token_len
 
         with self.actor_gather_manager:
             data = self.actor_gather_manager.preprocess_data(data)
@@ -663,6 +665,8 @@ class AsyncActorRolloutRefWorker(Worker):
         data.meta_info['role'] = Role.Actor
         data.meta_info["response_length"] = data.batch["responses"].shape[1]
         data.meta_info['compute_entropy'] = (self.config.actor.entropy_coeff > 0)
+        if self.config.actor.use_dynamic_bsz:
+            data.meta_info['micro_batch_tokens'] = self.config.actor.ppo_max_token_len
 
         with self.actor_gather_manager:
             data = self.actor_gather_manager.preprocess_data(data)
@@ -735,7 +739,7 @@ class AsyncActorRolloutRefWorker(Worker):
             # align with the training config
             output.meta_info['use_dynamic_bsz'] = self.config.actor.use_dynamic_bsz
             if self.config.actor.use_dynamic_bsz:
-                output.meta_info['micro_batch_tokens'] = self.config.actor.ppo_max_token_len
+                output.meta_info['micro_batch_tokens'] = self.config.actor.infer_ppo_max_token_len
             else:
                 output.meta_info['micro_batch_size'] = self.config.actor.ppo_micro_batch_size
             output.meta_info['response_length'] = output.batch["responses"].shape[1]
@@ -745,7 +749,7 @@ class AsyncActorRolloutRefWorker(Worker):
             with self.actor_gather_manager:
                 reuse_old_experts = self.config.actor.reuse_old_experts
                 output = self.actor_gather_manager.preprocess_data(output)
-                old_entropy, old_log_probs, acceptance_matrix = self.actor.compute_log_prob(
+                old_entropy, old_log_probs, acceptance_matrix, metrics = self.actor.compute_log_prob(
                     data=output, reuse_old_experts=reuse_old_experts)
                 output.batch['old_log_probs'] = old_log_probs
                 output.batch['old_entropy'] = old_entropy
@@ -759,6 +763,8 @@ class AsyncActorRolloutRefWorker(Worker):
                 self.to("cpu", model=True, optimizer=False)
 
         output = output.to('cpu')
+        output.meta_info['metrics'] = metrics
+
         # clear kv cache
         log_gpu_memory_usage('After recompute log prob')
         return output
@@ -861,7 +867,7 @@ class AsyncActorRolloutRefWorker(Worker):
 
         with self.ref_gather_manager:
             data = self.ref_gather_manager.preprocess_data(data)
-            _, output, _ = self.ref_policy.compute_log_prob(data=data)
+            _, output, _, metrics = self.ref_policy.compute_log_prob(data=data)
             output = DataProto.from_dict(tensors={'ref_log_prob': output})
             output = self.ref_gather_manager.postprocess_data(output)
 
@@ -876,6 +882,7 @@ class AsyncActorRolloutRefWorker(Worker):
             'memory/ref_max_allocated': max_memory_allocated,
             'memory/ref_max_reserved': max_memory_reserved
         })
+        output.meta_info['metrics'] = metrics
         output = output.to('cpu')
         return output
 

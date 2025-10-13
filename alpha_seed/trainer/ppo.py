@@ -2423,6 +2423,7 @@ class RayPPOTrainer(object):
                 metrics[f'mtp/{k}'] = (output_batch.batch[k].float() * acceptance_mask_mtp).sum().item() / max(
                     acceptance_mask_mtp.sum().item(), 1)
         metrics['timing/old_log_probs'] = timer.last
+        metrics.update(output_batch.meta_info['metrics'])
         print_dataproto_size(batch, head='After old log probs')
         return batch
 
@@ -2443,6 +2444,7 @@ class RayPPOTrainer(object):
                 metrics['timing/ref'] = timer.last
                 metrics['memory/ref_max_allocated'] = batch.meta_info.pop('memory/ref_max_allocated')
                 metrics['memory/ref_max_reserved'] = batch.meta_info.pop('memory/ref_max_reserved')
+                metrics.update(batch.meta_info['metrics'])
         print_dataproto_size(batch, head='After reference policy')
         return batch
 

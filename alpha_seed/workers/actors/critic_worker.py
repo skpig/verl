@@ -244,7 +244,7 @@ class CriticWorker(Worker):
 
         if self.config.use_dynamic_bsz:
             data.meta_info['micro_batch_tokens'] = self.config.get('infer_ppo_max_token_len',
-                                                                   self.config.ppo_max_token_len)
+                                                                   self.config.infer_ppo_max_token_len)
         else:
             data.meta_info['micro_batch_size'] = micro_batch_size
         with self.gather_manager:
@@ -271,6 +271,8 @@ class CriticWorker(Worker):
             data.meta_info["role"] = Role.Critic
             data.meta_info['response_length'] = data.batch["responses"].shape[1]
             data.meta_info['compute_entropy'] = False
+            if self.config.use_dynamic_bsz:
+                data.meta_info['micro_batch_tokens'] = self.config.ppo_max_token_len
 
             with self.gather_manager:
                 data = self.gather_manager.preprocess_data(data)

@@ -62,7 +62,10 @@ class DataParallelPPOActor(BasePPOActor):
         # Note: mismatched data order (here vs. upldate policy) can lead to
         # mismatched log probs. In order to match them, we need to split
         # batch into mini batches (same with training).
-        chunk_size = math.ceil(selected_data.batch.batch_size[0] / self.config.ppo_mini_batch_size)
+        if self.config.infer_num_mini_batch < 0:
+            chunk_size = math.ceil(selected_data.batch.batch_size[0] / self.config.ppo_mini_batch_size)
+        else:
+            chunk_size = self.config.infer_num_mini_batch
         for chunk_idx, mini_batch in enumerate(selected_data.chunk(chunk_size)):
             output_proto = self.engine.forward_backward_step(data=mini_batch,
                                                              forward_only=True,
@@ -100,8 +103,13 @@ class DataParallelPPOActor(BasePPOActor):
             acceptance_matrix = [torch.concat(acceptance_matrix_lst[j], dim=0) for j in range(mtp_n_heads - 1)]
         else:
             acceptance_matrix = []
+
+        role = data.meta_info['role']
+        metrics = {
+            f'{role}/#infer_micro_batch': output_proto.meta_info["metrics"].pop('#micro_batch_update'),
+        }
         # Don't return selected_experts since they are already cached
-        return entropy, log_probs, tuple(acceptance_matrix)
+        return entropy, log_probs, tuple(acceptance_matrix), metrics
 
     def train_one_step(self, data: DataProto):
         self.engine.set_loss(pg_loss_fn, OmegaConf.to_container(self.config, resolve=True))
