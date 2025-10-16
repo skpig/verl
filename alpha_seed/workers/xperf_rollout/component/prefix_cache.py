@@ -222,7 +222,6 @@ class PrefixCache(PrefixCacheInterface):
         self.lru_cache = collections.OrderedDict()
         self.req_id_to_slot_id = {}
         self.req_id_to_image_shift = {}
-        self.req_id_to_selected_experts = {}
 
         logging_rank_only(
             logging.warning, 0, f"enable prefix cache, cache shape: {self.cache_slots.shape}, "
@@ -238,8 +237,6 @@ class PrefixCache(PrefixCacheInterface):
         self.cached_input_id_length = [0 for _ in range(self.max_cache_slot_num)]
         self.lru_cache.clear()
         self.req_id_to_slot_id.clear()
-        self.req_id_to_image_shift.clear()
-        self.req_id_to_selected_experts.clear()
 
     def _get_free_slot(self, request_id: str):
         if len(self.free_slots) > 0:
@@ -255,7 +252,6 @@ class PrefixCache(PrefixCacheInterface):
             self.lru_cache[slot_evict] = request_id
             del self.req_id_to_slot_id[request_id_evict]
             del self.req_id_to_image_shift[request_id_evict]
-            del self.req_id_to_selected_experts[request_id_evict]
             self.req_id_to_slot_id[request_id] = slot_evict
             self.cached_input_id_length[slot_evict] = 0
             logging_rank_only(
@@ -279,9 +275,6 @@ class PrefixCache(PrefixCacheInterface):
 
     def get_image_shift(self, request_id: str):
         return self.req_id_to_image_shift.get(request_id, 0)
-
-    def get_selected_experts(self, request_id: str):
-        return self.req_id_to_selected_experts.get(request_id, None)
 
     def load_from_cache(self, request_id: str, input_ids: torch.Tensor, kv_cache_table: torch.Tensor, xperf_module,
                         start_pos: Optional[int]):
@@ -332,14 +325,13 @@ class PrefixCache(PrefixCacheInterface):
         return prefix_length
 
     def save_to_cache(self, request_id: str, full_input_ids: torch.Tensor, kv_cache_table: torch.Tensor, image_shift,
-                      selected_experts, xperf_module):
+                      xperf_module):
         if request_id not in self.req_id_to_slot_id:
             slot_id, is_evict = self._get_free_slot(request_id)
         else:
             slot_id = self.req_id_to_slot_id[request_id]
             is_evict = False
         self.req_id_to_image_shift[request_id] = image_shift
-        self.req_id_to_selected_experts[request_id] = selected_experts
 
         prefix_length = self.calc_prefix_length(request_id, full_input_ids)
 
@@ -486,7 +478,6 @@ class PagedPrefixCache(PrefixCacheInterface):
         self.enable_paged_attn = enable_paged_attn
         self.slot_block_size = slot_block_size
         self.req_id_to_image_shift = {}
-        self.req_id_to_selected_experts = {}
 
         self.free_slots = set(range(self.max_cache_slot_num))
 
@@ -507,8 +498,6 @@ class PagedPrefixCache(PrefixCacheInterface):
     def clear_cache(self):
         self.free_slots = set(range(self.max_cache_slot_num))
         self.lru_cache.clear()
-        self.req_id_to_image_shift.clear()
-        self.req_id_to_selected_experts.clear()
 
     def _need_to_evict(self, pages_needed: int):
         return len(self.free_slots) < pages_needed
@@ -542,7 +531,6 @@ class PagedPrefixCache(PrefixCacheInterface):
             for page_id in evicted_cache_item.cache_page_table:
                 self.free_slots.add(page_id)
             del self.req_id_to_image_shift[evicted_request_id]
-            del self.req_id_to_selected_experts[evicted_request_id]
 
             real_page_allocated = min(pages_needed, len(self.free_slots))
             pages_to_allocate = []
@@ -573,9 +561,6 @@ class PagedPrefixCache(PrefixCacheInterface):
     def get_image_shift(self, request_id: str):
         return self.req_id_to_image_shift.get(request_id, 0)
 
-    def get_selected_experts(self, request_id: str):
-        return self.req_id_to_selected_experts.get(request_id, None)
-
     def load_from_cache(self, request_id: str, input_ids: torch.Tensor, kv_cache_table: torch.Tensor, xperf_module,
                         start_pos: Optional[int]):
         if request_id not in self.lru_cache:
@@ -605,7 +590,7 @@ class PagedPrefixCache(PrefixCacheInterface):
         return prefix_length
 
     def save_to_cache(self, request_id: str, full_input_ids: torch.Tensor, kv_cache_table: torch.Tensor, image_shift,
-                      selected_experts, xperf_module):
+                      xperf_module):
         if request_id not in self.lru_cache:
             cache_item = CacheItem(request_id, torch.empty([self.max_cache_length], dtype=torch.long, device="cuda"),
                                    full_input_ids.shape[0])
@@ -617,7 +602,6 @@ class PagedPrefixCache(PrefixCacheInterface):
             self.lru_cache[request_id] = cache_item
             prefix_length = self.calc_prefix_length(request_id, full_input_ids)
         self.req_id_to_image_shift[request_id] = image_shift
-        self.req_id_to_selected_experts[request_id] = selected_experts
         total_length = full_input_ids.shape[0]
         if prefix_length == total_length:
             return False

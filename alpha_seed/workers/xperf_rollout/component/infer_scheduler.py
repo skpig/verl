@@ -21,8 +21,7 @@ class InferScheduler():
                  enable_metrics=False,
                  max_ngram_size=0,
                  num_pred_tokens=0,
-                 enable_mtp_decoding=False,
-                 return_selected_experts=False):
+                 enable_mtp_decoding=False):
         self.cache_manager = cache_manager
         self.engine = engine
         self.sampler = sampler
@@ -35,7 +34,6 @@ class InferScheduler():
         self.num_pred_tokens = num_pred_tokens
         self.enable_cuda_graph = enable_cuda_graph
         self.enable_mtp_decoding = enable_mtp_decoding
-        self.return_selected_experts = return_selected_experts
         self.init_cuda_graph()
         self.init_metrics()
 
@@ -185,8 +183,7 @@ class InferScheduler():
                                                   context_shifts=None,
                                                   return_full_hidden_states=False,
                                                   return_padding_tensor=False,
-                                                  last_token_only=True,
-                                                  return_selected_experts=self.return_selected_experts)
+                                                  last_token_only=True)
                 self.output_placeholder[bs].copy_(output)
 
             if need_to_warmup:
@@ -275,8 +272,7 @@ class InferScheduler():
                 context_max_kv_len=context_max_kv_len,
                 context_total_kv_len=context_total_kv_len,
                 decode_max_kv_len=decode_max_kv_len,
-                decode_total_kv_len=decode_total_kv_len,
-                return_selected_experts=self.return_selected_experts)
+                decode_total_kv_len=decode_total_kv_len)
 
     def forward_and_sample(self,
                            context_input: torch.Tensor,
@@ -321,19 +317,12 @@ class InferScheduler():
             # 1. forward
             output = self.internal_inference_orca(context_input, decode_input, total_length, kv_index, orca_updated,
                                                   context_shifts)
-            selected_experts = None
             if self.return_full_hidden_states:
                 logits = output[0]
                 target_hidden_states = list(output[1].split(total_length.tolist(), dim=0))
             else:
                 logits = output
                 target_hidden_states = None
-            if self.return_selected_experts:
-                logits = output[0]
-                context_bs = context_input.shape[0] if context_input is not None else 0
-                total_len = total_length.tolist()
-                prefill_decode_length = total_len[:context_bs] + [1] * (len(total_len) - context_bs)
-                selected_experts = output[-1].cpu().split(prefill_decode_length, dim=0)
 
             # 2. sample
             if self.context_only:
@@ -348,7 +337,7 @@ class InferScheduler():
                                                               need_torch_tensor=True,
                                                               history_ids=history_ids,
                                                               sample_kwargs=sample_kwargs)
-            return next_tokens, accepted_len, target_hidden_states, log_probs, selected_experts
+            return next_tokens, accepted_len, target_hidden_states, log_probs
         else:
             # forward mtp spec
             context_bs = context_input.shape[0] if context_input is not None else 0
@@ -377,4 +366,4 @@ class InferScheduler():
             target_hidden_states = [
                 hidden_states[:accepted_len[i] + 1] for i, hidden_states in enumerate(target_hidden_states)
             ]
-            return accpeted_tokens.contiguous(), accepted_len, target_hidden_states, None, None
+            return accpeted_tokens.contiguous(), accepted_len, target_hidden_states, None

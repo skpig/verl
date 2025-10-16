@@ -747,9 +747,10 @@ class AsyncActorRolloutRefWorker(Worker):
             output.meta_info['role'] = Role.Actor
 
             with self.actor_gather_manager:
+                reuse_old_experts = self.config.actor.reuse_old_experts
                 output = self.actor_gather_manager.preprocess_data(output)
                 old_entropy, old_log_probs, acceptance_matrix, metrics = self.actor.compute_log_prob(
-                    data=output, reuse_old_experts=self.config.actor.reuse_old_experts)
+                    data=output, reuse_old_experts=reuse_old_experts)
                 output.batch['old_log_probs'] = old_log_probs
                 output.batch['old_entropy'] = old_entropy
                 for j in range(len(acceptance_matrix)):

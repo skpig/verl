@@ -387,7 +387,6 @@ class InferenceSession:
             mp_size: int = None,
             use_ep: bool = None,
             multi_host_tp: bool = None,
-            return_selected_experts=False,
             **kwargs):
         """Initialize model engine and associated components
         
@@ -553,7 +552,6 @@ class InferenceSession:
             max_ngram_size=self.max_ngram_size,
             num_pred_tokens=self.num_pred_tokens,
             enable_mtp_decoding=self.enable_mtp_decoding,
-            return_selected_experts=return_selected_experts,
         )
 
         if vit_config is not None:
@@ -860,7 +858,7 @@ class InferenceSession:
             full_input_ids = torch.tensor(input_id_list).cuda()
             is_evict = self.prefix_cache.save_to_cache(query.cache_id, full_input_ids,
                                                        torch.tensor(query.kv_slot_ids).cuda(), query.image_shift,
-                                                       query.selected_experts, self.engine.module)
+                                                       self.engine.module)
             if is_evict:
                 self.infer_scheduler.incr("evict_count")
 
@@ -1084,13 +1082,6 @@ class InferenceSession:
                                                           torch.tensor(query.kv_slot_ids).cuda(), self.engine.module,
                                                           prefix_hit_length)
                         query.prefix_already_computed_len = prefix_hit_length
-                        selected_experts = self.prefix_cache.get_selected_experts(query.cache_id)
-                        if selected_experts is not None and query.return_selected_experts:
-                            query.selected_experts = torch.zeros((query.max_length,) + selected_experts.shape[-2:],
-                                                                 dtype=torch.int16,
-                                                                 device="cpu")
-                            query.selected_experts[:prefix_hit_length] = selected_experts[:prefix_hit_length]
-                            query.selected_experts_offset = prefix_hit_length
                         query.image_shift = self.prefix_cache.get_image_shift(query.cache_id)
 
         if self.vit_use_dp:
@@ -1425,7 +1416,7 @@ class InferenceSession:
             forward_inputs = self._prepare_forward_inputs(self.running)
             context_input = forward_inputs['context_input']
             decode_input = forward_inputs['decode_input']
-            next_tokens, accepted_len, hidden_states, log_probs, selected_experts = self.infer_scheduler.forward_and_sample(
+            next_tokens, accepted_len, hidden_states, log_probs = self.infer_scheduler.forward_and_sample(
                 context_input=context_input,
                 decode_input=decode_input,
                 total_length=forward_inputs['total_length'],
@@ -1448,8 +1439,7 @@ class InferenceSession:
                                        accepted_len=accepted_len,
                                        index_in_running_batch=forward_inputs['forward_index'],
                                        log_probs=log_probs,
-                                       hidden_states=hidden_states,
-                                       selected_experts=selected_experts)
+                                       hidden_states=hidden_states)
             has_prefill_input = context_input is not None
             self.infer_scheduler.next_step(has_prefill_input)
             if self.step_profiler is not None:
@@ -1518,7 +1508,7 @@ class InferenceSession:
                 #         f"{self.current_steps}: ctx_tokens: {ctx_tokens}, dec_tokens: {dec_tokens}, swap tokens: {self.cache_manager.page_swap_out_token}, per step: {(time.time() - last_time) / 100 * 1000} ms"
                 #     )
                 #     last_time = time.time()
-                next_tokens, accepted_len, hidden_states, log_probs, selected_experts = self.infer_scheduler.forward_and_sample(
+                next_tokens, accepted_len, hidden_states, log_probs = self.infer_scheduler.forward_and_sample(
                     context_input=context_input,
                     decode_input=decode_input,
                     total_length=forward_inputs['total_length'],
@@ -1541,8 +1531,7 @@ class InferenceSession:
                                            accepted_len=accepted_len,
                                            index_in_running_batch=forward_inputs['forward_index'],
                                            log_probs=log_probs,
-                                           hidden_states=hidden_states,
-                                           selected_experts=selected_experts)
+                                           hidden_states=hidden_states)
                 has_prefill_input = context_input is not None
                 self.infer_scheduler.next_step(has_prefill_input)
                 if self.step_profiler is not None:
@@ -1590,8 +1579,7 @@ class InferenceSession:
                               index_in_running_batch,
                               accepted_len=None,
                               log_probs=None,
-                              hidden_states=None,
-                              selected_experts=None):
+                              hidden_states=None):
         next_running = [[], []]
         new_paused = []
         next_tokens = next_tokens.cpu().tolist() if next_tokens is not None else None
@@ -1609,16 +1597,6 @@ class InferenceSession:
                 next_running[1].append(query)
                 continue
             i = running_index_to_i[idx]
-
-            if selected_experts is not None and query.return_selected_experts:
-                if query.selected_experts is None:
-                    query.selected_experts = torch.zeros((query.max_length,) + selected_experts[i].shape[-2:],
-                                                         dtype=torch.int16,
-                                                         device="cpu")
-                new_token_len = selected_experts[i].shape[0]
-                query.selected_experts[query.selected_experts_offset:query.selected_experts_offset +
-                                       new_token_len] = selected_experts[i]
-                query.selected_experts_offset += new_token_len
             # decoding
             if query.is_to_decoding_compute():
                 if query.prefill_only:

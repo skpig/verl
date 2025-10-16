@@ -73,11 +73,6 @@ class VLMRayPPOTrainer(RayPPOTrainer):
                         critic_future = self.critic_wg.compute_values(input_batch)
 
                     batch = self._compute_old_log_probs(actor_future, batch, metrics)
-                    if self.config.actor_rollout_ref.actor.reuse_old_experts:
-                        ray.get(
-                            self.dist_data_manager.release_refs.remote(
-                                batch.non_tensor_batch['old_experts_ref'].tolist()))
-                        batch.non_tensor_batch.pop('old_experts_ref')
                     if self.use_critic:
                         batch, critic_future = self._compute_values(batch, critic_future, input_batch, metrics)
 
@@ -99,6 +94,10 @@ class VLMRayPPOTrainer(RayPPOTrainer):
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_step and self.global_step % self.config.trainer.actor_update_freq == 0:
                         actor_future = self.actor_rollout_wg.update_actor(input_batch)
+
+                    # remove old_experts after policy update
+                    if "old_experts" in batch.batch:
+                        batch.batch.pop("old_experts")
 
                     # update critic
                     if self.use_critic:

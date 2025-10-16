@@ -119,7 +119,6 @@ class AsyncXPerfGPTRollout(object):
         self._process_thread_last_tb = None
         self._request_managers = {}
         self._update_ref = None
-        self.return_selected_experts = config.return_selected_experts
 
         # 初始状态下不在loop里，先set
         self.gen_loop_exited.set()
@@ -371,7 +370,6 @@ class AsyncXPerfGPTRollout(object):
                                 vit_config=vision_cfg,
                                 vit_model_cfg_path=self.vit_model_path,
                                 use_fp8_attention=use_fp8_attention,
-                                return_selected_experts=self.return_selected_experts,
                             )
                     if dist.is_initialized() and tp_size > 1:
                         dist.barrier()

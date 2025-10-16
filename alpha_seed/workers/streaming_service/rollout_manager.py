@@ -1377,7 +1377,6 @@ class RolloutManager:
         gen_batch.meta_info.update({
             "step": step,
             "generation_kwargs": sample_kwargs_dict,
-            "return_selected_experts": is_train,
         })
         if not is_train:
             gen_batch.meta_info.update({

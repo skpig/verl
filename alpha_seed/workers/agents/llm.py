@@ -42,9 +42,7 @@ def make_reqeust_data_and_metadata(item: DataProto, prompt: str, host, port):
             data['image_data_ref'] = image_data_ref
 
     # required for rollout engine
-    meta_info = {
-        k: item.meta_info[k] for k in ["step", "generation_kwargs", "return_selected_experts"] if k in item.meta_info
-    }
+    meta_info = {k: item.meta_info[k] for k in ["step", "generation_kwargs"] if k in item.meta_info}
     # required for eos callback
     meta_info['uid'] = item.non_tensor_batch['uid'][0]
     if 'reward_model' in item.non_tensor_batch:
@@ -235,7 +233,7 @@ class DirectAsyncClient(AsyncLLMInterface):
         query_id = await self.request_manager.put_new_query.remote(query)
 
         # 等待完成
-        finished_query, selected_experts = await self.request_manager.wait_until_finished.remote(query_id)
+        finished_query = await self.request_manager.wait_until_finished.remote(query_id)
 
         # 构造response dict（模仿server的返回格式）
         message = ChatCompletionMessageRollout(
@@ -263,9 +261,7 @@ class DirectAsyncClient(AsyncLLMInterface):
                                          usage=usage)
 
         # 转换成dict返回
-        ret = response.dict()
-        ret['choices'][0]['message']['selected_experts'] = selected_experts
-        return ret
+        return response.dict()
 
     @property
     def host(self) -> str:
@@ -403,7 +399,7 @@ class DirectClient(SyncLLMInterface):
         query_id = ray.get(self.request_manager.put_new_query.remote(query))
 
         # 等待完成
-        finished_query, _ = ray.get(self.request_manager.wait_until_finished.remote(query_id))
+        finished_query = ray.get(self.request_manager.wait_until_finished.remote(query_id))
 
         # 构造response dict（模仿server的返回格式）
         message = ChatCompletionMessageRollout(

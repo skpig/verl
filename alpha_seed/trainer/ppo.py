@@ -1214,8 +1214,6 @@ class RayPPOTrainer(object):
         # (方法名，要wait的futures), 方法名就是一个标注的名称，方便报错的时候可以找回哪个报错的对象
         init_futures: List[Tuple[str, List[ObjectRef]]] = []
 
-        assert not self.config.actor_rollout_ref.actor.reuse_old_experts or self.config.actor_rollout_ref.rollout.enable_paged_attention, \
-            "When using old experts, paged attention must be enabled."
         actor_rollout_init_fut = self.actor_rollout_wg.init_model(
             remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init,
             from_scratch=self.build_model_from_scratch(from_step, 'actor'))
@@ -2047,6 +2045,14 @@ class RayPPOTrainer(object):
                         with stage_logger.log_duration_context("advantage_calculation"):
                             batch = self.compute_reference(batch, metrics)
 
+                            # Generate unique training_uid before old_log_probs for proper caching
+                            # This prevents uid collision issues when the same uid appears in different batches
+                            batch_size = len(batch.batch)
+                            training_uids = np.array(
+                                [f"{self.global_step}_{uuid.uuid4().hex[:8]}_{i}" for i in range(batch_size)],
+                                dtype=object)
+                            batch.non_tensor_batch['training_uid'] = training_uids
+
                             input_batch = batch
                             if self.enable_actor_critic_spatial_mux:
                                 input_batch = input_batch.repeat(2, interleave=False)
@@ -2063,11 +2069,6 @@ class RayPPOTrainer(object):
                                 metrics['timing/values_future'] = timer.last
 
                             batch = self._compute_old_log_probs(actor_future, batch, metrics)
-                            if self.config.actor_rollout_ref.actor.reuse_old_experts:
-                                ray.get(
-                                    self.dist_data_manager.release_refs.remote(
-                                        batch.non_tensor_batch['old_experts_ref'].tolist()))
-                                batch.non_tensor_batch.pop('old_experts_ref')
                             if self.use_critic:
                                 batch, critic_future = self._compute_values(batch, critic_future, input_batch, metrics)
 
@@ -2087,6 +2088,10 @@ class RayPPOTrainer(object):
                             with Timer(name='actor_future', logger=None) as timer:
                                 actor_future = self.actor_rollout_wg.update_actor(input_batch)
                             metrics['timing/actor_future'] = timer.last
+
+                        # remove old_experts after policy update
+                        if "old_experts" in batch.batch:
+                            batch.batch.pop("old_experts")
 
                         # update critic
                         if self.use_critic:
