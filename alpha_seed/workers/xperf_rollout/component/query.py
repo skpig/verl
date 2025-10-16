@@ -111,6 +111,9 @@ class Query:
 
     hidden_states: Optional[torch.Tensor]
     logits: Optional[torch.Tensor]
+    return_selected_experts: bool
+    selected_experts: Optional[torch.Tensor]
+    selected_experts_offset: int
     cur_batch_pad_token: int
     nll_loss: Optional[torch.Tensor]
     is_finished: bool
@@ -154,6 +157,9 @@ class Query:
         self.system_ids_len = system_ids_len
         self.hidden_states = None
         self.logits = None
+        self.return_selected_experts = False
+        self.selected_experts = None
+        self.selected_experts_offset = 0
         self.cur_batch_pad_token = 0
         self.nll_loss = None
         self.is_finished = False
@@ -258,6 +264,8 @@ class Query:
         self.prefix_already_computed_len = 0
         self.hidden_states = None
         self.release_count += 1
+        self.selected_experts = None
+        self.selected_experts_offset = 0
 
     @call_once_method
     def lazy_init_from_prompt_once(self, tokenizer):
@@ -374,6 +382,7 @@ class Query:
         query.max_new_tokens = sampling_kwargs.get("max_new_tokens", 32)
         query.max_length = sampling_kwargs.get("max_length", 1024)
         query.meta_info = meta_info or {}
+        query.return_selected_experts = meta_info.get('return_selected_experts', False)
         if image_kwargs is not None and len(image_kwargs) > 0:
             query.image_data = image_kwargs.get('image_data')
             query.image_data_ref = image_kwargs.get('image_data_ref')
@@ -445,6 +454,7 @@ class Query:
 
         q = self.clone()
         q.clear_volatile()
+        q.selected_experts = None
 
         saved_length = q.update_checkpoint.saved_length
         accepted_len = q.accepted_len[saved_length:]

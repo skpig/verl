@@ -165,6 +165,7 @@ actor_rollout_ref:
     name: xperf_gpt
     prompt_length: ${data.max_prompt_length}  # for xperf_gpt
     response_length: ${data.max_response_length}
+    return_selected_experts: ${actor_rollout_ref.actor.reuse_old_experts}
     vit_use_xperf_gpt: False # if false, vit will use torch vit
     vit_use_dp: False
     dp_vit_batching_step: 0

@@ -570,11 +570,13 @@ class RequestManager:
         self._query_id_log[step].add(query.id)
         return query.id
 
-    async def wait_until_finished(self, query_id: str) -> Query:
+    async def wait_until_finished(self, query_id: str):
         req = await self.req_pool.wait(query_id)
         self.req_stat.finish(self._rm_name, req)
         self.query_tracer.trace(req)
-        return req.query
+        selected_experts = req.query.selected_experts
+        req.query.selected_experts = None
+        return req.query, selected_experts
 
     def update_intermediate_queries(self, queries: List[Query | QueryUpdate], engine_id: str, wg_name: str, ts: float):
         finished = len(list(None for q in queries if q.is_finished))
