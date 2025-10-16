@@ -8,7 +8,7 @@ import torch
 from transformers import AutoImageProcessor, AutoTokenizer
 import asyncio
 
-from alpha_seed.workers.agents.handlers.base_tool import BaseTool
+from alpha_seed.workers.agents.handlers.base_tool import BaseTool, ToolResult
 from alpha_seed.utils.dataset.vlm_rl_dataset import decode_bytes_to_rgb_image
 from alpha_seed.utils.ckpt.hdfs import download_config_and_tokenizer
 import numpy as np
@@ -392,19 +392,20 @@ class VisualCotEnv(BaseTool):
     async def async_eval(self, expression, globals=None, locals=None):
         return await asyncio.to_thread(eval, expression, globals or {}, locals or {})
 
-    async def step(self, action: str) -> tuple[bool, dict | str]:
+    async def execute(self, instance_id, paramaters: dict, **kwargs) -> ToolResult:
         """
         Args:
             action (str): a function string, e.g. 'POINT(image_bytes=..., points=...)'.
         """
+        action = paramaters['action']
         match = re.match(r'^(\w+)\(', action)
         if not match:
-            return False, f"Invalid function call string: {action}"
+            return ToolResult(result=f"Invalid function call string: {action}", success=False)
         function_name = match.group(1)
         if function_name not in self.VISUAL_COT_FUNC:
-            return False, f"{function_name} is not available now."
+            return ToolResult(result=f"{function_name} is not available now.", success=False)
         if ('image_bytes' not in action) and (function_name != 'PYTHON'):
-            return False, "Missing image input."
+            return ToolResult(result="Missing image input.", success=False)
         self._metrics[function_name].append(1)
 
         try:
@@ -433,10 +434,10 @@ class VisualCotEnv(BaseTool):
                 image_grid_hw=image_grid_hw,
                 raw_output=raw_visual_cot_output,
             )
-            return True, output
+            return ToolResult(result=output, success=True)
         except Exception as e:
             print(f"[env1] execution error {e}")
-            return False, str(e)
+            return ToolResult(result=str(e), success=False)
 
 
 def create_from_env_str(env_str: str, **kwargs):

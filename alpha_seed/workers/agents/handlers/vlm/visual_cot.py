@@ -16,6 +16,7 @@ from alpha_seed.workers.agents.handlers.base import AsyncAgent
 from alpha_seed.workers.agents.llm import AsyncLLMInterface
 from alpha_seed.workers.agents.handlers.tool.parser import FunctionCall
 from alpha_seed.workers.agents.handlers.vlm.parser import VisualCotParser
+from alpha_seed.workers.agents.handlers.base_tool import ToolResult
 from mono_rl import DataProto
 from typing import Any, List, Dict
 import json
@@ -381,11 +382,12 @@ class VisualCotAgent(AsyncAgent):
             tool_state = False
             try:
                 async with asyncio.timeout(timeout):
-                    result = await tool.step(tool_code)
-                    if isinstance(result, tuple) and len(result) == 2:
-                        tool_state, tool_response = result
-                    else:
-                        tool_response = result
+                    instance_id = str(uuid4())
+                    parameters = {"action": tool_code}
+                    tool_result = await tool.execute(instance_id, parameters)
+                    assert isinstance(tool_result, ToolResult)
+                    tool_state = tool_result.success
+                    tool_response = tool_result.result
             except (asyncio.TimeoutError, TimeoutError):
                 logger.info(f"tool {tool_name} timeout")
                 tool_response = "execution timeout error."
