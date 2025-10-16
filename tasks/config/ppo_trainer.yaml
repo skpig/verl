@@ -41,14 +41,13 @@ data:
     eos: "<[EOS_never_used_51bce0c785ca2f68081bfa7d91973934]>"
 
 actor_rollout_ref:
-  remove_o_bias: False
-  freeze_gate: False
-  update_gate_ema: False
   hybrid_engine: True
   model:
     path: hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/models/deepseek-llm-7b-chat
     tokenizer_path: ${actor_rollout_ref.model.path}
     external_lib: null
+    remove_o_bias: False
+    freeze_gate: False
     override_config: {}
     enable_gradient_checkpointing: False
     use_ce_loss_fusion: False
@@ -64,6 +63,7 @@ actor_rollout_ref:
     infer_num_mini_batch: -1
     max_ppo_mini_batch: -1
     ulysses_sequence_parallel_size: 1
+    update_gate_ema: False
     
     fsdp_size: -1
     tp_size: 1
@@ -151,6 +151,7 @@ actor_rollout_ref:
     fsdp_size: -1
     tp_size: 1
     gen_tp_size: 1
+    update_gate_ema: False
     spatial_interleave: false
     tp_outside: false
     oe_size: 1
@@ -295,8 +296,6 @@ actor_rollout_ref:
   
 
 critic:
-  remove_o_bias: False
-  freeze_gate: False
   update_gate_ema: False
   load_score_head: True
   strategy: fsdp
@@ -318,7 +317,10 @@ critic:
     path: hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/models/deepseek-llm-7b-chat
     tokenizer_path: ${critic.model.path}
     override_config: {}
+    freeze_gate: False
     external_lib: ${actor_rollout_ref.model.external_lib}
+    use_ce_loss_fusion: False
+    remove_o_bias: False
     enable_gradient_checkpointing: False
     fsdp_config:
       param_offload: False

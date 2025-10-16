@@ -14,7 +14,11 @@ from typing import Optional
 
 def _set_config_field(mono_config, source_config: DictConfig, field: str):
     """ Set one specific field in a mono_rl dataclass config object"""
-    if field in source_config and source_config[field] is not None:
+    if not hasattr(mono_config, field):
+        raise Exception(f"Field {field} not found in mono_config")
+    if field not in source_config:
+        raise Exception(f"Field {field} not found in source_config")
+    if source_config[field] is not None:
         setattr(mono_config, field, source_config[field])
 
 
@@ -24,27 +28,26 @@ def _set_config_fsdp_engine(mono_config, source_config: DictConfig, model_config
     assert isinstance(mono_config, FSDPEngineConfig), "mono_config must be a FSDPEngineConfig object"
     config = copy.deepcopy(source_config)
 
-    # set top level config fields
-    _set_config_field(mono_config, config, "ppo_micro_batch_size")
-    _set_config_field(mono_config, config, "ppo_max_token_len")
-
     # set the hf_model_config field of the fsdp_engine
-    _set_config_field(mono_config.model, config, "use_ce_loss_fusion")
-    _set_config_field(mono_config.model, config, "logits_clamp")
+    if "logits_clamp" in config:
+        _set_config_field(mono_config.model, config, "logits_clamp")
     _set_config_field(mono_config.model, config, "update_gate_ema")
-    _set_config_field(mono_config.model, config, "remove_o_bias")
-    _set_config_field(mono_config.model, config, "freeze_gate")
-    _set_config_field(mono_config.model, config, "record_amax")
-    _set_config_field(mono_config.model, config, "calibrate_batch_num")
+    # 这里有两个use_rmpad的注入逻辑，是因为，在alphaseed里，use_rmpad在ref和reward是不配置在model里，但actor_rollout_ref是配置在model里的，所以需要判断两次，很离谱，但因为很久一直这么干，就保留下来了
+    if "use_rmpad" in config:
+        _set_config_field(mono_config.model, config, "use_rmpad")
 
     # set the hf_model_config field of the fsdp_engine from model_config
     source_model_config = model_config
     if not source_model_config and hasattr(config, "model"):
         source_model_config = config.model
     if source_model_config:
+        if "use_rmpad" in source_model_config:
+            _set_config_field(mono_config.model, source_model_config, "use_rmpad")
+        _set_config_field(mono_config.model, source_model_config, "freeze_gate")
+        _set_config_field(mono_config.model, source_model_config, "remove_o_bias")
+        _set_config_field(mono_config.model, source_model_config, "use_ce_loss_fusion")
         _set_config_field(mono_config.model, source_model_config, "path")
         _set_config_field(mono_config.model, source_model_config, "external_lib")
-        _set_config_field(mono_config.model, source_model_config, "use_rmpad")
         _set_config_field(mono_config.model, source_model_config, "enable_gradient_checkpointing")
         # special case for override_config as it is a dict
         if hasattr(source_model_config, "override_config"):
@@ -52,7 +55,8 @@ def _set_config_fsdp_engine(mono_config, source_config: DictConfig, model_config
             mono_config.model.override_config = override_config_clean_dict
 
     # set the hf_optim_config field of the fsdp_engine
-    _set_config_field(mono_config.optim, config, "grad_clip")
+    if "grad_clip" in config:
+        _set_config_field(mono_config.optim, config, "grad_clip")
     if hasattr(config, "optim"):
         _set_config_field(mono_config.optim, config.optim, "type")
         _set_config_field(mono_config.optim, config.optim, "lr")
@@ -73,10 +77,11 @@ def _set_config_fsdp_engine(mono_config, source_config: DictConfig, model_config
     if hasattr(config, "fsdp_config"):  # Note that param_offload is a sub-field of role.fsdp_config.param_offload
         mono_config.fsdp.param_offload = config.fsdp_config.param_offload
     _set_config_field(mono_config.fsdp, config, "fsdp_size")
-    _set_config_field(mono_config.fsdp, config, "act_offload")
-    _set_config_field(mono_config.fsdp, config, "act_offload_upbound")
-    _set_config_field(mono_config.fsdp, config, "act_offload_buff_size")
-    _set_config_field(mono_config.fsdp, config, "act_offload_threshold")
+    # ref model has no act_offload config
+    if "act_offload" in config:
+        _set_config_field(mono_config.fsdp, config, "act_offload")
+        _set_config_field(mono_config.fsdp, config, "act_offload_upbound")
+        _set_config_field(mono_config.fsdp, config, "act_offload_buff_size")
     _set_config_field(mono_config.fsdp, config, "ulysses_sequence_parallel_size")
     _set_config_field(mono_config.fsdp, config, "oe_size")
     _set_config_field(mono_config.fsdp, config, "tp_size")
