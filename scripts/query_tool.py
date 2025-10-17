@@ -116,9 +116,10 @@ def handle_client(conn, server):
                 response = evict_query(rms, args["query_id"])
             elif cmd == "show-stats":
                 # 集成agent统计信息到show-stats命令
+                no_color = args['no_color']
                 response = ""
                 for _, rm in rms:
-                    response += get_statistics_str(rm) + "\n\n"
+                    response += get_statistics_str(rm, console_width, no_color) + "\n\n"
             elif cmd == "dump-trace":
                 # dump
                 spans = []
@@ -380,7 +381,8 @@ def main():
     evict.add_argument('query_id', help='ID of the query')
 
     # show stats
-    subparsers.add_parser('show-stats', help='Show statistics')
+    show_stats_parser = subparsers.add_parser('show-stats', help='Show statistics')
+    show_stats_parser.add_argument('--no-color', action='store_true', help='output without coloring')
 
     # dump query trace
     dump_trace_parser = subparsers.add_parser('dump-trace', help='dump query trace intermediately')

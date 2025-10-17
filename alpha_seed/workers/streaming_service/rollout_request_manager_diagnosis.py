@@ -1,4 +1,8 @@
+import dataclasses
+import os.path
 import random
+import shutil
+import sys
 import threading
 from collections import deque
 from dataclasses import dataclass, field
@@ -68,29 +72,45 @@ class FiniteDict:
     有限大小的dict，有个FIFO队列记录key，所以key重复了可能会被提前pop掉
     """
 
-    def __init__(self, max_size):
+    def __init__(self, name: str, max_size):
+        self.name = name
         self.max_size = max_size
-        self._map = {}
+        try:
+            from alpha_seed.utils.store.lmdb import LMDBKV
+            dbpath = f'/tmp/reqmgr.{name}'
+            if os.path.exists(dbpath):
+                if os.path.isdir(dbpath):
+                    shutil.rmtree(dbpath)  # 删除非空目录
+                else:
+                    os.remove(dbpath)  # 删除文件
+            self._map = LMDBKV(dbpath, map_size=1000 * 2**30)  # 1TB max，先设置足够大
+            print("use LMDB for kv store of FiniteDict")
+        except ImportError:
+            from alpha_seed.utils.store.kv import RayObjectKV
+            self._map = RayObjectKV()
+            print("use RayObjectKV for kv store of FiniteDict")
         self._queue = deque()  # 只存key，不要设定最大长度，手动判断pop
         self._mutex = threading.Lock()
 
     def add(self, key, data):
         with self._mutex:
-            self._map[key] = data
+            self._map.put(key, data)
             self._queue.append(key)
             if len(self._queue) > self.max_size:
                 pop_key = self._queue.popleft()
-                # add进来的key可能重复，所以这里pop要判None
-                self._map.pop(pop_key, None)
+                self._map.delete(pop_key)
 
     def get(self, key, default=None):
         return self._map.get(key, default)
 
     def __getitem__(self, key):
-        return self._map[key]
+        return self._map.get(key, None)
 
     def __len__(self):
         return len(self._map)
+
+    def get_kv_class(self) -> type:
+        return type(self._map)
 
 
 class ReservoirSamples:
@@ -233,3 +253,60 @@ class RequestStatCollector:
             "rollout/query/run_delay_p99": stat.run_delay.percentile(0.99),
             "rollout/query/run_delay_max": stat.run_delay.max(),
         }
+
+
+def get_size_recursive(obj, seen=None):
+    """递归计算对象及其子对象的总内存占用（字节）"""
+    if seen is None:
+        seen = set()
+
+    obj_id = id(obj)
+    if obj_id in seen:
+        return 0
+    seen.add(obj_id)
+
+    size = sys.getsizeof(obj)
+
+    # dict
+    if isinstance(obj, dict):
+        size += sum(get_size_recursive(k, seen) + get_size_recursive(v, seen) for k, v in obj.items())
+
+    # list/tuple/set
+    elif isinstance(obj, (list, tuple, set, frozenset)):
+        size += sum(get_size_recursive(i, seen) for i in obj)
+
+    # dataclass
+    elif dataclasses.is_dataclass(obj):
+        for f in dataclasses.fields(obj):
+            try:
+                value = getattr(obj, f.name)
+                size += get_size_recursive(value, seen)
+            except Exception:
+                continue
+
+    # 一般自定义类（非dataclass）
+    else:
+        # 处理 __dict__（普通属性）
+        if hasattr(obj, "__dict__"):
+            size += get_size_recursive(vars(obj), seen)
+
+        # 处理 __slots__（可能与 __dict__ 共存）
+        if hasattr(obj, "__slots__"):
+            for slot in obj.__slots__:
+                try:
+                    value = getattr(obj, slot)
+                    size += get_size_recursive(value, seen)
+                except AttributeError:
+                    # 某些 slot 可能没有被赋值
+                    continue
+
+    return size
+
+
+@dataclass
+class RequestManagerMemoryUsage:
+    pool_size_estimate: int  # RequestPool总共占多大，估计值，用抽样估计的
+    request_stats_size: int  # RequestStatCollector 所占空间
+    query_trace_size: int  # query trace 所占空间
+    usage_scan_cost: float  # 遍历对象统计内存消耗的耗时，单位s
+    history_store_class: str  # 存历史记录的kv是哪个类

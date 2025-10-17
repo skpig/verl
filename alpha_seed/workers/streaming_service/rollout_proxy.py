@@ -167,8 +167,9 @@ class EngineDispatchMetrics(EngineTraceMetrics):
 
 class _MetricSourceImpl(MetricSource):
 
-    def __init__(self, request_manager: RequestManager):
+    def __init__(self, request_manager: RequestManager, rm_name: str):
         self.req_mgr = request_manager
+        self.rm_name = rm_name
         self.concurrency_ts = []  # [(ts, concurrency), ...]
 
     def get_recent_time_series_metrics(self, recent_seconds: float) -> TimeSeriesMetrics:
@@ -176,11 +177,15 @@ class _MetricSourceImpl(MetricSource):
         concurrency = ray.get(self.req_mgr.get_concurrency.remote())
         concurrency_values = concurrency.values()
         if not concurrency_values:
-            return TimeSeriesMetrics([], [])
+            # 如果没有任何concurrency，应该返回当前时刻metrics为zero
+            return TimeSeriesMetrics(
+                timestamps=[time.time()],
+                metrics=[0],
+            )
         min_con = min(concurrency_values)
         max_con = max(concurrency_values)
         total_con = sum(concurrency_values)
-        print(f'[{time.ctime()}] get recent concurrency min={min_con} max={max_con} total={total_con}')
+        print(f'[{time.ctime()}] [{self.rm_name}] get recent concurrency min={min_con} max={max_con} total={total_con}')
         self.concurrency_ts.append((now, total_con))
         tss = []
         metrics = []
@@ -268,7 +273,8 @@ class CombinedRayWorkerGroupAdapter(ReplicatedRayWorkerGroup):
     ScalingOrReplicated = ReplicatedRayWorkerGroup | ScalingRayWorkerGroup
 
     # noqa: no initializing base class, use as interface only
-    def __init__(self, intermittent: Dict[str, ScalingOrReplicated], persistent: Dict[str, ScalingOrReplicated]):
+    def __init__(self, intermittent: Dict[str, ScalingOrReplicated], persistent: Dict[str,
+                                                                                      ScalingOrReplicated]):  # noqa
         # intermittent: 时间上时分复用，有时候可用有时候不可用，不可用期间不会访问到对应的方法，由_replica_active决定
         # persistent: 时间上持续存在，无论何时都可用
         assert all(
@@ -467,6 +473,15 @@ class StandaloneRolloutWGAdapter:
         )
         self._tracer.trace(evt)
 
+    def empty_engine_cache(self):
+        initialized_wgs = self.replicas.get_initialized_worker_groups().values()
+        futs = []
+        for wg in initialized_wgs:
+            wg: RemoteAsyncXPerfGPTRollout
+            ref = wg.empty_engine_cache()
+            futs.append((wg, ref))
+        self.wait_ignore_actor_died(futs)
+
     def wait_ignore_actor_died(self, refs: List[Tuple[RayWorkerGroup, List[ray.ObjectRef]]]) -> int:
         obj_wg_map = {}
         remaining = set()
@@ -578,7 +593,7 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
     def __init__(self, replicas: Union[ReplicatedRayWorkerGroup, ScalingRayWorkerGroup],
                  actor_info: List[WeightsRankInfo], request_manager_name: str, config: DictConfig):
         self.request_manager: RequestManager = RequestManagerRegisterCenter.get(request_manager_name)  # noqa
-        super().__init__(self.request_manager)
+        super().__init__(self.request_manager, request_manager_name)
         self.replicas = replicas
         self.actor_info = actor_info  # hybrid rollout actor info
         self.config = config  # .streaming_rollout
@@ -676,8 +691,8 @@ class RolloutWorkerGroupProxy(_MetricSourceImpl):
             wg_queries: Dict[str, List[Query]] = {}  # engine_id -> 记录分给engine的queries
             for engine_id, wg in ready_wg_items:
                 try:
-                    history_ids = wg.get_history_ids()
-                    wg_history_map[engine_id] = set(history_ids) if history_ids else set()
+                    history_ids = set(history_id for history_id, _ in wg.get_history_ids())
+                    wg_history_map[engine_id] = history_ids
                 except (ActorDiedError, RayTaskError) as e:
                     self._finalize(wg, e)
 

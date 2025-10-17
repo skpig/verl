@@ -962,7 +962,8 @@ class ElasticAsyncXPerfGPTRollout(_unwrap_ray_remote(RemoteAsyncXPerfGPTRollout)
     @contextmanager
     def robust_stable_init_context(self):
         # stable rollout在坏掉后重新被拉起时，先找其他stable rollout拉取，之后再把地址更新为hybrid地址
-        current_rollout_relay_addrs = ray.get(self.kv_store_actor.get_by_key.remote('rollout_relay_addresses'))
+        current_rollout_relay_addrs = ray.get(
+            self.kv_store_actor.get_by_key.remote(f'{self.role}.rollout_relay_addresses'))
         print(f"{current_rollout_relay_addrs=}")
         self.setup_as_client(self.role, current_rollout_relay_addrs, self.hybrid_rollout_info, init_recv_buffer=False)
         yield
@@ -1013,7 +1014,8 @@ class ElasticAsyncXPerfGPTRollout(_unwrap_ray_remote(RemoteAsyncXPerfGPTRollout)
     def update_standalone_worker(self, role):
         # 在更新权重前，elastic rollout需要更新relay addr的地址
         if not self.setup_relay:
-            current_rollout_relay_addrs = ray.get(self.kv_store_actor.get_by_key.remote('rollout_relay_addresses'))
+            current_rollout_relay_addrs = ray.get(
+                self.kv_store_actor.get_by_key.remote(f'{self.role}.rollout_relay_addresses'))
             print(f"{current_rollout_relay_addrs=}")
             # 这里重新设setup_as_client就是为了更新source_info并作连通性测试，避免重新初始化recv_buffer
             self.setup_as_client(role, current_rollout_relay_addrs, self.hybrid_rollout_info, init_recv_buffer=False)

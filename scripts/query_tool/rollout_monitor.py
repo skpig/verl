@@ -88,13 +88,15 @@ def list_finished_queries_str(request_managers: list):
 
 def get_query_details_str(request_managers: list, query_id: str) -> Tuple[str, str]:
     from alpha_seed.workers.streaming_service.rollout_request import Request
+    from alpha_seed.workers.streaming_service.rollout_request_manager_diagnosis import get_size_recursive
     for name, rm in request_managers:
         req: Optional[Request] = ray.get(rm.get_by_id.remote(query_id))
         if req:
+            obj_size_bytes = get_size_recursive(req)
             obj = asdict(req)
             obj = compact_list_fields(obj)
             yaml_str = yaml.dump(obj, sort_keys=False, allow_unicode=True, default_flow_style=False)
-            meta_info = f"Query from {name}, "
+            meta_info = f"Query from {name}, size: {obj_size_bytes} bytes in memory, "
             now = time.time()
             if req.finished:
                 finished_ago = now - req.query.finished_time / 1e3
@@ -135,20 +137,22 @@ def list_all_pools_str():
     return '\n'.join(output)
 
 
-def get_statistics_str(request_manager) -> str:
-    from alpha_seed.workers.streaming_service.rollout_request_manager_diagnosis import FinishedEventStats
+def get_statistics_str(request_manager, width: int, no_color: bool = False) -> str:
+    from alpha_seed.workers.streaming_service.rollout_request_manager_diagnosis import FinishedEventStats, RequestManagerMemoryUsage
+    rm_name = ray.get(request_manager.get_name.remote())
     prefill_throughput, decode_throughput = ray.get(request_manager.get_estimated_throughput.remote())
     prefill_throughput = prefill_throughput.values() or [0]
     decode_throughput = decode_throughput.values() or [0]
     concurrency = ray.get(request_manager.get_concurrency.remote())
     concurrency_values = concurrency.values() or [0]
     finished_stats: FinishedEventStats = ray.get(request_manager.get_finished_stats.remote())
+    memory_usage: RequestManagerMemoryUsage = ray.get(request_manager.get_memory_usage_info.remote())
 
     # Create rich table for statistics display
-    table = Table(show_header=True, header_style="bold cyan", box=box.SIMPLE_HEAD, width=80)
-    table.add_column("Metric", style="bold white", no_wrap=True, width=25)
-    table.add_column("Value", style="green", justify="right", width=20)
-    table.add_column("Unit", style="dim", width=15)
+    table = Table(show_header=True, header_style="bold cyan", box=box.SIMPLE_HEAD)
+    table.add_column("Metric", style="bold white", no_wrap=True)
+    table.add_column("Value", style="green", justify="right")
+    table.add_column("Unit", style="dim")
 
     # Add throughput and concurrency rows
     table.add_row("Active engines", f"{len(concurrency)}", "")
@@ -165,11 +169,16 @@ def get_statistics_str(request_manager) -> str:
     table.add_row("Rollout finished events(wait)", f"{finished_stats.waiting_count}", "requests")
     table.add_row("Rollout finished staging", f"{finished_stats.finished_staging_size}", "requests")
     table.add_row("Rollout finished total", f"{finished_stats.finished_accumulated_size}", "requests")
+    table.add_row("ReqMgr pool size(est.)", f"{memory_usage.pool_size_estimate / 1e6:.0f}", "MB")
+    table.add_row("ReqMgr stats size", f"{memory_usage.request_stats_size / 1e3:.0f}", "KB")
+    table.add_row("ReqMgr query trace size", f"{memory_usage.query_trace_size / 1e6:.0f}", "MB")
+    table.add_row("ReqMgr usage scan cost", f"{memory_usage.usage_scan_cost:.3f}", "s")
+    table.add_row("ReqMgr history store class", f"{memory_usage.history_store_class}", "")
 
     # Render table to string
-    console = Console(width=80)
+    console = Console(force_terminal=not no_color, width=width, no_color=no_color)
     with console.capture() as capture:
-        console.print("\n[bold yellow]📊 Request Manager Statistics[/bold yellow]")
+        console.print(f"\n[bold yellow]📊 {rm_name} [/bold yellow] Request Manager Statistics")
         console.print(table)
         console.print("")
 

@@ -52,6 +52,8 @@ class HorizontalAutoScaling:
     def __init__(self, replicas: ReplicatedRayWorkerGroup, worker_pool_name: str, config: ScalePolicyConfig,
                  metric_source: MetricSource):
         self.replicas = replicas
+        self.group_name = self.replicas.resource_unit.name_prefix  # 要伸缩的group的名字
+        self.group_unit_size = self.replicas.resource_unit.world_size  # 要伸缩的group的一个unit的大小(i.e. 一个dp的大小)
         self.worker_pool_name = worker_pool_name
         self.config = config
         self.metric_source = metric_source
@@ -59,10 +61,12 @@ class HorizontalAutoScaling:
         self._is_local_ray_cluster = is_local_ray_instance()
         self._tracer: Optional[Tracer] = None  # _scaling_loop 专用tracer
 
-        threading.Thread(target=self._scaling_loop, daemon=True, name=f'scaling-loop/{worker_pool_name}').start()
+        threading.Thread(target=self._scaling_loop,
+                         daemon=True,
+                         name=f'scaling-loop/{worker_pool_name}/{self.group_name}').start()
         threading.Thread(target=self._scaling_materializing,
                          daemon=True,
-                         name=f'scaling-materialize/{worker_pool_name}').start()
+                         name=f'scaling-materialize/{worker_pool_name}/{self.group_name}').start()
 
     def _scaling_loop(self):
         self._tracer = Tracer.get_instance()
@@ -124,7 +128,8 @@ class HorizontalAutoScaling:
                 time.sleep(1)
                 continue
 
-            done, not_done = ray.wait(list(remaining), num_returns=len(remaining), timeout=2.)
+            remaining_size = len(remaining)
+            done, not_done = ray.wait(list(remaining), num_returns=remaining_size, timeout=2.)
             for obj in done:
                 try:
                     ray.get(obj)
@@ -141,7 +146,7 @@ class HorizontalAutoScaling:
         t1 = time.time() * 1e6
         original_dur = t1 - t0
         dur = max(1e6, original_dur)  # 最小显示1s的方块，避免找不到
-        evt = CompleteEvent(pid='HorizontalAutoScaling',
+        evt = CompleteEvent(pid=self._tracer_pid,
                             tid=0,
                             name=event_name,
                             cat=event_name,
@@ -158,13 +163,13 @@ class HorizontalAutoScaling:
         t0 = time.time() * 1e6
         yield
         t1 = time.time() * 1e6
-        evt = CompleteEvent(pid='HorizontalAutoScaling', tid=0, name=object_name, cat=object_name, ts=t0, dur=t1 - t0)
+        evt = CompleteEvent(pid=self._tracer_pid, tid=0, name=object_name, cat=object_name, ts=t0, dur=t1 - t0)
         self._tracer.trace(evt)
 
     def _trace_scaling_metrics(self, direction: str, metrics: TimeSeriesMetrics):
         ts = metrics.timestamps[-1]
         val = metrics.metrics[-1]
-        evt = CounterEvent(name=f'scale {direction}', pid='HorizontalAutoScaling', ts=ts * 1e6, data={
+        evt = CounterEvent(name=f'scale {direction}', pid=self._tracer_pid, ts=ts * 1e6, data={
             'current': val,
         })
         self._tracer.trace(evt)
@@ -248,3 +253,7 @@ class HorizontalAutoScaling:
 
         # note(lixiang): ray现在的版本暂不支持每个node可用资源检查，所以这里只检查数量，不做拓扑检查
         return int(num_gpus_available // num_gpus_required)
+
+    @property
+    def _tracer_pid(self) -> str:
+        return f"{self.group_name} HAS.{self.worker_pool_name}"

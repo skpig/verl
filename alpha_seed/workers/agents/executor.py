@@ -134,9 +134,11 @@ class AgentWorker:
                     alpha_seed.trainer.ppo.RayPPOTrainer._preprocess_batch_before_gen
         :param agent_name: agent class name
         """
+        tf = TrajectoryFactory(uid, agent_name, global_step)
+        tf.get()  # 初始化第一个表示task开始，以便能够即使没有调用llm或者tool也能知道有个task已经开始
         return {
             'uid': uid,
-            'trajectory_factory': TrajectoryFactory(uid, agent_name, global_step),
+            'trajectory_factory': tf,
             'config': self.config,
             'executor': self._thread_executor,
             'global_state': self.global_state,
@@ -207,6 +209,8 @@ class AgentWorker:
     def stop(self):
         self._metrics_task.cancel()
         self._traj_task.cancel()
+        self._thread_executor.shutdown()
+        self.async_tokenizer.executor.shutdown()
 
 
 class ExecutorBase:

@@ -6,6 +6,7 @@ import ray
 import yaml
 from rich.console import Console
 from rich.table import Table, box
+from rich.markup import escape
 
 from scripts.query_tool.utils import compact_list_fields, FlowStyleList, represent_flow_list, represent_multiline_str
 
@@ -186,16 +187,16 @@ def _colorize(v):
     color = ACTION_COLORS.get(v) or ROLE_COLORS.get(v)
     if not color:
         return v
-    return f"[{color}]{v}[/]"
+    return f"[{color}]{escape(v)}[/]"
 
 
 def _colorize_with(role, v):
     if v.startswith(system_exception_content_prefix):
-        return f"[bright_red]{v}[/]"
+        return f"[bright_red]{escape(v)}[/]"
     color = ACTION_COLORS.get(role) or ROLE_COLORS.get(role)
     if not color:
         return v
-    return f"[{color}]{v}[/]"
+    return f"[{color}]{escape(v)}[/]"
 
 
 def list_agent_tasks_str(width,

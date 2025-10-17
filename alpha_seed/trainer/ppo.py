@@ -934,6 +934,7 @@ class RayPPOTrainer(object):
         self.use_standalone_rollout = self.config.streaming_rollout.nnodes > 0
         self.use_standalone_validator = self.config.streaming_validator.nnodes > 0
         self.use_elastic_streaming_rollout = self.config.streaming_rollout.elastic.enable and self.use_standalone_rollout
+        self.use_elastic_streaming_validation = self.config.streaming_validator.elastic.enable and self.use_standalone_validator
         self.use_reference_policy = self.use_standalone_reference_policy or self.use_colocate_reference_policy
         self.use_rm = Role.RewardModel in role_worker_mapping
 
@@ -1075,7 +1076,7 @@ class RayPPOTrainer(object):
                 self.resource_pool_to_cls[resource_pool]['standalone_rollout'] = rollout_cls
                 worker_configs['standalone_rollout'] = self.config.actor_rollout_ref
 
-            if self.use_standalone_validator:
+            if self.use_standalone_validator and not self.use_elastic_streaming_validation:
                 resource_pool = self.resource_pool_manager.get_resource_pool(Role.Validator)
                 validator_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Validator],
                                                      config=self.config.actor_rollout_ref,
@@ -1227,7 +1228,7 @@ class RayPPOTrainer(object):
                                      remove_safetensors_after_init=self.config.trainer.remove_safetensors_after_init,
                                      from_scratch=from_scratch)))
 
-        if self.use_standalone_validator:
+        if self.use_standalone_validator and not self.use_elastic_streaming_validation:
             self.standalone_validator_wg = self.all_wg['standalone_validator']
             init_futures.append(('standalone_val_init_model',
                                  self.standalone_validator_wg.init_model(
@@ -1866,8 +1867,8 @@ class RayPPOTrainer(object):
 
                 with Timer(name='generate', logger=None) as timer:
                     batch, metrics_from_gen = ray.get(
-                        self.rollout_manager.train_generate_queued.remote(self.dataloader_consumer,
-                                                                          step=self.global_step))
+                        self.rollout_manager.train_generate_queued_async.remote(self.dataloader_consumer,
+                                                                                step=self.global_step))
 
                 metrics.update(metrics_from_gen)
                 metrics['timing/generate'] = timer.last
@@ -1893,10 +1894,10 @@ class RayPPOTrainer(object):
                                                 path=save_path,
                                                 dist_data_manager=self.dist_data_manager)
                     batch, metrics_from_gen = ray.get(
-                        self.rollout_manager.train_generate.remote(batch,
-                                                                   step=self.global_step,
-                                                                   save_dataproto_fn=save_dataproto_fn,
-                                                                   is_warmup_step=is_warmup_step))
+                        self.rollout_manager.train_generate_async.remote(batch,
+                                                                         step=self.global_step,
+                                                                         save_dataproto_fn=save_dataproto_fn,
+                                                                         is_warmup_step=is_warmup_step))
                 metrics.update(metrics_from_gen)
                 metrics['timing/generate'] = timer.last
                 if batch is None or len(batch) == 0 or is_warmup_step:
@@ -2162,6 +2163,16 @@ class RayPPOTrainer(object):
             log_cpu_memory_usage('before load checkpoint')
             self.load_checkpoint()
             log_cpu_memory_usage('after load checkpoint')
+
+    def shutdown(self):
+        from tasks.main_ppo import RewardManager
+        self.async_tracking_pool.shutdown()
+        if self.rollout_manager is not None:
+            ray.get(self.rollout_manager.stop_servers.remote())
+        if isinstance(self.reward_fn, RewardManager):
+            self.reward_fn.finalize()
+        if isinstance(self.val_reward_fn, RewardManager):
+            self.val_reward_fn.finalize()
 
     @stage_logger.log_duration('policy_update')
     def _update_actor(self, actor_future, batch, metrics):

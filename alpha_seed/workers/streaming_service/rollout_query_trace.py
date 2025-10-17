@@ -1,7 +1,7 @@
 import copy
 import time
 from dataclasses import asdict
-from typing import List, Optional
+from typing import List, Optional, Callable
 
 from omegaconf import DictConfig
 
@@ -11,11 +11,37 @@ from alpha_seed.workers.streaming_service.rollout_request import StaleHistory, R
 from alpha_seed.workers.xperf_rollout.component.query import QueryProcessEvent, ProcessEventType
 
 
+def colorize_step(step: int) -> str:
+    # 把step (0-25) 转成a-z的字母循环，用于渲染D slice
+    # 渲染成这样的效果  D.1.a  D.2.b
+    step = step % 26
+    return f"{step}.{chr(step + ord(b'a'))}"
+
+
+def get_worker_group_name_normalizer(query_trace_config: DictConfig) -> Callable[[str], str]:
+    if query_trace_config.renderer.merge_elastic_replicas:
+
+        def normalize(wg_name: str) -> str:
+            # 为了简单不把对象和配置传来传去，
+            # 先hardcode渲染规则在这里，注意跟着ElasticRolloutManager的命名一起修改
+            # wg name格式一般是 ElasticAsyncXPerfGPTRollout_train_rollout_el_644_
+            #   _el_ 表示elastic
+            #   _st_ 表示stable
+            if '_el_' in wg_name:
+                return wg_name.split('_el_')[0] + '_elastic'
+            return wg_name
+
+        return normalize
+    else:
+        return lambda x: x
+
+
 class QueryTracer:
 
     def __init__(self, query_trace_config: DictConfig, rm_name: str):
         self.query_trace_config = query_trace_config
         self._rm_name = rm_name
+        self._wg_name_normalizer = get_worker_group_name_normalizer(query_trace_config)
 
         self.tracer = Tracer.get_instance(retention_hours=query_trace_config.retention_hours)
         self.waterfall_tracer = WaterfallSlotTracer(self.tracer)
@@ -59,73 +85,6 @@ class QueryTracer:
     def trace_event(self, event: TracingEvent):
         self.tracer.trace(event)
 
-    def _make_trace_event(self, req: Request) -> List[CompleteEvent | CoherentCompleteEvent]:
-        # [C][W][P][D](stale) --> [W][P][D]
-        # [C]Query对象被创建出来的时刻，也就是从dataloader里取出来的时刻，每个batch应该几乎统一开始
-        # [W]始终以re/scheduled ts开始，
-        # [P]尽量以engine里的first_scheduled_time作为开始
-        # [D]尽量以first_token_time作为开始
-        # 如果任意一个时间为0，则往前回退一个已标记的时间
-        query = req.query
-
-        working = self._make_wpd_coherent_seq(req)
-
-        uid = query.meta_info.get("uid", req.query.id)
-        histories = []
-        for idx, his in enumerate(req.stale_histories):
-            stale_wait = CompleteEvent(
-                name='W',
-                cat='rollout-wait',
-                pid=f'{self._rm_name} {his.assigned_engine_name}',
-                tid=0,
-                ts=his.received_time * 1000 + 1,
-                dur=(his.first_scheduled_time - his.received_time) * 1000 - 1,
-                args={
-                    'stale_count': idx,
-                    'query_id': query.id,
-                    'uid': uid,
-                    'step': his.start_step,
-                    'age': (his.received_time - req.query.created_time) / 1e3,
-                    'shed_delay': (his.received_time - his.last_pending_reschedule_ts) / 1e3,
-                },
-            )
-            stale_prefill = CompleteEvent(
-                name='P',
-                cat='rollout-prefill',
-                pid=f'{self._rm_name} {his.assigned_engine_name}',
-                tid=0,
-                ts=his.first_scheduled_time * 1000 + 1,
-                dur=(his.first_token_time - his.first_scheduled_time) * 1000 - 1,
-                args={
-                    'stale_count': idx,
-                    'query_id': query.id,
-                    'uid': uid,
-                    'step': his.start_step,
-                },
-            )
-            stale_decode = CompleteEvent(
-                name=his.stale_reason,
-                cat='rollout-stale',
-                pid=f'{self._rm_name} {his.assigned_engine_name}',
-                tid=0,
-                ts=his.first_token_time * 1000 + 1,
-                dur=(his.end_ts - his.first_token_time) * 1000 - 1,
-                args={
-                    'stale_count': idx,
-                    'query_id': query.id,
-                    'uid': uid,
-                    'step': his.start_step,
-                    'stale_action': his.stale_action,
-                    'stale_reason': his.stale_reason,
-                    'length_generated': his.length_generated,
-                    'update_count': his.update_count,
-                    'release_count': his.release_count,
-                },
-            )
-            histories.append(CoherentCompleteEvent([stale_wait, stale_prefill, stale_decode], 1))
-
-        return histories + working
-
     def _make_trace_event2(self, req: Request) -> List[CoherentCompleteEvent]:
         cce = []
         if req.query.process_events:
@@ -136,83 +95,6 @@ class QueryTracer:
                 his_cce = self._make_history_wpd_coherent_seq(req, idx, his)
                 histories.extend(his_cce)
         return histories + cce
-
-    # deprecated
-    def _make_wpd_coherent_seq(self, req: Request) -> List[CoherentCompleteEvent]:
-        """
-        根据query对象还原最后一次调度到engine的W/P/D trace
-        """
-        query = req.query
-        received_time = query.received_time
-        first_scheduled_time = query.first_scheduled_time or query.created_time
-        first_token_time = query.first_token_time or first_scheduled_time
-        meta_info = copy.deepcopy(query.meta_info)
-        self._remove_garbage_from_metainfo(meta_info)
-        uid = meta_info.get("uid", req.query.id)
-
-        wait = CompleteEvent(
-            name='W',
-            cat='rollout-wait',
-            pid=f'{self._rm_name} {req.assigned_engine_name}',
-            tid=0,
-            ts=received_time * 1000 + 1,
-            dur=(first_scheduled_time - received_time) * 1000 - 1,
-            args={
-                'query_id': query.id,
-                'uid': uid,
-                'original_input_len': query.original_input_len,
-                # 如果engine更新过参数，这个值也会显示为更新参数前已经decode的长度
-                'previous_generated_len': len(query.input_ids) - query.original_input_len,
-                'step': req.global_step,
-                'stale_count': len(req.stale_histories),
-                'abort_count': len(req.abort_histories),
-                'age': (received_time - query.created_time) / 1e3,  # 相对于query生命周期的延迟
-                'shed_delay': (received_time - req.last_pending_reschedule_ts) / 1e3,  # 相对于上次进入request pool的延迟
-                'enqueue_delay': (query.enqueue_time - query.created_time) / 1e3,
-            },
-        )
-        prefill = CompleteEvent(
-            name='P',
-            cat='rollout-prefill',
-            pid=f'{self._rm_name} {req.assigned_engine_name}',
-            tid=0,
-            ts=first_scheduled_time * 1000 + 1,  # 处理渲染上对齐的误差，偏移1us
-            dur=(first_token_time - first_scheduled_time) * 1000 - 1,
-            args={
-                'query_id': query.id,
-                'uid': uid,
-                'prefill_len': len(query.input_ids),  # 用这个表示prefill里真正输入的token数，可能包含中途decode中断重新prefill的token
-                'step': req.global_step,
-                'stale_count': len(req.stale_histories),
-                'age': (first_scheduled_time - query.created_time) / 1e3,
-            },
-        )
-        decode = CompleteEvent(
-            name='D',
-            cat='rollout-decode',
-            pid=f'{self._rm_name} {req.assigned_engine_name}',
-            tid=0,
-            ts=first_token_time * 1000 + 1,
-            dur=(query.finished_time - first_token_time) * 1000 - 1,
-            args={
-                'query_id': query.id,
-                'uid': uid,
-                'original_input_len': query.original_input_len,  # 原始输入给定的prefill token数，对齐openai usage的指标
-                'length_generated': query.new_token_len -
-                                    (len(query.input_ids) - query.original_input_len),  # 本次decode的token数
-                'total_output_len': query.new_token_len,  # 总共decode的token数
-                'update_count': req.update_count,
-                'release_count': req.query.release_count,
-                'step': req.global_step,
-                'meta_info': meta_info,
-                'sample_kwargs': {
-                    'top_k': query.top_k,
-                    'top_p': query.top_p,
-                    'temperature': query.temperature,
-                }
-            },
-        )
-        return [CoherentCompleteEvent([wait, prefill, decode], 1)]
 
     def _make_wpd_coherent_seq2(self, req: Request, events: List[QueryProcessEvent]) -> List[CoherentCompleteEvent]:
         """
@@ -228,6 +110,7 @@ class QueryTracer:
         coherent_list: List[CompleteEvent] = []
         coherent_sort_idx = -1
 
+        wg_name = self._wg_name_normalizer(req.assigned_engine_name)
         wait_delay = 0
         for i in range(1, len(events)):
             prev_event = events[i - 1]
@@ -246,11 +129,13 @@ class QueryTracer:
                     'wait_delay': wait_delay,
                     **this_event.info,
                 }
+                if wg_name != req.assigned_engine_name:
+                    extra_args["wg_name"] = req.assigned_engine_name  # noqa
                 # 按第一个prefill event来对齐
                 if coherent_sort_idx == -1:
                     coherent_sort_idx = len(coherent_list)
             elif this_event.event == ProcessEventType.FINISHED:
-                event_name, event_cat = "D", "rollout-decode"
+                event_name, event_cat = f"D.{colorize_step(req.global_step)}", "rollout-decode"
                 extra_args = {
                     "update_count": req.update_count,
                     "meta_info": meta_info,
@@ -264,7 +149,7 @@ class QueryTracer:
             elif this_event.event == ProcessEventType.EVICTED:
                 event_name, event_cat = this_event.info.get("reason", "Evict"), "rollout-evicted"
                 if prev_event.event == ProcessEventType.PREFILL_DONE:
-                    event_name = f"D -> {event_name}"
+                    event_name = f"D.{colorize_step(req.global_step)}"
                 extra_args = {
                     **this_event.info,
                 }
@@ -275,7 +160,7 @@ class QueryTracer:
             ce = CompleteEvent(
                 name=event_name,
                 cat=event_cat,
-                pid=f'{self._rm_name} {req.assigned_engine_name}',
+                pid=f'{self._rm_name} {wg_name}',
                 tid=0,
                 ts=start_ts + 1,
                 dur=dur - 1,
@@ -314,7 +199,7 @@ class QueryTracer:
             if last_event.event == ProcessEventType.PREFILL_START:
                 event_name, event_cat = "P(running)", "rollout-prefill"
             elif last_event.event == ProcessEventType.PREFILL_DONE:
-                event_name, event_cat = "D(running)", "rollout-decode"
+                event_name, event_cat = f"D.{colorize_step(req.global_step)}(running)", "rollout-decode"
 
             if event_name:
                 start_ts = last_event.ts_ms * 1e3
@@ -346,10 +231,12 @@ class QueryTracer:
                     'enqueue_delay': (req.query.enqueue_time - req.query.created_time) / 1e3,
                     'processing_events': [asdict(e) for e in events],
                 }
+                if wg_name != req.assigned_engine_name:
+                    args["wg_name"] = req.assigned_engine_name
                 ce = CompleteEvent(
                     name=event_name,
                     cat=event_cat,
-                    pid=f'{self._rm_name} {req.assigned_engine_name}',
+                    pid=f'{self._rm_name} {wg_name}',
                     tid=0,
                     ts=start_ts + 1,
                     dur=dur - 1,
@@ -373,6 +260,7 @@ class QueryTracer:
         events_obj = [asdict(e) for e in events]
         ret: List[CoherentCompleteEvent] = []
         coherent_list: List[CompleteEvent] = []
+        his_wg_name = self._wg_name_normalizer(history.assigned_engine_name)
         for i in range(1, len(events)):
             prev_event = events[i - 1]
             this_event = events[i]
@@ -391,12 +279,14 @@ class QueryTracer:
                     'wait_delay': wait_delay,
                     **this_event.info,
                 }
+                if his_wg_name != history.assigned_engine_name:
+                    extra_args["wg_name"] = his_wg_name  # noqa
                 if coherent_sort_idx == -1:
                     coherent_sort_idx = len(coherent_list)  # 选P对应的位置，不能用i
             elif this_event.event == ProcessEventType.EVICTED:
                 event_name, event_cat = this_event.info.get("reason", "Evict"), "rollout-evicted"
                 if prev_event.event == ProcessEventType.PREFILL_DONE:
-                    event_name = f"D -> {event_name}"
+                    event_name = f"D.{colorize_step(history.start_step)}"
                 extra_args = {
                     'stale_action': history.stale_action,
                     'stale_reason': history.stale_reason,
@@ -409,7 +299,7 @@ class QueryTracer:
             ce = CompleteEvent(
                 name=event_name,
                 cat=event_cat,
-                pid=f'{self._rm_name} {history.assigned_engine_name}',
+                pid=f'{self._rm_name} {his_wg_name}',
                 tid=0,
                 ts=start_ts + 1,
                 dur=dur - 1,
@@ -442,7 +332,7 @@ class QueryTracer:
         last_event = events[-1]
         name = None
         if last_event.event == ProcessEventType.PREFILL_DONE:
-            name = f"D -> {history.stale_reason}"
+            name = f"D.{colorize_step(history.start_step)}"
         elif last_event.event in [ProcessEventType.RECEIVED, ProcessEventType.EVICTED]:
             # 最后一个事件如果是evicted的话，说明最后的状态是waiting
             if not self.query_trace_config.renderer.no_waiting_spans:
@@ -457,7 +347,7 @@ class QueryTracer:
             stale_decode = CompleteEvent(
                 name=name,
                 cat='rollout-stale',
-                pid=f'{self._rm_name} {history.assigned_engine_name}',
+                pid=f'{self._rm_name} {his_wg_name}',
                 tid=0,
                 ts=last_event_end_ts + 1,
                 dur=history.end_ts * 1e3 - last_event_end_ts - 1,
@@ -472,6 +362,7 @@ class QueryTracer:
                     'release_count': history.release_count,
                     'length_generated': history.length_generated,
                     'processing_events': events_obj,
+                    'wg_name': his_wg_name if his_wg_name != history.assigned_engine_name else '',
                 },
             )
             coherent_list.append(stale_decode)

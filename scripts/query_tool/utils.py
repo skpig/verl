@@ -74,12 +74,19 @@ def render_rollout_progress(stats: List[dict], task_complete_stats: Dict[str, di
         else:
             least_recent_update = int(now - stat['oldest_updated_time'])
 
-        step_completion = task_complete_stats.get(str(stat['step']), {"running": 0, "completed": 0})
-        step_total_tasks = step_completion["running"] + step_completion["completed"]
-        bar = _render_progress_bar(step_completion['completed'], step_total_tasks, width=40)
+        # 按traj统计完成的和总task数
+        # 但traj同步有延迟，如果还没有traj数据的话先用Query数计算完成和正在跑的
+        if str(stat['step']) in task_complete_stats:
+            step_completion = task_complete_stats[str(stat['step'])]
+            finished_num = step_completion["completed"]
+            step_total_tasks = step_completion["running"] + step_completion["completed"]
+        else:
+            finished_num, step_total_tasks = stat['finished'], stat['total']
+
+        bar = _render_progress_bar(finished_num, step_total_tasks, width=40)
         line = (f"{stat['pool_name']:13s} | "
                 f"Step {stat['step']}: {bar} | "
-                f"{step_completion['completed']} / {step_total_tasks} | "
+                f"{finished_num} / {step_total_tasks} | "
                 f"P/D {stat['prefill_throughput']:.0f}/{stat['token_throughput']:.1f} TPS | "
                 f"assigned {stat['running_queries']} pending {stat['pending_queries']} done {stat['finished']} | "
                 f"old {oldest} LRU {least_recent_update} new {latest} (sec ago) | "

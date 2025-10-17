@@ -608,9 +608,11 @@ streaming_rollout:
     # 注意是step % N == 0，不是从最开始的N开始
     dump_every_n_steps: 4  # 每隔多少个step dump一次query trace，每次dump的内容会包含此刻往前2N个step的trace event
     retention_hours: 12  # query trace在内存里最多保留多少小时
+    max_history_size: 102400  # RequestManager里最多存多少个已完成的历史query
     upload_to_mlx: True
     renderer:
       no_waiting_spans: True  # 是否在trace threads上显示waiting，不显示W可以更清晰看出engine填充程度
+      merge_elastic_replicas: True  # 是否将elastic的实例都merge到同一个process里，便于看elastic整体情况
   proxy:
     # elastic打开时不能选even-distribution
     lb_mode: dynamic-balancing  # ["dynamic-balancing", "even-distribution", "cache-aware-balancing"]
@@ -633,9 +635,32 @@ streaming_rollout:
 streaming_validator:
   n_gpus_per_node: 0
   nnodes: 0
+  # 有standalone validator资源时，是否在空闲时出借给train rollout
+  # 默认开，如果因为出借导致每次weights update耗时增加可选择关掉
+  enable_lend: True
+
+  # elastic和proxy配置字段同streaming_rollout,注释参考streaming_rollout
   elastic:
     enable: false
     stable_pool_name: byted_stable_resource
+    elastic_pool_name: byted_unstable_resource
+    min_replicas: 1  # 最少的副本数，最小值会放在稳定资源池上跑，超过最小值的部分会放到弹性资源池上跑
+    max_replicas: 100
+    metrics_sampling_seconds: 5
+    scale_up_threshold: 6  # 平均每个engine生成的并发度超过x就扩
+    scale_up_wait: 20  # seconds，连续x seconds里的那个采样都超过threshold就扩
+    scale_down_threshold: 6  # 类似上面
+    scale_down_wait: 20  # 类似上面
+  proxy:
+    lb_mode: dynamic-balancing  # ["dynamic-balancing", "even-distribution", "cache-aware-balancing"]
+    poll_internal_seconds: 2.  # 1轮最短间隔
+    rebalance_threshold: 2  # 最小溢出x个才重新分发给其他
+    enable_no_cache_rebalancing: False
+    rebalance_skewness_coef: 1.0
+    gmem_abundant_threshold: 0.30
+    gmem_high_water_level_threshold: 0.90
+    gmem_insufficient_threshold: 0.95
+  query_trace: ${streaming_rollout.query_trace}
 
 # 这是资源池的配置伸缩
 elastic:

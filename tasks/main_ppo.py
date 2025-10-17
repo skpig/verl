@@ -805,6 +805,10 @@ class RewardManager():
         else:
             return reward_tensor, log_table
 
+    def finalize(self):
+        if self.rm_req_executor is not None:
+            self.rm_req_executor.shutdown()
+
 
 import ray
 import hydra
@@ -1419,6 +1423,7 @@ def main_task(config):
 
         send_message_to_employee("alpha seed任务开始训练", f"任务链接: {task_url}", user_email)
         trainer.fit()
+        trainer.shutdown()
 
 
 if __name__ == '__main__':

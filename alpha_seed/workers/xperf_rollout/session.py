@@ -822,7 +822,7 @@ class InferenceSession:
         if self.prefix_cache is not None:
             waiting_cache_ids = set(q.cache_id for q in self.waiting)
             pending_cache_ids = set(aq.query.cache_id for aq in self.pending.queue)
-            cache_ids = set(self.prefix_cache.get_cache_ids())
+            cache_ids = set(hid for hid, _ in self.prefix_cache.get_cache_ids())
             in_cache = (waiting_cache_ids | pending_cache_ids) & cache_ids
             used_slots = sum(self.prefix_cache.get_used_slot_num_of(cid) for cid in in_cache)
             swap_util = used_slots * 1.0 / self.prefix_cache.get_max_cache_slot_num()

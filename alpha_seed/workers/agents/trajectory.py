@@ -5,6 +5,7 @@ import traceback
 import uuid
 from collections import defaultdict, deque
 from dataclasses import dataclass, field, asdict
+from itertools import groupby
 from typing import Dict, Any, List, Tuple, Optional, Literal, Iterable
 
 import ray
@@ -106,8 +107,16 @@ class LLMStartSegment(StartSegment):
 
     def decode(self, tokenizer):
         if not self.input_prompt:
-            input_ids = list(filter(lambda i: i >= 0, self.input_ids))
-            self.input_prompt = tokenizer.decode(input_ids, skip_special_tokens=True).strip()
+            token_slice = [list(g) for _, g in groupby(self.input_ids, key=lambda x: x >= 0)]
+            prompt_frags = []
+            for token_ids in token_slice:
+                if token_ids[0] >= 0:
+                    text = tokenizer.decode(token_ids, skip_special_tokens=True).strip()
+                    prompt_frags.append(text)
+                else:
+                    image_placeholder = f"[image placeholder {len(token_ids)} tokens]"
+                    prompt_frags.append(image_placeholder)
+            self.input_prompt = " ".join(prompt_frags)
 
     def to_digest(self) -> str:
         return f"{self.input_prompt[:80]}..."
@@ -144,8 +153,16 @@ class LLMEndSegment(EndSegment):
 
     def decode(self, tokenizer):
         if not self.output_prompt:
-            output_ids = list(filter(lambda i: i >= 0, self.output_ids))
-            self.output_prompt = tokenizer.decode(output_ids, skip_special_tokens=True).strip()
+            token_slice = [list(g) for _, g in groupby(self.output_ids, key=lambda x: x >= 0)]
+            prompt_frags = []
+            for token_ids in token_slice:
+                if token_ids[0] >= 0:
+                    text = tokenizer.decode(token_ids, skip_special_tokens=True).strip()
+                    prompt_frags.append(text)
+                else:
+                    image_placeholder = f"[image placeholder {len(token_ids)} tokens]"
+                    prompt_frags.append(image_placeholder)
+            self.output_prompt = " ".join(prompt_frags)
 
     def to_digest(self) -> str:
         return f"{self.output_prompt[:30]}...{self.output_prompt[-30:]}"

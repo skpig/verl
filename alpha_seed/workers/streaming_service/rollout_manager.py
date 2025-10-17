@@ -143,6 +143,7 @@ class RolloutManager:
 
         self._use_server = self.config.actor_rollout_ref.rollout.mode == "server"
         self._rollout_elastic_enabled = self.config.streaming_rollout.elastic.enable
+        self._validation_elastic_enabled = self.config.streaming_validator.elastic.enable
         self._server_args = self.config.rollout_server
         self.rollout_server_started = threading.Event()
         self.threadsafe_nccl_comm = threading.Event()
@@ -158,7 +159,10 @@ class RolloutManager:
         self.rollout_pool_warmup_step = self.config.actor_rollout_ref.rollout.rollout_pool.get("warmup_step", 0)
 
         self.weights_communicator = self.config.actor_rollout_ref.rollout.weights_communicator
-        self.elastic_rollout_mgr = ElasticRolloutManager(self.config)
+        self.elastic_rollout_mgr = ElasticRolloutManager("train_rollout", self.config.streaming_rollout,
+                                                         self.config.actor_rollout_ref)
+        self.elastic_validation_mgr = ElasticRolloutManager("val_rollout", self.config.streaming_validator,
+                                                            self.config.actor_rollout_ref)
 
         # worker groups
         self.hybrid_wg = None
@@ -235,6 +239,7 @@ class RolloutManager:
 
         self.val_client_executor.stop()
         self.train_client_executor.stop()
+        self._save_executor.shutdown()
 
     def _init_standalone_comms(self):
         # 初始化参数更新的方式，其中elastic rollout必须只能用ucx
@@ -243,12 +248,13 @@ class RolloutManager:
             # setup actor as server to serve weights update request
             self._source_info = self.hybrid_wg.setup_as_server()
             self.elastic_rollout_mgr.set_hybrid_rollout_source_info(self._source_info)
+            self.elastic_validation_mgr.set_hybrid_rollout_source_info(self._source_info)
 
             # setup standalone worker as client
+            # elastic 由每个实例scale up后setup，这里跳过
             if self.train_standalone_wg is not None and not self._rollout_elastic_enabled:
-                # elastic rollout由每个实例scale up后setup，这里跳过
                 _setup_standalone_comm_ucx(self._source_info, self.train_standalone_wg, "standalone_rollout")
-            if self.val_standalone_wg is not None:
+            if self.val_standalone_wg is not None and not self._validation_elastic_enabled:
                 _setup_standalone_comm_ucx(self._source_info, self.val_standalone_wg, "standalone_validator")
         else:
             if self.train_standalone_wg is not None:
@@ -546,6 +552,9 @@ class RolloutManager:
                 metrics[f"rollout/agent/{finish_reason}_ratio"] = finish_reason_dict[finish_reason] / max(
                     1, len(all_iterations))
 
+    async def train_generate_async(self, *args, **kwargs) -> Tuple[DataProto, dict]:
+        return await asyncio.to_thread(self.train_generate, *args, **kwargs)
+
     def train_generate(
         self,
         batch: DataProto,
@@ -572,6 +581,9 @@ class RolloutManager:
         batch = self.train_generate_fetch(step, is_warmup_step, metrics)
         print(f"[INFO] gen step #{step}, elapsed: {time.time() - step_start}")
         return batch, metrics
+
+    async def train_generate_queued_async(self, *args, **kwargs) -> Tuple[DataProto, dict]:
+        return await asyncio.to_thread(self.train_generate_queued, *args, **kwargs)
 
     def train_generate_queued(self, train_batch_iter: Iterator[DataProto], step: int) -> Tuple[DataProto, dict]:
         """Train generation in queued style
@@ -620,11 +632,12 @@ class RolloutManager:
         if self.val_standalone_wg is not None:
             with try_lock(self._val_standalone_wg_lock) as locked:
                 if locked and not self.val_replicas.is_replica_ready('standalone'):
-                    self.train_replicas.set_replica_ready_state('val', ready=True)
-                    with Timer(name="update_val_rollout_server_queued", logger=None) as timer:
-                        _ = self.update_standalone_server_weights(is_train=False, is_main_thread=True)
-                    print(f"[INFO] {step} train generate queued[update val weights and restart] {timer.last}")
-                    metrics["timing/update_val_rollout_server_queued"] = timer.last
+                    if 'borrow' in self.train_replicas.replicas:
+                        with Timer(name="update_val_rollout_server_queued", logger=None) as timer:
+                            _ = self.update_standalone_server_weights(is_train=False, is_main_thread=True)
+                        self.train_replicas.set_replica_ready_state('borrow', ready=True)
+                        print(f"[INFO] {step} train generate queued[update val weights and restart] {timer.last}")
+                        metrics["timing/update_val_rollout_server_queued"] = timer.last
 
         with self.suppress_train_update_standalone():
             xperf_metrics = {}
@@ -945,12 +958,13 @@ class RolloutManager:
         if self.val_standalone_wg is not None and self.should_train_update_standalone():
             with try_lock(self._val_standalone_wg_lock) as locked:
                 if locked and not self.val_replicas.is_replica_ready('standalone'):
-                    self.train_replicas.set_replica_ready_state('val', ready=True)
-                    # Update val standalone wg if val replica is ready for train rollout
-                    with Timer(name="update_val_rollout_server", logger=None) as timer:
-                        _ = self.update_standalone_server_weights(is_train=False, is_main_thread=True)
-                    print(f"[INFO] {step} generate streaming[update val weights and restart] {timer.last}")
-                    metrics["timing/update_val_rollout_server"] = timer.last
+                    if 'borrow' in self.train_replicas.replicas:
+                        # Update val standalone wg if val replica is ready for train rollout
+                        with Timer(name="update_val_rollout_server", logger=None) as timer:
+                            _ = self.update_standalone_server_weights(is_train=False, is_main_thread=True)
+                        self.train_replicas.set_replica_ready_state('borrow', ready=True)
+                        print(f"[INFO] {step} generate streaming[update val weights and restart] {timer.last}")
+                        metrics["timing/update_val_rollout_server"] = timer.last
 
         global_handler = select_handler_fn(self.config.rollout_server.handler,
                                            external_lib=self.config.rollout_server.external_lib)
@@ -1353,7 +1367,7 @@ class RolloutManager:
                     agent_env = agent_env.tolist()
                 gen_batch.non_tensor_batch['extra_data'][i].update({'agent_env': agent_env})
         if (key := "initial_files") in gen_batch.non_tensor_batch:
-            #Here some CI tasks need initial files to upload to sandbox
+            # Here some CI tasks need initial files to upload to sandbox
             for i in range(len(gen_batch)):
                 agent_env_initial_files = gen_batch.non_tensor_batch['initial_files'][i]
                 if not pd.isna(agent_env_initial_files):
@@ -1410,42 +1424,26 @@ class RolloutManager:
                              f"please choose from ['even-distribution', 'dynamic-balancing', 'cache-aware-balancing']")
 
         hybrid_replica = FixedReplicatedRayWorkerGroupAdapter(self.hybrid_wg, gen_tp_size, 'actor_rollout_ref')
-
-        # validation on hybrid engine
-        val_intermittent_replicas = {
-            'hybrid': hybrid_replica,
-        }
-        # standalone validation
+        # standalone validation resource
         val_standalone_replica = None
         if self.val_standalone_wg is not None:
             val_standalone_replica = FixedReplicatedRayWorkerGroupAdapter(self.val_standalone_wg, gen_tp_size,
                                                                           'standalone_validator')
-            val_intermittent_replicas['standalone'] = val_standalone_replica
-
-        val_persistent_replicas = {}
-        self.val_replicas = CombinedRayWorkerGroupAdapter(val_intermittent_replicas, val_persistent_replicas)
-        # Turn off hybrid for gen by default (i.e. train mode initially)
-        self.val_replicas.set_replica_ready_state(name='hybrid', ready=False)
-        if 'standalone' in self.val_replicas.replicas:
-            self.val_replicas.set_replica_ready_state(name='standalone', ready=False)
-
-        self.val_rollout_proxy = ProxyClass(self.val_replicas, [], 'val_rollout', rollout_config)
-        self.val_rollout_server = await listen('val_rollout')
 
         # train
         # create replicated worker group and rollout proxy
-
         if self._rollout_elastic_enabled:
             assert self.weights_communicator == 'ucx', 'weights_communicator must be "ucx" when using elastic rollout'
             assert self.train_standalone_wg is None, 'should not initialize train standalone when using elastic rollout'
+            borrowed_replica = val_standalone_replica if self.config.streaming_validator.enable_lend else None
             self.train_rollout_proxy, self.train_standalone_wg, self.train_replicas = self.elastic_rollout_mgr.init_elastic_rollout(
-                hybrid_replica=hybrid_replica, val_standalone_replica=val_standalone_replica)
+                hybrid_replica=hybrid_replica, borrowed_standalone_replica=borrowed_replica)
         else:
             train_intermittent_replicas = {'hybrid': hybrid_replica}
 
             # Add val standalone replica to train replicas by default
-            if val_standalone_replica is not None:
-                train_intermittent_replicas['val'] = val_standalone_replica
+            if val_standalone_replica is not None and self.config.streaming_validator.enable_lend:
+                train_intermittent_replicas['borrow'] = val_standalone_replica
 
             train_persistent_replicas = {}
             if self.train_standalone_wg is not None:
@@ -1457,6 +1455,27 @@ class RolloutManager:
         # Turn off hybrid for gen by default (i.e. train mode initially)
         self.train_replicas.set_replica_ready_state(name='hybrid', ready=False)
         self.train_rollout_server = await listen('train_rollout')
+
+        # validation
+        if self._validation_elastic_enabled:
+            assert self.weights_communicator == 'ucx', 'weights_communicator must be "ucx" when using elastic validation'
+            assert self.val_standalone_wg is None, 'should not initialize val standalone when using elastic validation'
+            self.val_rollout_proxy, self.val_standalone_wg, self.val_replicas = self.elastic_validation_mgr.init_elastic_rollout(
+                hybrid_replica=hybrid_replica)
+        else:
+            # validation on hybrid engine
+            val_intermittent_replicas = {'hybrid': hybrid_replica}
+            if val_standalone_replica is not None:
+                val_intermittent_replicas['standalone'] = val_standalone_replica
+            val_persistent_replicas = {}
+            self.val_replicas = CombinedRayWorkerGroupAdapter(val_intermittent_replicas, val_persistent_replicas)
+            self.val_rollout_proxy = ProxyClass(self.val_replicas, [], 'val_rollout', rollout_config)
+
+        # Turn off hybrid for gen by default (i.e. train mode initially)
+        self.val_replicas.set_replica_ready_state(name='hybrid', ready=False)
+        if 'standalone' in self.val_replicas.replicas:
+            self.val_replicas.set_replica_ready_state(name='standalone', ready=False)
+        self.val_rollout_server = await listen('val_rollout')
 
         self.rollout_server_started.set()
         print("[rollout manager] servers started.")
@@ -1500,15 +1519,18 @@ class RolloutManager:
 
         with self._val_standalone_wg_lock:
             with Timer(name='train_to_val') as timer:
-                self.train_replicas.set_replica_ready_state('val', ready=False)
+                if 'borrow' in self.train_replicas.replicas:
+                    self.train_replicas.set_replica_ready_state('borrow', ready=False)
                 self.val_standalone_wg.empty_engine_cache()
-                self.val_replicas.set_replica_ready_state('standalone', ready=True)
+                if 'standalone' in self.val_replicas.replicas:
+                    self.val_replicas.set_replica_ready_state('standalone', ready=True)
             metrics['timing/val_standalone_to_val'] = timer.last
             print(f"[INFO] acquired val_standalone for validation")
             yield
             print(f"[INFO] release val_standalone to enable training")
-            self.val_replicas.set_replica_ready_state('standalone', ready=False)
-            # NOTE: Do not set `self.train_replicas.set_replica_ready_state('val', ready=True)`,
+            if 'standalone' in self.val_replicas.replicas:
+                self.val_replicas.set_replica_ready_state('standalone', ready=False)
+            # NOTE: Do not set `self.train_replicas.set_replica_ready_state('borrow', ready=True)`,
             # because the weights is not guaranteed to be updated, let train thread to decide
             # whether to use val standalone replica
 
@@ -1536,7 +1558,7 @@ class RolloutManager:
         return not getattr(self, flag_key, False)
 
     def get_standalone_metrics(self, standalone_wg):
-        if not self._rollout_elastic_enabled and standalone_wg is not None:
+        if standalone_wg is not None:
             metrics = standalone_wg.return_metrics()
             standalone_wg.empty_engine_cache()
             return metrics
@@ -1553,12 +1575,16 @@ class RolloutManager:
         if standalone_wg is None:
             return None
 
+        standalone_metric = {}
         with server_update_weights_ctx(standalone_wg, role=standalone_role):
             with self.acquire_hybrid_wg(is_train):
                 _update_standalone_weights(self.hybrid_wg, standalone_wg, standalone_role,
                                            self.threadsafe_nccl_comm if not is_main_thread else None, True, False)
-                standalone_metric = self.get_standalone_metrics(standalone_wg)
+                if is_train and not self._rollout_elastic_enabled:
+                    standalone_metric = self.get_standalone_metrics(standalone_wg)
+                elif not is_train and not self._validation_elastic_enabled:
+                    standalone_metric = self.get_standalone_metrics(standalone_wg)
         return standalone_metric
 
-    def dump_trace_spans(self, after_ts: float = 0.):
-        return Tracer.merge_all(after_ts=after_ts)
+    async def dump_trace_spans(self, after_ts: float = 0.):
+        return await asyncio.to_thread(Tracer.merge_all, after_ts=after_ts)

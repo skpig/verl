@@ -1,4 +1,5 @@
 import asyncio
+import random
 import threading
 import time
 from typing import Dict, List, Optional, Tuple, Container, Set, Any
@@ -10,7 +11,8 @@ from omegaconf import DictConfig
 from alpha_seed.workers.streaming_service.rollout_query_trace import QueryTracer
 from alpha_seed.workers.streaming_service.rollout_request import StaleHistory, AbortHistory, Request
 from alpha_seed.workers.streaming_service.rollout_request_manager_diagnosis import FinishedEventStats, RequestDigest, \
-    FiniteDict, ProgressStat, RequestStatCollector, RequestPoolInternalDiagnosis
+    FiniteDict, ProgressStat, RequestStatCollector, RequestPoolInternalDiagnosis, RequestManagerMemoryUsage, \
+    get_size_recursive
 from alpha_seed.workers.xperf_rollout.component.query import Query, QueryUpdate
 from alpha_seed.utils.profile.timeline import CounterEvent
 from alpha_seed.utils.server_client import get_stable_res
@@ -105,12 +107,13 @@ class StepPriorityList:
 
 class RequestPool:
 
-    def __init__(self):
+    def __init__(self, pool_name: str, max_history_size: int = 102400):
         self.requests: Dict[str, Request] = {}  # {query_id -> } 中间结果会被update进来
         # 按顺序记录每个(step, query id)，分发的时候优先从取更早的step，锁跟着self.requests的一起就好
         self.fifo = StepPriorityList()
         self.finished_requests: Dict[str, Request] = {}  # finished部分会被移到这里
-        self.historical_finished_requests = FiniteDict(204800)  # 记录所有完成的query，FIFO，便于query_tool查询诊断
+        self.historical_finished_requests = FiniteDict(pool_name,
+                                                       max_history_size)  # 记录所有完成的query，FIFO，便于query_tool查询诊断
         self.finished_counter = defaultdict(int)  # {step -> count} 统计每个step完成的数量(因为多轮每个step数量是会变化的)
         self._finished_events: Dict[str, asyncio.Event] = {}  # 标记请求完成的async event
         self._mutex = threading.Lock()
@@ -479,7 +482,8 @@ class RequestManagerRegisterCenter:
     def init(cls, config: DictConfig):
         stable_res = get_stable_res()
         rmrc = RequestManagerRegisterCenter.options(name='RequestManagerRegisterCenter',
-                                                    resources=stable_res).remote(config)
+                                                    resources=stable_res,
+                                                    max_concurrency=128).remote(config)
         ray.get(rmrc.ready.remote())
         return rmrc
 
@@ -540,12 +544,12 @@ class ProgressBar:
 class RequestManager:
 
     def __init__(self, query_trace_config: DictConfig):
-        self.req_pool = RequestPool()
+        self.actor_name = ray.get_runtime_context().get_actor_name()
+        self._rm_name = self.actor_name.removeprefix('RequestManager/')
+        self.req_pool = RequestPool(self._rm_name, query_trace_config.max_history_size)
         self.req_stat = RequestStatCollector()
         self.query_trace_config = query_trace_config
         self._step = 0
-        self.actor_name = ray.get_runtime_context().get_actor_name()
-        self._rm_name = self.actor_name.removeprefix('RequestManager/')
         self.query_tracer = QueryTracer(self.query_trace_config, self._rm_name)
         self._progress_bar = ProgressBar(self.actor_name)
         self._query_id_log = defaultdict(set)  # step -> set(query.id)
@@ -553,6 +557,9 @@ class RequestManager:
     def ready(self):
         print(f'RequestManager ready, {self.actor_name=}')
         return True
+
+    def get_name(self) -> str:
+        return self._rm_name
 
     async def put_new_query(self, query: Query) -> str:
         now = time.time()
@@ -799,6 +806,35 @@ class RequestManager:
 
         ret = sorted(ret, key=lambda p: p.step)
         return ret
+
+    def get_memory_usage_info(self) -> RequestManagerMemoryUsage:
+        t0 = time.time()
+
+        # sample from live request
+        live_keys = list(self.req_pool.requests.keys())
+        sample_keys = random.sample(live_keys, k=min(64, len(live_keys)))
+        size_list = []
+        for key in sample_keys:
+            req = self.req_pool.requests.get(key)
+            if req is not None:
+                size_list.append(get_size_recursive(req))
+        pool_size_estimate = 0
+        if size_list:
+            avg_size = sum(size_list) / len(size_list)
+            pool_size_estimate = int(avg_size * len(self.req_pool.requests))
+
+        # other objects
+        req_stats_size = get_size_recursive(self.req_stat)
+        query_trace_size = get_size_recursive(self.query_tracer)
+        time_cost = time.time() - t0
+
+        return RequestManagerMemoryUsage(
+            pool_size_estimate=pool_size_estimate,
+            request_stats_size=req_stats_size,
+            query_trace_size=query_trace_size,
+            usage_scan_cost=time_cost,
+            history_store_class=str(self.req_pool.historical_finished_requests.get_kv_class()),
+        )
 
 
 def get_all_request_manager_actors() -> List[RequestManager]:
