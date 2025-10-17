@@ -86,7 +86,7 @@ actor_rollout_ref:
     loss_average_constant: 0
     clip_mode: "token"  # "token", "sentence"
     dynamic_clip: False  # dynamically adjust clip range based on probability
-    reuse_old_experts: False
+    reuse_old_experts: "disabled" # "old_log_prob", "rollout"
     scale_pg_by_kl: False
     scale_pg_by_local_kl: False
     upgo_loss_weight: 0.0
@@ -167,6 +167,7 @@ actor_rollout_ref:
     name: xperf_gpt
     prompt_length: ${data.max_prompt_length}  # for xperf_gpt
     response_length: ${data.max_response_length}
+    return_selected_experts: ${actor_rollout_ref.actor.reuse_old_experts}
     think_template: ${data.think_template}
     video_sampling_strategy: ${data.video_sampling_strategy}
     vit_use_xperf_gpt: False # if false, vit will use torch vit

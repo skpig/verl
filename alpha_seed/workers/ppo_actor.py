@@ -16,17 +16,18 @@ Single Process Actor
 """
 from typing import Dict
 import math
-
+import ray
 import torch
 from tensordict import TensorDict
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-
+from collections import defaultdict
 from mono_rl import DataProto
 from verl.workers.actor import BasePPOActor
 import verl.utils.torch_functional as verl_F
 from alpha_seed.utils.functional import append_dict_items_to_dict
 
 from mono_rl.models.seed_models.modeling_vlm import get_image_keys
+from mono_rl.utils.dataset.dist_data_util import get_dist_data_manager
 from alpha_seed import core_algos
 from mono_rl.worker.engine.fsdp.models.model import FSDPModel
 from omegaconf import DictConfig, OmegaConf
@@ -39,26 +40,25 @@ class DataParallelPPOActor(BasePPOActor):
     def __init__(self, as_config: DictConfig, model_engine: FSDPModel):
         super().__init__(as_config)
         self.engine = model_engine
+        self.dist_data_manager = get_dist_data_manager()
         # Cache for old_experts to avoid communication overhead
-        self.old_experts_cache = {}
 
-    def compute_log_prob(self, data: DataProto, reuse_old_experts=False):
+    def compute_log_prob(self, data: DataProto, reuse_old_experts="disabled"):
         select_keys = ['responses', 'input_ids', 'attention_mask']
         image_keys = get_image_keys(data.non_tensor_batch)
-        # Only use training_uid for caching when reuse_old_experts is enabled
         non_tensor_keys = image_keys
-        if reuse_old_experts and 'training_uid' in data.non_tensor_batch:
-            non_tensor_keys = non_tensor_keys + ['training_uid']
         selected_data = data.select(batch_keys=select_keys, non_tensor_batch_keys=non_tensor_keys)
 
         mtp_n_heads = getattr(self.engine.model_config, 'mtp_n_heads', 1)
 
         entropy_lst = []
         log_prob_lst = []
-        acceptance_matrix_lst = [[] for _ in range(mtp_n_heads - 1)]
         selected_experts_lst = []
-        uid_lst = []  # Collect UIDs for caching
+        acceptance_matrix_lst = [[] for _ in range(mtp_n_heads - 1)]
 
+        if reuse_old_experts == 'rollout':
+            self.old_experts = self.get_old_experts(data)
+            selected_data.batch['old_experts'] = self.old_experts
         # Note: mismatched data order (here vs. upldate policy) can lead to
         # mismatched log probs. In order to match them, we need to split
         # batch into mini batches (same with training).
@@ -66,35 +66,26 @@ class DataParallelPPOActor(BasePPOActor):
             chunk_size = math.ceil(selected_data.batch.batch_size[0] / self.config.ppo_mini_batch_size)
         else:
             chunk_size = self.config.infer_num_mini_batch
+        reuse_old_log_prob_experts = reuse_old_experts == 'old_log_prob'
         for chunk_idx, mini_batch in enumerate(selected_data.chunk(chunk_size)):
             output_proto = self.engine.forward_backward_step(data=mini_batch,
                                                              forward_only=True,
-                                                             reuse_old_experts=reuse_old_experts)
+                                                             reuse_old_experts=reuse_old_log_prob_experts)
             if isinstance(self.engine.model_module, FSDP):
                 self.engine.model_module._handle.reshard(True)  # release memory
             log_prob_lst.append(output_proto.batch['logprobs'])
             entropy_lst.append(output_proto.batch['entropy'])
 
-            # Cache old_experts with uid as key
-            if reuse_old_experts:
+            if reuse_old_log_prob_experts:
                 batch_old_experts = output_proto.batch['old_experts']
-                selected_experts_lst.append(batch_old_experts)
-
-                # Store in cache using training_uid for reuse_old_experts
-                # training_uid should be unique per training step to avoid collisions
-                if 'training_uid' in mini_batch.non_tensor_batch:
-                    training_uids = mini_batch.non_tensor_batch['training_uid']
-                    for i, training_uid in enumerate(training_uids):
-                        if training_uid is not None:
-                            self.old_experts_cache[training_uid] = batch_old_experts[i].cpu()
-                    uid_lst.extend(training_uids)
-                else:
-                    raise RuntimeError(
-                        "training_uid not found in mini_batch.non_tensor_batch when reuse_old_experts=True")
+                selected_experts_lst.append(batch_old_experts.cpu())
 
             for j in range(mtp_n_heads - 1):
                 if output_proto.batch.get(f"acceptance_matrix_{j}", None) is not None:
                     acceptance_matrix_lst[j].append(output_proto.batch[f'acceptance_matrix_{j}'])
+
+        if reuse_old_log_prob_experts:
+            self.old_experts = torch.concat(selected_experts_lst, dim=0)
 
         log_probs = torch.concat(log_prob_lst, dim=0)
         entropy = torch.concat(entropy_lst, dim=0)
@@ -124,9 +115,17 @@ class DataParallelPPOActor(BasePPOActor):
         }
         return metrics
 
+    def get_old_experts(self, data: DataProto):
+        refs = data.non_tensor_batch['old_experts_ref'].tolist()
+        old_experts_ref = ray.get(self.dist_data_manager.get_refs.remote(refs))
+        return torch.cat(ray.get(old_experts_ref), dim=0)
+
     def update_policy(self, data: DataProto):
         config_dict = OmegaConf.to_container(self.config, resolve=True)
 
+        if self.config.reuse_old_experts != "disabled":
+            data.batch['old_experts'] = self.old_experts
+            self.old_experts = None
         # compute batch full token count
         response_length = data.batch['responses'].size(1)
         batch_full_token_count_mask = data.batch['attention_mask'][:, -response_length:]
@@ -144,24 +143,9 @@ class DataParallelPPOActor(BasePPOActor):
             self.engine.optimizer_zero_grad()
 
             # Retrieve cached old_experts if reuse_old_experts is enabled
-            # Use training_uid as cache key to avoid uid collision issues
-            if self.config.get('reuse_old_experts', False) and 'training_uid' in mini_batch.non_tensor_batch:
-                training_uids = mini_batch.non_tensor_batch['training_uid']
-                cached_experts = []
-                missing_keys = []
-
-                for training_uid in training_uids:
-                    if training_uid in self.old_experts_cache:
-                        cached_experts.append(self.old_experts_cache[training_uid])
-                    else:
-                        missing_keys.append(training_uid)
-                # Must hit all cache keys, otherwise raise error
-                if missing_keys:
-                    raise RuntimeError(f"Failed to find training_uids in old_experts cache: {missing_keys}. "
-                                       f"This indicates a mismatch between compute_log_prob and update_policy batches.")
-                # Add old_experts to mini_batch from cache
+            if self.config.reuse_old_experts != "disabled":
                 device = mini_batch.batch['responses'].device  # Use responses tensor to get device
-                mini_batch.batch['old_experts'] = torch.stack(cached_experts).to(device)
+                mini_batch.batch['old_experts'] = mini_batch.batch['old_experts'].to(device)
 
             # compute minibatch full token count
             mini_batch_full_token_count_mask = mini_batch.batch['attention_mask'][:, -response_length:]
@@ -190,15 +174,10 @@ class DataParallelPPOActor(BasePPOActor):
 
         self.engine.optimizer_zero_grad()
         self.engine.clear_memory_cache()
-
-        # Clear the old_experts cache after each update_policy step
-        self.clear_experts_cache()
+        if self.config.reuse_old_experts != "disabled":
+            data.batch.pop('old_experts')
 
         return metrics
-
-    def clear_experts_cache(self):
-        """Clear the old_experts cache after each step to prevent memory leak."""
-        self.old_experts_cache.clear()
 
 
 def pg_loss_fn(config: Dict, output: TensorDict, micro_data: TensorDict):

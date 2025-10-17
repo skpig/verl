@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from typing import *
 import aiohttp, copy
 from mono_rl import DataProto
+from mono_rl.utils.dataset.dist_data_util import get_dist_data_manager
 
 
 def rmpad(item):
@@ -28,6 +29,12 @@ def pad(item, max_standalone_len, tokenizer):
     item.batch['input_ids'] = F.pad(item.batch['input_ids'], (pad_len, 0), value=tokenizer.pad_token_id)
     item.batch['attention_mask'] = F.pad(item.batch['attention_mask'], (pad_len, 0), value=0)
     return item
+
+
+def pad_selected_experts(selected_experts, attention_mask):
+    total_len = attention_mask.shape[-1]
+    left_pad_len = torch.nonzero(attention_mask)[0]
+    return F.pad(selected_experts, (0, 0, 0, 0, left_pad_len, 0), value=0)[:total_len]
 
 
 def process_output(input_batch, output_batch, tokenizer, ready_batch, pending_batch, config, standalone=False):
@@ -260,6 +267,7 @@ class DataPack:
     extra_data: Optional[list] = None
     image_data_ref: Optional[list] = None
     raw_output_ref: Optional[list] = None
+    selected_experts: Optional[list] = None
 
     @classmethod
     def create_from_completion(cls, message):
@@ -285,6 +293,9 @@ class DataPack:
                              metrics=message['metrics'],
                              image_data_ref=[message.get('image_data_ref')],
                              raw_output_ref=[message.get('raw_output_ref')])
+        if message.get('selected_experts') is not None:
+            data_pack.selected_experts = [message['selected_experts']]
+
         return data_pack
 
 
@@ -373,6 +384,12 @@ def pack_to_dataproto(prompts, tokenizer, data_pack: DataPack, config) -> DataPr
     out.meta_info["xperf_metrics"] = data_pack.metrics
     out.meta_info["generation_kwargs"] = prompts.meta_info['generation_kwargs']
     out.non_tensor_batch = copy.deepcopy(prompts.non_tensor_batch)
+    if data_pack.selected_experts:
+        selected_experts = pad_selected_experts(data_pack.selected_experts[0], attention_mask[0]).unsqueeze(0)
+        ref = ray.put(selected_experts)
+        dist_data_manager = get_dist_data_manager()
+        ray.get(dist_data_manager.add_refs.remote([ref]))
+        out.non_tensor_batch['old_experts_ref'] = np.array([ref.hex()])
     if data_pack.extra_data is not None:
         out.non_tensor_batch['extra_data'] = np.array(data_pack.extra_data, dtype=object)
     if data_pack.image_data_ref is not None and any(i is not None for i in data_pack.image_data_ref):

@@ -1224,6 +1224,13 @@ def config_to_trainer_kwargs(config):
     pprint(OmegaConf.to_container(config, resolve=True))  # resolve=True will eval symbol values
     OmegaConf.resolve(config)
 
+    assert config.actor_rollout_ref.rollout.return_selected_experts != "rollout" or config.actor_rollout_ref.rollout.enable_paged_attention, \
+        "When using rollout old experts, paged attention must be enabled."
+    assert config.actor_rollout_ref.rollout.return_selected_experts != "rollout" or config.actor_rollout_ref.rollout.mode == "server", \
+        "When using rollout old experts, mode must be server."
+    assert config.actor_rollout_ref.rollout.return_selected_experts != "rollout" or not config.actor_rollout_ref.rollout.get("use_mtp", False), \
+        "When using rollout old experts, use_mtp must be disabled."
+
     # download the checkpoint from hdfs
     local_path = copy_local_path_from_hdfs(config.actor_rollout_ref.model.path)
 
