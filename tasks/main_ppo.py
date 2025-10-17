@@ -103,13 +103,14 @@ class RemoteClient:
     A centralized remote client that pipelines any function with generation at [EOS]
     """
 
-    def __init__(self, config, tokenizer_path, remote_service=None) -> None:
+    def __init__(self, config, tokenizer_path, remote_service=None, secrm_service=None) -> None:
         self.config = config
         local_path = download_minimal_required_files(tokenizer_path, from_scratch=False, rank=0, world_size=1)
         self.tokenizer = AutoTokenizer.from_pretrained(local_path)
         self.callback_running_pool = defaultdict(dict)
         self.results = defaultdict(dict)
         self.remote_service = remote_service
+        self.secrm_service = secrm_service
         self.executor = ThreadPoolExecutor(max_workers=128)
 
     def clear(self):
@@ -126,6 +127,7 @@ class RemoteClient:
         if verifier is not None and not self.callback_running_pool[req_id].get(reward_style, False):
             self.callback_running_pool[req_id][reward_style] = True
             kwargs['remote_service'] = self.remote_service
+            kwargs['secrm_service'] = self.secrm_service
             if req_id in self.results:
                 assert reward_style not in self.results[req_id], \
                     f"{req_id} already has result for reward_style: {reward_style}"

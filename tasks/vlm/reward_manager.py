@@ -353,6 +353,9 @@ class VLMRewardManager(RewardManager):
                     }
                     score = rm_verifier.merge_vlm_score(verifier_score, rm_score, **rm_kwargs)
 
+            # FIXME:(xya): left for secrm server
+            secrm_score, secrm_waiting_time, secrm_time_cost, secrm_retry_cnt = 0, 0, 0, 0
+
             is_para_dup = para_dup.find_single_turn_duplicate(
                 solution_str, enable_resp_para=self.config.reward_model.enable_resp_para)[0]
 
@@ -377,6 +380,10 @@ class VLMRewardManager(RewardManager):
                 "rm_wait_time": waiting_time,
                 "rm_time_cost": rm_time_cost,
                 "rm_retry_cnt": rm_retry_cnt,
+                "secrm_score": secrm_score,
+                "secrm_wait_time": secrm_waiting_time,
+                "secrm_time_cost": secrm_time_cost,
+                "secrm_retry_cnt": secrm_retry_cnt,
                 "is_para_dup": is_para_dup,
                 "is_trunc": is_trunc,
                 "idx": idx,
@@ -414,6 +421,12 @@ class VLMRewardManager(RewardManager):
         rm_score_sum = 0
         rm_wait_time_sum = 0
         rm_time_cost_sum = 0
+        secrm_total_cnt = 0
+        secrm_fail_cnt = 0
+        secrm_retry_cnt_sum = 0
+        secrm_score_sum = 0
+        secrm_wait_time_sum = 0
+        secrm_time_cost_sum = 0
         dup_cnt = 0
         dup_lens = []
         timeout_cnt = 0
@@ -474,6 +487,10 @@ class VLMRewardManager(RewardManager):
             rm_wait_time = output_dict['rm_wait_time']
             rm_time_cost = output_dict['rm_time_cost']
             rm_retry_cnt = output_dict['rm_retry_cnt']
+            secrm_score = output_dict['secrm_score']
+            secrm_wait_time = output_dict['secrm_wait_time']
+            secrm_time_cost = output_dict['secrm_time_cost']
+            secrm_retry_cnt = output_dict['secrm_retry_cnt']
             is_para_dup = output_dict['is_para_dup']
             is_trunc = output_dict['is_trunc']
             idx = output_dict['idx']

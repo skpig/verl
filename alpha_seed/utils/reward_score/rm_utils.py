@@ -26,10 +26,10 @@ def wait_remote_server_ready(psm: str):
     while fail_time < 20:
         try:
             sd_result = servicediscovery.get_one(psm, address_family="dual-stack")
-            print(f"[GRM SERVER INFO] psm {psm} ready !!!")
+            print(f"[RM SERVER INFO] psm {psm} ready !!!")
             return
         except ServiceDiscoveryError:
-            print(f"[GRM SERVER WARNING] waitting psm {psm} ready, cnt={fail_time}, begin sleep 60s")
+            print(f"[RM SERVER WARNING] waitting psm {psm} ready, cnt={fail_time}, begin sleep 60s")
             time.sleep(60)
             fail_time += 1
     raise ServiceDiscoveryError(f"psm {psm} not ready after 30 times retry, please check remote rm log")

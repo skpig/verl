@@ -21,7 +21,10 @@ auto_import_submodules("alpha_seed.utils.reward_score")
 
 
 def select_remote_rm_fn(config, **kwargs):
-    if config.trainer.remote_rm_type == "qrm":
+    if kwargs.get("remote_rm_type", None) == "secrm":
+        from alpha_seed.utils.reward_score.secrm_service import init_secrm_server
+        return init_secrm_server
+    elif config.trainer.remote_rm_type == "qrm":
         from alpha_seed.utils.reward_score.qrm_service import init_qrm_server
         return init_qrm_server
     elif config.trainer.remote_rm_type == "grm":
