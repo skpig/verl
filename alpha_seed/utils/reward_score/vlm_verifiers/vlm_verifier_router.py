@@ -360,6 +360,12 @@ def submit_verifier(response: str,
             result = ModelBasedMixedPerceptionVerifierVolc(
                 volc_ark_key=volc_ark_key, volc_model_name=volc_model_name).verify(response=response,
                                                                                    verifier_feature_dict=feature)
+        elif verifier_name == 'grm_maintask_verifier':
+            from alpha_seed.utils.reward_score.vlm_verifiers.grm_label_verifier import RuleBasedMaintaskVerifier
+            result = RuleBasedMaintaskVerifier().verify(response=response, verifier_feature_dict=feature)
+        elif verifier_name == 'video_cqa':
+            from alpha_seed.utils.reward_score.vlm_verifiers.mcqa_verifier import VideoMCQAVerifier
+            result = VideoMCQAVerifier().verify(response=response, verifier_feature_dict=feature)
         else:
             raise NotImplementedError(f'No verifier named "{verifier_name}".')
 

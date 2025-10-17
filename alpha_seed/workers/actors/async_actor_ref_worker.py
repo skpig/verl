@@ -577,7 +577,9 @@ class AsyncActorRolloutRefWorker(Worker):
                                                 self.processor,
                                                 self.dist_data_manager,
                                                 max_prompt_length=self.config.rollout.prompt_length,
-                                                truncation=self.config.rollout.vlm.truncation)
+                                                truncation=self.config.rollout.vlm.truncation,
+                                                video_sampling_strategy=self.config.rollout.video_sampling_strategy,
+                                                think_template=self.config.rollout.think_template)
         return prompts
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO, blocking=False)

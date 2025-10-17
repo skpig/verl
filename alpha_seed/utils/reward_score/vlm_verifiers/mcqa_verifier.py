@@ -26,6 +26,23 @@ class MCQAVerifier(BaseVerifier):
         return VerifyResult(score=score, extracted_answer=pred_option)
 
 
+class VideoMCQAVerifier(BaseVerifier):
+
+    def verify(self, response: str, verifier_feature_dict: dict) -> VerifyResult:
+        answer = verifier_feature_dict['answer']
+        options = list(get_valid_options(verifier_feature_dict.get('options', None)))
+        gt_option = answer
+
+        try:
+            pred_option = extract_option(response, options)
+            assert pred_option
+        except:
+            raise ExtractAnswerFailed(f"Failed to extract predict option from: {response}")
+
+        score = float(gt_option == pred_option)
+        return VerifyResult(score=score, extracted_answer=pred_option)
+
+
 if __name__ == "__main__":
     import pandas as pd
     import json

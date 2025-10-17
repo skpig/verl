@@ -15,8 +15,10 @@
 VLM dataset
 """
 
+from collections import defaultdict
 from typing import List
 import io
+import os
 import re
 import json
 
@@ -30,6 +32,9 @@ import verl.utils.torch_functional as verl_F
 from PIL import Image
 import os
 
+from alpha_seed.prompts.think_template_utils import align_special_tokens, get_special_tokens_dict_or_name
+from alpha_seed.utils.dataset.data_decoder import video_decoder
+from alpha_seed.utils.dataset.video_transform import simple_video_transform
 from alpha_seed.utils.dataset.rl_dataset import RLHFDataset
 from alpha_seed.prompts.think_template_utils import align_special_tokens
 from mono_rl.utils.dataset.dist_data_util import DistImageLoader, get_local_inputs, \
@@ -118,6 +123,8 @@ def convert_conversation_to_prompt(conversation, config):
         for content in turn["content"]:
             if content["type"] == "image":
                 turn_prompt += f"{config.data.special_tokens.soi}<ImageHere>{config.data.special_tokens.eoi}"
+            elif content["type"] == "video":
+                turn_prompt += "<VideoHere>"
             elif content["type"] == "text":
                 turn_prompt += content["text"]
             else:
@@ -223,6 +230,7 @@ class RLHFDatasetVL(RLHFDataset):
         self.processor = kwargs.pop('processor', None)
         self.config = kwargs.pop('config')
         self.image_key = self.config.data.image_key
+        self.video_key = self.config.data.video_key
         self.tokenizer_file = self.config.actor_rollout_ref.model.path
         self.dist_image = True
         self.stable_pool_names = self.config.elastic.resource_pools.stable_pool_names
@@ -252,28 +260,31 @@ class RLHFDatasetVL(RLHFDataset):
         assert len(nodes) > 0, (f"should have at least one satisfied node in the cluster. "
                                 f"total {len(ray.nodes())} nodes. check the criteria whether too strict")
         self.image_loaders = []
-        image_keys = [self.image_key]
         for i, node in enumerate(nodes):
             image_loader = DistImageLoader.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                     node_id=node["NodeID"],
                     soft=False,
-                )).remote(self.original_parquet_files, self.image_key, self.tokenizer_file, len(nodes), i)
+                )).remote(self.original_parquet_files, self.image_key, self.video_key, self.tokenizer_file, len(nodes),
+                          i)
             self.image_loaders.append(image_loader)
         ray.get(self.dist_data_manager.set_image_loaders.remote(self.image_loaders))
         offsets = []
         refs = []
         for img_loader in self.image_loaders:
             refs.append(img_loader.process_all_images.remote())
-
             offsets.append(img_loader.get_offset.remote())
 
         self.offsets = ray.get(offsets)
-        images_bytes_refs = ray.get(refs)
-        images_bytes_refs_list = []
+        self.ref_keys = set()
+        data_bytes_refs = ray.get(refs)
+        data_bytes_refs_dict = defaultdict(list)
         indices = []
-        for refs in images_bytes_refs:
-            images_bytes_refs_list.extend(refs[0])
+        for refs in data_bytes_refs:
+            for data_ref_str in refs[0]:
+                for key, value in data_ref_str.items():
+                    self.ref_keys.add(key)
+                    data_bytes_refs_dict[key].append(value)
             indices.extend(refs[1])
         # make sure no duplicate index
         assert len(indices) == len(set(indices))
@@ -285,10 +296,16 @@ class RLHFDatasetVL(RLHFDataset):
             if 'session' in dataframe:
                 dataframe = pd.DataFrame(list(dataframe['session']))
             if self.dist_image:
-                dataframe.drop(columns=image_keys, inplace=True)
+                data_keys = []
+                if self.image_key in dataframe:
+                    data_keys.append(self.image_key)
+                if self.video_key in dataframe:
+                    data_keys.append(self.video_key)
+                dataframe.drop(columns=data_keys, inplace=True)
             dataframes.append(dataframe)
         self.dataframe = pd.concat(dataframes)
-        self.dataframe['images_bytes_ref'] = images_bytes_refs_list
+        for ref_key, ref in data_bytes_refs_dict.items():
+            self.dataframe[ref_key] = ref
         self.dataframe['dataset_index'] = indices
 
         print(f'original dataset len: {len(self.dataframe)}')
@@ -334,12 +351,14 @@ class RLHFDatasetVL(RLHFDataset):
 
         user_contents = [{"type": "text", "text": f"{self.tokenizer.bos_token}user\n"}]
         chat[0] = align_special_tokens(chat[0])
-        prompt_chunks = re.split(r"(<image>)", chat[0])
+        prompt_chunks = re.split(r"(<image>|<video>)", chat[0])
         for chunk in prompt_chunks:
             if not chunk:
                 continue
             if chunk == '<image>':
                 user_contents.append({"type": "image"})
+            elif chunk == '<video>':
+                user_contents.append({"type": "video"})
             else:
                 user_contents.append({"type": "text", "text": chunk})
         user_contents.append({
@@ -398,7 +417,8 @@ class RLHFDatasetVL(RLHFDataset):
 
         row_dict_ret['data_source'] = row_dict['data_source']
         row_dict_ret['off_policy_steps'] = torch.zeros([1]).to(torch.int8)
-        row_dict_ret['images_bytes_ref'] = row_dict['images_bytes_ref']
+        for ref_key in self.ref_keys:
+            row_dict_ret[ref_key] = row_dict[ref_key]
         return row_dict_ret
 
     def __getstate__(self):
@@ -425,16 +445,39 @@ class RLHFDatasetVL(RLHFDataset):
             print(r'old dataloader ckpt file is used, please train from scratch for better ckpt performance')
 
 
-def transform_image(prompt,
-                    images_bytes,
-                    tokenizer,
-                    processor,
-                    truncation,
-                    max_prompt_length=None,
-                    critic_reference_response=None):
+def transform_vision(prompt,
+                     image_bytes: np.ndarray,
+                     videos: bytes,
+                     tokenizer,
+                     processor,
+                     truncation,
+                     max_prompt_length=None,
+                     critic_reference_response=None,
+                     video_sampling_strategy: dict | None = None,
+                     think_template: str | None = None):
     row_dict_ret = {}
-    pil_images = [decode_bytes_to_rgb_image(img) for img in images_bytes
-                 ] if images_bytes is not None and len(images_bytes) > 0 else None
+    if videos is not None:
+        pil_images = []
+        video_nums = prompt.count('<VideoHere>')
+
+        for video_index in range(video_nums):
+            video_reader = video_decoder(videos, video_index)
+            image_info_list = simple_video_transform(video_reader, video_sampling_strategy=video_sampling_strategy)
+            pil_images.extend([image_info["image"] for image_info in image_info_list])
+            video_placeholder = ''
+            for idx, image_info in enumerate(image_info_list):
+                if "timestamp" in image_info:
+                    timestamp = round(image_info["timestamp"], 1)
+                    video_placeholder += '[{} second]'.format(str(timestamp))
+                video_placeholder += (f'{get_special_tokens_dict_or_name("soi", think_template)}'
+                                      f'<ImageHere>'
+                                      f'{get_special_tokens_dict_or_name("eoi", think_template)}')
+            prompt = prompt.replace('<VideoHere>', video_placeholder, 1)
+    elif image_bytes is not None:
+        pil_images = [decode_bytes_to_rgb_image(img) for img in image_bytes] if len(image_bytes) > 0 else None
+    else:
+        pil_images = None
+
     inputs = process_images(pil_images, processor.image_processor)
     if pil_images is not None:
         num_image_tokens = inputs['num_image_tokens']
@@ -476,7 +519,7 @@ def transform_image(prompt,
         row_dict_ret['input_ids_critic'] = critic_input_ids[0]
         row_dict_ret['attention_mask_critic'] = critic_attention_mask[0]
 
-    if images_bytes is not None and len(images_bytes) > 0:
+    if pil_images is not None and len(pil_images) > 0:
         row_dict_ret['raw_image'] = []
         pixel_values = inputs['pixel_values']
         row_dict_ret['image_data'] = {
@@ -496,9 +539,12 @@ def load_and_transform_save_image(prompts,
                                   processor,
                                   dist_data_manager,
                                   max_prompt_length=None,
-                                  truncation="left"):
+                                  truncation="left",
+                                  video_sampling_strategy: dict | None = None,
+                                  think_template: str | None = None):
     if 'input_ids' not in prompts.batch:
         image_bytes = get_local_inputs(prompts.non_tensor_batch, 'images_bytes_ref', dist_data_manager)
+        video_bytes = get_local_inputs(prompts.non_tensor_batch, 'videos_ref', dist_data_manager)
         processed_list = []
         from alpha_seed.utils.dataset.vlm_rl_dataset import collate_fn
         for i in range(len(image_bytes)):
@@ -506,13 +552,16 @@ def load_and_transform_save_image(prompts,
                 critic_reference_response = prompts.non_tensor_batch['critic_reference_response'][i]
             else:
                 critic_reference_response = None
-            processed = transform_image(prompts.non_tensor_batch['prompt'][i],
-                                        image_bytes[i],
-                                        tokenizer,
-                                        processor,
-                                        truncation=truncation,
-                                        max_prompt_length=max_prompt_length,
-                                        critic_reference_response=critic_reference_response)
+            processed = transform_vision(prompts.non_tensor_batch['prompt'][i],
+                                         image_bytes[i],
+                                         video_bytes[i],
+                                         tokenizer,
+                                         processor,
+                                         truncation=truncation,
+                                         max_prompt_length=max_prompt_length,
+                                         critic_reference_response=critic_reference_response,
+                                         video_sampling_strategy=video_sampling_strategy,
+                                         think_template=think_template)
             processed_list.append(processed)
         processed_dict = collate_fn(processed_list)
         prompt_ids = processed_dict.pop('input_ids')  # (bs, prompt_length)

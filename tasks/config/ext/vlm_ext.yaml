@@ -15,7 +15,18 @@ reward_model:
   use_vlm_verifier_router: True
 data:
   image_key: img
+  video_key: videos
   check_template: True
+  video_sampling_strategy: {
+    "img_size": 448,
+    "sampling_fps": 1,
+    "n_frames": null,
+    "min_n_frames": 16,
+    "max_n_frames": null,
+    "max_video_length": 24576,
+    "max_pixels_choices": [501760, 401408, 301056, 200704, 125440, 100352],
+    "use_timestamp": True,
+  }
 tasks:
   reward_manager: tasks.vlm.reward_manager.VLMRewardManager
   trainer: tasks.vlm.ppo_trainer.VLMRayPPOTrainer

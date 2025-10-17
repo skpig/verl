@@ -6,6 +6,8 @@ data:
   prompt_key: prompt
   answer_key: answer
   image_key: null
+  video_key: null
+  video_sampling_strategy: null
   dist_image: True
   use_ref_answer: False
   add_thinking_prompt: False
@@ -165,6 +167,8 @@ actor_rollout_ref:
     name: xperf_gpt
     prompt_length: ${data.max_prompt_length}  # for xperf_gpt
     response_length: ${data.max_response_length}
+    think_template: ${data.think_template}
+    video_sampling_strategy: ${data.video_sampling_strategy}
     vit_use_xperf_gpt: False # if false, vit will use torch vit
     vit_use_dp: False
     dp_vit_batching_step: 0

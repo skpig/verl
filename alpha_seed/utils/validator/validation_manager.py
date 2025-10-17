@@ -192,7 +192,7 @@ class ValidateManager(object):
                 )
                 if test_batch is None:
                     release_object(self.dist_data_manager, input_batch.non_tensor_batch,
-                                   ['image_data_ref', 'images_bytes_ref'])
+                                   ['image_data_ref', 'images_bytes_ref', 'videos_ref'])
                     continue
 
                 if self.use_rm:
@@ -256,14 +256,14 @@ class ValidateManager(object):
                     prompts = self.tokenizer.batch_decode(decode_batch_prompt, skip_special_tokens=True)
                     responses = self.tokenizer.batch_decode(decode_batch_response, skip_special_tokens=False)
                     reward_tensor_before_select = reward_tensor_before_select.sum(-1).cpu()
-                    if 'image_bytes_ref' in test_batch.non_tensor_batch or \
+                    if 'images_bytes_ref' in test_batch.non_tensor_batch or \
                             'image_data_ref' in test_batch.non_tensor_batch:
                         self._save_val_data_vlm(test_batch, prompt_ids, reward_tensor_before_select, prompts, responses,
                                                 val_epoch_idx, val_idx, f)
                     else:
                         self._save_val_data(reward_tensor_before_select, prompts, responses, f)
                 release_object(self.dist_data_manager, test_batch.non_tensor_batch,
-                               ['image_data_ref', 'images_bytes_ref'])
+                               ['image_data_ref', 'images_bytes_ref', 'videos_ref'])
 
         if len(reward_tensor_lst) == 0:
             self.val_result_queue.put(({}, val_log_lst, global_step))

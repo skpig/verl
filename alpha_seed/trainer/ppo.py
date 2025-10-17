@@ -950,7 +950,7 @@ class RayPPOTrainer(object):
         self.data_len_per_query = None
         self.acc_per_query = {}  # moving avg acc
         self.sample_acc_dir = config.trainer.default_hdfs_dir + "/sample_acc"
-        self.is_vlm = config.data['image_key'] is not None
+        self.is_vlm = config.data['image_key'] is not None or config.data['video_key'] is not None
         self.save_batch_dir = ""
 
         # tracking logging rl samples takes quite a long time, put it in a background processes
@@ -2485,7 +2485,7 @@ class RayPPOTrainer(object):
             else:
                 response_length = self.config.data.max_response_length
             valid_response_length = batch.batch['attention_mask'][:, prompt_length:].sum(-1)
-            is_vlm = self.config.data['image_key'] is not None
+            is_vlm = self.config.data['image_key'] is not None or self.config.data['video_key'] is not None
             if is_vlm:
                 is_overlong = (response_length == valid_response_length) & (raw_scores_log == 0)
             else:

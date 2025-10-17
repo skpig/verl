@@ -182,10 +182,10 @@ class GeneralVideoTransform:
 def simple_video_transform(
     video_reader,
     video_sampling_strategy: dict,
-    img_size: int = 448,
     min_pixels: int = 4 * 28 * 28,
     max_pixels: int = 5120 * 28 * 28,
 ) -> list[dict]:
+    img_size = video_sampling_strategy.get('img_size', 448)
     n_frames = video_sampling_strategy.get('n_frames', None)
     sampling_fps = video_sampling_strategy.get('sampling_fps', None)
     assert n_frames is None or sampling_fps is None, video_sampling_strategy
