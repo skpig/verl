@@ -60,13 +60,14 @@ actor_rollout_ref:
   actor:
     early_stop_by_kl: 0.0
     logits_clamp: 0.0
+    record_amax: False
+    calibrate_batch_num: 0
     strategy: fsdp  # This is for backward-compatibility
     ppo_mini_batch_size: 512
     infer_num_mini_batch: -1
     max_ppo_mini_batch: -1
     ulysses_sequence_parallel_size: 1
     update_gate_ema: False
-    
     fsdp_size: -1
     tp_size: 1
     gen_tp_size: 1
@@ -149,6 +150,8 @@ actor_rollout_ref:
     ppo_mini_batch_size: ${actor_rollout_ref.actor.ppo_mini_batch_size}
     infer_num_mini_batch: ${actor_rollout_ref.actor.infer_num_mini_batch}
     log_prob_micro_batch_size: 128
+    record_amax: False
+    calibrate_batch_num: 0
     ulysses_sequence_parallel_size: 1
     fsdp_size: -1
     tp_size: 1
@@ -326,6 +329,8 @@ critic:
     external_lib: ${actor_rollout_ref.model.external_lib}
     use_ce_loss_fusion: False
     remove_o_bias: False
+    record_amax: False
+    calibrate_batch_num: 0
     enable_gradient_checkpointing: False
     fsdp_config:
       param_offload: False
@@ -352,6 +357,8 @@ critic:
   phasic_critic_epochs: 1
   shuffle: ${actor_rollout_ref.actor.shuffle}
   grad_clip: 1.0
+  record_amax: False
+  calibrate_batch_num: 0
   cliprange_value: 0.5
   cliprange_value_low: null
   cliprange_value_high: null

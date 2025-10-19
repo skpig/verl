@@ -31,6 +31,9 @@ def _set_config_fsdp_engine(mono_config, source_config: DictConfig, model_config
     # set the hf_model_config field of the fsdp_engine
     if "logits_clamp" in config:
         _set_config_field(mono_config.model, config, "logits_clamp")
+
+    _set_config_field(mono_config.model, config, "record_amax")
+    _set_config_field(mono_config.model, config, "calibrate_batch_num")
     _set_config_field(mono_config.model, config, "update_gate_ema")
     # 这里有两个use_rmpad的注入逻辑，是因为，在alphaseed里，use_rmpad在ref和reward是不配置在model里，但actor_rollout_ref是配置在model里的，所以需要判断两次，很离谱，但因为很久一直这么干，就保留下来了
     if "use_rmpad" in config:
