@@ -235,7 +235,7 @@ class DirectAsyncClient(AsyncLLMInterface):
         query_id = await self.request_manager.put_new_query.remote(query)
 
         # 等待完成
-        finished_query, selected_experts = await self.request_manager.wait_until_finished.remote(query_id)
+        finished_query = await self.request_manager.wait_until_finished.remote(query_id)
 
         # 构造response dict（模仿server的返回格式）
         message = ChatCompletionMessageRollout(
@@ -264,7 +264,8 @@ class DirectAsyncClient(AsyncLLMInterface):
 
         # 转换成dict返回
         ret = response.dict()
-        ret['choices'][0]['message']['selected_experts'] = selected_experts
+        # 单独加个字段，不定义在ChatCompletionMessageRollout里跳过Tensor json序列化问题 (注意http API不含这个字段)
+        ret['choices'][0]['message']['selected_experts'] = finished_query.selected_experts
         return ret
 
     @property
@@ -403,7 +404,7 @@ class DirectClient(SyncLLMInterface):
         query_id = ray.get(self.request_manager.put_new_query.remote(query))
 
         # 等待完成
-        finished_query, _ = ray.get(self.request_manager.wait_until_finished.remote(query_id))
+        finished_query = ray.get(self.request_manager.wait_until_finished.remote(query_id))
 
         # 构造response dict（模仿server的返回格式）
         message = ChatCompletionMessageRollout(
@@ -431,7 +432,9 @@ class DirectClient(SyncLLMInterface):
                                          usage=usage)
 
         # 转换成dict返回
-        return response.dict()
+        ret = response.dict()
+        ret['choices'][0]['message']['selected_experts'] = finished_query.selected_experts
+        return ret
 
     @property
     def host(self) -> str:

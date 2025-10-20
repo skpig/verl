@@ -280,7 +280,7 @@ class QueryTracer:
                     **this_event.info,
                 }
                 if his_wg_name != history.assigned_engine_name:
-                    extra_args["wg_name"] = his_wg_name  # noqa
+                    extra_args["wg_name"] = history.assigned_engine_name  # noqa
                 if coherent_sort_idx == -1:
                     coherent_sort_idx = len(coherent_list)  # 选P对应的位置，不能用i
             elif this_event.event == ProcessEventType.EVICTED:
@@ -362,7 +362,7 @@ class QueryTracer:
                     'release_count': history.release_count,
                     'length_generated': history.length_generated,
                     'processing_events': events_obj,
-                    'wg_name': his_wg_name if his_wg_name != history.assigned_engine_name else '',
+                    'wg_name': history.assigned_engine_name if his_wg_name != history.assigned_engine_name else '',
                 },
             )
             coherent_list.append(stale_decode)

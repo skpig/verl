@@ -89,3 +89,6 @@ class Request:
                 # 遇到任意一个engine则true
                 return True
         return False
+
+    def clone(self) -> 'Request':
+        return copy.deepcopy(self)

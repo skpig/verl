@@ -275,7 +275,10 @@ class RequestPool:
 
             if r.finished:
                 self.finished_requests[r.request_id] = r
-                self.historical_finished_requests.add(r.request_id, r)
+                # history不需要存volatile/transient字段
+                persisted_r = r.clone()
+                persisted_r.query.clear_transient()
+                self.historical_finished_requests.add(r.request_id, persisted_r)
                 self.finished_counter[r.global_step] += 1
                 self.requests.pop(r.request_id)
                 self.fifo.remove(r.global_step, r.request_id)
@@ -581,9 +584,7 @@ class RequestManager:
         req = await self.req_pool.wait(query_id)
         self.req_stat.finish(self._rm_name, req)
         self.query_tracer.trace(req)
-        selected_experts = req.query.selected_experts
-        req.query.selected_experts = None
-        return req.query, selected_experts
+        return req.query
 
     def update_intermediate_queries(self, queries: List[Query | QueryUpdate], engine_id: str, wg_name: str, ts: float):
         finished = len(list(None for q in queries if q.is_finished))

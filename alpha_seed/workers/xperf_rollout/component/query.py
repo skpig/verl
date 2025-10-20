@@ -447,14 +447,19 @@ class Query:
         self.nll_loss = None
         self.image_data = None
 
+    def clear_transient(self):
+        # 持久化之前需要忽略掉的字段，即不持久化，但需要返回到client侧
+        # experts信息不能增量存储，中途切换engine可能需要重新prefill
+        self.selected_experts = None
+
     def to_incremental(self) -> QueryUpdate:
-        # 0. 去掉易变部分
+        # 0. 去掉易变部分 (包括增量部分非determined结果)
         # 1. 计算增量部分
         # 2. 去掉不变的字段
 
         q = self.clone()
         q.clear_volatile()
-        q.selected_experts = None
+        q.clear_transient()
 
         saved_length = q.update_checkpoint.saved_length
         accepted_len = q.accepted_len[saved_length:]

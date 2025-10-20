@@ -136,7 +136,7 @@ class AsyncXPerfGPTRolloutServer(OpenAIProxy):
         query_id = await self.request_manager.put_new_query.remote(query)
 
         # await prompt generation finished
-        finished_query, _ = await self.request_manager.wait_until_finished.remote(query_id)
+        finished_query = await self.request_manager.wait_until_finished.remote(query_id)
         try:
             response = self.create_response(finished_query)
         except Exception as e:
