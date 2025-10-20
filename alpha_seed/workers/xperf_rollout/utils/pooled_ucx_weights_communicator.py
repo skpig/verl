@@ -568,6 +568,12 @@ class UCXWeightsCommunicator(WeightsCommunicator):
                     for layer_weight in layers_weight:
                         weights = [w for w in layer_weight if isinstance(w, torch.Tensor)]
                         weight_list.extend(weights)
+                    if hasattr(self.inference_engine, "vit_engine"):
+                        vit_engine = self.inference_engine.vit_engine
+                        if hasattr(vit_engine, "get_weight_list"):
+                            weight_list.extend(vit_engine.get_weight_list())
+                        else:
+                            raise RuntimeError(f"vit_engine must have get_weight_list method, got {vit_engine}")
 
                     async with self.send_buffer_sema:
                         await send_tensor_multi(ep, weight_list, self.send_buffer)
@@ -751,6 +757,13 @@ class UCXWeightsCommunicator(WeightsCommunicator):
             for layer_weight in layers_weight:
                 weights = [w for w in layer_weight if isinstance(w, torch.Tensor)]
                 weight_list.extend(weights)
+
+            if hasattr(self.inference_engine, "vit_engine"):
+                vit_engine = self.inference_engine.vit_engine
+                if hasattr(vit_engine, "get_weight_list"):
+                    weight_list.extend(vit_engine.get_weight_list())
+                else:
+                    raise RuntimeError(f"vit_engine must have get_weight_list method, got {vit_engine}")
             await ep.send_obj(f"pull_weights".encode("utf-8"))
             await recv_tensor_multi(ep, weight_list, self.recv_buffer)
 

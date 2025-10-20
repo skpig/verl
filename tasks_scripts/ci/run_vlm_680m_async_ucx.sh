@@ -161,4 +161,5 @@ python3 tasks/main_ppo.py \
     trainer.total_steps=${NUM_STEPS} \
     trainer.save_cases_to_hdfs=False \
     actor_rollout_ref.rollout.mode=server \
-    data.think_template=v2
+    data.think_template=v2 \
+    actor_rollout_ref.rollout.weights_communicator=ucx

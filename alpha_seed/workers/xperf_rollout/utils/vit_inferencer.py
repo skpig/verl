@@ -198,3 +198,33 @@ class TorchVitInferencer(BaseVitInferencer):
         comm_and_assign(self.ln_vision)
         comm_and_assign(self.seed_proj[0])
         comm_and_assign(self.seed_proj[2])
+
+    def get_weight_list(self):
+        weight_list = []
+        for layer in self.visual_encoder.blocks:
+            weight_list.extend([
+                layer.norm1.weight,
+                layer.norm1.bias,
+                layer.norm2.weight,
+                layer.norm2.bias,
+                layer.mlp.fc1.weight,
+                layer.mlp.fc1.bias,
+                layer.mlp.fc2.weight,
+                layer.mlp.fc2.bias,
+                layer.attn.proj.weight,
+                layer.attn.proj.bias,
+                layer.attn.qkv.weight,
+                layer.attn.q_bias,
+                layer.attn.v_bias,
+            ])
+        weight_list.extend([
+            self.visual_encoder.patch_embed.proj.weight,
+            self.visual_encoder.patch_embed.proj.bias,
+            self.ln_vision.weight,
+            self.ln_vision.bias,
+            self.seed_proj[0].weight,
+            self.seed_proj[0].bias,
+            self.seed_proj[2].weight,
+            self.seed_proj[2].bias,
+        ])
+        return weight_list
