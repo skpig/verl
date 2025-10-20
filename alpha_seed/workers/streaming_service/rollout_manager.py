@@ -1589,3 +1589,33 @@ class RolloutManager:
 
     async def dump_trace_spans(self, after_ts: float = 0.):
         return await asyncio.to_thread(Tracer.merge_all, after_ts=after_ts)
+
+    def get_engine_actor_maps(self):
+        try:
+            maps = {}
+
+            replicas = [['train', self.train_replicas], ['val', self.val_replicas]]
+            wg_types = ['val', 'hybrid', 'standalone']
+            for role, replica in replicas:
+                maps[role] = {}
+                if replica is not None:
+                    for wg_type in wg_types:
+                        if replica._intermittent_replicas.get(wg_type, None) is not None:
+                            wgs = replica._intermittent_replicas[wg_type].wgs
+                            maps[role][wg_type] = {}
+                            for uid in wgs:
+                                maps[role][wg_type][uid] = [
+                                    ray.get(w._get_actor_name.remote()) for w in wgs[uid]._workers
+                                ]
+                        if replica._persistent_replicas.get(wg_type, None) is not None:
+                            wgs = replica._persistent_replicas[wg_type].wgs
+                            maps[role][wg_type] = {}
+                            for uid in wgs:
+                                maps[role][wg_type][uid] = [
+                                    ray.get(w._get_actor_name.remote()) for w in wgs[uid]._workers
+                                ]
+
+            return maps
+        except Exception as e:
+            logging.info(f"Error in get_actor_info: {e}")
+            return {}
