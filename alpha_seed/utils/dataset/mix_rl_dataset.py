@@ -227,5 +227,6 @@ class MixRLDataset(RLHFDatasetVL):
 
         row_dict_ret['data_source'] = row_dict['data_source']
         row_dict_ret['off_policy_steps'] = torch.zeros([1]).to(torch.int8)
-        row_dict_ret['images_bytes_ref'] = row_dict['images_bytes_ref']
+        for ref_key in self.ref_keys:
+            row_dict_ret[ref_key] = row_dict[ref_key]
         return row_dict_ret
