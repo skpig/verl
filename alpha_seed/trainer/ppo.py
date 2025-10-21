@@ -87,6 +87,7 @@ except ImportError:
 from alpha_seed import core_algos
 from mono_rl.utils.dataset.dist_data_util import load_and_resume_image_data, load_and_save_image_data
 import pickle as pkl
+from alpha_seed.utils.kafka_logging import send_to_kafka
 
 stage_logger = SafeStageLogger()
 
@@ -2021,7 +2022,7 @@ class RayPPOTrainer(object):
                         batch = self._rollout_log_probs(batch, metrics)
                         with stage_logger.log_duration_context("scoring_evaluation"):
                             batch = self._rm_score(batch, metrics)
-                            raw_scores_log = self._reward_fn(batch, metrics)
+                            raw_scores_log, kafka_log_data = self._reward_fn(batch, metrics)
                             if self.config.algorithm.priority_sample:
                                 self.sample_pool.update_priority_dict(batch)
 
@@ -2080,6 +2081,14 @@ class RayPPOTrainer(object):
                                 input_batch = input_batch.repeat(2, interleave=False)
 
                         self.compute_metrics(batch, metrics)
+                        keys = ["actor/entropy", "critic/score/mean", "response_length/mean"]
+                        for item in kafka_log_data:
+                            for k in keys:
+                                item[k.replace('/', '_')] = metrics[k]
+                            model_name = self.config.actor_rollout_ref.model.path
+                            item["model_name"] = model_name
+                            send_to_kafka(item)
+
                         # update actor
                         # implement critic warmup
                         if self.config.trainer.critic_warmup <= self.global_step and self.global_step % self.config.trainer.actor_update_freq == 0:
@@ -2297,7 +2306,8 @@ class RayPPOTrainer(object):
     def _reward_fn(self, batch, metrics):
         with Timer(name='reward_fn', logger=None) as timer:
             # we combine with rule-based rm
-            reward_tensor, raw_scores, length_scores, eos_ids = self.reward_fn(batch, global_step=self.global_step)
+            reward_tensor, raw_scores, length_scores, eos_ids, kafka_log_data = self.reward_fn(
+                batch, global_step=self.global_step)
             batch.batch['token_level_scores'] = reward_tensor
             batch.batch['raw_scores'] = raw_scores
             batch.batch['eos_ids'] = eos_ids
@@ -2312,7 +2322,7 @@ class RayPPOTrainer(object):
                 length_scores = length_scores.sum(-1)
                 self.logger.log(data={"score/length_score": wandb.Histogram(length_scores)}, step=self.global_step)
         metrics['timing/reward_fn'] = timer.last
-        return raw_scores_log
+        return raw_scores_log, kafka_log_data
 
     @stage_logger.log_duration('compute_score')
     def _rm_score(self, batch, metrics):

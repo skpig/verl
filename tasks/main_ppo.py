@@ -69,7 +69,6 @@ from alpha_seed.workers.streaming_service.rollout_request_manager import Request
 from alpha_seed.utils.functional import import_from_string, SafeStageLogger
 from alpha_seed.utils.tracking_utils import async_save_cases_to_hdfs
 from alpha_seed.prompts.think_template_utils import get_special_tokens_dict_or_name, check_tokenizer_with_template
-from databus import collect_array
 from alpha_seed.utils.reward_score.utils import Verifier
 from alpha_seed.utils.reward_score import select_remote_rm_fn
 
@@ -77,20 +76,8 @@ stage_logger = SafeStageLogger()
 
 user_email = os.getenv('ARNOLD_LARK_RECEIVER', '')
 task_url = os.getenv('ARNOLD_ORIGIN_PLATFORM_URL', '')
-ARNOLD_TRIAL_ID = os.environ.get("ARNOLD_TRIAL_ID", "0")
-ARNOLD_TRIAL_OWNER = os.environ.get("ARNOLD_TRIAL_OWNER", "0")
 ARNOLD_REGION = os.getenv("ARNOLD_REGION", "CN")
 ENABLE_REDIS_TRITON_CACHE = int(os.getenv("ENABLE_REDIS_TRITON_CACHE", '1'))
-CHANNEL = "llm_channel"
-
-if os.getenv("RUNTIME_IDC_NAME", "") == "wlby":
-    CHANNEL = "llm_channel_wl"
-
-
-def send_to_kafka(message):
-    message["ARNOLD_TRIAL_ID"] = ARNOLD_TRIAL_ID
-    message["ARNOLD_TRIAL_OWNER"] = ARNOLD_TRIAL_OWNER
-    collect_array(CHANNEL, [json.dumps(message, ensure_ascii=False).encode("utf-8")])
 
 
 def is_awaitable(obj):
@@ -460,6 +447,7 @@ class RewardManager():
         static_conf = make_static_omegaconf(self.config)
         i_to_idx = []
 
+        kafka_log_data = []
         for i, res in tqdm(enumerate(as_completed(rm_res_future_list)), total=len(data), desc="get_rm_score"):
             output_dict = res.result()
             prompt_str = output_dict["prompt_str"]
@@ -619,13 +607,14 @@ class RewardManager():
                                                                                     {}).get("agent_traj_url", ""),
                     data[idx].non_tensor_batch.get('extra_info', {}).get("all_turns_sum", -1)
                 ])
-            send_to_kafka({
+            kafka_log_data.append({
                 "global_index": global_index,
                 "prompt": prompt_str,
                 "response": solution_str,
                 "ground_truth": ground_truth,
                 "score": score,
-                "is_validation": is_validation
+                "is_validation": is_validation,
+                "step": global_step,
             })
             save_to_hdfs.append([
                 global_index, idx, global_step, prompt_str, solution_str, ground_truth, raw_score, score, rm_score,
@@ -803,7 +792,7 @@ class RewardManager():
             self.async_case_running_tasks.add(task)
             print(f"[{time.ctime()}][save cases] reward_fn end")
         if not is_validation:
-            return reward_tensor, raw_scores, len_scores, idx_tensor
+            return reward_tensor, raw_scores, len_scores, idx_tensor, kafka_log_data
         else:
             return reward_tensor, log_table
 

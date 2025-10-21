@@ -13,6 +13,7 @@ from pprint import pprint
 from mono_rl import DataProto
 import random
 import ray
+from alpha_seed.utils.kafka_logging import send_to_kafka
 
 try:
     from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
@@ -310,6 +311,14 @@ class ValidateManager(object):
                 reward_tensor) // num_prompts_per_data if num_prompts_per_data > 0 else len(reward_tensor)
 
         compute_metric(reward_tensor, bopxn, metric_dict, data_source="all")
+
+        kafka_log_key = "val/test_score/all_avgpbo0"
+        if kafka_log_key in metric_dict:
+            send_to_kafka({
+                "model_name": self.config.actor_rollout_ref.model.path,
+                kafka_log_key.replace('/', '_'): metric_dict[kafka_log_key],
+                "global_step": self.global_step,
+            })
 
         # group by data source metrics
         data_sources = np.concatenate(data_source_lst, axis=0)

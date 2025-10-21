@@ -469,6 +469,7 @@ class VLMRewardManager(RewardManager):
             generator = tqdm(as_completed(rm_res_future_list), total=len(data), desc="get_rm_score")
         else:
             generator = iter(rm_res_future_list)
+        kafka_log_data = []
         for res in generator:
             if not isinstance(res, dict):
                 output_dict = res.result()
@@ -628,6 +629,16 @@ class VLMRewardManager(RewardManager):
                     rm_score, rm_response,
                     solution_str_post_proc.split("boxed{")[-1][-80:], is_para_dup, is_trunc, valid_response_length
                 ])
+
+            kafka_log_data.append({
+                "global_index": global_index,
+                "prompt": prompt_str,
+                "response": solution_str,
+                "ground_truth": ground_truth,
+                "score": score,
+                "is_validation": is_validation,
+                "step": global_step,
+            })
             save_to_hdfs.append([
                 global_index, idx, global_step, prompt_str, solution_str, ground_truth, score, verifier_score, rm_score,
                 rm_response, solution_str_post_proc[-32:], is_para_dup, is_trunc, valid_response_length
@@ -928,7 +939,7 @@ class VLMRewardManager(RewardManager):
             print(f"[{time.ctime()}][save cases] reward_fn end")
 
         if not is_validation:
-            return reward_tensor, raw_scores, len_scores, idx_tensor
+            return reward_tensor, raw_scores, len_scores, idx_tensor, kafka_log_data
         elif val_only:
             return reward_tensor, prompt_str, solution_str
         else:
